@@ -1685,6 +1685,8 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
         const V3LangCode optval{valp};
         if (optval.legal()) {
             m_defaultLanguage = optval;
+            // A later --language must be able to restore SystemVerilog mode
+            m_sourceLang = V3SourceLang::SV;
         } else {
             VSpellCheck spell;
             for (int i = V3LangCode::L_ERROR + 1; i < V3LangCode::_ENUM_END; ++i) {
