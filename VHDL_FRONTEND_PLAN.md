@@ -3,8 +3,9 @@
 
 # VHDL frontend for Verilator — implementation plan
 
-**Status:** proposal, nothing implemented. Not user documentation; this is a planning
-document and must not be linked from `docs/`.
+**Status:** proposal; WP0 plumbing implemented on branch `vhdl-frontend-wp0` (commits
+`729df7a`, `bed81f2`). Nothing beyond WP0 is implemented. Not user documentation; this is
+a planning document and must not be linked from `docs/`.
 
 **Target tree:** Verilator 5.055 devel, commit `9c28d84` (2026-11-07).
 
@@ -12,6 +13,46 @@ document and must not be linked from `docs/`.
 subset is 25–45k new LOC (1.5–3 engineer-years for a solid subset, 5–10 person-months
 for a demo subset). Faithful VHDL-2008 simulation semantics are not reachable without a
 new value model and are out of scope.
+
+## Implementation status (2026-11-07)
+
+| Work package | State |
+|---|---|
+| WP0 plumbing | **done** on branch `vhdl-frontend-wp0` (`729df7a`, `bed81f2`) |
+| WP1 parser | not started; replaces the WP0 stub lexer/parser |
+| WP2–WP8 | not started |
+
+WP0 proves the seam end-to-end:
+
+- `.vhd`/`.vhdl` detection and `--language vhdl`; a later `--language <IEEE 1800>`
+  restores SystemVerilog mode, so option order works both ways. Explicit file extensions
+  always win over the default.
+- Per-file `V3VhdlParse::parseFile()` collects design units only; `finish()` binds
+  `(library, entity)` to architectures and emits `AstModule`s with port `AstVar`s before
+  `V3LinkCells`.
+- `V3VhdlLink` applies the `.vlt` directives that `V3LinkParse` would have applied
+  (`applyVarAttr`/`applyFTask`/`applyCoverageBlock`/`applyCase`) and checks the
+  post-width contract under `--debug-check`.
+- `process()` skips `V3LinkParse`…`V3WidthCommit` in VHDL mode and commits the width
+  invariants directly. `.vlt` control files stay on the SV parser; the standard package,
+  libmaps and hierarchical parameter files are skipped.
+- Mixed SV/VHDL sources are rejected with an error.
+
+Verified at WP0: an entity with an empty architecture produces a C++ model that compiles
+and runs (`--binary`); port types (`std_logic`, `std_logic_vector`, `unsigned`, `signed`,
+`integer`, `boolean`) map to the expected dtypes; an entity without an architecture is
+rejected; `DECLFILENAME` is suppressed by a `.vlt` waiver; `test_regress/t/t_EXAMPLE.py`
+still passes.
+
+Known WP0 limits (all intentional, all rejected with diagnostics): architecture
+declarative/statement parts, packages, generics, components, configurations, expressions
+and all sequential/concurrent statements. VHDL library lookup through `-y`/`-v` is
+deferred because `V3LinkCells::autoLoad` still uses the SV parser. Build note: `make`
+stops at the `verilator_gantt.1` target when `help2man` is absent; both compiler binaries
+build.
+
+Next: WP1 replaces the stub with the real VHDL subset parser (architecture declarative and
+statement parts, subtype declarations, expressions, subprograms), then WP2 semantics.
 
 ## 1. Approach
 
@@ -262,7 +303,7 @@ downstream assertions.
 
 | WP | Deliverable | Exit criterion | Est. |
 |---|---|---|---|
-| WP0 | Plumbing: `V3SourceLang` detection, `.vhd`/`.vhdl` sourcing, frontend entry points (`parseFile`/`finish`), context clauses, entity ports, empty architecture binding, control-input handling (`.vlt` parsed and applied, std package/libmap/hier-params skipped), pipeline gate, mixed-input rejection, empty module emission | `verilator --language vhdl` on an entity with an empty architecture produces and runs a C++ model; module, function, variable and warning-suppression directives from `.vlt` take effect on a VHDL design; an entity without an architecture is rejected; a mixed SV/VHDL run fails with a clear error; `make test` unaffected | 2–4 wk |
+| WP0 | **Done.** Plumbing: `V3SourceLang` detection, `.vhd`/`.vhdl` sourcing, frontend entry points (`parseFile`/`finish`), context clauses, entity ports, empty architecture binding, control-input handling (`.vlt` parsed and applied, std package/libmap/hier-params skipped), pipeline gate, mixed-input rejection, empty module emission | `verilator --language vhdl` on an entity with an empty architecture produces and runs a C++ model; module, function, variable and warning-suppression directives from `.vlt` take effect on a VHDL design; an entity without an architecture is rejected; a mixed SV/VHDL run fails with a clear error; `make test` unaffected | 2–4 wk |
 | WP1 | Lexer + parser + frontend AST; full VHDL-2008 design-unit grammar for the M1 subset; diagnostics with VHDL `file:line` | Parses the M1 corpus; syntax errors match GHDL's line numbers | 3–6 PM |
 | WP2 | Semantics: declarative regions, visibility/`use`, overload resolution, types/subtypes, static expression evaluation with VHDL range rules | Accepts/rejects semantic corpus identically to GHDL for M1 constructs | 5–10 PM |
 | WP3 | Elaboration: entity/architecture/component binding, constant generics, generate unrolling, array range specialization, deferred constants | Hierarchy and instance names match GHDL's elaboration | 3–6 PM |
@@ -378,7 +419,7 @@ CI: new tests must not require GHDL for the default suite; gate differential tes
 
 | Milestone | Content | Duration |
 |---|---|---|
-| M0 | WP0 plumbing + empty entity end-to-end | 2–4 weeks |
+| M0 | WP0 plumbing + empty entity end-to-end (**done**) | 2–4 weeks |
 | M1 | Demo profile (§2.1 `Demo` column): reduced WP1–WP4 end-to-end, minimal `numeric_std` slice, minimal WP6, demo corpus | 5–10 person-months |
 | M1.1 | Solid profile: remaining WP1–WP4 work + full WP5 standard packages + full WP6/WP7 | +11–23 person-months (cumulative 16–33) |
 | M2 | resolution logic, unconstrained ports, configurations, waits/timing, mixed-language WP8 | +6–12 person-months |
