@@ -727,6 +727,27 @@ V3LangCode V3Options::fileLanguage(const string& filename) {
     return m_defaultLanguage;
 }
 
+bool V3Options::isVhdlFileName(const string& filename) {
+    const string name = V3Os::filenameNonDir(filename);
+    const string::size_type pos = name.rfind('.');
+    if (pos == string::npos) return false;
+    const string ext = name.substr(pos + 1);
+    return ext == "vhd" || ext == "vhdl";
+}
+
+V3SourceLang V3Options::fileSourceLang(const string& filename) const {
+    // Explicit extensions win over the --language default, so `--language vhdl` does not
+    // silently reinterpret a .v/.sv file as VHDL.
+    if (isVhdlFileName(filename)) return V3SourceLang::VHDL;
+    const string name = V3Os::filenameNonDir(filename);
+    const string::size_type pos = name.rfind('.');
+    if (pos != string::npos) {
+        const string ext = name.substr(pos + 1);
+        if (ext == "v" || ext == "sv") return V3SourceLang::SV;
+    }
+    return m_sourceLang;
+}
+
 //######################################################################
 // Environment
 
@@ -1657,6 +1678,10 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     DECL_OPTION("-no-l2name", CbCall, [this]() { m_l2Name = ""; }).undocumented();  // Historical
     DECL_OPTION("-l2name", CbCall, [this]() { m_l2Name = "v"; }).undocumented();  // Historical
     const auto setLang = [this, fl](const char* valp) {
+        if (0 == VL_STRCASECMP(valp, "vhdl")) {
+            m_sourceLang = V3SourceLang::VHDL;
+            return;
+        }
         const V3LangCode optval{valp};
         if (optval.legal()) {
             m_defaultLanguage = optval;
@@ -1665,6 +1690,7 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
             for (int i = V3LangCode::L_ERROR + 1; i < V3LangCode::_ENUM_END; ++i) {
                 spell.pushCandidate(V3LangCode{i}.ascii());
             }
+            spell.pushCandidate("vhdl");
             fl->v3error("Unknown language specified: " << valp << spell.bestCandidateMsg(valp));
         }
     };

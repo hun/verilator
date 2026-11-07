@@ -93,6 +93,12 @@ using VFileLibSet = std::set<VFileLibName>;
 
 // ######################################################################
 
+//! Source language of a design file. Deliberately separate from V3LangCode, which selects
+//! SystemVerilog keyword standards for the parser and the `begin_keywords directive.
+enum class V3SourceLang : uint8_t { SV, VHDL };
+
+// ######################################################################
+
 class VTimescale final {
 public:
     enum en : uint8_t {
@@ -436,6 +442,7 @@ private:
     // Language is now held in FileLine, on a per-node basis. However we still
     // have a concept of the default language at a global level.
     V3LangCode  m_defaultLanguage;      // main switch: --language
+    V3SourceLang m_sourceLang = V3SourceLang::SV;  // main switch: --language vhdl
 
     // MEMBERS (optimizations)
     bool m_fAcycSimp;    // main switch: -fno-acyc-simp: acyclic pre-optimizations
@@ -902,6 +909,10 @@ public:
                     const string& errmsg);
     string filePathLookedMsg(FileLine* fl, const string& modname);
     V3LangCode fileLanguage(const string& filename);
+    bool sourceLangVhdl() const { return m_sourceLang == V3SourceLang::VHDL; }
+    //! Source language of a design file: explicit extension wins, else the --language default
+    V3SourceLang fileSourceLang(const string& filename) const;
+    static bool isVhdlFileName(const string& filename);
     static bool fileStatNormal(const string& filename);
 
     // METHODS (other OS)

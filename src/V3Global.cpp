@@ -31,6 +31,8 @@
 #include "V3SolverBackend.h"
 #include "V3Stats.h"
 #include "V3ThreadPool.h"
+#include "V3VhdlLink.h"
+#include "V3VhdlParse.h"
 
 VL_DEFINE_DEBUG_FUNCTIONS;
 
@@ -86,23 +88,56 @@ void V3Global::readFiles() {
 
     VInFilter filter{v3Global.opt.pipeFilter()};
 
-    {
-        V3Parse parser{v3Global.rootp(), &filter};
-
-        // Parse the std waivers
-        if (v3Global.opt.stdWaiver()) {
-            parser.parseFile(
-                new FileLine{V3Options::getStdWaiverPath()}, V3Options::getStdWaiverPath(), false,
-                false, "work",
-                "Cannot find verilated_std_waiver.vlt containing built-in lint waivers: ");
+    // Decide the source language before parsing, and reject mixed-language designs. M1
+    // supports one language per invocation; mixed hierarchies are a separate design.
+    bool anyVhdl = false;
+    bool anySv = false;
+    const auto noteLang = [&](const string& filename) {
+        if (v3Global.opt.fileSourceLang(filename) == V3SourceLang::VHDL) {
+            anyVhdl = true;
+        } else {
+            anySv = true;
         }
-        // Read .vlt files
-        for (const VFileLibName& filelib : v3Global.opt.vltFiles()) {
-            parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(),
-                             false, false, filelib.libname(),
-                             "Cannot find file containing .vlt file: ");
-        }
+    };
+    for (const VFileLibName& filelib : v3Global.opt.vFiles()) noteLang(filelib.filename());
+    for (const VFileLibName& filelib : v3Global.opt.libraryFiles()) {
+        noteLang(filelib.filename());
+    }
+    const bool forceVhdl = v3Global.opt.sourceLangVhdl();
+    if ((anyVhdl && anySv) || (forceVhdl && anySv)) {
+        v3error("Cannot mix VHDL and SystemVerilog design sources in one invocation");
+    }
+    const bool vhdlMode = forceVhdl || anyVhdl;
+    v3Global.vhdlMode(vhdlMode);
+    V3Error::abortIfErrors();
 
+    V3Parse parser{v3Global.rootp(), &filter};
+    V3VhdlParse* const vhdlParserp = vhdlMode ? new V3VhdlParse{v3Global.rootp()} : nullptr;
+
+    const auto parseDesignFile = [&](FileLine* flp, const string& filename, bool inLibrary,
+                                     const string& libname, const string& errmsg) {
+        if (vhdlMode) {
+            vhdlParserp->parseFile(flp, filename, inLibrary, false, libname, errmsg);
+        } else {
+            parser.parseFile(flp, filename, inLibrary, false, libname, errmsg);
+        }
+    };
+
+    // Parse the std waivers. These are .vlt control files and stay SystemVerilog syntax
+    // in VHDL mode; their directives are applied by V3Control.
+    if (v3Global.opt.stdWaiver()) {
+        parser.parseFile(
+            new FileLine{V3Options::getStdWaiverPath()}, V3Options::getStdWaiverPath(), false,
+            false, "work",
+            "Cannot find verilated_std_waiver.vlt containing built-in lint waivers: ");
+    }
+    // Read .vlt files
+    for (const VFileLibName& filelib : v3Global.opt.vltFiles()) {
+        parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(), false,
+                         false, filelib.libname(), "Cannot find file containing .vlt file: ");
+    }
+
+    if (!vhdlMode) {
         // Parse the std package
         if (v3Global.opt.stdPackage()) {
             parser.parseFile(
@@ -118,25 +153,26 @@ void V3Global::readFiles() {
         }
         // Create library mapping
         V3LibMap::map(v3Global.rootp());
+    }
 
-        // Read top module
-        for (const auto& filelib : v3Global.opt.vFiles()) {
-            const string& libname = filelib.libname() == "work"
-                                        ? v3Global.libMapp()->matchMapping(filelib.filename())
-                                        : filelib.libname();
-            parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(),
-                             false, false, libname, "Cannot find file containing module: ");
-        }
+    // Read top module
+    for (const auto& filelib : v3Global.opt.vFiles()) {
+        const string& libname = vhdlMode || filelib.libname() != "work"
+                                    ? filelib.libname()
+                                    : v3Global.libMapp()->matchMapping(filelib.filename());
+        parseDesignFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(), false,
+                        libname, "Cannot find file containing module: ");
+    }
 
-        // Read libraries
-        // To be compatible with other simulators,
-        // this needs to be done after the top file is read
-        for (const auto& filelib : v3Global.opt.libraryFiles()) {
-            parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(),
-                             true, false, filelib.libname(),
-                             "Cannot find file containing library module: ");
-        }
+    // Read libraries
+    // To be compatible with other simulators,
+    // this needs to be done after the top file is read
+    for (const auto& filelib : v3Global.opt.libraryFiles()) {
+        parseDesignFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(), true,
+                        filelib.libname(), "Cannot find file containing library module: ");
+    }
 
+    if (!vhdlMode) {
         // Read hierarchical type parameter file
         for (const auto& filelib : v3Global.opt.hierParamFile()) {
             parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(),
@@ -145,12 +181,23 @@ void V3Global::readFiles() {
         }
     }
 
+    // VHDL: analyze and elaborate all collected design units, then emit AstModules
+    if (vhdlParserp) {
+        vhdlParserp->finish();
+        delete vhdlParserp;
+    }
+
     // v3Global.rootp()->dumpTreeFile(v3Global.debugFilename("parse.tree"));
     V3Error::abortIfErrors();
 
     if (!v3Global.opt.preprocOnly() || v3Global.opt.preprocResolve()) {
         // Resolve all modules cells refer to
         V3LinkCells::link(v3Global.rootp(), &filter);
+    }
+
+    if (vhdlMode) {
+        // Apply the control-file directives that V3LinkParse would have applied
+        V3VhdlLink::link(v3Global.rootp());
     }
 
     V3Global::dumpCheckGlobalTree("cells", false, dumpTreeEitherLevel() >= 9);

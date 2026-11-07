@@ -159,53 +159,56 @@ static void process() {
             v3Global.vlExit(0);
         }
 
-        // Convert parseref's to varrefs, and other directly post parsing fixups
-        V3LinkParse::linkParse(v3Global.rootp());
-        // Cross-link signal names
-        // Cross-link dotted hierarchical references
-        V3LinkDot::linkDotPrimary(v3Global.rootp());
-        v3Global.checkTree();  // Force a check, as link is most likely place for problems
-        // Check if all parameters have been found
-        v3Global.opt.checkParameters();
-        // Correct state we couldn't know at parse time, repair SEL's
-        V3LinkResolve::linkResolve(v3Global.rootp());
-        // Set Lvalue's in variable refs
-        V3LinkLValue::linkLValue(v3Global.rootp());
-        // Convert return/continue/disable to jumps
-        V3LinkJump::linkJump(v3Global.rootp());
-        // Convert --/++ to normal operations. Must be after LinkJump.
-        V3LinkInc::linkIncrements(v3Global.rootp());
-        V3Error::abortIfErrors();
+        const bool vhdl = v3Global.vhdlMode();
+        if (!vhdl) {
+            // Convert parseref's to varrefs, and other directly post parsing fixups
+            V3LinkParse::linkParse(v3Global.rootp());
+            // Cross-link signal names
+            // Cross-link dotted hierarchical references
+            V3LinkDot::linkDotPrimary(v3Global.rootp());
+            v3Global.checkTree();  // Force a check, as link is most likely place for problems
+            // Check if all parameters have been found
+            v3Global.opt.checkParameters();
+            // Correct state we couldn't know at parse time, repair SEL's
+            V3LinkResolve::linkResolve(v3Global.rootp());
+            // Set Lvalue's in variable refs
+            V3LinkLValue::linkLValue(v3Global.rootp());
+            // Convert return/continue/disable to jumps
+            V3LinkJump::linkJump(v3Global.rootp());
+            // Convert --/++ to normal operations. Must be after LinkJump.
+            V3LinkInc::linkIncrements(v3Global.rootp());
+            V3Error::abortIfErrors();
 
-        if (v3Global.opt.stats()) V3Stats::statsStageAll(v3Global.rootp(), "Link");
+            if (v3Global.opt.stats()) V3Stats::statsStageAll(v3Global.rootp(), "Link");
 
-        // Remove parameters by cloning modules to de-parameterized versions
-        //   This requires some width calculations and constant propagation
-        // No more AstGenCase/AstGenFor/AstGenIf after this
-        V3Param::param(v3Global.rootp());
+            // Remove parameters by cloning modules to de-parameterized versions
+            //   This requires some width calculations and constant propagation
+            // No more AstGenCase/AstGenFor/AstGenIf after this
+            V3Param::param(v3Global.rootp());
 
-        V3LinkDot::linkDotParamed(v3Global.rootp());  // Cleanup as made new modules
-        V3Param::finalizeDeferredParams(v3Global.rootp());
-        V3LinkLValue::linkLValue(v3Global.rootp());  // Resolve new VarRefs
+            V3LinkDot::linkDotParamed(v3Global.rootp());  // Cleanup as made new modules
+            V3Param::finalizeDeferredParams(v3Global.rootp());
+            V3LinkLValue::linkLValue(v3Global.rootp());  // Resolve new VarRefs
 
-        // Link cleanup of 'with' as final link phase before V3Width
-        // (called only once, not when width a single params)
-        V3LinkWith::linkWith(v3Global.rootp());
+            // Link cleanup of 'with' as final link phase before V3Width
+            // (called only once, not when width a single params)
+            V3LinkWith::linkWith(v3Global.rootp());
 
-        V3Error::abortIfErrors();
+            V3Error::abortIfErrors();
 
-        // Fix any remaining cross-interface refs created during V3Width::widthParamsEdit
-        // that weren't captured earlier. Must run before V3Dead deletes template modules.
-        V3LinkDotIfaceCapture::finalizeIfaceCapture();
+            // Fix any remaining cross-interface refs created during V3Width::widthParamsEdit
+            // that weren't captured earlier. Must run before V3Dead deletes template modules.
+            V3LinkDotIfaceCapture::finalizeIfaceCapture();
+        }
 
         // Remove any modules that were parameterized and are no longer referenced.
         V3Dead::deadifyModules(v3Global.rootp());
 
         v3Global.checkTree();
-        if (v3Global.hasTable()) V3Udp::udpResolve(v3Global.rootp());
+        if (!vhdl && v3Global.hasTable()) V3Udp::udpResolve(v3Global.rootp());
 
         // Create a hierarchical Verilation plan
-        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
+        if (!vhdl && !v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
             && v3Global.opt.hierarchical() && !v3Global.opt.hierChild()) {
             V3Hierarchical::createGraph(v3Global.rootp());
             // If a plan is created, further analysis is not necessary.
@@ -213,13 +216,18 @@ static void process() {
             if (v3Global.hierGraphp()) return;
         }
 
-        // Calculate and check widths, edit tree to TRUNC/EXTRACT any width mismatches
-        V3Width::width(v3Global.rootp());
+        if (!vhdl) {
+            // Calculate and check widths, edit tree to TRUNC/EXTRACT any width mismatches
+            V3Width::width(v3Global.rootp());
 
-        V3Error::abortIfErrors();
+            V3Error::abortIfErrors();
 
-        // Commit to the widths we've chosen; Make widthMin==width
-        V3WidthCommit::widthCommit(v3Global.rootp());
+            // Commit to the widths we've chosen; Make widthMin==width
+            V3WidthCommit::widthCommit(v3Global.rootp());
+        } else {
+            // The VHDL frontend emits a post-width-commit AST, so there is nothing to width
+            V3Error::abortIfErrors();
+        }
         v3Global.assertDTypesResolved(true);
         v3Global.widthMinUsage(VWidthMinUsage::MATCHES_WIDTH);
 

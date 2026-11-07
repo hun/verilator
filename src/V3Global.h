@@ -110,6 +110,7 @@ class V3Global final {
     bool m_usesTiming = false;  // Design uses timing constructs
     bool m_usesForce = false;  // Design uses force/release statements
     bool m_usesZeroDelay = false;  // Design uses #0 delay (or non-constant delay)
+    bool m_vhdlMode = false;  // Design sources are VHDL; skip the SV front half
     bool m_hasForceableSignals = false;  // Need to apply V3Force pass
     bool m_hasAssignDeassign = false;  // Need to apply V3Force pass for assign/deassign statements
     bool m_useParallelBuild = false;  // Use parallel build for model
@@ -195,6 +196,8 @@ public:
     void setUsesTiming() { m_usesTiming = true; }
     bool usesZeroDelay() const { return m_usesZeroDelay; }
     void setUsesZeroDelay() { m_usesZeroDelay = true; }
+    bool vhdlMode() const { return m_vhdlMode; }
+    void vhdlMode(bool flag) { m_vhdlMode = flag; }
     bool hasForceableSignals() const { return m_hasForceableSignals; }
     void setHasForceableSignals() { m_hasForceableSignals = true; }
     bool hasAssignDeassign() const { return m_hasAssignDeassign; }
