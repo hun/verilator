@@ -248,6 +248,7 @@ class VhdlXmlFrontend final {
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
     int m_varSeq = 0;  // Sequence for process/generate-local names
+    int m_genSeq = 0;  // Sequence for disambiguating sibling generate blocks
     std::string m_genSuffix;  // Suffix for names created inside a generate iteration
 
     //! Emitted module and its ports, used to bind instances across the hierarchy
@@ -385,12 +386,16 @@ class VhdlXmlFrontend final {
             return spec;
         }
         spec.ascending = rangep->attr("direction") == "to";
-        if (!literalValue(rangep->child("left_limit_expr"), spec.left)
-            || !literalValue(rangep->child("right_limit_expr"), spec.right)) {
-            error(rangep, "non-literal VHDL range limit is not supported yet");
+        int64_t leftValue = 0;
+        int64_t rightValue = 0;
+        if (!evalConst(rangeBound(rangep, true), leftValue)
+            || !evalConst(rangeBound(rangep, false), rightValue)) {
+            error(rangep, "non-static VHDL range limit is not supported yet");
             spec.isVector = false;  // Keep the tree buildable; the error aborts the run
             return spec;
         }
+        spec.left = static_cast<int>(leftValue);
+        spec.right = static_cast<int>(rightValue);
         return spec;
     }
 
@@ -613,6 +618,17 @@ class VhdlXmlFrontend final {
         FileLine* const flp = flpOf(nodep);
         const std::string kind = nodep->attr("kind");
 
+        if (kind == "simple_name") {
+            const std::string id = vhdlFold(nodep->attr("identifier"));
+            if (id == "true" || id == "false") {
+                return makeConst(flp, contextp ? contextp : bitDType(flp), id == "true" ? 1U : 0U);
+            }
+            int64_t value = 0;
+            if (evalConst(nodep, value)) {
+                return makeConst(flp, contextp ? contextp : intDType(flp),
+                                 static_cast<uint64_t>(value));
+            }
+        }
         if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name") {
             return lowerName(nodep, false);
         }
@@ -980,44 +996,59 @@ class VhdlXmlFrontend final {
     }
 
     //! Evaluate a locally static integer expression from the dump
-    bool evalConst(const Node* nodep, int64_t& value) const {
-        if (!nodep) return false;
+    bool evalConst(const Node* nodep, int64_t& value, int depth = 0) const {
+        if (!nodep || depth > 16) return false;
         const std::string kind = nodep->attr("kind");
         if (kind == "integer_literal") {
             value = std::strtoll(nodep->attr("value").c_str(), nullptr, 10);
             return true;
         }
+        // GHDL spells the IIR kind "substraction_operator"
         if (kind == "addition_operator" || kind == "subtraction_operator"
-            || kind == "multiplication_operator") {
+            || kind == "substraction_operator" || kind == "multiplication_operator") {
             int64_t lhsv = 0;
             int64_t rhsv = 0;
-            if (!evalConst(nodep->child("left"), lhsv)
-                || !evalConst(nodep->child("right"), rhsv)) {
+            if (!evalConst(nodep->child("left"), lhsv, depth + 1)
+                || !evalConst(nodep->child("right"), rhsv, depth + 1)) {
                 return false;
             }
             if (kind == "addition_operator") {
                 value = lhsv + rhsv;
-            } else if (kind == "subtraction_operator") {
-                value = lhsv - rhsv;
-            } else {
+            } else if (kind == "multiplication_operator") {
                 value = lhsv * rhsv;
+            } else {
+                value = lhsv - rhsv;
             }
             return true;
         }
         if (kind == "negation_operator") {
             int64_t operandv = 0;
-            if (!evalConst(nodep->child("operand"), operandv)) return false;
+            if (!evalConst(nodep->child("operand"), operandv, depth + 1)) return false;
             value = -operandv;
             return true;
         }
         if (kind == "parentheses_expression") {
-            return evalConst(nodep->child("expression"), value);
+            return evalConst(nodep->child("expression"), value, depth + 1);
         }
         if (kind == "simple_name") {
             const auto it = m_constBindings.find(vhdlFold(nodep->attr("identifier")));
             if (it != m_constBindings.end()) {
                 value = it->second;
                 return true;
+            }
+            // Constants and generic defaults resolve through the analyzed reference
+            const Node* const refp = nodep->child("named_entity");
+            if (refp && refp->has("ref")) {
+                const Node* const declp = nodeById(refp->attr("ref"));
+                if (declp) {
+                    const std::string declKind = declp->attr("kind");
+                    if (declKind == "constant_declaration"
+                        || declKind == "interface_constant_declaration") {
+                        if (const Node* const defp = declp->child("default_value")) {
+                            return evalConst(defp, value, depth + 1);
+                        }
+                    }
+                }
             }
             return false;
         }
@@ -1348,6 +1379,10 @@ class VhdlXmlFrontend final {
         const Node* const declsp = processp->child("declaration_chain");
         if (!declsp) return;
         for (const Node* const declp : childEls(declsp)) {
+            if (declp->attr("kind") == "constant_declaration") {
+                // Evaluated at use sites through its analyzed reference
+                continue;
+            }
             if (declp->attr("kind") != "variable_declaration") {
                 unsupported(declp, "process declaration '" + declp->attr("kind") + "'");
                 continue;
@@ -1496,8 +1531,10 @@ class VhdlXmlFrontend final {
         if (take) {
             if (const Node* const bodyp = elseClausep->child("generate_statement_body")) {
                 emitGenerateBody(bodyp, suffix);
-                return;
+            } else {
+                unsupported(elseClausep, "selected generate branch without a body");
             }
+            return;
         }
         lowerGenerateElse(elseClausep->child("generate_else_clause"), suffix);
     }
@@ -1512,6 +1549,8 @@ class VhdlXmlFrontend final {
         if (condition) {
             if (const Node* const bodyp = stmtp->child("generate_statement_body")) {
                 emitGenerateBody(bodyp, suffix);
+            } else {
+                unsupported(stmtp, "selected generate branch without a body");
             }
         } else {
             lowerGenerateElse(stmtp->child("generate_else_clause"), suffix);
@@ -1540,6 +1579,7 @@ class VhdlXmlFrontend final {
         }
 
         const std::string key = vhdlFold(specp->attr("identifier"));
+        const int genSeq = ++m_genSeq;
         const int step = ascending ? 1 : -1;
         for (int value = left; ascending ? value <= right : value >= right; value += step) {
             const auto saved = m_constBindings.find(key);
@@ -1547,7 +1587,8 @@ class VhdlXmlFrontend final {
             const int64_t savedValue = hadBinding ? saved->second : 0;
             m_constBindings[key] = value;
 
-            emitGenerateBody(bodyp, m_genSuffix + "__gen" + std::to_string(value));
+            emitGenerateBody(bodyp, m_genSuffix + "__gen" + std::to_string(genSeq) + "_"
+                                        + std::to_string(value));
 
             if (hadBinding) {
                 m_constBindings[key] = savedValue;
@@ -1563,7 +1604,7 @@ class VhdlXmlFrontend final {
         if (!declsp) return;
         for (const Node* const declp : childEls(declsp)) {
             const std::string kind = declp->attr("kind");
-            if (kind == "component_declaration") continue;
+            if (kind == "component_declaration" || kind == "constant_declaration") continue;
             if (kind != "signal_declaration") {
                 unsupported(declp, "generate declaration '" + kind + "'");
                 continue;
@@ -1672,6 +1713,10 @@ class VhdlXmlFrontend final {
                 if (kind == "component_declaration") {
                     // Interface contract checked when the component is instantiated
                     m_components[vhdlFold(declp->attr("identifier"))] = declp;
+                    continue;
+                }
+                if (kind == "constant_declaration") {
+                    // Constants are evaluated at their use sites through their reference
                     continue;
                 }
                 if (kind != "signal_declaration") {
