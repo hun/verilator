@@ -148,6 +148,7 @@ public:
     //! Run GHDL on the collected files, then emit AstModules from its XML
     void finishXml();
 
+    // LCOV_EXCL_START
     //! Emit design units collected by the in-tree parser. Reserved for that parser; the active
     //! frontend is finishXml().
     void finishLegacy() {
@@ -193,6 +194,7 @@ public:
         m_entities.clear();
         m_architectures.clear();
     }
+    // LCOV_EXCL_STOP
 };
 
 namespace {
@@ -229,6 +231,9 @@ struct VhdlDTypeSpec final {
     bool ascending = false;
 };
 
+//! How a lowered signal assignment is emitted
+enum class AssignMode : uint8_t { CONT, DELAYED, BLOCKING };
+
 class VhdlXmlFrontend final {
     using Node = V3VhdlXmlNode;
 
@@ -239,6 +244,7 @@ class VhdlXmlFrontend final {
     std::vector<const Node*> m_entityNodes;  // User entity declarations
     std::vector<const Node*> m_archNodes;  // User architecture bodies
     std::map<std::string, AstVar*> m_scope;  // Current module: folded name -> Var
+    std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
 
     //! Emitted module and its ports, used to bind instances across the hierarchy
@@ -524,7 +530,7 @@ class VhdlXmlFrontend final {
 
     // ---- Statements
 
-    AstNode* lowerAssignment(const Node* stmtp, bool delayed) {
+    AstNode* lowerAssignment(const Node* stmtp, AssignMode mode) {
         FileLine* const flp = flpOf(stmtp);
         const Node* const targetp = stmtp->child("target");
         if (!targetp || targetp->attr("kind") != "simple_name") {
@@ -549,24 +555,25 @@ class VhdlXmlFrontend final {
         AstNodeExpr* const lhsp = new AstVarRef{flp, varp, VAccess::WRITE};
         AstNodeExpr* const rhsp = lowerExpr(wep, varp->dtypep());
         if (!rhsp) return nullptr;
-        if (delayed) return new AstAssignDly{flp, lhsp, rhsp};
+        if (mode == AssignMode::DELAYED) return new AstAssignDly{flp, lhsp, rhsp};
+        if (mode == AssignMode::BLOCKING) return new AstAssign{flp, lhsp, rhsp};
         return new AstAssignW{flp, lhsp, rhsp};
     }
 
     //! Lower an elsif/else clause chain attached to an if statement
-    AstNode* lowerElse(const Node* elsep, bool delayed) {
+    AstNode* lowerElse(const Node* elsep, AssignMode mode) {
         const std::string kind = elsep->attr("kind");
         const Node* const condp = elsep->child("condition");
         if (kind == "else" || (kind == "elsif" && !condp)) {
-            return lowerStmtChain(elsep->child("sequential_statement_chain"), delayed);
+            return lowerStmtChain(elsep->child("sequential_statement_chain"), mode);
         }
         if (kind == "elsif") {
             FileLine* const flp = flpOf(elsep);
             AstNodeExpr* const condExprp = lowerExpr(condp, bitDType(flp));
             AstNode* const thensp
-                = lowerStmtChain(elsep->child("sequential_statement_chain"), delayed);
+                = lowerStmtChain(elsep->child("sequential_statement_chain"), mode);
             AstNode* const elsesp = elsep->child("else_clause")
-                                        ? lowerElse(elsep->child("else_clause"), delayed)
+                                        ? lowerElse(elsep->child("else_clause"), mode)
                                         : nullptr;
             return new AstIf{flp, condExprp, thensp, elsesp};
         }
@@ -574,19 +581,17 @@ class VhdlXmlFrontend final {
         return nullptr;
     }
 
-    AstNode* lowerStmt(const Node* stmtp, bool delayed) {
+    AstNode* lowerStmt(const Node* stmtp, AssignMode mode) {
         const std::string kind = stmtp->attr("kind");
-        if (kind == "simple_signal_assignment_statement") {
-            return lowerAssignment(stmtp, delayed);
-        }
+        if (kind == "simple_signal_assignment_statement") { return lowerAssignment(stmtp, mode); }
         if (kind == "null_statement") return nullptr;
         if (kind == "if_statement") {
             FileLine* const flp = flpOf(stmtp);
             AstNodeExpr* const condp = lowerExpr(stmtp->child("condition"), bitDType(flp));
             AstNode* const thensp
-                = lowerStmtChain(stmtp->child("sequential_statement_chain"), delayed);
+                = lowerStmtChain(stmtp->child("sequential_statement_chain"), mode);
             AstNode* const elsesp = stmtp->child("else_clause")
-                                        ? lowerElse(stmtp->child("else_clause"), delayed)
+                                        ? lowerElse(stmtp->child("else_clause"), mode)
                                         : nullptr;
             return new AstIf{flp, condp, thensp, elsesp};
         }
@@ -594,10 +599,10 @@ class VhdlXmlFrontend final {
         return nullptr;
     }
 
-    AstNode* lowerStmtChain(const Node* chainp, bool delayed) {
+    AstNode* lowerStmtChain(const Node* chainp, AssignMode mode) {
         AstNode* headp = nullptr;
         for (const Node* const stmtp : childEls(chainp)) {
-            AstNode* const nodep = lowerStmt(stmtp, delayed);
+            AstNode* const nodep = lowerStmt(stmtp, mode);
             if (!nodep) continue;
             headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
         }
@@ -628,9 +633,25 @@ class VhdlXmlFrontend final {
 
     void emitConcurrentAssignment(const Node* processp) {
         AstNode* const bodyp
-            = lowerStmtChain(processp->child("sequential_statement_chain"), false);
+            = lowerStmtChain(processp->child("sequential_statement_chain"), AssignMode::CONT);
         if (!bodyp) return;
         m_modp->addStmtsp(new AstAlways{flpOf(processp), VAlwaysKwd::CONT_ASSIGN, nullptr, bodyp});
+    }
+
+    static AstVar* astVarOf(AstNodeExpr* exprp) {
+        AstNodeVarRef* const refp = VN_CAST(exprp, NodeVarRef);
+        return refp ? refp->varp() : nullptr;
+    }
+
+    bool sensitivityHasVar(const Node* sensp, const AstVar* varp) const {
+        if (!sensp) return false;
+        for (const Node* const elp : childEls(sensp)) {
+            const Node* const namep = elp->attr("ref").empty() ? elp : nodeById(elp->attr("ref"));
+            if (!namep || namep->attr("kind") != "simple_name") continue;
+            const auto it = m_scope.find(vhdlFold(namep->attr("identifier")));
+            if (it != m_scope.end() && it->second == varp) return true;
+        }
+        return false;
     }
 
     //! Edge information extracted from a rising_edge/falling_edge call
@@ -707,8 +728,8 @@ class VhdlXmlFrontend final {
                     return;
                 }
                 AstSenItem* const itemp = new AstSenItem{flp, clock.edgeType, clock.sigp};
-                AstNode* const stmtsp
-                    = lowerStmtChain(ifp->child("sequential_statement_chain"), true);
+                AstNode* const stmtsp = lowerStmtChain(ifp->child("sequential_statement_chain"),
+                                                       AssignMode::DELAYED);
                 m_modp->addStmtsp(
                     new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemp}, stmtsp});
                 return;
@@ -722,20 +743,36 @@ class VhdlXmlFrontend final {
                 AstNodeExpr* rstSigp = nullptr;
                 VEdgeType rstEdge = VEdgeType::ET_CHANGED;
                 AstNodeExpr* rstCondp = nullptr;
-                if (resetEdge(ifp->child("condition"), rstSigp, rstEdge, rstCondp)) {
-                    AstSenItem* const clkItemp = new AstSenItem{flp, clock2.edgeType, clock2.sigp};
+                if (!resetEdge(ifp->child("condition"), rstSigp, rstEdge, rstCondp)) return;
+                // A reset signal in the sensitivity list makes the reset asynchronous
+                AstVar* const rstVarp = astVarOf(rstSigp);
+                const bool asyncReset
+                    = rstVarp && sensitivityHasVar(processp->child("sensitivity_list"), rstVarp);
+                AstSenItem* const clkItemp = new AstSenItem{flp, clock2.edgeType, clock2.sigp};
+                AstSenTree* senTreep = nullptr;
+                if (asyncReset) {
                     AstSenItem* const rstItemp = new AstSenItem{flp, rstEdge, rstSigp};
-                    AstSenTree* const senTreep = new AstSenTree{
+                    senTreep = new AstSenTree{
                         flp, AstNode::addNext<AstSenItem, AstSenItem>(clkItemp, rstItemp)};
-                    AstNode* const resetStmtsp
-                        = lowerStmtChain(ifp->child("sequential_statement_chain"), true);
-                    AstNode* const normalStmtsp
-                        = lowerStmtChain(elsep->child("sequential_statement_chain"), true);
-                    m_modp->addStmtsp(
-                        new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep,
-                                      new AstIf{flp, rstCondp, resetStmtsp, normalStmtsp}});
-                    return;
+                } else {
+                    senTreep = new AstSenTree{flp, clkItemp};
                 }
+                AstNode* const resetStmtsp = lowerStmtChain(
+                    ifp->child("sequential_statement_chain"), AssignMode::DELAYED);
+                AstNode* const normalStmtsp = lowerStmtChain(
+                    elsep->child("sequential_statement_chain"), AssignMode::DELAYED);
+                m_modp->addStmtsp(
+                    new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep,
+                                  new AstIf{flp, rstCondp, resetStmtsp, normalStmtsp}});
+                // The process also executes once at time zero; a level-true reset applies then
+                AstNodeExpr* const initCondp = lowerExpr(ifp->child("condition"), bitDType(flp));
+                AstNode* const initResetp = lowerStmtChain(
+                    ifp->child("sequential_statement_chain"), AssignMode::BLOCKING);
+                if (initResetp) {
+                    m_modp->addStmtsp(
+                        new AstInitialStatic{flp, new AstIf{flp, initCondp, initResetp}});
+                }
+                return;
             }
         }
 
@@ -760,10 +797,12 @@ class VhdlXmlFrontend final {
             unsupported(processp, "process without a sensitivity list");
             return;
         }
-        AstNode* const stmtsp = lowerStmtChain(bodyp, true);
+        AstNode* const stmtsp = lowerStmtChain(bodyp, AssignMode::DELAYED);
         if (!stmtsp) return;
-        // VHDL executes a process once at time zero, before any sensitivity event
-        m_modp->addStmtsp(new AstInitialStatic{flp, stmtsp->cloneTree(true)});
+        // VHDL executes a process once at time zero, before any sensitivity event. Blocking
+        // assignments are used there: no other process observes the interim delta.
+        AstNode* const initp = lowerStmtChain(bodyp, AssignMode::BLOCKING);
+        if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
         m_modp->addStmtsp(
             new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
     }
@@ -833,12 +872,14 @@ class VhdlXmlFrontend final {
         ModuleInfo& info = m_modules[vhdlFold(entityp->attr("identifier"))];
         m_modp = info.modp;
         m_scope = info.ports;
+        m_components.clear();
 
         if (const Node* const declsp = archp->child("declaration_chain")) {
             for (const Node* const declp : childEls(declsp)) {
                 const std::string kind = declp->attr("kind");
                 if (kind == "component_declaration") {
-                    // Interface contract only; the instantiation is bound separately
+                    // Interface contract checked when the component is instantiated
+                    m_components[vhdlFold(declp->attr("identifier"))] = declp;
                     continue;
                 }
                 if (kind != "signal_declaration") {
@@ -875,6 +916,7 @@ class VhdlXmlFrontend final {
 
         m_modp = nullptr;
         m_scope.clear();
+        m_components.clear();
     }
 
     std::string instantiatedUnitName(const Node* unitp) const {
@@ -891,6 +933,36 @@ class VhdlXmlFrontend final {
             }
         }
         return {};
+    }
+
+    //! Check a component declaration's ports against the entity it binds to
+    void validateComponent(const Node* componentp, const ModuleInfo& target,
+                           const std::string& unitName) const {
+        const Node* const portsp = componentp->child("port_chain");
+        if (!portsp) return;
+        for (const Node* const portp : childEls(portsp)) {
+            if (portp->attr("kind") != "interface_signal_declaration") continue;
+            const std::string name = portp->attr("identifier");
+            const auto it = target.ports.find(vhdlFold(name));
+            if (it == target.ports.end()) {
+                error(portp, "Component '" + unitName + "' port '" + name
+                                 + "' has no matching entity port");
+                continue;
+            }
+            AstVar* const varp = it->second;
+            if (!(directionOf(portp->attr("mode")) == varp->direction())) {
+                error(portp, "Component '" + unitName + "' port '" + name
+                                 + "' direction does not match the entity");
+            }
+            if (const Node* const subtypep = portp->child("subtype_indication")) {
+                const int width = dtypeOf(parseType(subtypep), flpOf(portp))->width();
+                if (width != varp->width()) {
+                    error(portp, "Component '" + unitName + "' port '" + name + "' width "
+                                     + std::to_string(width) + " does not match the entity ("
+                                     + std::to_string(varp->width()) + ")");
+                }
+            }
+        }
     }
 
     void lowerInstance(const Node* stmtp) {
@@ -912,6 +984,18 @@ class VhdlXmlFrontend final {
         }
         const auto targetIt = m_modules.find(vhdlFold(unitName));
         ModuleInfo* const targetp = targetIt == m_modules.end() ? nullptr : &targetIt->second;
+        // UG901: direct entity instantiation of a Verilog module is not supported
+        const bool directEntity = unitp->attr("kind") == "entity_aspect_entity";
+        if (directEntity && !targetp) {
+            error(unitp, "Unknown VHDL entity '" + unitName + "' in direct entity instantiation");
+            return;
+        }
+        if (targetp) {
+            const auto compIt = m_components.find(vhdlFold(unitName));
+            if (compIt != m_components.end()) {
+                validateComponent(compIt->second, *targetp, unitName);
+            }
+        }
         // VHDL entity wins; otherwise leave the original spelling for the case-sensitive
         // SystemVerilog fallback (see VHDL_FRONTEND_PLAN.md section 3.5.1)
         const std::string modName = targetp ? targetp->modp->name() : unitName;
@@ -979,7 +1063,12 @@ class VhdlXmlFrontend final {
                 }
                 FileLine* const pinFlp = flpOf(assocp);
                 if (!actualExprp) {
-                    // VHDL "open" is an intentional disconnection
+                    if (modVarp && modVarp->isNonOutput()) {
+                        error(assocp, "open on an input or inout port with a default value is not "
+                                      "supported yet");
+                        continue;
+                    }
+                    // VHDL "open" on an output is an intentional disconnection
                     pinFlp->warnOff(V3ErrorCode::PINCONNECTEMPTY, true);
                 }
                 AstPin* const pinp = new AstPin{pinFlp, pinNum, formalName, actualExprp};
@@ -1092,7 +1181,8 @@ void V3VhdlParseImp::finishXml() {
 
     std::ifstream ifs{xmlFile};
     if (!ifs) {
-        v3Global.rootp()->fileline()->v3error("Cannot read GHDL XML output: '" + xmlFile + "'");
+        v3Global.rootp()->fileline()->v3error("Cannot read GHDL XML output: '" + xmlFile
+                                              + "'");  // LCOV_EXCL_LINE
         std::remove(errFile.c_str());
         return;
     }
@@ -1109,6 +1199,10 @@ void V3VhdlParseImp::finishXml() {
 }
 
 namespace {
+
+// LCOV_EXCL_START
+// The in-tree lexer/parser is reserved for a self-contained front end; it is not reachable
+// from --language vhdl while the GHDL XML path is active, so no test can exercise it.
 
 //######################################################################
 // Lexer
@@ -1541,6 +1635,8 @@ public:
     }
 };
 
+// LCOV_EXCL_STOP
+
 }  // namespace
 
 //######################################################################
@@ -1557,7 +1653,8 @@ void V3VhdlParse::parseFile(FileLine* fileline, const std::string& filename, boo
     const std::string modname = V3Os::filenameNonDirExt(filename);
     if (v3Global.opt.preprocOnly()) return;  // VHDL has no preprocessor
     if (inLibMap) {
-        fileline->v3error("Library map files are not supported for VHDL sources");
+        fileline->v3error(
+            "Library map files are not supported for VHDL sources");  // LCOV_EXCL_LINE
         return;
     }
 

@@ -1,0 +1,8 @@
+%Error: GHDL failed to analyze the VHDL sources (exit 1). Verilator uses GHDL as its VHDL frontend; install GHDL or set VERILATOR_GHDL to its executable.
+t/t_vhdl_ghdl_bad.vhdl:15:9:error: ';' expected at end of signal assignment
+  y <= a
+        ^
+t/t_vhdl_ghdl_bad.vhdl:15:9:error: (found: 'end')
+ghdl:error: xml dump failed due to compilation error
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

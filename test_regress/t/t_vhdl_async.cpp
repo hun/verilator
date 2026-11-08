@@ -17,16 +17,25 @@ int main(int argc, char** argv) {
     VM_PREFIX* const topp = new VM_PREFIX;
 
     int fails = 0;
+
+    // Reset is asserted from time zero: the process executes once at t0 and applies it
     topp->clk = 0;
-    topp->rst = 0;
+    topp->rst = 1;
     topp->d = 0;
     topp->eval();
+    if (topp->q != 1) {
+        std::printf("%%Error: t0 reset q=%d\n", static_cast<int>(topp->q));
+        ++fails;
+    }
 
-    // Normal load
-    topp->d = 1;
+    topp->rst = 0;
+    topp->eval();
+
+    // Normal load of a value different from the reset value
+    topp->d = 0;
     topp->clk = 1;
     topp->eval();
-    if (topp->q != 1) {
+    if (topp->q != 0) {
         std::printf("%%Error: load q=%d\n", static_cast<int>(topp->q));
         ++fails;
     }
@@ -36,16 +45,16 @@ int main(int argc, char** argv) {
     // Asynchronous reset takes effect without a clock edge
     topp->rst = 1;
     topp->eval();
-    if (topp->q != 0) {
-        std::printf("%%Error: reset q=%d\n", static_cast<int>(topp->q));
+    if (topp->q != 1) {
+        std::printf("%%Error: async reset q=%d\n", static_cast<int>(topp->q));
         ++fails;
     }
 
     // A clock edge while reset is asserted must not load
-    topp->d = 1;
+    topp->d = 0;
     topp->clk = 1;
     topp->eval();
-    if (topp->q != 0) {
+    if (topp->q != 1) {
         std::printf("%%Error: reset load q=%d\n", static_cast<int>(topp->q));
         ++fails;
     }
