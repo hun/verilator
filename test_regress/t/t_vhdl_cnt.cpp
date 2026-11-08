@@ -16,15 +16,18 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     VM_PREFIX* const topp = new VM_PREFIX;
 
+    // Initialize the clock edge state before the first rising edge.
+    topp->clk = 0;
+    topp->eval();
+
     int fails = 0;
-    // Reference: q is the previous value of the counter register.
+    // q is the value of the counter register before the increment of this edge.
     for (int i = 0; i < 16; ++i) {
         topp->clk = 1;
         topp->eval();
         const int q = static_cast<int>(topp->q);
-        const int expect = i == 0 ? 0 : i - 1;
-        if (q != expect) {
-            std::printf("%%Error: edge %d: q=%d expected %d\n", i, q, expect);
+        if (q != i) {
+            std::printf("%%Error: edge %d: q=%d expected %d\n", i, q, i);
             ++fails;
         }
         topp->clk = 0;
