@@ -18,28 +18,58 @@ int main(int argc, char** argv) {
 
     int fails = 0;
     for (int a = 0; a < 16; ++a) {
-        topp->a = a;
-        topp->eval();
+        for (int b = 0; b < 256; ++b) {
+            topp->a = a;
+            topp->b = b;
+            topp->eval();
 
-        const int y = static_cast<int>(topp->y);
-        const int z = static_cast<int>(topp->z);
-        const int v = static_cast<int>(topp->v);
-        const int w = static_cast<int>(topp->w);
-        if (y != a) {
-            std::printf("%%Error: a=%d y=%d\n", a, y);
-            ++fails;
-        }
-        if (z != 0xf) {
-            std::printf("%%Error: a=%d z=%d\n", a, z);
-            ++fails;
-        }
-        if (v != 0xff) {
-            std::printf("%%Error: a=%d v=%d\n", a, v);
-            ++fails;
-        }
-        if (w != a) {
-            std::printf("%%Error: a=%d w=%d\n", a, w);
-            ++fails;
+            const int y = static_cast<int>(topp->y);
+            const int z = static_cast<int>(topp->z);
+            const int v = static_cast<int>(topp->v);
+            const int q = static_cast<int>(topp->q);
+            const int r = static_cast<int>(topp->r);
+            const int t2 = static_cast<int>(topp->t2);
+            const int o0 = static_cast<int>(topp->o0);
+            const int o1 = static_cast<int>(topp->o1);
+            const int ob = static_cast<int>(topp->ob);
+            const int sq = static_cast<int>(topp->sq);
+            const int w = static_cast<int>(topp->w);
+            if (y != a) {
+                std::printf("%%Error: a=%d y=%d\n", a, y);
+                ++fails;
+            }
+            if (z != 0xf) {
+                std::printf("%%Error: a=%d z=%d\n", a, z);
+                ++fails;
+            }
+            if (v != 0xff) {
+                std::printf("%%Error: a=%d v=%d\n", a, v);
+                ++fails;
+            }
+            if (q != ((b >> 4) & 0xf)) {
+                std::printf("%%Error: b=%d q=%d\n", b, q);
+                ++fails;
+            }
+            if (r != 0x0f) {
+                std::printf("%%Error: r=%d\n", r);
+                ++fails;
+            }
+            if (t2 != 0xaa) {
+                std::printf("%%Error: t2=%d\n", t2);
+                ++fails;
+            }
+            if (o0 != 0x00 || o1 != 0xff || ob != ((b & 1) ? 0xff : 0x00)) {
+                std::printf("%%Error: b=%d o0=%d o1=%d ob=%d\n", b, o0, o1, ob);
+                ++fails;
+            }
+            if (sq != 0xf8) {
+                std::printf("%%Error: sq=%d\n", sq);
+                ++fails;
+            }
+            if (w != a) {
+                std::printf("%%Error: a=%d w=%d\n", a, w);
+                ++fails;
+            }
         }
     }
 
