@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL enumeration types through GHDL XML
+# DESCRIPTION: Verilator: VHDL enumeration types and attributes through GHDL XML
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3

@@ -382,6 +382,27 @@ class VhdlXmlFrontend final {
         return enumDType(defp);
     }
 
+    //! Enumeration type definition behind a type mark, or nullptr if not an enumeration
+    const Node* enumTypeDef(const Node* nodep) const {
+        for (int depth = 0; nodep && depth < 8; ++depth) {
+            const std::string kind = nodep->attr("kind");
+            if (kind == "enumeration_type_definition") return nodep;
+            const Node* nextp = nullptr;
+            if (kind == "simple_name") {
+                const Node* const refp = nodep->child("named_entity");
+                if (!refp || !refp->has("ref")) return nullptr;
+                nextp = nodeById(refp->attr("ref"));
+            } else if (const Node* const defp = nodep->child("type_definition")) {
+                nextp = defp;
+            } else if (const Node* const typep = nodep->child("type")) {
+                nextp = typep->has("ref") ? nodeById(typep->attr("ref")) : typep;
+            }
+            if (!nextp) return nullptr;
+            nodep = nextp;
+        }
+        return nullptr;
+    }
+
     //! Declarations resolved at their use sites, or not modeled by Verilator
     static bool ignorableDeclaration(const std::string& kind) {
         return kind == "constant_declaration" || kind == "type_declaration"
@@ -771,6 +792,17 @@ class VhdlXmlFrontend final {
             unsupported(nodep, "character literal " + id);
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
         }
+        if (kind == "left_type_attribute" || kind == "right_type_attribute"
+            || kind == "high_type_attribute" || kind == "low_type_attribute") {
+            if (const Node* const defp = enumTypeDef(nodep->child("prefix"))) {
+                const int lastp
+                    = static_cast<int>(childEls(defp->child("enumeration_literal_list")).size())
+                      - 1;
+                const bool isLast
+                    = kind == "right_type_attribute" || kind == "high_type_attribute";
+                return makeConst(flp, enumDType(defp), static_cast<uint64_t>(isLast ? lastp : 0));
+            }
+        }
         if (kind == "left_attribute" || kind == "right_attribute" || kind == "high_attribute"
             || kind == "low_attribute" || kind == "length_attribute"
             || kind == "ascending_attribute" || kind == "left_array_attribute"
@@ -787,6 +819,30 @@ class VhdlXmlFrontend final {
             AstNodeDType* const dtp = isAscending ? (contextp ? contextp : bitDType(flp))
                                                   : (contextp ? contextp : intDType(flp));
             return makeConst(flp, dtp, static_cast<uint64_t>(value));
+        }
+        if (kind == "pos_attribute" || kind == "succ_attribute" || kind == "pred_attribute"
+            || kind == "val_attribute") {
+            const Node* const defp = enumTypeDef(nodep->child("prefix"));
+            if (!defp) {
+                unsupported(nodep, "attribute " + kind);
+                return makeConst(flp, contextp ? contextp : intDType(flp), 0);
+            }
+            AstNodeDType* const enump = enumDType(defp);
+            if (kind == "val_attribute") {
+                AstNodeExpr* const indexp = lowerExpr(nodep->child("parameter"), nullptr);
+                if (!indexp) return nullptr;
+                return resizeExpr(indexp, enump);
+            }
+            AstNodeExpr* const valuep = lowerExpr(nodep->child("parameter"), enump);
+            if (!valuep) return nullptr;
+            if (kind == "pos_attribute") return resizeExpr(valuep, intDType(flp));
+            AstNodeExpr* const onep = makeConst(flp, enump, 1);
+            AstNodeExpr* const resultp
+                = kind == "succ_attribute"
+                      ? static_cast<AstNodeExpr*>(new AstAdd{flp, valuep, onep})
+                      : static_cast<AstNodeExpr*>(new AstSub{flp, valuep, onep});
+            resultp->dtypep(enump);
+            return resultp;
         }
         if (kind == "enumeration_literal") {
             const std::string id = vhdlFold(nodep->attr("identifier"));
@@ -1134,6 +1190,23 @@ class VhdlXmlFrontend final {
             value = std::strtoll(nodep->attr("value").c_str(), nullptr, 10);
             return true;
         }
+        if (kind == "enumeration_literal") {
+            value = std::strtoll(nodep->attr("enum_pos").c_str(), nullptr, 10);
+            return true;
+        }
+        if (kind == "pos_attribute" || kind == "succ_attribute" || kind == "pred_attribute"
+            || kind == "val_attribute") {
+            int64_t operandv = 0;
+            if (!evalConst(nodep->child("parameter"), operandv, depth + 1)) return false;
+            if (kind == "succ_attribute") {
+                value = operandv + 1;
+            } else if (kind == "pred_attribute") {
+                value = operandv - 1;
+            } else {
+                value = operandv;
+            }
+            return true;
+        }
         // GHDL spells the IIR kind "substraction_operator"
         if (kind == "addition_operator" || kind == "subtraction_operator"
             || kind == "substraction_operator" || kind == "multiplication_operator") {
@@ -1178,6 +1251,9 @@ class VhdlXmlFrontend final {
                         if (const Node* const defp = declp->child("default_value")) {
                             return evalConst(defp, value, depth + 1);
                         }
+                    } else if (declKind == "enumeration_literal") {
+                        value = std::strtoll(declp->attr("enum_pos").c_str(), nullptr, 10);
+                        return true;
                     }
                 }
             }
