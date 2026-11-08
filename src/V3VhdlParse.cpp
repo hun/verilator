@@ -1020,24 +1020,138 @@ class VhdlXmlFrontend final {
             }
             return makeConst(flp, dtp, value);
         }
-        if (kind == "addition_operator" || kind == "subtraction_operator" || kind == "and_operator"
-            || kind == "or_operator" || kind == "xor_operator") {
+        if (kind == "addition_operator" || kind == "subtraction_operator"
+            || kind == "substraction_operator" || kind == "multiplication_operator"
+            || kind == "division_operator" || kind == "modulus_operator"
+            || kind == "remainder_operator" || kind == "exponentiation_operator"
+            || kind == "and_operator" || kind == "or_operator" || kind == "xor_operator"
+            || kind == "nand_operator" || kind == "nor_operator" || kind == "xnor_operator") {
             AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), contextp);
             if (!lhsp) return nullptr;
             AstNodeDType* const dtp = lhsp->dtypep();
             AstNodeExpr* const rhsp = lowerExpr(nodep->child("right"), dtp);
             if (!rhsp) return nullptr;
+            const bool signedp = dtp->isSigned();
             AstNodeExpr* resultp = nullptr;
             if (kind == "addition_operator") {
                 resultp = new AstAdd{flp, lhsp, rhsp};
-            } else if (kind == "subtraction_operator") {
+            } else if (kind == "subtraction_operator" || kind == "substraction_operator") {
                 resultp = new AstSub{flp, lhsp, rhsp};
+            } else if (kind == "multiplication_operator") {
+                resultp = new AstMul{flp, lhsp, rhsp};
+            } else if (kind == "division_operator") {
+                resultp = signedp ? static_cast<AstNodeExpr*>(new AstDivS{flp, lhsp, rhsp})
+                                  : static_cast<AstNodeExpr*>(new AstDiv{flp, lhsp, rhsp});
+            } else if (kind == "remainder_operator") {
+                resultp = signedp ? static_cast<AstNodeExpr*>(new AstModDivS{flp, lhsp, rhsp})
+                                  : static_cast<AstNodeExpr*>(new AstModDiv{flp, lhsp, rhsp});
+            } else if (kind == "modulus_operator") {
+                // VHDL mod takes the sign of the divisor, unlike the C remainder
+                AstNodeExpr* const remp
+                    = signedp ? static_cast<AstNodeExpr*>(new AstModDivS{flp, lhsp, rhsp})
+                              : static_cast<AstNodeExpr*>(new AstModDiv{flp, lhsp, rhsp});
+                remp->dtypep(dtp);
+                if (!signedp) {
+                    resultp = remp;
+                } else {
+                    // mod = rem + b when rem is nonzero and the signs differ
+                    AstNodeExpr* const addRemp = remp->cloneTree(false);
+                    AstNodeExpr* const signRemp = remp->cloneTree(false);
+                    AstNodeExpr* const testRemp = remp->cloneTree(false);
+                    AstNodeExpr* const signZerop = makeConst(flp, dtp, 0);
+                    AstNodeExpr* const testZerop = makeConst(flp, dtp, 0);
+                    AstNodeExpr* const remNegp = new AstLtS{flp, signRemp, signZerop};
+                    remNegp->dtypep(bitDType(flp));
+                    AstNodeExpr* const rhsNegp
+                        = new AstLtS{flp, rhsp->cloneTree(false), makeConst(flp, dtp, 0)};
+                    rhsNegp->dtypep(bitDType(flp));
+                    AstNodeExpr* const diffSignp = new AstXor{flp, remNegp, rhsNegp};
+                    diffSignp->dtypep(bitDType(flp));
+                    AstNodeExpr* const nonzerop = new AstNeq{flp, testRemp, testZerop};
+                    nonzerop->dtypep(bitDType(flp));
+                    AstNodeExpr* const adjustp = new AstAnd{flp, nonzerop, diffSignp};
+                    adjustp->dtypep(bitDType(flp));
+                    AstNodeExpr* const sump = new AstAdd{flp, addRemp, rhsp->cloneTree(false)};
+                    sump->dtypep(dtp);
+                    resultp = new AstCond{flp, adjustp, sump, remp};
+                }
+            } else if (kind == "exponentiation_operator") {
+                resultp = new AstPow{flp, lhsp, rhsp};
             } else if (kind == "and_operator") {
                 resultp = new AstAnd{flp, lhsp, rhsp};
             } else if (kind == "or_operator") {
                 resultp = new AstOr{flp, lhsp, rhsp};
-            } else {
+            } else if (kind == "xor_operator") {
                 resultp = new AstXor{flp, lhsp, rhsp};
+            } else if (kind == "nand_operator") {
+                AstNodeExpr* const andp = new AstAnd{flp, lhsp, rhsp};
+                andp->dtypep(dtp);
+                resultp = new AstNot{flp, andp};
+            } else if (kind == "nor_operator") {
+                AstNodeExpr* const orp = new AstOr{flp, lhsp, rhsp};
+                orp->dtypep(dtp);
+                resultp = new AstNot{flp, orp};
+            } else {
+                AstNodeExpr* const xorp = new AstXor{flp, lhsp, rhsp};
+                xorp->dtypep(dtp);
+                resultp = new AstNot{flp, xorp};
+            }
+            resultp->dtypep(dtp);
+            return resultp;
+        }
+        if (kind == "less_than_operator" || kind == "less_than_or_equal_operator"
+            || kind == "greater_than_operator" || kind == "greater_than_or_equal_operator") {
+            AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), nullptr);
+            if (!lhsp) return nullptr;
+            AstNodeExpr* const rhsp = lowerExpr(nodep->child("right"), lhsp->dtypep());
+            if (!rhsp) return nullptr;
+            const bool signedp = lhsp->dtypep()->isSigned();
+            AstNodeExpr* resultp = nullptr;
+            if (kind == "less_than_operator") {
+                resultp = signedp ? static_cast<AstNodeExpr*>(new AstLtS{flp, lhsp, rhsp})
+                                  : static_cast<AstNodeExpr*>(new AstLt{flp, lhsp, rhsp});
+            } else if (kind == "less_than_or_equal_operator") {
+                resultp = signedp ? static_cast<AstNodeExpr*>(new AstLteS{flp, lhsp, rhsp})
+                                  : static_cast<AstNodeExpr*>(new AstLte{flp, lhsp, rhsp});
+            } else if (kind == "greater_than_operator") {
+                resultp = signedp ? static_cast<AstNodeExpr*>(new AstGtS{flp, lhsp, rhsp})
+                                  : static_cast<AstNodeExpr*>(new AstGt{flp, lhsp, rhsp});
+            } else {
+                resultp = signedp ? static_cast<AstNodeExpr*>(new AstGteS{flp, lhsp, rhsp})
+                                  : static_cast<AstNodeExpr*>(new AstGte{flp, lhsp, rhsp});
+            }
+            resultp->dtypep(bitDType(flp));
+            return resultp;
+        }
+        if (kind == "absolute_operator") {
+            AstNodeExpr* const valuep = lowerExpr(nodep->child("operand"), contextp);
+            if (!valuep) return nullptr;
+            AstNodeDType* const dtp = valuep->dtypep();
+            if (!dtp->isSigned()) return valuep;
+            AstNodeExpr* const negp = new AstNegate{flp, valuep->cloneTree(false)};
+            negp->dtypep(dtp);
+            AstNodeExpr* const condp
+                = new AstLtS{flp, valuep->cloneTree(false), makeConst(flp, dtp, 0)};
+            condp->dtypep(bitDType(flp));
+            AstCond* const resultp = new AstCond{flp, condp, negp, valuep};
+            resultp->dtypep(dtp);
+            return resultp;
+        }
+        if (kind == "sll_operator" || kind == "srl_operator" || kind == "sla_operator"
+            || kind == "sra_operator") {
+            AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), nullptr);
+            if (!lhsp) return nullptr;
+            AstNodeExpr* const amountp = lowerExpr(nodep->child("right"), nullptr);
+            if (!amountp) return nullptr;
+            AstNodeDType* const dtp = lhsp->dtypep();
+            AstNodeExpr* resultp = nullptr;
+            // numeric_std defines sla as sll and srl as a logical shift even for signed
+            if (kind == "sll_operator" || kind == "sla_operator") {
+                resultp = new AstShiftL{flp, lhsp, amountp, dtp->width()};
+            } else if (kind == "sra_operator" && dtp->isSigned()) {
+                resultp = new AstShiftRS{flp, lhsp, amountp, dtp->width()};
+            } else {
+                resultp = new AstShiftR{flp, lhsp, amountp, dtp->width()};
             }
             resultp->dtypep(dtp);
             return resultp;
@@ -1054,6 +1168,13 @@ class VhdlXmlFrontend final {
                 flp, fourstate ? VBasicDTypeKwd::LOGIC : VBasicDTypeKwd::BIT, width, width,
                 VSigning::UNSIGNED));
             return concatp;
+        }
+        if (kind == "negation_operator") {
+            AstNodeExpr* const valuep = lowerExpr(nodep->child("operand"), contextp);
+            if (!valuep) return nullptr;
+            AstNodeExpr* const negp = new AstNegate{flp, valuep};
+            negp->dtypep(valuep->dtypep());
+            return negp;
         }
         if (kind == "not_operator") {
             AstNodeExpr* const operandp = lowerExpr(nodep->child("operand"), contextp);
