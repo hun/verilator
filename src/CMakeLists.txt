@@ -207,6 +207,7 @@ set(HEADERS
     V3VariableOrder.h
     V3VhdlLink.h
     V3VhdlParse.h
+    V3VhdlXml.h
     V3Waiver.h
     V3Width.h
     V3WidthCommit.h
@@ -392,6 +393,7 @@ set(COMMON_SOURCES
     V3VariableOrder.cpp
     V3VhdlLink.cpp
     V3VhdlParse.cpp
+    V3VhdlXml.cpp
     V3Waiver.cpp
     V3Width.cpp
     V3WidthCommit.cpp

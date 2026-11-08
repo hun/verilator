@@ -14,12 +14,30 @@ subset is 25–45k new LOC (1.5–3 engineer-years for a solid subset, 5–10 pe
 for a demo subset). Faithful VHDL-2008 simulation semantics are not reachable without a
 new value model and are out of scope.
 
-## Implementation status (2026-11-07)
+## Implementation status (2026-11-08)
 
 | Work package | State |
 |---|---|
 | WP0 plumbing | **done** on branch `vhdl-frontend-wp0` (`729df7a`, `bed81f2`) |
-| WP1 parser | not started; replaces the WP0 stub lexer/parser |
+| WP1 front end | **GHDL XML path implemented**: entities with ports, architecture signals, concurrent assignments, clocked processes (`rising_edge`/`falling_edge`), if, `and`/`or`/`xor`/`not`, `+`/`-`, `=`/`/=`, type conversions, declaration initializers. The in-tree lexer/parser remains reserved and is not used |
+| WP2 semantics | provided by GHDL analysis; Verilator does not repeat it on this path |
+| WP3 elaboration | entity/architecture binding only; generics, generate and component instantiation are not implemented |
+| WP4–WP8 | not started |
+
+The active frontend runs `ghdl --file-to-xml --std=08` out of process, parses the XML into a
+minimal DOM (`V3VhdlXml`), and lowers the analyzed design units to a post-width-commit
+Verilator AST (`V3VhdlParse::finishXml`). GHDL is therefore a build-time dependency of VHDL
+runs; `VERILATOR_GHDL` selects the executable. The GPL boundary stays at the process
+boundary.
+
+Supported expression forms are those the lowering recognizes explicitly; everything else
+reports "not supported yet" with the VHDL source location. The in-tree parser is kept for
+the day the front end must be self-contained again; it is not reachable from
+`--language vhdl` today.
+
+| Work package | State |
+|---|---|
+| WP1 parser (in-tree) | reserved; not started |
 | WP2–WP8 | not started |
 
 WP0 proves the seam end-to-end:
@@ -56,9 +74,12 @@ statement parts, subtype declarations, expressions, subprograms), then WP2 seman
 
 ## 1. Approach
 
-The frontend parses, type-checks and elaborates VHDL itself, then emits an AST in the
-shape produced by `V3WidthCommit` and re-enters `process()` after the width stage. From
-there the existing pipeline is reused unchanged.
+The frontend emits an AST in the shape produced by `V3WidthCommit` and re-enters
+`process()` after the width stage; from there the existing pipeline is reused unchanged.
+Parsing and semantic analysis are replaceable: the active path delegates them to GHDL
+(`ghdl --file-to-xml`) and keeps only the XML reader and lowering in Verilator, while the
+reserved path performs them in-tree. Both produce the same committed AST, so elaboration
+and lowering are shared work rather than duplicated front ends.
 
 Rationale:
 
@@ -277,6 +298,45 @@ M2 options, in order of preference:
 Mixed-language support is not implied by the M1 design; option 1 is the M2 target and
 requires a separately reviewed change.
 
+### 3.5.1 Cross-language binding contract (UG901-compatible)
+
+The contract follows Vivado UG901 "Instantiating Verilog in VHDL" so that designs which
+synthesize there behave the same here. GHDL 7.0.0-dev behavior was measured to confirm the
+analysis side (2026-11-08).
+
+- **SV into VHDL needs no contract.** Once VHDL entities are emitted as `AstModule`s, an
+  SV `AstCell` binds to them by module name in `V3LinkCells`, exactly as for SV-to-SV.
+- **VHDL into SV requires a component declaration.** Declare a VHDL component with the same
+  name as the SV module and instantiate it as a component, as UG901 specifies. Direct
+  entity instantiation of a Verilog module is not supported there, and Verilator must not
+  accept it through generated stubs - that would compile designs Vivado rejects. GHDL
+  agrees at analysis: `entity work.svmod` reports
+  `unit "svmod" not found in library "work"` and aborts `--file-to-xml`, while a declared,
+  unbound component analyzes cleanly and defers binding.
+- **Binding algorithm (UG901).** Treat the component name as a VHDL design-unit name and
+  search `work`; if a VHDL unit is found, bind it; otherwise treat the name as a Verilog
+  module name and search **case-sensitively**; bind the match. Configuration declarations
+  and non-default binding are out of scope, as they are there. Only Verilog modules are
+  visible across the boundary.
+- **Unified library.** An SV module and a VHDL entity with the same name cannot coexist in
+  one logical library, so that is an error, not a silent preference. Verilator already
+  reports duplicate declarations (`MODDUP`, `src/V3LinkCells.cpp:875`) and warnings are
+  errors by default, so UG901's "first match" rule has no ambiguous equivalent.
+- **Case handling.** VHDL identifiers are case-insensitive for lookup, but the Verilog
+  search must observe case. The frontend must therefore keep the original spelling of
+  component and port identifiers. The WP0 lexer currently folds identifiers to lowercase in
+  `tok.text` (`src/V3VhdlParse.cpp:250-254`); WP1 must keep the original text and add a
+  folded form for scope lookup and keyword comparison, so `AstVar`/pin names carry the
+  spelling the SV side must match.
+- **Elaboration stays in Verilator.** `ghdl --file-to-xml` is pre-elaboration, and
+  `ghdl synth` reports `instance "u1" of component "svmod" is not bound [-Wbinding]` and
+  drops the instance. Any GHDL-derived IR stops at the analyzed, type-resolved design unit;
+  component binding, generics/generates and hierarchy construction are Verilator's WP3.
+
+Port name/type/direction/width compatibility is defined by the companion UG901 page (not
+quoted here). Treat the specific type mappings as **unverified** until checked against the
+target tool; enforce whatever is confirmed as a debug-checked contract in `V3VhdlLink`.
+
 ## 4. AST contract (normative)
 
 The emitted tree must satisfy the following before it enters `process()`.
@@ -304,7 +364,7 @@ downstream assertions.
 | WP | Deliverable | Exit criterion | Est. |
 |---|---|---|---|
 | WP0 | **Done.** Plumbing: `V3SourceLang` detection, `.vhd`/`.vhdl` sourcing, frontend entry points (`parseFile`/`finish`), context clauses, entity ports, empty architecture binding, control-input handling (`.vlt` parsed and applied, std package/libmap/hier-params skipped), pipeline gate, mixed-input rejection, empty module emission | `verilator --language vhdl` on an entity with an empty architecture produces and runs a C++ model; module, function, variable and warning-suppression directives from `.vlt` take effect on a VHDL design; an entity without an architecture is rejected; a mixed SV/VHDL run fails with a clear error; `make test` unaffected | 2–4 wk |
-| WP1 | Lexer + parser + frontend AST; full VHDL-2008 design-unit grammar for the M1 subset; diagnostics with VHDL `file:line` | Parses the M1 corpus; syntax errors match GHDL's line numbers | 3–6 PM |
+| WP1 | In-tree lexer + parser + frontend AST (reserved alternative; the active path is GHDL XML). Full VHDL-2008 design-unit grammar for the M1 subset; diagnostics with VHDL `file:line` | Parses the M1 corpus; syntax errors match GHDL's line numbers | 3–6 PM |
 | WP2 | Semantics: declarative regions, visibility/`use`, overload resolution, types/subtypes, static expression evaluation with VHDL range rules | Accepts/rejects semantic corpus identically to GHDL for M1 constructs | 5–10 PM |
 | WP3 | Elaboration: entity/architecture/component binding, constant generics, generate unrolling, array range specialization, deferred constants | Hierarchy and instance names match GHDL's elaboration | 3–6 PM |
 | WP4 | Lowering to Verilator AST including the Section 4 contract, clock-idiosyncrasy recognition, port/pin binding, attribute lowering | Counter, FIFO, FSM, UART, AXI-Lite pass simulation comparison | 2–4 PM |
@@ -363,8 +423,8 @@ completes WP1–WP4, adds the full WP5 and WP7, and reaches the 16–33 person-m
 | process classification | explicit sensitivity list + NBA keeps a level-sensitive active | slower than VHDL-aware combinational inference; optimize later |
 | multiple architectures | last analyzed architecture is the default; explicit selection is an error | no configuration support in M1; M2 adds selection |
 | multiple drivers | one driver per signal in M1 | M2 inserts per-bit resolution logic for `std_logic(_vector)` |
-| generics | fully elaborated in the frontend | no `AstParam`/`V3Param`; type generics are M2 |
-| names | VHDL identifiers folded to lowercase, encoded with `AstNode::encodeName` | extended identifiers keep a side table for tracing/diagnostics |
+| generics | fully elaborated in the frontend (VHDL-only runs) | no `AstParam`/`V3Param`; cross-language generic/parameter passing is **unverified**: UG901's instantiation rules do not cover it, so `AstParam` on VHDL modules vs. monomorphized variants stays TBD until checked against the target tool |
+| names | VHDL identifiers keep their original spelling for emitted `AstVar`/pin/instance names; a folded form keys scope lookup; both encoded with `AstNode::encodeName` | cross-language binding is case-sensitive per UG901; VCD/debug show source spelling |
 | timing | no `after`/`wait` in M1 | M2 behind `--timing`; inertial/pulse rejection never |
 
 ## 8. CLI and user experience
@@ -413,7 +473,7 @@ CI: new tests must not require GHDL for the default suite; gate differential tes
 | Skipping `V3Width` means the frontend owns constant folding | frontend must fold elaboration-time expressions | implement VHDL static evaluation once and use it for ranges, generics, attributes, case choices |
 | Contract drift | downstream assertion failures | debug checker in `V3VhdlLink`; golden AST dumps |
 | Frontend maintenance cost | second language frontend forever | keep the subset explicit; no new AST nodes; reuse every generic pass possible |
-| Licensing | cannot link GHDL (GPL-2.0) or nvc (GPL-3.0) into `verilator_bin` under LGPL/Artistic | write the frontend from scratch; keep external tools out-of-process |
+| Licensing | cannot link GHDL (GPL-2.0) or nvc (GPL-3.0) into `verilator_bin` under LGPL/Artistic | write the frontend from scratch, or consume an out-of-process helper's IR; keep external tools out-of-process |
 
 ## 11. Milestones
 
@@ -435,6 +495,13 @@ CI: new tests must not require GHDL for the default suite; gate differential tes
 1. Clocked-process recognition heuristics: `rising_edge`/`falling_edge`/`'event and clk = '1'` only (recommended) versus requiring user attributes.
 1. M2 mixed-language route: `--lib-create` wrapper plus linked library (recommended), parse-level
    emission for VHDL leaf modules, or per-module bypass (§3.5). M1 rejects mixed inputs.
+1. Frontend source: hand-written frontend (current recommendation) versus an out-of-process
+   GPL helper that emits the analyzed, type-resolved GHDL IIR for Verilator to elaborate and
+   lower. `ghdl --file-to-xml` carries `kind`, `file`/`line`/`col` on every node and resolved
+   references (`implementation`, `named_entity`, `type`), so it already contains the WP2
+   result, but no elaboration (§3.5.1). The helper removes WP1-WP2 and most of WP5, keeps
+   WP3-WP7, and confines GHDL version coupling to the helper; its cost is an IR reader and a
+   pinned producer.
 1. Whether multi-driver `std_logic` resolution is in M1 (recommended: no) or M2.
 
 ## 13. Evidence references
