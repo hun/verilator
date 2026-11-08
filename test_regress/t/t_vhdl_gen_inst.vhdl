@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL for generate with an instance and local signal
+-- DESCRIPTION: Verilator: VHDL sibling for-generates sharing labels
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
@@ -31,10 +31,19 @@ end;
 
 architecture rtl of t is
 begin
-  g : for i in 0 to 3 generate
+  -- The label u1 is reused in two sibling generate blocks; the flattened
+  -- names must still be unique.
+  g1 : for i in 0 to 1 generate
     signal s : std_logic;
   begin
     u1 : entity work.bit_inv port map (x => a(i), y => s);
     y(i) <= s;
+  end generate;
+
+  g2 : for i in 0 to 1 generate
+    signal s : std_logic;
+  begin
+    u1 : entity work.bit_inv port map (x => a(i + 2), y => s);
+    y(i + 2) <= s;
   end generate;
 end;
