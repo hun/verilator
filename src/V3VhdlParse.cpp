@@ -244,6 +244,7 @@ class VhdlXmlFrontend final {
     std::vector<const Node*> m_entityNodes;  // User entity declarations
     std::vector<const Node*> m_archNodes;  // User architecture bodies
     std::map<std::string, AstVar*> m_scope;  // Current module: folded name -> Var
+    std::map<std::string, int64_t> m_constBindings;  // Loop parameters during unrolling
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
     int m_varSeq = 0;  // Sequence for process-variable names
@@ -326,6 +327,11 @@ class VhdlXmlFrontend final {
     VhdlDTypeSpec parseType(const Node* subtypep) const {
         VhdlDTypeSpec spec;
         const std::string kind = subtypep->attr("kind");
+        if (kind == "integer_subtype_definition") {
+            spec.isInteger = true;
+            spec.kwd = VBasicDTypeKwd::INT;
+            return spec;
+        }
         if (kind == "simple_name") {
             const std::string id = vhdlFold(subtypep->attr("identifier"));
             if (id == "std_logic" || id == "boolean") {
@@ -428,6 +434,15 @@ class VhdlXmlFrontend final {
             unsupported(nodep, "name form '" + kind + "'");
             return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
         }
+        const auto bindIt = m_constBindings.find(vhdlFold(namep->attr("identifier")));
+        if (bindIt != m_constBindings.end()) {
+            if (write) {
+                error(nodep, "VHDL loop parameter cannot be assigned");
+                return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+            }
+            return makeConst(flpOf(nodep), intDType(flpOf(nodep)),
+                             static_cast<uint32_t>(bindIt->second));
+        }
         AstVar* const varp = lookupVar(namep);
         if (!varp) {
             error(namep, "Unknown VHDL identifier '" + namep->attr("identifier") + "'");
@@ -444,19 +459,28 @@ class VhdlXmlFrontend final {
         }
         if (kind == "indexed_name") {
             const std::vector<const Node*> indices = childEls(nodep->child("index_list"));
-            if (indices.size() != 1 || indices.front()->attr("kind") != "integer_literal") {
-                unsupported(nodep, "non-literal or multi-dimensional VHDL index");
+            if (indices.size() != 1) {
+                unsupported(nodep, "multi-dimensional VHDL index");
                 return basep;
             }
-            const int index = static_cast<int>(
-                std::strtol(indices.front()->attr("value").c_str(), nullptr, 10));
-            const int offset
-                = basicp->ascending() ? index - basicp->left() : index - basicp->right();
-            if (offset < 0 || offset >= basicp->width()) {
-                error(nodep, "VHDL index is out of range");
-                return basep;
+            const int baseIndex = basicp->ascending() ? basicp->left() : basicp->right();
+            if (indices.front()->attr("kind") == "integer_literal") {
+                const int index = static_cast<int>(
+                    std::strtol(indices.front()->attr("value").c_str(), nullptr, 10));
+                const int offset = index - baseIndex;
+                if (offset < 0 || offset >= basicp->width()) {
+                    error(nodep, "VHDL index is out of range");
+                    return basep;
+                }
+                return new AstSel{flpOf(nodep), basep, offset, 1};
             }
-            return new AstSel{flpOf(nodep), basep, offset, 1};
+            AstNodeExpr* const indexExprp = lowerExpr(indices.front(), intDType(flpOf(nodep)));
+            if (!indexExprp) return basep;
+            AstNodeExpr* const offsetp
+                = new AstSub{flpOf(nodep), indexExprp,
+                             makeConst(flpOf(nodep), intDType(flpOf(nodep)), baseIndex)};
+            offsetp->dtypep(intDType(flpOf(nodep)));
+            return new AstSel{flpOf(nodep), basep, offsetp, 1};
         }
 
         // slice_name
@@ -484,7 +508,11 @@ class VhdlXmlFrontend final {
             error(nodep, "VHDL slice is out of range");
             return basep;
         }
-        return new AstSel{flpOf(nodep), basep, offset, width};
+        AstNodeExpr* const selp = new AstSel{flpOf(nodep), basep, offset, width};
+        // AstSel defaults to unsigned; a slice of a signed array stays signed
+        selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flpOf(nodep), basicp->keyword(),
+                                                              width, width, basicp->numeric()));
+        return selp;
     }
 
     AstNodeExpr* lowerLValue(const Node* stmtp, const Node* targetp) {
@@ -507,7 +535,8 @@ class VhdlXmlFrontend final {
         AstBasicDType* const toBasicp = VN_CAST(toDtype->skipRefp(), BasicDType);
         AstBasicDType* const fromBasicp = VN_CAST(fromp->dtypep()->skipRefp(), BasicDType);
         if (!toBasicp || !fromBasicp || toBasicp->width() <= 0 || fromBasicp->width() <= 0) {
-            flp->v3error("VHDL conversion between non-basic types is not supported yet");  // LCOV_EXCL_LINE
+            flp->v3error(
+                "VHDL conversion between non-basic types is not supported yet");  // LCOV_EXCL_LINE
             return fromp;
         }
         const int toWidth = toBasicp->width();
@@ -888,11 +917,55 @@ class VhdlXmlFrontend final {
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
 
+    AstNode* lowerForLoop(const Node* stmtp, AssignMode mode) {
+        const Node* const specp = stmtp->child("parameter_specification");
+        if (!specp || specp->attr("kind") != "iterator_declaration") {
+            unsupported(stmtp, "for loop without an iterator specification");
+            return nullptr;
+        }
+        const std::string name = specp->attr("identifier");
+        const Node* const subtypep = specp->child("subtype_indication");
+        const Node* const rangep = subtypep ? subtypep->child("range_constraint") : nullptr;
+        if (!rangep) {
+            unsupported(stmtp, "for loop without a static range");
+            return nullptr;
+        }
+        int left = 0;
+        int right = 0;
+        if (!literalValue(rangep->child("left_limit_expr"), left)
+            || !literalValue(rangep->child("right_limit_expr"), right)) {
+            unsupported(stmtp, "non-static VHDL loop range");
+            return nullptr;
+        }
+
+        const std::string key = vhdlFold(name);
+        const bool ascending = rangep->attr("direction") == "to";
+        const int step = ascending ? 1 : -1;
+        AstNode* headp = nullptr;
+        for (int value = left; ascending ? value <= right : value >= right; value += step) {
+            const auto saved = m_constBindings.find(key);
+            const bool hadBinding = saved != m_constBindings.end();
+            const int64_t savedValue = hadBinding ? saved->second : 0;
+            m_constBindings[key] = value;
+            AstNode* const bodyp
+                = lowerStmtChain(stmtp->child("sequential_statement_chain"), mode);
+            if (hadBinding) {
+                m_constBindings[key] = savedValue;
+            } else {
+                m_constBindings.erase(key);
+            }
+            if (!bodyp) continue;
+            headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, bodyp) : bodyp;
+        }
+        return headp;
+    }
+
     AstNode* lowerStmt(const Node* stmtp, AssignMode mode) {
         const std::string kind = stmtp->attr("kind");
         if (kind == "simple_signal_assignment_statement") { return lowerAssignment(stmtp, mode); }
         if (kind == "variable_assignment_statement") return lowerVariableAssignment(stmtp);
         if (kind == "case_statement") return lowerCase(stmtp, mode);
+        if (kind == "for_loop_statement") return lowerForLoop(stmtp, mode);
         if (kind == "selected_waveform_assignment_statement") {
             return lowerSelectedAssignment(stmtp, mode);
         }
