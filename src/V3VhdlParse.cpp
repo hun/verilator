@@ -827,6 +827,90 @@ class VhdlXmlFrontend final {
                 = m_rootp->typeTablep()->findLogicBitDType(flp, kwd, width, width, signing);
             return resizeExpr(valueExprp, dtp);
         }
+        if (fn == "shift_left" || fn == "shift_right") {
+            const Node* const valuep = actualOf(0);
+            const Node* const amountp = actualOf(1);
+            AstNodeExpr* const valueExprp = valuep ? lowerExpr(valuep, nullptr) : nullptr;
+            AstNodeExpr* const amountExprp = amountp ? lowerExpr(amountp, nullptr) : nullptr;
+            if (!valueExprp || !amountExprp) {
+                unsupported(nodep, fn + " without two arguments");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            AstNodeDType* const dtp = valueExprp->dtypep();
+            AstNodeExpr* resultp = nullptr;
+            // numeric_std shift_right sign-extends signed operands, shift_left does not
+            if (fn == "shift_left") {
+                resultp = new AstShiftL{flp, valueExprp, amountExprp, dtp->width()};
+            } else if (dtp->isSigned()) {
+                resultp = new AstShiftRS{flp, valueExprp, amountExprp, dtp->width()};
+            } else {
+                resultp = new AstShiftR{flp, valueExprp, amountExprp, dtp->width()};
+            }
+            resultp->dtypep(dtp);
+            return resultp;
+        }
+        if (fn == "rotate_left" || fn == "rotate_right") {
+            const Node* const valuep = actualOf(0);
+            const Node* const amountp = actualOf(1);
+            AstNodeExpr* const valueExprp = valuep ? lowerExpr(valuep, nullptr) : nullptr;
+            AstNodeExpr* const amountExprp = amountp ? lowerExpr(amountp, nullptr) : nullptr;
+            if (!valueExprp || !amountExprp) {
+                unsupported(nodep, fn + " without two arguments");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            AstNodeDType* const dtp = valueExprp->dtypep();
+            const int width = dtp->width();
+            // Counts at or beyond the width wrap, so rotate by count mod width
+            AstNodeExpr* const nmodp
+                = new AstModDiv{flp, amountExprp, makeConst(flp, intDType(flp), width)};
+            nmodp->dtypep(intDType(flp));
+            AstNodeExpr* const restp
+                = new AstSub{flp, makeConst(flp, intDType(flp), width), nmodp->cloneTree(false)};
+            restp->dtypep(intDType(flp));
+            AstNodeExpr* const innerShiftp
+                = fn == "rotate_left"
+                      ? static_cast<AstNodeExpr*>(
+                            new AstShiftL{flp, valueExprp, nmodp->cloneTree(false), width})
+                      : static_cast<AstNodeExpr*>(
+                            new AstShiftR{flp, valueExprp, nmodp->cloneTree(false), width});
+            AstNodeExpr* const outerShiftp
+                = fn == "rotate_left"
+                      ? static_cast<AstNodeExpr*>(
+                            new AstShiftR{flp, valueExprp->cloneTree(false), restp, width})
+                      : static_cast<AstNodeExpr*>(
+                            new AstShiftL{flp, valueExprp->cloneTree(false), restp, width});
+            innerShiftp->dtypep(dtp);
+            outerShiftp->dtypep(dtp);
+            AstNodeExpr* const resultp = new AstOr{flp, innerShiftp, outerShiftp};
+            resultp->dtypep(dtp);
+            return resultp;
+        }
+        if (fn == "minimum" || fn == "maximum") {
+            const Node* const lhsp = actualOf(0);
+            const Node* const rhsp = actualOf(1);
+            AstNodeExpr* const lhsExprp = lhsp ? lowerExpr(lhsp, nullptr) : nullptr;
+            AstNodeExpr* const rhsExprp
+                = rhsp ? lowerExpr(rhsp, lhsExprp ? lhsExprp->dtypep() : nullptr) : nullptr;
+            if (!lhsExprp || !rhsExprp) {
+                unsupported(nodep, fn + " without two arguments");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            AstNodeDType* const dtp = lhsExprp->dtypep();
+            const bool signedp = dtp->isSigned();
+            AstNodeExpr* cmp;
+            if (fn == "minimum") {
+                cmp = signedp ? static_cast<AstNodeExpr*>(new AstLtS{flp, lhsExprp, rhsExprp})
+                              : static_cast<AstNodeExpr*>(new AstLt{flp, lhsExprp, rhsExprp});
+            } else {
+                cmp = signedp ? static_cast<AstNodeExpr*>(new AstGtS{flp, lhsExprp, rhsExprp})
+                              : static_cast<AstNodeExpr*>(new AstGt{flp, lhsExprp, rhsExprp});
+            }
+            cmp->dtypep(bitDType(flp));
+            AstCond* const resultp
+                = new AstCond{flp, cmp, lhsExprp->cloneTree(false), rhsExprp->cloneTree(false)};
+            resultp->dtypep(dtp);
+            return resultp;
+        }
         if (fn == "to_integer" || fn == "conv_integer") {
             const Node* const valuep = actualOf(0);
             if (!valuep) {
