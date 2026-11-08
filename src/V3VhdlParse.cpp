@@ -301,9 +301,11 @@ class VhdlXmlFrontend final {
 
     // ---- Types
 
-    int intAttr(const Node* nodep) const {
-        if (!nodep) return 0;
-        return static_cast<int>(std::strtol(nodep->attr("value").c_str(), nullptr, 10));
+    //! Read an integer-literal node's value; false for non-literals (e.g. generic expressions)
+    bool literalValue(const Node* nodep, int& value) const {
+        if (!nodep || nodep->attr("kind") != "integer_literal") return false;
+        value = static_cast<int>(std::strtol(nodep->attr("value").c_str(), nullptr, 10));
+        return true;
     }
 
     VhdlDTypeSpec parseType(const Node* subtypep) const {
@@ -361,8 +363,12 @@ class VhdlXmlFrontend final {
             return spec;
         }
         spec.ascending = rangep->attr("direction") == "to";
-        spec.left = intAttr(rangep->child("left_limit_expr"));
-        spec.right = intAttr(rangep->child("right_limit_expr"));
+        if (!literalValue(rangep->child("left_limit_expr"), spec.left)
+            || !literalValue(rangep->child("right_limit_expr"), spec.right)) {
+            error(rangep, "non-literal VHDL range limit is not supported yet");
+            spec.isVector = false;  // Keep the tree buildable; the error aborts the run
+            return spec;
+        }
         return spec;
     }
 
@@ -619,7 +625,7 @@ class VhdlXmlFrontend final {
                         sensp};
                     AstNode* const stmtsp
                         = lowerStmtChain(ifp->child("sequential_statement_chain"), true);
-                    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS_FF,
+                    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS,
                                                     new AstSenTree{flp, itemp}, stmtsp});
                     return;
                 }
@@ -724,6 +730,7 @@ class VhdlXmlFrontend final {
                 m_scope[vhdlFold(name)] = varp;
 
                 if (const Node* const defp = declp->child("default_value")) {
+                    varp->noCReset(true);
                     AstNodeExpr* const rhsp = lowerDefault(defp, varp->dtypep());
                     if (rhsp) {
                         AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
