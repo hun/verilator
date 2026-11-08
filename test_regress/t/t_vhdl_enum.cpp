@@ -1,6 +1,6 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //
-// DESCRIPTION: Verilator: VHDL enumeration types through GHDL XML test
+// DESCRIPTION: Verilator: VHDL enumeration types and attributes test
 //
 // This file ONLY is placed under the Creative Commons Public Domain.
 // SPDX-FileCopyrightText: 2026 Hannes Klas
@@ -17,31 +17,65 @@ int main(int argc, char** argv) {
     VM_PREFIX* const topp = new VM_PREFIX;
 
     int fails = 0;
-    const int expect[3] = {1, 2, 0};  // run, done, idle
+    const int expect[4] = {0, 1, 2, 0};  // idle, run, done, idle
+    const int expectConstPos = 4;  // pos(run) + pos(run) + pos(done)
 
     topp->clk = 0;
+    topp->sel = 0;
     topp->eval();
-    if (static_cast<int>(topp->state_o) != 0 || static_cast<int>(topp->q) != 1) {
-        std::printf("%%Error: t=0 state=%d q=%d expected idle\n",
-                    static_cast<int>(topp->state_o), static_cast<int>(topp->q));
-        ++fails;
-    }
-
-    for (int i = 0; i < 3; ++i) {
-        topp->clk = 1;
-        topp->eval();
+    for (int step = 0; step < 4; ++step) {
+        if (step) {
+            topp->clk = 1;
+            topp->eval();
+        }
         const int state = static_cast<int>(topp->state_o);
-        const int q = static_cast<int>(topp->q);
-        if (state != expect[i]) {
-            std::printf("%%Error: edge %d state=%d expected %d\n", i, state, expect[i]);
+        if (state != expect[step]) {
+            std::printf("%%Error: step %d state=%d expected %d\n", step, state, expect[step]);
             ++fails;
         }
-        if (q != (state == 0)) {
-            std::printf("%%Error: edge %d q=%d state=%d\n", i, q, state);
+        if (static_cast<int>(topp->q) != (state == 0)) {
+            std::printf("%%Error: step %d q=%d state=%d\n", step,
+                        static_cast<int>(topp->q), state);
             ++fails;
         }
-        topp->clk = 0;
-        topp->eval();
+        if (static_cast<int>(topp->pos_o) != state) {
+            std::printf("%%Error: step %d pos_o=%d state=%d\n", step,
+                        static_cast<int>(topp->pos_o), state);
+            ++fails;
+        }
+        if (static_cast<int>(topp->high_o) != (state == 2)) {
+            std::printf("%%Error: step %d high_o=%d state=%d\n", step,
+                        static_cast<int>(topp->high_o), state);
+            ++fails;
+        }
+        if (static_cast<int>(topp->low_o) != (state == 0)) {
+            std::printf("%%Error: step %d low_o=%d state=%d\n", step,
+                        static_cast<int>(topp->low_o), state);
+            ++fails;
+        }
+        if (static_cast<int>(topp->const_pos_o) != expectConstPos) {
+            std::printf("%%Error: step %d const_pos_o=%d expected %d\n", step,
+                        static_cast<int>(topp->const_pos_o), expectConstPos);
+            ++fails;
+        }
+        // 'succ is only defined below the last enumeration value
+        if (state < 2 && static_cast<int>(topp->succ_o) != state + 1) {
+            std::printf("%%Error: step %d succ_o=%d state=%d\n", step,
+                        static_cast<int>(topp->succ_o), state);
+            ++fails;
+        }
+        for (int sel = 0; sel < 4; ++sel) {
+            topp->sel = sel;
+            topp->eval();
+            if (static_cast<int>(topp->val_o) != sel) {
+                std::printf("%%Error: sel=%d val_o=%d\n", sel, static_cast<int>(topp->val_o));
+                ++fails;
+            }
+        }
+        if (step) {
+            topp->clk = 0;
+            topp->eval();
+        }
     }
 
     topp->final();
