@@ -338,8 +338,9 @@ class VhdlXmlFrontend final {
         return true;
     }
 
-    VhdlDTypeSpec parseType(const Node* subtypep) const {
+    VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) const {
         VhdlDTypeSpec spec;
+        if (!subtypep || depth > 16) return spec;
         const std::string kind = subtypep->attr("kind");
         if (kind == "integer_subtype_definition") {
             spec.isInteger = true;
@@ -356,6 +357,26 @@ class VhdlXmlFrontend final {
                 spec.isInteger = true;
                 spec.kwd = VBasicDTypeKwd::INT;
             } else {
+                // User-defined subtype or type: follow the analyzed declaration
+                const Node* const refp = subtypep->child("named_entity");
+                if (refp && refp->has("ref")) {
+                    const Node* const declp = nodeById(refp->attr("ref"));
+                    if (declp) {
+                        const std::string declKind = declp->attr("kind");
+                        if (declKind == "subtype_declaration") {
+                            if (const Node* const subp = declp->child("subtype_indication")) {
+                                return parseType(subp, depth + 1);
+                            }
+                        } else if (declKind == "type_declaration"
+                                   || declKind == "anonymous_type_declaration") {
+                            const Node* subp = declp->child("subtype_definition");
+                            if (subp && !subp->has("kind") && subp->has("ref")) {
+                                subp = nodeById(subp->attr("ref"));
+                            }
+                            if (subp) return parseType(subp, depth + 1);
+                        }
+                    }
+                }
                 error(subtypep,
                       "VHDL type '" + subtypep->attr("identifier") + "' is not supported yet");
             }
@@ -367,14 +388,30 @@ class VhdlXmlFrontend final {
         }
 
         const Node* const markp = subtypep->child("subtype_type_mark");
-        const std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
+        std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
+        if (mark.empty()) {
+            // Anonymous array type (type X is array (...) of T): derive from the element type
+            const Node* const elemRefp = subtypep->child("element_subtype");
+            const Node* elemp = nullptr;
+            if (elemRefp) {
+                elemp = elemRefp->has("ref") ? nodeById(elemRefp->attr("ref")) : elemRefp;
+            }
+            if (elemp) {
+                if (const Node* const elemMarkp = elemp->child("subtype_type_mark")) {
+                    mark = vhdlFold(elemMarkp->attr("identifier"));
+                } else if (elemp->attr("kind") == "simple_name") {
+                    mark = vhdlFold(elemp->attr("identifier"));
+                }
+            }
+        }
         if (mark == "signed") {
             spec.kwd = VBasicDTypeKwd::LOGIC;
             spec.signing = VSigning::SIGNED;
-        } else if (mark == "unsigned" || mark == "std_logic_vector") {
+        } else if (mark == "unsigned" || mark == "std_logic_vector" || mark == "std_logic"
+                   || mark == "std_ulogic") {
             spec.kwd = VBasicDTypeKwd::LOGIC;
             spec.signing = VSigning::UNSIGNED;
-        } else if (mark == "bit_vector") {
+        } else if (mark == "bit_vector" || mark == "bit") {
             spec.kwd = VBasicDTypeKwd::BIT;
         } else {
             error(subtypep, "VHDL array type '" + mark + "' is not supported yet");
