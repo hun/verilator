@@ -247,7 +247,8 @@ class VhdlXmlFrontend final {
     std::map<std::string, int64_t> m_constBindings;  // Loop parameters during unrolling
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
-    int m_varSeq = 0;  // Sequence for process-variable names
+    int m_varSeq = 0;  // Sequence for process/generate-local names
+    std::string m_genSuffix;  // Suffix for names created inside a generate iteration
 
     //! Emitted module and its ports, used to bind instances across the hierarchy
     struct ModuleInfo final {
@@ -1431,12 +1432,6 @@ class VhdlXmlFrontend final {
             unsupported(stmtp, "generate without a body");
             return;
         }
-        if (const Node* const declsp = bodyp->child("declaration_chain")) {
-            if (!childEls(declsp).empty()) {
-                unsupported(bodyp, "declarations inside a generate block");
-                return;
-            }
-        }
 
         const std::string key = vhdlFold(specp->attr("identifier"));
         const int step = ascending ? 1 : -1;
@@ -1445,13 +1440,56 @@ class VhdlXmlFrontend final {
             const bool hadBinding = saved != m_constBindings.end();
             const int64_t savedValue = hadBinding ? saved->second : 0;
             m_constBindings[key] = value;
+
+            VL_RESTORER_COPY(m_scope);
+            const std::string savedSuffix = m_genSuffix;
+            m_genSuffix = savedSuffix + "__gen" + std::to_string(value);
+            emitGenerateDeclarations(bodyp);
             if (const Node* const concp = bodyp->child("concurrent_statement_chain")) {
                 for (const Node* const stmtp2 : childEls(concp)) lowerConcurrent(stmtp2);
             }
+            m_genSuffix = savedSuffix;
+
             if (hadBinding) {
                 m_constBindings[key] = savedValue;
             } else {
                 m_constBindings.erase(key);
+            }
+        }
+    }
+
+    //! Declarations inside one generate iteration; they are flattened with unique names
+    void emitGenerateDeclarations(const Node* bodyp) {
+        const Node* const declsp = bodyp->child("declaration_chain");
+        if (!declsp) return;
+        for (const Node* const declp : childEls(declsp)) {
+            const std::string kind = declp->attr("kind");
+            if (kind == "component_declaration") continue;
+            if (kind != "signal_declaration") {
+                unsupported(declp, "generate declaration '" + kind + "'");
+                continue;
+            }
+            const Node* const subtypep = declp->child("subtype_indication");
+            if (!subtypep) {
+                error(declp, "VHDL signal without a subtype");
+                continue;
+            }
+            FileLine* const dflp = flpOf(declp);
+            const std::string name = declp->attr("identifier");
+            const std::string mangled
+                = "vhdlgen_" + std::to_string(++m_varSeq) + "__" + name;
+            AstVar* const varp
+                = new AstVar{dflp, VVarType::VAR, mangled, dtypeOf(parseType(subtypep), dflp)};
+            m_modp->addStmtsp(varp);
+            m_scope[vhdlFold(name)] = varp;
+            if (const Node* const defp = declp->child("default_value")) {
+                varp->noCReset(true);
+                AstNodeExpr* const rhsp = lowerDefault(defp, varp->dtypep());
+                if (rhsp) {
+                    AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
+                    m_modp->addStmtsp(
+                        new AstInitialStatic{dflp, new AstAssign{dflp, lhsp, rhsp}});
+                }
             }
         }
     }
@@ -1730,8 +1768,8 @@ class VhdlXmlFrontend final {
             }
         }
 
-        AstCell* const cellp
-            = new AstCell{flp, flp, stmtp->attr("label"), modName, pinsp, nullptr, nullptr};
+        AstCell* const cellp = new AstCell{flp, flp, stmtp->attr("label") + m_genSuffix,
+                                           modName, pinsp, nullptr, nullptr};
         m_modp->addStmtsp(cellp);
     }
 
