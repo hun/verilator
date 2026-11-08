@@ -338,6 +338,16 @@ class VhdlXmlFrontend final {
         return true;
     }
 
+    //! Declarations resolved at their use sites, or not modeled by Verilator
+    static bool ignorableDeclaration(const std::string& kind) {
+        return kind == "constant_declaration" || kind == "type_declaration"
+               || kind == "anonymous_type_declaration" || kind == "subtype_declaration"
+               || kind == "function_declaration" || kind == "procedure_declaration"
+               || kind == "attribute_declaration" || kind == "attribute_specification"
+               || kind == "alias_declaration" || kind == "file_declaration"
+               || kind == "use_clause";
+    }
+
     VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) const {
         VhdlDTypeSpec spec;
         if (!subtypep || depth > 16) return spec;
@@ -1428,10 +1438,7 @@ class VhdlXmlFrontend final {
         const Node* const declsp = processp->child("declaration_chain");
         if (!declsp) return;
         for (const Node* const declp : childEls(declsp)) {
-            if (declp->attr("kind") == "constant_declaration") {
-                // Evaluated at use sites through its analyzed reference
-                continue;
-            }
+            if (ignorableDeclaration(declp->attr("kind"))) continue;
             if (declp->attr("kind") != "variable_declaration") {
                 unsupported(declp, "process declaration '" + declp->attr("kind") + "'");
                 continue;
@@ -1653,7 +1660,8 @@ class VhdlXmlFrontend final {
         if (!declsp) return;
         for (const Node* const declp : childEls(declsp)) {
             const std::string kind = declp->attr("kind");
-            if (kind == "component_declaration" || kind == "constant_declaration") continue;
+            if (kind == "component_declaration") continue;
+            if (ignorableDeclaration(kind)) continue;
             if (kind != "signal_declaration") {
                 unsupported(declp, "generate declaration '" + kind + "'");
                 continue;
@@ -1775,10 +1783,7 @@ class VhdlXmlFrontend final {
                     m_components[vhdlFold(declp->attr("identifier"))] = declp;
                     continue;
                 }
-                if (kind == "constant_declaration") {
-                    // Constants are evaluated at their use sites through their reference
-                    continue;
-                }
+                if (ignorableDeclaration(kind)) continue;
                 if (kind != "signal_declaration") {
                     unsupported(declp, "declaration '" + kind + "'");
                     continue;
