@@ -500,6 +500,84 @@ class VhdlXmlFrontend final {
         return nullptr;
     }
 
+    //! Resize/reinterpret an expression to a target dtype using post-width nodes.
+    //! AstCast cannot be used: VHDL mode skips the width pass that lowers casts.
+    AstNodeExpr* resizeExpr(AstNodeExpr* fromp, AstNodeDType* toDtype) {
+        FileLine* const flp = fromp->fileline();
+        AstBasicDType* const toBasicp = VN_CAST(toDtype->skipRefp(), BasicDType);
+        AstBasicDType* const fromBasicp = VN_CAST(fromp->dtypep()->skipRefp(), BasicDType);
+        if (!toBasicp || !fromBasicp || toBasicp->width() <= 0 || fromBasicp->width() <= 0) {
+            flp->v3error("VHDL conversion between non-basic types is not supported yet");  // LCOV_EXCL_LINE
+            return fromp;
+        }
+        const int toWidth = toBasicp->width();
+        const int fromWidth = fromBasicp->width();
+        AstNodeExpr* resultp = fromp;
+        if (toWidth > fromWidth) {
+            resultp = fromBasicp->isSigned()
+                          ? static_cast<AstNodeExpr*>(new AstExtendS{flp, fromp, toWidth})
+                          : static_cast<AstNodeExpr*>(new AstExtend{flp, fromp, toWidth});
+        } else if (toWidth < fromWidth) {
+            resultp = new AstSel{flp, fromp, 0, toWidth};
+        }
+        resultp->dtypep(toDtype);
+        return resultp;
+    }
+
+    //! Lower the numeric_std conversion builtins needed by synthesizable VHDL
+    AstNodeExpr* lowerCall(const Node* nodep, AstNodeDType* contextp) {
+        FileLine* const flp = flpOf(nodep);
+        const Node* const prefixp = nodep->child("prefix");
+        const std::string fn = prefixp ? vhdlFold(prefixp->attr("identifier")) : std::string{};
+        const std::vector<const Node*> argsp
+            = childEls(nodep->child("parameter_association_chain"));
+        const auto actualOf = [&](size_t index) -> const Node* {
+            if (index >= argsp.size()) return nullptr;
+            return argsp[index]->child("actual");
+        };
+
+        if (fn == "to_unsigned" || fn == "to_signed" || fn == "resize") {
+            const Node* const valuep = actualOf(0);
+            const Node* const widthp = actualOf(1);
+            int width = 0;
+            if (!valuep || !widthp || !literalValue(widthp, width) || width <= 0) {
+                unsupported(nodep, "non-static width in " + fn);
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
+            if (!valueExprp) return nullptr;
+
+            VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
+            VSigning signing = fn == "to_signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+            if (fn == "resize") {
+                const AstBasicDType* const srcp
+                    = VN_CAST(valueExprp->dtypep()->skipRefp(), BasicDType);
+                if (!srcp || srcp->width() <= 1) {
+                    unsupported(nodep, "resize of a non-vector value");
+                    return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+                }
+                kwd = srcp->keyword();
+                signing = srcp->numeric();
+            }
+            AstNodeDType* const dtp
+                = m_rootp->typeTablep()->findLogicBitDType(flp, kwd, width, width, signing);
+            return resizeExpr(valueExprp, dtp);
+        }
+        if (fn == "to_integer" || fn == "conv_integer") {
+            const Node* const valuep = actualOf(0);
+            if (!valuep) {
+                unsupported(nodep, fn + " without an argument");
+                return makeConst(flp, intDType(flp), 0);
+            }
+            AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
+            if (!valueExprp) return nullptr;
+            return resizeExpr(valueExprp, intDType(flp));
+        }
+
+        unsupported(nodep, "function call '" + fn + "'");
+        return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+    }
+
     AstNodeExpr* lowerExpr(const Node* nodep, AstNodeDType* contextp) {
         if (!nodep) return nullptr;
         FileLine* const flp = flpOf(nodep);
@@ -588,14 +666,18 @@ class VhdlXmlFrontend final {
             AstNodeExpr* const innerp = lowerExpr(nodep->child("expression"), contextp);
             if (!innerp) return nullptr;
             if (!contextp || innerp->dtypep() == contextp) return innerp;
-            return new AstCast{flp, innerp, contextp};
+            return resizeExpr(innerp, contextp);
         }
-        if (kind == "function_call") {
-            const Node* const prefixp = nodep->child("prefix");
-            const std::string fn = prefixp ? prefixp->attr("identifier") : std::string{};
-            unsupported(nodep, "function call '" + fn + "'");
+        if (kind == "simple_aggregate") {
+            // GHDL folds locally static expressions into an aggregate that retains the
+            // originating call; lower that call instead
+            if (const Node* const originp = nodep->child("literal_origin")) {
+                return lowerExpr(originp, contextp);
+            }
+            unsupported(nodep, "static VHDL aggregate");
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
         }
+        if (kind == "function_call") { return lowerCall(nodep, contextp); }
         unsupported(nodep, "expression '" + kind + "'");
         return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
     }
