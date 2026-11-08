@@ -449,7 +449,8 @@ class VhdlXmlFrontend final {
                || kind == "anonymous_type_declaration" || kind == "subtype_declaration"
                || kind == "function_declaration" || kind == "procedure_declaration"
                || kind == "attribute_declaration" || kind == "attribute_specification"
-               || kind == "alias_declaration" || kind == "file_declaration"
+               || kind == "alias_declaration" || kind == "object_alias_declaration"
+               || kind == "non_object_alias_declaration" || kind == "file_declaration"
                || kind == "use_clause";
     }
 
@@ -529,6 +530,10 @@ class VhdlXmlFrontend final {
                     mark = vhdlFold(elemMarkp->attr("identifier"));
                 } else if (elemp->attr("kind") == "simple_name") {
                     mark = vhdlFold(elemp->attr("identifier"));
+                } else if (elemp->attr("kind") == "enumeration_type_definition") {
+                    // Only '0'/'1' literals is a bit-like element; otherwise std_logic-like
+                    const auto lits = childEls(elemp->child("enumeration_literal_list"));
+                    mark = lits.size() == 2 ? "bit" : "std_logic";
                 }
             }
         }
@@ -584,6 +589,15 @@ class VhdlXmlFrontend final {
         const int width = std::abs(spec.left - spec.right) + 1;
         return tablep->findLogicBitDType(
             flp, spec.kwd, VNumRange{spec.left, spec.right, spec.ascending}, width, spec.signing);
+    }
+
+    //! Dtype of a node's analyzed result type (its <type ref>), if any
+    AstNodeDType* typeRefDType(const Node* nodep) {
+        const Node* const typep = nodep->child("type");
+        if (!typep || !typep->has("ref")) return nullptr;
+        const Node* const defp = nodeById(typep->attr("ref"));
+        if (!defp) return nullptr;
+        return dtypeOf(parseType(defp), flpOf(nodep));
     }
 
     AstNodeDType* bitDType(FileLine* flp) const {
@@ -643,6 +657,14 @@ class VhdlXmlFrontend final {
         }
 
         const Node* const namep = nodep;
+        if (const Node* const refp = namep->child("named_entity")) {
+            if (refp->has("ref")) {
+                const Node* const declp = nodeById(refp->attr("ref"));
+                if (declp && declp->attr("kind") == "object_alias_declaration") {
+                    return lowerName(declp->child("name"), write);
+                }
+            }
+        }
         const auto bindIt = m_constBindings.find(vhdlFold(namep->attr("identifier")));
         if (bindIt != m_constBindings.end()) {
             if (write) {
@@ -885,6 +907,14 @@ class VhdlXmlFrontend final {
                 return makeConst(flp, contextp ? contextp : intDType(flp),
                                  static_cast<uint64_t>(value));
             }
+            if (const Node* const refp = nodep->child("named_entity")) {
+                if (refp->has("ref")) {
+                    const Node* const declp = nodeById(refp->attr("ref"));
+                    if (declp && declp->attr("kind") == "object_alias_declaration") {
+                        return lowerExpr(declp->child("name"), contextp);
+                    }
+                }
+            }
             // Non-scalar constants resolve to their declaration's default value
             if (const Node* const refp = nodep->child("named_entity")) {
                 if (refp->has("ref")) {
@@ -1001,7 +1031,9 @@ class VhdlXmlFrontend final {
         if (kind == "string_literal8") {
             const Node* const strp = nodep->child("string8_id");
             const std::string content = strp ? strp->attr("content") : std::string{};
-            AstNodeDType* const dtp = contextp ? contextp : bitDType(flp);
+            AstNodeDType* dtp = contextp;
+            if (!dtp) dtp = typeRefDType(nodep);
+            if (!dtp) dtp = bitDType(flp);
             if (content.empty()) {
                 unsupported(nodep, "empty VHDL string literal");
                 return makeConst(flp, dtp, 0);
@@ -1535,6 +1567,8 @@ class VhdlXmlFrontend final {
                     } else if (declKind == "enumeration_literal") {
                         value = std::strtoll(declp->attr("enum_pos").c_str(), nullptr, 10);
                         return true;
+                    } else if (declKind == "object_alias_declaration") {
+                        return evalConst(declp->child("name"), value, depth + 1);
                     }
                 }
             }
