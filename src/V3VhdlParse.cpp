@@ -222,6 +222,7 @@ std::vector<const V3VhdlXmlNode*> childEls(const V3VhdlXmlNode* chainp) {
 
 //! VHDL type information needed to build one Verilator dtype
 struct VhdlDTypeSpec final {
+    AstNodeDType* dtp = nullptr;  // Explicit dtype (enums) when set
     bool isVector = false;
     bool isInteger = false;
     VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
@@ -269,6 +270,7 @@ class VhdlXmlFrontend final {
     std::map<std::string, std::vector<GenericDecl>> m_entityGenerics;  // Folded name -> generics
     std::map<std::string, ModuleInfo> m_specializations;  // Binding key -> specialized module
     std::set<std::string> m_instantiatedEntities;  // Folded names of entities used by instances
+    std::map<const Node*, AstNodeDType*> m_enumDtypes;  // Enum type definition -> dtype
     int m_specDepth = 0;  // Generic specialization recursion depth
 
     // ---- XML access
@@ -338,6 +340,48 @@ class VhdlXmlFrontend final {
         return true;
     }
 
+    //! Build (once) the Verilator enum dtype for an enumeration type definition
+    AstNodeDType* enumDType(const Node* typeDefp) {
+        const auto found = m_enumDtypes.find(typeDefp);
+        if (found != m_enumDtypes.end()) return found->second;
+        FileLine* const flp = flpOf(typeDefp);
+        const std::vector<const Node*> lits
+            = childEls(typeDefp->child("enumeration_literal_list"));
+        int width = 1;
+        while ((1 << width) < static_cast<int>(lits.size())) ++width;
+        AstBasicDType* const basep = m_rootp->typeTablep()->findLogicBitDType(
+            flp, VBasicDTypeKwd::LOGIC, width, width, VSigning::UNSIGNED);
+        AstEnumItem* itemsp = nullptr;
+        for (size_t i = 0; i < lits.size(); ++i) {
+            AstEnumItem* const itemp = new AstEnumItem{
+                flp, lits[i]->attr("identifier"), nullptr,
+                new AstConst{flp, V3Number{flp, width, static_cast<uint32_t>(i)}}};
+            itemsp = itemsp ? AstNode::addNext<AstEnumItem, AstEnumItem>(itemsp, itemp) : itemp;
+        }
+        // The constructor takes the basis type as a child (op1), which is only legal for
+        // parser dtypes not yet in the type table.  Give it a throw-away basis, then
+        // reference the shared basic dtype and drop the child to reach the post-width shape.
+        AstBasicDType* const basisp
+            = new AstBasicDType{flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width, width};
+        AstEnumDType* const enump = new AstEnumDType{flp, VFlagChildDType{}, basisp, itemsp};
+        enump->refDTypep(basep);
+        basisp->unlinkFrBack();
+        VL_DO_DANGLING(basisp->deleteTree(), basisp);
+        enump->dtypep(enump);
+        for (AstEnumItem* const itemp : enump->itemspList()) itemp->dtypep(enump);
+        m_rootp->typeTablep()->addTypesp(enump);
+        m_enumDtypes[typeDefp] = enump;
+        return enump;
+    }
+
+    AstNodeDType* enumDTypeOfLiteral(const Node* litp) {
+        const Node* const typerefp = litp->child("type");
+        if (!typerefp || !typerefp->has("ref")) return nullptr;
+        const Node* const defp = nodeById(typerefp->attr("ref"));
+        if (!defp || defp->attr("kind") != "enumeration_type_definition") return nullptr;
+        return enumDType(defp);
+    }
+
     //! Declarations resolved at their use sites, or not modeled by Verilator
     static bool ignorableDeclaration(const std::string& kind) {
         return kind == "constant_declaration" || kind == "type_declaration"
@@ -348,7 +392,7 @@ class VhdlXmlFrontend final {
                || kind == "use_clause";
     }
 
-    VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) const {
+    VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) {
         VhdlDTypeSpec spec;
         if (!subtypep || depth > 16) return spec;
         const std::string kind = subtypep->attr("kind");
@@ -356,6 +400,9 @@ class VhdlXmlFrontend final {
             spec.isInteger = true;
             spec.kwd = VBasicDTypeKwd::INT;
             return spec;
+        }
+        if (kind == "enumeration_subtype_definition") {
+            return parseType(subtypep->child("subtype_type_mark"), depth + 1);
         }
         if (kind == "simple_name") {
             const std::string id = vhdlFold(subtypep->attr("identifier"));
@@ -384,6 +431,12 @@ class VhdlXmlFrontend final {
                                 subp = nodeById(subp->attr("ref"));
                             }
                             if (subp) return parseType(subp, depth + 1);
+                            if (const Node* const defp = declp->child("type_definition")) {
+                                if (defp->attr("kind") == "enumeration_type_definition") {
+                                    spec.dtp = enumDType(defp);
+                                    return spec;
+                                }
+                            }
                         }
                     }
                 }
@@ -459,6 +512,7 @@ class VhdlXmlFrontend final {
     }
 
     AstNodeDType* dtypeOf(const VhdlDTypeSpec& spec, FileLine* flp) const {
+        if (spec.dtp) return spec.dtp;
         AstTypeTable* const tablep = m_rootp->typeTablep();
         if (spec.isInteger) return tablep->findBasicDType(flp, VBasicDTypeKwd::INT);
         if (!spec.isVector) return tablep->findBasicDType(flp, spec.kwd);
@@ -687,6 +741,19 @@ class VhdlXmlFrontend final {
                 return makeConst(flp, contextp ? contextp : intDType(flp),
                                  static_cast<uint64_t>(value));
             }
+            // Enumeration literal: resolve the analyzed literal declaration
+            if (const Node* const refp = nodep->child("named_entity")) {
+                if (refp->has("ref")) {
+                    const Node* const declp = nodeById(refp->attr("ref"));
+                    if (declp && declp->attr("kind") == "enumeration_literal") {
+                        AstNodeDType* dtp = contextp ? contextp : enumDTypeOfLiteral(declp);
+                        if (!dtp) dtp = bitDType(flp);
+                        const int64_t pos
+                            = std::strtoll(declp->attr("enum_pos").c_str(), nullptr, 10);
+                        return makeConst(flp, dtp, static_cast<uint64_t>(pos));
+                    }
+                }
+            }
         }
         if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name") {
             return lowerName(nodep, false);
@@ -726,8 +793,13 @@ class VhdlXmlFrontend final {
             if (id == "true" || id == "false") {
                 return makeConst(flp, contextp ? contextp : bitDType(flp), id == "true" ? 1U : 0U);
             }
-            unsupported(nodep, "enumeration literal " + nodep->attr("identifier"));
-            return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            AstNodeDType* dtp = contextp ? contextp : enumDTypeOfLiteral(nodep);
+            if (!dtp) {
+                unsupported(nodep, "enumeration literal " + nodep->attr("identifier"));
+                return makeConst(flp, bitDType(flp), 0);
+            }
+            const int64_t pos = std::strtoll(nodep->attr("enum_pos").c_str(), nullptr, 10);
+            return makeConst(flp, dtp, static_cast<uint64_t>(pos));
         }
         if (kind == "string_literal8") {
             const Node* const strp = nodep->child("string8_id");
@@ -1835,7 +1907,7 @@ class VhdlXmlFrontend final {
 
     //! Check a component declaration's ports against the entity it binds to
     void validateComponent(const Node* componentp, const ModuleInfo& target,
-                           const std::string& unitName) const {
+                           const std::string& unitName) {
         const Node* const portsp = componentp->child("port_chain");
         if (!portsp) return;
         for (const Node* const portp : childEls(portsp)) {
