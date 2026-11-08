@@ -246,6 +246,7 @@ class VhdlXmlFrontend final {
     std::map<std::string, AstVar*> m_scope;  // Current module: folded name -> Var
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
+    int m_varSeq = 0;  // Sequence for process-variable names
 
     //! Emitted module and its ports, used to bind instances across the hierarchy
     struct ModuleInfo final {
@@ -418,18 +419,94 @@ class VhdlXmlFrontend final {
 
     // ---- Expressions
 
+    //! Lower a simple, indexed or sliced name; write selects lvalue access
+    AstNodeExpr* lowerName(const Node* nodep, bool write) {
+        const std::string kind = nodep->attr("kind");
+        const Node* const namep
+            = (kind == "indexed_name" || kind == "slice_name") ? nodep->child("prefix") : nodep;
+        if (!namep || namep->attr("kind") != "simple_name") {
+            unsupported(nodep, "name form '" + kind + "'");
+            return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+        }
+        AstVar* const varp = lookupVar(namep);
+        if (!varp) {
+            error(namep, "Unknown VHDL identifier '" + namep->attr("identifier") + "'");
+            return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+        }
+        AstNodeExpr* const basep
+            = new AstVarRef{flpOf(namep), varp, write ? VAccess::WRITE : VAccess::READ};
+        if (kind == "simple_name") return basep;
+
+        const AstBasicDType* const basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
+        if (!basicp || basicp->width() <= 1) {
+            error(nodep, "Indexing a non-vector VHDL name is not supported yet");
+            return basep;
+        }
+        if (kind == "indexed_name") {
+            const std::vector<const Node*> indices = childEls(nodep->child("index_list"));
+            if (indices.size() != 1 || indices.front()->attr("kind") != "integer_literal") {
+                unsupported(nodep, "non-literal or multi-dimensional VHDL index");
+                return basep;
+            }
+            const int index = static_cast<int>(
+                std::strtol(indices.front()->attr("value").c_str(), nullptr, 10));
+            const int offset
+                = basicp->ascending() ? index - basicp->left() : index - basicp->right();
+            if (offset < 0 || offset >= basicp->width()) {
+                error(nodep, "VHDL index is out of range");
+                return basep;
+            }
+            return new AstSel{flpOf(nodep), basep, offset, 1};
+        }
+
+        // slice_name
+        const Node* const suffixp = nodep->child("suffix");
+        if (!suffixp || suffixp->attr("kind") != "range_expression") {
+            unsupported(nodep, "VHDL slice form");
+            return basep;
+        }
+        int left = 0;
+        int right = 0;
+        if (!literalValue(suffixp->child("left_limit_expr"), left)
+            || !literalValue(suffixp->child("right_limit_expr"), right)) {
+            unsupported(nodep, "non-literal VHDL slice bounds");
+            return basep;
+        }
+        const bool ascending = suffixp->attr("direction") == "to";
+        if (ascending != basicp->ascending()) {
+            error(nodep, "VHDL slice direction does not match the array");
+            return basep;
+        }
+        const int lowIndex = ascending ? left : right;
+        const int offset = ascending ? lowIndex - basicp->left() : lowIndex - basicp->right();
+        const int width = std::abs(left - right) + 1;
+        if (offset < 0 || offset + width > basicp->width()) {
+            error(nodep, "VHDL slice is out of range");
+            return basep;
+        }
+        return new AstSel{flpOf(nodep), basep, offset, width};
+    }
+
+    AstNodeExpr* lowerLValue(const Node* stmtp, const Node* targetp) {
+        if (!targetp) {
+            unsupported(stmtp, "assignment without a target");
+            return nullptr;
+        }
+        const std::string kind = targetp->attr("kind");
+        if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name") {
+            return lowerName(targetp, true);
+        }
+        unsupported(targetp, "assignment target form");
+        return nullptr;
+    }
+
     AstNodeExpr* lowerExpr(const Node* nodep, AstNodeDType* contextp) {
         if (!nodep) return nullptr;
         FileLine* const flp = flpOf(nodep);
         const std::string kind = nodep->attr("kind");
 
-        if (kind == "simple_name") {
-            AstVar* const varp = lookupVar(nodep);
-            if (!varp) {
-                error(nodep, "Unknown VHDL identifier '" + nodep->attr("identifier") + "'");
-                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
-            }
-            return new AstVarRef{flp, varp, VAccess::READ};
+        if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name") {
+            return lowerName(nodep, false);
         }
         if (kind == "integer_literal") {
             const long value = std::strtol(nodep->attr("value").c_str(), nullptr, 10);
@@ -443,6 +520,28 @@ class VhdlXmlFrontend final {
             }
             unsupported(nodep, "character literal " + id);
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+        }
+        if (kind == "string_literal8") {
+            const Node* const strp = nodep->child("string8_id");
+            const std::string content = strp ? strp->attr("content") : std::string{};
+            AstNodeDType* const dtp = contextp ? contextp : bitDType(flp);
+            if (content.empty()) {
+                unsupported(nodep, "empty VHDL string literal");
+                return makeConst(flp, dtp, 0);
+            }
+            uint32_t value = 0;
+            for (const char ch : content) {
+                if (ch != '0' && ch != '1') {
+                    unsupported(nodep, "non-binary VHDL string literal");
+                    return makeConst(flp, dtp, 0);
+                }
+                value = (value << 1) | (ch == '1' ? 1U : 0U);
+            }
+            if (static_cast<int>(content.size()) != dtp->width()) {
+                error(nodep, "VHDL string literal length does not match its context");
+                return makeConst(flp, dtp, 0);
+            }
+            return makeConst(flp, dtp, value);
         }
         if (kind == "addition_operator" || kind == "subtraction_operator" || kind == "and_operator"
             || kind == "or_operator" || kind == "xor_operator") {
@@ -532,16 +631,8 @@ class VhdlXmlFrontend final {
 
     AstNode* lowerAssignment(const Node* stmtp, AssignMode mode) {
         FileLine* const flp = flpOf(stmtp);
-        const Node* const targetp = stmtp->child("target");
-        if (!targetp || targetp->attr("kind") != "simple_name") {
-            unsupported(stmtp, "assignment target form");
-            return nullptr;
-        }
-        AstVar* const varp = lookupVar(targetp);
-        if (!varp) {
-            error(targetp, "Unknown VHDL signal '" + targetp->attr("identifier") + "'");
-            return nullptr;
-        }
+        AstNodeExpr* const lhsp = lowerLValue(stmtp, stmtp->child("target"));
+        if (!lhsp) return nullptr;
         const std::vector<const Node*> waves = childEls(stmtp->child("waveform_chain"));
         if (waves.size() != 1) {
             unsupported(stmtp, "multiple waveform elements");
@@ -552,8 +643,7 @@ class VhdlXmlFrontend final {
             unsupported(stmtp, "assignment without a waveform value");
             return nullptr;
         }
-        AstNodeExpr* const lhsp = new AstVarRef{flp, varp, VAccess::WRITE};
-        AstNodeExpr* const rhsp = lowerExpr(wep, varp->dtypep());
+        AstNodeExpr* const rhsp = lowerExpr(wep, lhsp->dtypep());
         if (!rhsp) return nullptr;
         if (mode == AssignMode::DELAYED) return new AstAssignDly{flp, lhsp, rhsp};
         if (mode == AssignMode::BLOCKING) return new AstAssign{flp, lhsp, rhsp};
@@ -581,9 +671,70 @@ class VhdlXmlFrontend final {
         return nullptr;
     }
 
+    AstNode* lowerVariableAssignment(const Node* stmtp) {
+        FileLine* const flp = flpOf(stmtp);
+        AstNodeExpr* const lhsp = lowerLValue(stmtp, stmtp->child("target"));
+        if (!lhsp) return nullptr;
+        const Node* const exprp = stmtp->child("expression");
+        if (!exprp) {
+            unsupported(stmtp, "variable assignment without an expression");
+            return nullptr;
+        }
+        AstNodeExpr* const rhsp = lowerExpr(exprp, lhsp->dtypep());
+        if (!rhsp) return nullptr;
+        // Variable assignment is immediate, unlike signal assignment
+        return new AstAssign{flp, lhsp, rhsp};
+    }
+
+    AstNode* lowerCase(const Node* stmtp, AssignMode mode) {
+        FileLine* const flp = flpOf(stmtp);
+        AstNodeExpr* const selectorp = lowerExpr(stmtp->child("expression"), nullptr);
+        if (!selectorp) return nullptr;
+
+        AstCaseItem* itemsp = nullptr;
+        AstCaseItem* currentp = nullptr;
+        for (const Node* const choicep :
+             childEls(stmtp->child("case_statement_alternative_chain"))) {
+            AstConst* condp = nullptr;
+            const std::string kind = choicep->attr("kind");
+            if (kind == "choice_by_expression") {
+                const Node* const choiceExprp = choicep->child("choice_expression");
+                if (!choiceExprp) {
+                    unsupported(choicep, "case choice without an expression");
+                    continue;
+                }
+                AstNodeExpr* const choiceValp = lowerExpr(choiceExprp, selectorp->dtypep());
+                if (!choiceValp) continue;
+                // AstCaseItem conditions are constant values; V3Case builds the comparisons
+                condp = VN_CAST(choiceValp, Const);
+                if (!condp) {
+                    VL_DO_DANGLING(choiceValp->deleteTree(), choiceValp);
+                    unsupported(choicep, "non-constant VHDL case choice");
+                    continue;
+                }
+            } else if (kind != "choice_by_others") {
+                unsupported(choicep, "case choice form '" + kind + "'");
+                continue;
+            }
+
+            const bool sameAlternative = choicep->attr("same_alternative_flag") == "true";
+            if (!sameAlternative || !currentp) {
+                AstNode* const bodyp = lowerStmtChain(choicep->child("associated_chain"), mode);
+                currentp = new AstCaseItem{flp, condp, bodyp};
+                itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
+                                : currentp;
+            } else if (condp) {
+                currentp->addCondsp(condp);
+            }
+        }
+        return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+    }
+
     AstNode* lowerStmt(const Node* stmtp, AssignMode mode) {
         const std::string kind = stmtp->attr("kind");
         if (kind == "simple_signal_assignment_statement") { return lowerAssignment(stmtp, mode); }
+        if (kind == "variable_assignment_statement") return lowerVariableAssignment(stmtp);
+        if (kind == "case_statement") return lowerCase(stmtp, mode);
         if (kind == "null_statement") return nullptr;
         if (kind == "if_statement") {
             FileLine* const flp = flpOf(stmtp);
@@ -715,9 +866,44 @@ class VhdlXmlFrontend final {
         return false;
     }
 
+    //! Declarations of a process: variables live in a process-local scope
+    void emitProcessVariables(const Node* processp) {
+        const Node* const declsp = processp->child("declaration_chain");
+        if (!declsp) return;
+        for (const Node* const declp : childEls(declsp)) {
+            if (declp->attr("kind") != "variable_declaration") {
+                unsupported(declp, "process declaration '" + declp->attr("kind") + "'");
+                continue;
+            }
+            const Node* const subtypep = declp->child("subtype_indication");
+            if (!subtypep) {
+                error(declp, "VHDL variable without a subtype");
+                continue;
+            }
+            FileLine* const dflp = flpOf(declp);
+            const std::string name = declp->attr("identifier");
+            // Variables are process-local; mangle to keep same-named variables of different
+            // processes apart in the flat module namespace
+            const std::string mangled = "vhdlvar_" + std::to_string(++m_varSeq) + "__" + name;
+            AstVar* const varp
+                = new AstVar{dflp, VVarType::VAR, mangled, dtypeOf(parseType(subtypep), dflp)};
+            m_modp->addStmtsp(varp);
+            m_scope[vhdlFold(name)] = varp;
+            if (const Node* const defp = declp->child("default_value")) {
+                AstNodeExpr* const rhsp = lowerDefault(defp, varp->dtypep());
+                if (rhsp) {
+                    AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
+                    m_modp->addStmtsp(new AstInitialStatic{dflp, new AstAssign{dflp, lhsp, rhsp}});
+                }
+            }
+        }
+    }
+
     void emitProcess(const Node* processp) {
         FileLine* const flp = flpOf(processp);
+        VL_RESTORER_COPY(m_scope);
         const Node* const bodyp = processp->child("sequential_statement_chain");
+        emitProcessVariables(processp);
 
         // Clocked idiom: a single "if rising_edge(clk)"/"if falling_edge(clk)" wrapper
         if (const Node* const ifp = singleTopIf(bodyp)) {
