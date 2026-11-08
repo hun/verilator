@@ -21,7 +21,7 @@ new value model and are out of scope.
 | WP0 plumbing | **done** on branch `vhdl-frontend-wp0` (`729df7a`, `bed81f2`) |
 | WP1 front end | **GHDL XML path implemented**: entities with ports, architecture signals, concurrent assignments, clocked processes (`rising_edge`/`falling_edge`/`clk'event and clk = '1'`), synchronous and asynchronous reset processes, conditional and selected concurrent assignments, `if`/`elsif`/`else`, `case`, enumeration types (literals, subtypes, enum-valued ports and case selectors, `'pos`/`'val`/`'succ`/`'pred` and type-mark `'left`/`'right`/`'high`/`'low`), process variables, indexing and slicing (including dynamic indices), static for loops, for-generate and if-generate blocks (unrolled/selected), static attributes (`'length`, `'high`, `'left`, `'ascending`), `+`/`-`/`*`/`/`/`mod`/`rem`/`**`/`abs` (unary `-`), `and`/`or`/`xor`/`nand`/`nor`/`xnor`/`not`, `=`/`/=`/`<`/`<=`/`>`/`>=`, `&`, `sll`/`srl`/`sla`/`sra`, records (packed-vector layout, member selection, nested records, positional and named aggregates), object aliases (including slices and constants), user-defined pure function calls (inlined: locals, if/elsif/else, case, parameter defaults, named associations, nested calls), type conversions, `to_unsigned`/`to_signed`/`resize`/`to_integer`/`shift_left`/`shift_right`/`rotate_left`/`rotate_right`/`minimum`/`maximum`, declaration initializers, static constants and generics (defaults and generic maps, with per-binding module specialization) resolved through their analyzed references, user-defined subtypes and constrained array types, and component/direct-entity instantiation with named, positional and open port maps. Component declarations are validated against the bound entity (direction and width). Processes execute once at time zero, as VHDL requires. The in-tree lexer/parser remains reserved and is not used |
 | WP2 semantics | provided by GHDL analysis; Verilator does not repeat it on this path |
-| WP3 elaboration | entity/architecture binding, VHDL-entity instance binding, component-interface validation, for-generate unrolling and if-generate selection; generic defaults and generic maps are elaborated (constant generics; type generics are not implemented) |
+| WP3 elaboration | entity/architecture binding, VHDL-entity instance binding, component-interface validation, for-generate unrolling and if-generate selection; generic defaults and generic maps are elaborated (constant and generic type parameters, with per-binding module specialization) |
 | WP4–WP8 | not started |
 
 The active frontend runs `ghdl --file-to-xml --std=08` out of process, parses the XML into a
@@ -106,6 +106,7 @@ are written.
 | Area | Target support | Demo |
 |---|---|---|
 | Design units | `entity` + one `architecture` per entity | yes |
+| Generics | constant generics and generic type parameters, defaults, named/positional maps | yes |
 | Design units | `package` and `package body` (constants, types, subprograms) | no |
 | Ports | `in`, `out`, `inout`, `buffer` (mapped to `out`); named, positional and `open` maps | yes |
 | Types | `std_logic`, `std_ulogic`, `std_logic_vector`, `unsigned`, `signed`, `integer`/`natural`/`positive` with static ranges, `boolean`, enumerations | yes (arithmetic via the minimal `numeric_std` slice below) |

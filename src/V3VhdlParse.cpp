@@ -246,6 +246,7 @@ class VhdlXmlFrontend final {
     std::vector<const Node*> m_archNodes;  // User architecture bodies
     std::map<std::string, AstVar*> m_scope;  // Current module: folded name -> Var
     std::map<std::string, int64_t> m_constBindings;  // Loop parameters during unrolling
+    std::map<std::string, const Node*> m_typeBindings;  // Generic type name -> actual type mark
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
     int m_varSeq = 0;  // Sequence for process/generate-local names
@@ -323,7 +324,8 @@ class VhdlXmlFrontend final {
 
     void collect(const Node* nodep) {
         const std::string& kind = nodep->attr("kind");
-        if (kind == "entity_declaration" && isUserFile(nodep)) {
+        if (kind == "entity_declaration" && isUserFile(nodep)
+            && !nodep->attr("identifier").empty()) {
             m_entityNodes.push_back(nodep);
         } else if (kind == "architecture_body" && isUserFile(nodep)) {
             m_archNodes.push_back(nodep);
@@ -475,6 +477,10 @@ class VhdlXmlFrontend final {
         }
         if (kind == "simple_name") {
             const std::string id = vhdlFold(subtypep->attr("identifier"));
+            if (m_typeBindings.find(id) != m_typeBindings.end()) {
+                // Generic type parameter: resolve through the instance's binding
+                return parseType(m_typeBindings.find(id)->second, depth + 1);
+            }
             if (id == "std_logic" || id == "boolean") {
                 spec.kwd = VBasicDTypeKwd::LOGIC;
             } else if (id == "bit") {
@@ -2858,6 +2864,14 @@ class VhdlXmlFrontend final {
         }
     }
 
+    //! Whether an entity has generic type parameters (needing specialization)
+    static bool hasTypeGenerics(const Node* entityp) {
+        for (const Node* const declp : childEls(entityp->child("generic_chain"))) {
+            if (declp->attr("kind") == "interface_type_declaration") return true;
+        }
+        return false;
+    }
+
     std::vector<GenericDecl> genericsOf(const Node* entityp) const {
         std::vector<GenericDecl> result;
         const Node* const chainp = entityp->child("generic_chain");
@@ -2874,11 +2888,15 @@ class VhdlXmlFrontend final {
 
     //! Emit (or reuse) a module specialized for one generic binding set
     ModuleInfo* specializeModule(const Node* entityp,
-                                 const std::map<std::string, int64_t>& bindings) {
+                                 const std::map<std::string, int64_t>& bindings,
+                                 const std::map<std::string, const Node*>& typeBindings) {
         const std::string entityKey = vhdlFold(entityp->attr("identifier"));
         std::string key = entityKey;
         for (const auto& binding : bindings) {
             key += "|" + binding.first + "=" + std::to_string(binding.second);
+        }
+        for (const auto& binding : typeBindings) {
+            key += "|" + binding.first + "@" + binding.second->attr("id");
         }
         const auto found = m_specializations.find(key);
         if (found != m_specializations.end()) return &found->second;
@@ -2893,7 +2911,9 @@ class VhdlXmlFrontend final {
         }
 
         VL_RESTORER_COPY(m_constBindings);
+        VL_RESTORER_COPY(m_typeBindings);
         for (const auto& binding : bindings) m_constBindings[binding.first] = binding.second;
+        for (const auto& binding : typeBindings) m_typeBindings[binding.first] = binding.second;
 
         ++m_specDepth;
         ModuleInfo& info = m_specializations[key];
@@ -2925,7 +2945,7 @@ class VhdlXmlFrontend final {
         const Node* const entityp = entityIt == m_entityByName.end() ? nullptr : entityIt->second;
         // UG901: direct entity instantiation of a Verilog module is not supported
         const bool directEntity = unitp->attr("kind") == "entity_aspect_entity";
-        if (directEntity && !targetp) {
+        if (directEntity && !targetp && !entityp) {
             error(unitp, "Unknown VHDL entity '" + unitName + "' in direct entity instantiation");
             return;
         }
@@ -2933,8 +2953,9 @@ class VhdlXmlFrontend final {
         if (entityp) m_instantiatedEntities.insert(vhdlFold(unitName));
 
         std::map<std::string, int64_t> bindings;
+        std::map<std::string, const Node*> typeBindings;
         if (const Node* const gmapp = stmtp->child("generic_map_aspect_chain")) {
-            if (!targetp || !entityp) {
+            if (!entityp) {
                 unsupported(stmtp, "generic map on a non-VHDL unit");
                 return;
             }
@@ -2947,6 +2968,18 @@ class VhdlXmlFrontend final {
                 if (kind == "association_element_open") {
                     // GHDL emits an open association for an un-mapped generic; the default
                     // value is filled in below
+                    continue;
+                }
+                if (kind == "association_element_type") {
+                    // Generic type parameter: the actual is a type mark
+                    const Node* const formalp = assocp->child("formal");
+                    const Node* const actualp = assocp->child("actual");
+                    if (!formalp || !actualp) {
+                        unsupported(assocp, "generic type association without a type mark");
+                        bad = true;
+                        continue;
+                    }
+                    typeBindings[vhdlFold(formalp->attr("identifier"))] = actualp;
                     continue;
                 }
                 if (kind != "association_element_by_expression"
@@ -2984,7 +3017,7 @@ class VhdlXmlFrontend final {
                 }
                 bindings[formalName] = value;
             }
-            ModuleInfo* const spec = specializeModule(entityp, bindings);
+            ModuleInfo* const spec = specializeModule(entityp, bindings, typeBindings);
             if (!spec) return;
             targetp = spec;
         }
@@ -2995,8 +3028,12 @@ class VhdlXmlFrontend final {
                 // Validate under the instance's bindings: the component's port ranges may
                 // use its own generics, which specializeModule has since restored
                 VL_RESTORER_COPY(m_constBindings);
+                VL_RESTORER_COPY(m_typeBindings);
                 for (const auto& binding : bindings) {
                     m_constBindings[binding.first] = binding.second;
+                }
+                for (const auto& binding : typeBindings) {
+                    m_typeBindings[binding.first] = binding.second;
                 }
                 validateComponent(compIt->second, *targetp, unitName);
             }
@@ -3130,7 +3167,8 @@ public:
             }
             m_entityByName[vhdlFold(name)] = entityp;
             m_entityGenerics[vhdlFold(name)] = genericsOf(entityp);
-            modules.emplace_back(entityp, it->second);
+            // A type-generic entity has no single port type; only its specializations emit
+            if (!hasTypeGenerics(entityp)) modules.emplace_back(entityp, it->second);
         }
 
         // Create all modules first so instances can bind to ports emitted later in the walk
