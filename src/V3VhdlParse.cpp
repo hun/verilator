@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -244,7 +245,8 @@ class VhdlXmlFrontend final {
     std::map<std::string, const Node*> m_byId;  // XML nodes indexed by `id`
     std::vector<const Node*> m_entityNodes;  // User entity declarations
     std::vector<const Node*> m_archNodes;  // User architecture bodies
-    std::map<std::string, AstVar*> m_scope;  // Current module: folded name -> Var
+    std::map<std::string, AstVar*> m_scope;  // Current scope: folded name -> Var
+    std::map<std::string, AstVar*> m_moduleScope;  // Module declarative part: folded name -> Var
     std::map<std::string, int64_t> m_constBindings;  // Loop parameters during unrolling
     std::map<std::string, const Node*> m_typeBindings;  // Generic type name -> actual type mark
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
@@ -283,9 +285,41 @@ class VhdlXmlFrontend final {
         std::vector<RecordMember> members;  // Declaration order, most significant first
     };
     std::map<const Node*, RecordInfo> m_records;  // Record type definition -> layout
-    using FuncEnv = std::map<std::string, AstNodeExpr*>;  // Function locals during inlining
-    FuncEnv* m_inlineEnvp = nullptr;  // Active function environment, or nullptr
-    std::set<const Node*> m_inlineBodies;  // Function bodies being inlined (recursion guard)
+    //! One name bound during subprogram inlining: an expression value, or an lvalue
+    struct InlineBinding final {
+        AstNodeExpr* exprp = nullptr;  // Bound expression
+        bool lvalue = false;  // exprp denotes a writable location (out/inout parameter)
+        bool readable = true;  // False for an out signal parameter, whose reads are rejected
+    };
+    using FuncEnv = std::map<std::string, InlineBinding>;  // Subprogram bindings during inlining
+    FuncEnv* m_inlineEnvp = nullptr;  // Active subprogram environment, or nullptr
+    std::set<const Node*> m_inlineBodies;  // Bodies being inlined (recursion guard)
+
+    //! One active subprogram inlining frame, for lexical capture by nested subprograms
+    struct InlineFrame final {
+        const Node* bodyp = nullptr;  // Body being inlined
+        std::map<std::string, AstVar*> entryScope;  // Caller scope when the frame was entered
+        std::map<std::string, AstVar*> liveScope;  // Entry scope plus this frame's locals
+        FuncEnv* envp = nullptr;  // This frame's environment (valid while active)
+    };
+    std::vector<InlineFrame> m_inlineFrames;  // Active frames, outermost first
+
+    //! Pushes an inlining frame and pops it on scope exit
+    class InlineFrameGuard final {
+        VhdlXmlFrontend& m_frontend;
+
+    public:
+        InlineFrameGuard(VhdlXmlFrontend& frontend, const Node* bodyp)
+            : m_frontend{frontend} {
+            InlineFrame frame;
+            frame.bodyp = bodyp;
+            frame.entryScope = frontend.m_scope;
+            frontend.m_inlineFrames.push_back(std::move(frame));
+        }
+        ~InlineFrameGuard() { m_frontend.m_inlineFrames.pop_back(); }
+        InlineFrameGuard(const InlineFrameGuard&) = delete;
+        InlineFrameGuard& operator=(const InlineFrameGuard&) = delete;
+    };
     int m_specDepth = 0;  // Generic specialization recursion depth
 
     // ---- XML access
@@ -348,13 +382,6 @@ class VhdlXmlFrontend final {
     }
 
     // ---- Types
-
-    //! Read an integer-literal node's value; false for non-literals (e.g. generic expressions)
-    bool literalValue(const Node* nodep, int& value) const {
-        if (!nodep || nodep->attr("kind") != "integer_literal") return false;
-        value = static_cast<int>(std::strtol(nodep->attr("value").c_str(), nullptr, 10));
-        return true;
-    }
 
     //! Build (once) the Verilator enum dtype for an enumeration type definition
     AstNodeDType* enumDType(const Node* typeDefp) {
@@ -685,6 +712,22 @@ class VhdlXmlFrontend final {
                 }
             }
         }
+        if (m_inlineEnvp) {
+            const auto it = m_inlineEnvp->find(vhdlFold(namep->attr("identifier")));
+            if (it != m_inlineEnvp->end()) {
+                if (write && !it->second.lvalue) {
+                    error(nodep, "VHDL input parameter or constant cannot be assigned");
+                    return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+                }
+                if (!write && !it->second.readable) {
+                    unsupported(nodep, "read of an out procedure parameter");
+                    return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+                }
+                AstNodeExpr* const valuep = it->second.exprp->cloneTree(false);
+                if (!write) setReadAccess(valuep);
+                return valuep;
+            }
+        }
         const auto bindIt = m_constBindings.find(vhdlFold(namep->attr("identifier")));
         if (bindIt != m_constBindings.end()) {
             if (write) {
@@ -743,13 +786,20 @@ class VhdlXmlFrontend final {
             unsupported(nodep, "VHDL slice form");
             return basep;
         }
-        int left = 0;
-        int right = 0;
-        if (!literalValue(suffixp->child("left_limit_expr"), left)
-            || !literalValue(suffixp->child("right_limit_expr"), right)) {
-            unsupported(nodep, "non-literal VHDL slice bounds");
+        int64_t leftValue = 0;
+        int64_t rightValue = 0;
+        if (!evalConst(rangeBound(suffixp, true), leftValue)
+            || !evalConst(rangeBound(suffixp, false), rightValue)) {
+            unsupported(nodep, "non-static VHDL slice bounds");
             return basep;
         }
+        if (leftValue < INT_MIN || leftValue > INT_MAX || rightValue < INT_MIN
+            || rightValue > INT_MAX) {
+            error(nodep, "VHDL slice bound is out of range");
+            return basep;
+        }
+        const int left = static_cast<int>(leftValue);
+        const int right = static_cast<int>(rightValue);
         const bool ascending = suffixp->attr("direction") == "to";
         if (ascending != basicp->ascending()) {
             error(nodep, "VHDL slice direction does not match the array");
@@ -823,11 +873,13 @@ class VhdlXmlFrontend final {
         if (fn == "to_unsigned" || fn == "to_signed" || fn == "resize") {
             const Node* const valuep = actualOf(0);
             const Node* const widthp = actualOf(1);
-            int width = 0;
-            if (!valuep || !widthp || !literalValue(widthp, width) || width <= 0) {
+            int64_t widthValue = 0;
+            if (!valuep || !widthp || !evalConst(widthp, widthValue) || widthValue <= 0
+                || widthValue > INT_MAX) {
                 unsupported(nodep, "non-static width in " + fn);
                 return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
             }
+            const int width = static_cast<int>(widthValue);
             AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
             if (!valueExprp) return nullptr;
 
@@ -954,7 +1006,7 @@ class VhdlXmlFrontend final {
 
     static void deleteFuncEnv(FuncEnv& env) {
         for (auto& pair : env) {
-            AstNode* const nodep = pair.second;
+            AstNode* const nodep = pair.second.exprp;
             if (nodep) VL_DO_DANGLING(nodep->deleteTree(), nodep);
         }
         env.clear();
@@ -962,19 +1014,28 @@ class VhdlXmlFrontend final {
 
     static FuncEnv cloneFuncEnv(const FuncEnv& env) {
         FuncEnv out;
-        for (const auto& pair : env) out[pair.first] = pair.second->cloneTree(false);
+        for (const auto& pair : env) {
+            out[pair.first] = InlineBinding{pair.second.exprp->cloneTree(false),
+                                            pair.second.lvalue, pair.second.readable};
+        }
         return out;
     }
 
-    static void funcEnvSet(FuncEnv& env, const std::string& name, AstNodeExpr* nodep) {
+    static void funcEnvSet(FuncEnv& env, const std::string& name, AstNodeExpr* nodep,
+                           bool lvalue = false, bool readable = true) {
         const auto it = env.find(name);
         if (it == env.end()) {
-            env[name] = nodep;
+            env[name] = InlineBinding{nodep, lvalue, readable};
             return;
         }
-        AstNode* const oldp = it->second;
-        it->second = nodep;
+        AstNode* const oldp = it->second.exprp;
+        it->second = InlineBinding{nodep, lvalue, readable};
         if (oldp) VL_DO_DANGLING(oldp->deleteTree(), oldp);
+    }
+
+    //! Mark every variable reference as a read; used when an out/inout lvalue is read back
+    static void setReadAccess(AstNodeExpr* exprp) {
+        exprp->foreach([](AstVarRef* refp) { refp->access(VAccess::READ); });
     }
 
     //! Merge variable values of two branch environments into env under condp
@@ -987,9 +1048,9 @@ class VhdlXmlFrontend final {
             const auto thenIt = thenEnv.find(name);
             const auto elseIt = elseEnv.find(name);
             AstNodeExpr* thenp
-                = thenIt != thenEnv.end() ? thenIt->second->cloneTree(false) : nullptr;
+                = thenIt != thenEnv.end() ? thenIt->second.exprp->cloneTree(false) : nullptr;
             AstNodeExpr* elsep
-                = elseIt != elseEnv.end() ? elseIt->second->cloneTree(false) : nullptr;
+                = elseIt != elseEnv.end() ? elseIt->second.exprp->cloneTree(false) : nullptr;
             if (!thenp) thenp = elsep->cloneTree(false);
             if (!elsep) elsep = thenp->cloneTree(false);
             AstCond* const condp2
@@ -1310,7 +1371,9 @@ class VhdlXmlFrontend final {
 
     AstNodeExpr* inlineFunctionBody(const Node* callp, const Node* declp, const Node* bodyp) {
         FileLine* const flp = flpOf(callp);
+        std::map<std::string, AstVar*> captureScope;
         FuncEnv env;
+        captureBaseFor(declp, captureScope, env);
         const std::vector<const Node*> params
             = childEls(declp->child("interface_declaration_chain"));
         std::map<std::string, const Node*> actualByName;
@@ -1326,8 +1389,17 @@ class VhdlXmlFrontend final {
         }
         size_t positionalIndex = 0;
         for (const Node* const paramp : params) {
-            if (paramp->attr("kind") != "interface_constant_declaration") {
+            const std::string paramKind = paramp->attr("kind");
+            if (paramKind != "interface_constant_declaration"
+                && paramKind != "interface_signal_declaration"
+                && paramKind != "interface_variable_declaration") {
                 unsupported(paramp, "VHDL function parameter form");
+                deleteFuncEnv(env);
+                return nullptr;
+            }
+            const std::string paramMode = paramp->attr("mode");
+            if (!paramMode.empty() && paramMode != "in") {
+                unsupported(paramp, "VHDL function parameter mode '" + paramMode + "'");
                 deleteFuncEnv(env);
                 return nullptr;
             }
@@ -1355,6 +1427,13 @@ class VhdlXmlFrontend final {
             }
             funcEnvSet(env, name, valuep);
         }
+        VL_RESTORER(m_inlineEnvp);
+        VL_RESTORER_COPY(m_scope);
+        InlineFrameGuard frameGuard{*this, bodyp};  // Captures the caller's scope
+        m_scope = captureScope;
+        m_inlineEnvp = &env;
+        m_inlineFrames.back().liveScope = m_scope;
+        m_inlineFrames.back().envp = &env;
         for (const Node* const declp2 : childEls(bodyp->child("declaration_chain"))) {
             const std::string kind = declp2->attr("kind");
             if (kind != "variable_declaration" && kind != "constant_declaration") continue;
@@ -1368,8 +1447,6 @@ class VhdlXmlFrontend final {
             if (!valuep) valuep = makeConst(flpOf(declp2), dtp, 0);
             funcEnvSet(env, name, valuep);
         }
-        VL_RESTORER(m_inlineEnvp);
-        m_inlineEnvp = &env;
         AstNodeExpr* resultp = evalFuncBlock(childEls(bodyp->child("sequential_statement_chain")),
                                              0, env, bodyp, 0);
         if (!resultp) { error(callp, "VHDL function does not return a value on all paths"); }
@@ -1379,6 +1456,382 @@ class VhdlXmlFrontend final {
             return resizeExpr(resultp, resultDtp);
         }
         return resultp;
+    }
+
+    // ---- User-defined procedure inlining
+
+    //! Find the analyzed declaration of a called procedure, or nullptr
+    const Node* procedureDeclOf(const Node* callp) const {
+        const Node* implp = callp->child("implementation");
+        if (!implp) {
+            const Node* const prefixp = callp->child("prefix");
+            implp = prefixp ? prefixp->child("named_entity") : nullptr;
+        }
+        if (!implp || !implp->has("ref")) return nullptr;
+        const Node* const declp = nodeById(implp->attr("ref"));
+        if (!declp || declp->attr("kind") != "procedure_declaration") return nullptr;
+        return declp;
+    }
+
+    //! Find the analyzed body of a subprogram declaration, or nullptr
+    const Node* subprogramBodyOf(const Node* declp) const {
+        const Node* const bodyrefp = declp->child("subprogram_body");
+        if (!bodyrefp) return nullptr;
+        return bodyrefp->has("ref") ? nodeById(bodyrefp->attr("ref")) : bodyrefp;
+    }
+
+    //! Whether `nodep` is lexically inside `containerp` in the analyzed tree
+    bool isLexicallyInside(const Node* nodep, const Node* containerp) const {
+        if (!containerp) return false;
+        for (int depth = 0; nodep && depth < 64; ++depth) {
+            if (nodep == containerp) return true;
+            const Node* const parentp = nodep->child("parent");
+            if (!parentp || !parentp->has("ref")) return false;
+            nodep = nodeById(parentp->attr("ref"));
+        }
+        return false;
+    }
+
+    //! Whether a subprogram is declared in a process or generate declarative part
+    bool subprogramIsProcessLocal(const Node* declp) const {
+        const Node* nodep = declp;
+        for (int depth = 0; nodep && depth < 64; ++depth) {
+            const Node* const parentp = nodep->child("parent");
+            if (!parentp || !parentp->has("ref")) return false;
+            nodep = nodeById(parentp->attr("ref"));
+            if (!nodep) return false;
+            const std::string kind = nodep->attr("kind");
+            if (kind == "process_statement" || kind == "sensitized_process_statement"
+                || kind == "generate_statement_body") {
+                return true;
+            }
+            if (kind == "architecture_body" || kind == "package_body"
+                || kind == "package_declaration" || kind == "entity_declaration") {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    //! Scope and environment visible to a subprogram from its lexical position.
+    //! Subprograms nested in an active inlining frame capture that frame's own scope and
+    //! parameters; siblings and outer-scope subprograms capture the enclosing level.
+    void captureBaseFor(const Node* declp, std::map<std::string, AstVar*>& scope,
+                        FuncEnv& env) const {
+        size_t ancestor = m_inlineFrames.size();
+        for (size_t i = m_inlineFrames.size(); i-- > 0;) {
+            if (isLexicallyInside(declp, m_inlineFrames[i].bodyp)) {
+                ancestor = i;
+                break;
+            }
+        }
+        if (ancestor != m_inlineFrames.size()) {
+            scope = m_inlineFrames[ancestor].liveScope;
+            if (m_inlineFrames[ancestor].envp) {
+                env = cloneFuncEnv(*m_inlineFrames[ancestor].envp);
+            }
+            return;
+        }
+        if (subprogramIsProcessLocal(declp)) {
+            scope = m_inlineFrames.empty() ? m_scope : m_inlineFrames.front().entryScope;
+        } else {
+            scope = m_moduleScope;
+        }
+    }
+
+    //! Inline a procedure call.  The body statements replace the call; out/inout
+    //! parameters are bound to the actual lvalues.
+    AstNode* lowerProcedureCall(const Node* stmtp, AssignMode mode) {
+        const Node* const callp = stmtp->child("procedure_call");
+        if (!callp) {
+            unsupported(stmtp, "procedure call form");
+            return nullptr;
+        }
+        const Node* const declp = procedureDeclOf(callp);
+        if (!declp) {
+            unsupported(callp, "procedure call target");
+            return nullptr;
+        }
+        const Node* const bodyp = subprogramBodyOf(declp);
+        if (!bodyp || bodyp->attr("kind") != "procedure_body") {
+            unsupported(callp, "procedure without a body");
+            return nullptr;
+        }
+        if (!m_inlineBodies.insert(bodyp).second) {
+            unsupported(callp, "recursive procedure call");
+            return nullptr;
+        }
+        AstNode* const resultp = inlineProcedureBody(callp, declp, bodyp, mode);
+        m_inlineBodies.erase(bodyp);
+        return resultp;
+    }
+
+    AstNode* inlineProcedureBody(const Node* callp, const Node* declp, const Node* bodyp,
+                                 AssignMode mode) {
+        std::map<std::string, AstVar*> captureScope;
+        FuncEnv calleeEnv;
+        captureBaseFor(declp, captureScope, calleeEnv);
+        AstNode* prologsp = nullptr;  // Out-parameter initializations
+        // Match actuals to formals in the caller's scope
+        std::map<std::string, const Node*> actualByName;
+        std::vector<const Node*> positional;
+        if (const Node* const assocsp = callp->child("parameter_association_chain")) {
+            for (const Node* const assocp : childEls(assocsp)) {
+                if (assocp->attr("kind") != "association_element_by_expression") {
+                    unsupported(assocp, "procedure association form");
+                    deleteFuncEnv(calleeEnv);
+                    return nullptr;
+                }
+                const Node* const formalp = assocp->child("formal");
+                const Node* const actualp = assocp->child("actual");
+                if (formalp) {
+                    actualByName[vhdlFold(formalp->attr("identifier"))] = actualp;
+                } else {
+                    positional.push_back(actualp);
+                }
+            }
+        }
+        size_t positionalIndex = 0;
+        for (const Node* const paramp : childEls(declp->child("interface_declaration_chain"))) {
+            const std::string paramKind = paramp->attr("kind");
+            if (paramKind != "interface_constant_declaration"
+                && paramKind != "interface_signal_declaration"
+                && paramKind != "interface_variable_declaration") {
+                unsupported(paramp, "procedure parameter form");
+                deleteFuncEnv(calleeEnv);
+                return nullptr;
+            }
+            const std::string name = vhdlFold(paramp->attr("identifier"));
+            const Node* actualp = nullptr;
+            const auto namedIt = actualByName.find(name);
+            if (namedIt != actualByName.end()) {
+                actualp = namedIt->second;
+            } else if (positionalIndex < positional.size()) {
+                actualp = positional[positionalIndex++];
+            }
+            if (!actualp) actualp = paramp->child("default_value");
+            if (!actualp) {
+                error(callp, "VHDL procedure call is missing argument '"
+                                 + paramp->attr("identifier") + "'");
+                deleteFuncEnv(calleeEnv);
+                return nullptr;
+            }
+            const std::string paramMode = paramp->attr("mode");
+            AstNodeDType* const dtp
+                = dtypeOf(parseType(paramp->child("subtype_indication")), flpOf(paramp));
+            if (paramMode.empty() || paramMode == "in") {
+                AstNodeExpr* const valuep = lowerExpr(actualp, dtp);
+                if (!valuep) {
+                    deleteFuncEnv(calleeEnv);
+                    return nullptr;
+                }
+                funcEnvSet(calleeEnv, name, valuep, false);
+            } else if (paramMode == "out" || paramMode == "inout" || paramMode == "buffer") {
+                AstNodeExpr* const lhsp = lowerLValue(callp, actualp);
+                if (!lhsp) {
+                    deleteFuncEnv(calleeEnv);
+                    return nullptr;
+                }
+                const bool isSignal = paramKind == "interface_signal_declaration";
+                if (paramMode == "out") {
+                    // An out parameter starts at its subtype's default value.  Binding it
+                    // directly to the actual also performs the copy-out.
+                    FileLine* const pflp = flpOf(paramp);
+                    AstNodeExpr* const defp = makeConst(pflp, dtp, 0);
+                    AstNodeExpr* const lhspInit = lhsp->cloneTree(false);
+                    AstNode* initp = nullptr;
+                    if (isSignal && mode == AssignMode::DELAYED) {
+                        initp = new AstAssignDly{pflp, lhspInit, defp};
+                    } else if (isSignal && mode == AssignMode::CONT) {
+                        initp = new AstAssignW{pflp, lhspInit, defp};
+                    } else {
+                        initp = new AstAssign{pflp, lhspInit, defp};
+                    }
+                    prologsp
+                        = prologsp ? AstNode::addNext<AstNode, AstNode>(prologsp, initp) : initp;
+                }
+                // Reading an out signal parameter before it is written would see the old
+                // actual value rather than the formal's default; reject that case
+                funcEnvSet(calleeEnv, name, lhsp, true, paramMode != "out" || !isSignal);
+            } else {
+                unsupported(paramp, "procedure parameter mode '" + paramMode + "'");
+                deleteFuncEnv(calleeEnv);
+                return nullptr;
+            }
+        }
+
+        VL_RESTORER(m_inlineEnvp);
+        VL_RESTORER_COPY(m_scope);
+        InlineFrameGuard frameGuard{*this, bodyp};  // Captures the caller's scope
+        m_scope = captureScope;
+        m_inlineEnvp = &calleeEnv;
+        m_inlineFrames.back().liveScope = m_scope;
+        m_inlineFrames.back().envp = &calleeEnv;
+
+        // Locals are reinitialized on every call, like automatic variables
+        AstNode* initsp = nullptr;
+        for (const Node* const declp2 : childEls(bodyp->child("declaration_chain"))) {
+            const std::string kind = declp2->attr("kind");
+            if (kind == "variable_declaration") {
+                const Node* const subtypep = declp2->child("subtype_indication");
+                if (!subtypep) {
+                    error(declp2, "VHDL variable without a subtype");
+                    continue;
+                }
+                FileLine* const dflp = flpOf(declp2);
+                const std::string vname = declp2->attr("identifier");
+                const std::string mangled
+                    = "vhdlproc_" + std::to_string(++m_varSeq) + "__" + vname;
+                AstVar* const varp
+                    = new AstVar{dflp, VVarType::VAR, mangled, dtypeOf(parseType(subtypep), dflp)};
+                m_modp->addStmtsp(varp);
+                m_scope[vhdlFold(vname)] = varp;
+                m_inlineFrames.back().liveScope = m_scope;
+                AstNodeExpr* rhsp = nullptr;
+                if (const Node* const defp = declp2->child("default_value")) {
+                    rhsp = lowerExpr(defp, varp->dtypep());
+                }
+                if (!rhsp) rhsp = makeConst(dflp, varp->dtypep(), 0);
+                AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
+                AstNode* const initp = new AstAssign{dflp, lhsp, rhsp};
+                initsp = initsp ? AstNode::addNext<AstNode, AstNode>(initsp, initp) : initp;
+            } else if (kind != "constant_declaration" && !ignorableDeclaration(kind)) {
+                unsupported(declp2, "procedure declaration '" + kind + "'");
+            }
+        }
+
+        bool fallsThrough = true;
+        AstNode* const bodysp
+            = lowerProcChain(bodyp->child("sequential_statement_chain"), mode, fallsThrough);
+        AstNode* resultp = prologsp;
+        if (initsp)
+            resultp = resultp ? AstNode::addNext<AstNode, AstNode>(resultp, initsp) : initsp;
+        if (bodysp)
+            resultp = resultp ? AstNode::addNext<AstNode, AstNode>(resultp, bodysp) : bodysp;
+        deleteFuncEnv(calleeEnv);
+        return resultp;
+    }
+
+    //! Lower a procedure statement chain.  `fallsThroughp` is false when every path
+    //! returns before the end of the chain.
+    AstNode* lowerProcChain(const Node* chainp, AssignMode mode, bool& fallsThroughp) {
+        return lowerProcChain(childEls(chainp), 0, mode, fallsThroughp);
+    }
+
+    AstNode* lowerProcChain(const std::vector<const Node*>& stmts, size_t index, AssignMode mode,
+                            bool& fallsThroughp) {
+        AstNode* headp = nullptr;
+        for (size_t i = index; i < stmts.size(); ++i) {
+            const Node* const stmtp = stmts[i];
+            const std::string kind = stmtp->attr("kind");
+            if (kind == "return_statement") {
+                if (stmtp->child("expression")) {
+                    unsupported(stmtp, "VHDL procedure return value");
+                }
+                fallsThroughp = false;
+                return headp;
+            }
+            if (kind == "if_statement") {
+                AstNode* const ifp = lowerProcIf(stmtp, stmts, i + 1, mode, fallsThroughp);
+                if (!ifp) return headp;
+                return headp ? AstNode::addNext<AstNode, AstNode>(headp, ifp) : ifp;
+            }
+            if (kind == "case_statement") {
+                AstNode* const casep = lowerProcCase(stmtp, stmts, i + 1, mode, fallsThroughp);
+                if (!casep) return headp;
+                return headp ? AstNode::addNext<AstNode, AstNode>(headp, casep) : casep;
+            }
+            AstNode* const nodep = lowerStmt(stmtp, mode);
+            if (!nodep) continue;
+            headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+        }
+        fallsThroughp = true;
+        return headp;
+    }
+
+    //! Lower `stmts[index..]` followed by `tail[tailIndex..]` as one chain.  The tail is
+    //! re-lowered per falling branch, so an early return truncates it in that branch only.
+    AstNode* lowerProcChainWithTail(const std::vector<const Node*>& stmts, size_t index,
+                                    const std::vector<const Node*>& tail, size_t tailIndex,
+                                    AssignMode mode, bool& fallsThroughp) {
+        std::vector<const Node*> combined;
+        combined.reserve(stmts.size() - index + tail.size() - tailIndex);
+        combined.insert(combined.end(), stmts.begin() + index, stmts.end());
+        combined.insert(combined.end(), tail.begin() + tailIndex, tail.end());
+        return lowerProcChain(combined, 0, mode, fallsThroughp);
+    }
+
+    //! Lower an if/elsif construct, appending the following statements to each branch
+    AstNode* lowerProcIf(const Node* ifp, const std::vector<const Node*>& tail, size_t tailIndex,
+                         AssignMode mode, bool& fallsThroughp) {
+        FileLine* const flp = flpOf(ifp);
+        AstNodeExpr* const condp = lowerExpr(ifp->child("condition"), bitDType(flp));
+        if (!condp) {
+            fallsThroughp = false;
+            return nullptr;
+        }
+        bool thenFalls = true;
+        AstNode* const thensp
+            = lowerProcChainWithTail(childEls(ifp->child("sequential_statement_chain")), 0, tail,
+                                     tailIndex, mode, thenFalls);
+        AstNode* elsesp = nullptr;
+        bool elseFalls = true;
+        const Node* const elsep = ifp->child("else_clause");
+        if (!elsep) {
+            elsesp = lowerProcChain(tail, tailIndex, mode, elseFalls);
+        } else if (elsep->attr("kind") == "elsif" && elsep->child("condition")) {
+            elsesp = lowerProcIf(elsep, tail, tailIndex, mode, elseFalls);
+        } else {
+            elsesp = lowerProcChainWithTail(childEls(elsep->child("sequential_statement_chain")),
+                                            0, tail, tailIndex, mode, elseFalls);
+        }
+        fallsThroughp = thenFalls || elseFalls;
+        return new AstIf{flp, condp, thensp, elsesp};
+    }
+
+    //! Lower a case statement, appending the following statements to each alternative
+    AstNode* lowerProcCase(const Node* casep, const std::vector<const Node*>& tail,
+                           size_t tailIndex, AssignMode mode, bool& fallsThroughp) {
+        FileLine* const flp = flpOf(casep);
+        AstNodeExpr* const selectorp = lowerExpr(casep->child("expression"), nullptr);
+        if (!selectorp) {
+            fallsThroughp = false;
+            return nullptr;
+        }
+        AstCaseItem* itemsp = nullptr;
+        AstCaseItem* currentp = nullptr;
+        fallsThroughp = false;
+        for (const Node* const choicep :
+             childEls(casep->child("case_statement_alternative_chain"))) {
+            const bool sameAlternative = choicep->attr("same_alternative_flag") == "true";
+            const std::string kind = choicep->attr("kind");
+            const auto lowerBody = [&]() -> AstNode* {
+                bool altFalls = true;
+                AstNode* const bodyp
+                    = lowerProcChainWithTail(childEls(choicep->child("associated_chain")), 0, tail,
+                                             tailIndex, mode, altFalls);
+                fallsThroughp = fallsThroughp || altFalls;
+                return bodyp;
+            };
+            if (kind == "choice_by_others") {
+                currentp = new AstCaseItem{flp, nullptr, lowerBody()};
+                itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
+                                : currentp;
+                continue;
+            }
+            std::vector<AstConst*> conds
+                = lowerChoiceConditions(choicep, selectorp->dtypep(), "case");
+            if (conds.empty()) continue;
+            if (!sameAlternative || !currentp) {
+                AstConst* const firstp = conds.front();
+                conds.erase(conds.begin());
+                currentp = new AstCaseItem{flp, firstp, lowerBody()};
+                itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
+                                : currentp;
+            }
+            for (AstConst* const condp : conds) currentp->addCondsp(condp);
+        }
+        return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
 
     AstNodeExpr* lowerRecordAggregate(const Node* nodep, const Node* typeDefp) {
@@ -1437,7 +1890,15 @@ class VhdlXmlFrontend final {
 
         if (kind == "simple_name" && m_inlineEnvp) {
             const auto it = m_inlineEnvp->find(vhdlFold(nodep->attr("identifier")));
-            if (it != m_inlineEnvp->end()) return it->second->cloneTree(false);
+            if (it != m_inlineEnvp->end()) {
+                if (!it->second.readable) {
+                    unsupported(nodep, "read of an out procedure parameter");
+                    return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+                }
+                AstNodeExpr* const valuep = it->second.exprp->cloneTree(false);
+                if (it->second.lvalue) setReadAccess(valuep);
+                return valuep;
+            }
         }
         if (kind == "simple_name") {
             const std::string id = vhdlFold(nodep->attr("identifier"));
@@ -1769,6 +2230,27 @@ class VhdlXmlFrontend final {
             resultp->dtypep(bitDType(flp));
             return resultp;
         }
+        if (kind == "qualified_expression") {
+            // The context constrains the operand; otherwise use the expression's own
+            // (possibly constrained) type.  A literal subtype only carries its element
+            // type, so a `signed` qualification must restore the signing.
+            AstNodeDType* dtp = contextp;
+            if (!dtp) {
+                dtp = typeRefDType(nodep);
+                const Node* const markp = nodep->child("type_mark");
+                const std::string mark
+                    = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
+                AstBasicDType* const basicp = dtp ? VN_CAST(dtp->skipRefp(), BasicDType) : nullptr;
+                if (basicp && !basicp->isSigned()
+                    && (mark == "signed" || mark == "unresolved_signed")) {
+                    dtp = m_rootp->typeTablep()->findLogicBitDType(
+                        flp, basicp->keyword(),
+                        VNumRange{basicp->left(), basicp->right(), basicp->ascending()},
+                        basicp->width(), VSigning::SIGNED);
+                }
+            }
+            return lowerExpr(nodep->child("expression"), dtp);
+        }
         if (kind == "type_conversion") {
             AstNodeExpr* const innerp = lowerExpr(nodep->child("expression"), contextp);
             if (!innerp) return nullptr;
@@ -1778,6 +2260,26 @@ class VhdlXmlFrontend final {
         if (kind == "aggregate") {
             const Node* const defp = typeDefOfKind(nodep, "record_type_definition");
             if (defp) return lowerRecordAggregate(nodep, defp);
+            // Array aggregate: (others => expr)
+            const std::vector<const Node*> choices
+                = childEls(nodep->child("association_choices_chain"));
+            if (choices.size() == 1 && choices.front()->attr("kind") == "choice_by_others") {
+                const Node* const assocp = choices.front()->child("associated_expr");
+                AstNodeDType* const arrayDtp = typeRefDType(nodep);
+                AstNodeDType* const targetDtp = contextp ? contextp : arrayDtp;
+                if (assocp && targetDtp && targetDtp->width() > 0) {
+                    AstNodeExpr* const elemp = lowerExpr(assocp, nullptr);
+                    if (!elemp) return nullptr;
+                    const int elemWidth = elemp->dtypep()->width();
+                    const int targetWidth = targetDtp->width();
+                    if (elemWidth > 0 && targetWidth % elemWidth == 0) {
+                        AstReplicate* const repp = new AstReplicate{
+                            flp, elemp, static_cast<uint32_t>(targetWidth / elemWidth)};
+                        repp->dtypep(targetDtp);
+                        return repp;
+                    }
+                }
+            }
             unsupported(nodep, "VHDL aggregate of a non-record type");
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
         }
@@ -1793,33 +2295,6 @@ class VhdlXmlFrontend final {
         if (kind == "function_call") { return lowerCall(nodep, contextp); }
         unsupported(nodep, "expression '" + kind + "'");
         return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
-    }
-
-    AstNodeExpr* lowerDefault(const Node* defp, AstNodeDType* dtypep) {
-        const std::string kind = defp->attr("kind");
-        if (kind != "aggregate") return lowerExpr(defp, dtypep);
-
-        const std::vector<const Node*> choices
-            = childEls(defp->child("association_choices_chain"));
-        if (choices.size() != 1) {
-            unsupported(defp, "aggregate with multiple choices");
-            return nullptr;
-        }
-        const Node* const exprp = choices.front()->child("associated_expr");
-        if (!exprp) {
-            unsupported(defp, "aggregate without an associated expression");
-            return nullptr;
-        }
-        const std::string id = exprp->attr("identifier");
-        if (id == "'0'" || id == "'1'") {
-            uint32_t value = 0;
-            if (id == "'1'") {
-                value = dtypep->width() >= 32 ? 0xffffffffU : ((1U << dtypep->width()) - 1U);
-            }
-            return makeConst(flpOf(defp), dtypep, value);
-        }
-        unsupported(exprp, "aggregate element " + id);
-        return nullptr;
     }
 
     // ---- Statements
@@ -1890,69 +2365,109 @@ class VhdlXmlFrontend final {
         return new AstAssign{flp, lhsp, rhsp};
     }
 
+    //! Lower a case or selected-assignment choice to constant conditions.  A range choice
+    //! expands to one condition per value; `others` is handled by the caller.
+    std::vector<AstConst*> lowerChoiceConditions(const Node* choicep, AstNodeDType* dtypep,
+                                                 const char* what) {
+        std::vector<AstConst*> conds;
+        const std::string kind = choicep->attr("kind");
+        if (kind == "choice_by_expression") {
+            const Node* const choiceExprp = choicep->child("choice_expression");
+            if (!choiceExprp) {
+                unsupported(choicep, std::string{what} + " choice without an expression");
+                return conds;
+            }
+            AstNodeExpr* const choiceValp = lowerExpr(choiceExprp, dtypep);
+            if (!choiceValp) return conds;
+            AstConst* const constp = VN_CAST(choiceValp, Const);
+            if (!constp) {
+                VL_DO_DANGLING(choiceValp->deleteTree(), choiceValp);
+                unsupported(choicep, "non-constant " + std::string{what} + " choice");
+                return conds;
+            }
+            conds.push_back(constp);
+            return conds;
+        }
+        if (kind == "choice_by_range") {
+            const Node* const rangep = choicep->child("choice_range");
+            int64_t left = 0;
+            int64_t right = 0;
+            if (!rangep || !evalConst(rangeBound(rangep, true), left)
+                || !evalConst(rangeBound(rangep, false), right)) {
+                unsupported(choicep, "non-static " + std::string{what} + " range");
+                return conds;
+            }
+            const int64_t lo = std::min(left, right);
+            const int64_t hi = std::max(left, right);
+            if (hi - lo > 4096) {
+                unsupported(choicep, "large " + std::string{what} + " range");
+                return conds;
+            }
+            for (int64_t value = lo; value <= hi; ++value) {
+                conds.push_back(makeConst(flpOf(choicep), dtypep, static_cast<uint64_t>(value)));
+            }
+            return conds;
+        }
+        unsupported(choicep, std::string{what} + " choice form '" + kind + "'");
+        return conds;
+    }
+
     AstNode* lowerSelectedAssignment(const Node* stmtp, AssignMode mode) {
         FileLine* const flp = flpOf(stmtp);
         const Node* const targetp = targetNode(stmtp);
         AstNodeExpr* const selectorp = lowerExpr(stmtp->child("expression"), nullptr);
         if (!selectorp) return nullptr;
 
+        const auto lowerBody = [&](const Node* choicep) -> AstNode* {
+            AstNode* bodyp = nullptr;
+            for (const Node* const wavep : childEls(choicep->child("associated_chain"))) {
+                if (wavep->attr("kind") != "waveform_element") {
+                    unsupported(wavep, "selected association form '" + wavep->attr("kind") + "'");
+                    continue;
+                }
+                const Node* const wep = wavep->child("we_value");
+                if (!wep) {
+                    unsupported(wavep, "selected association without a value");
+                    continue;
+                }
+                AstNodeExpr* const lhsp = lowerLValue(stmtp, targetp);
+                AstNodeExpr* const rhsp = lowerExpr(wep, lhsp ? lhsp->dtypep() : nullptr);
+                if (!lhsp || !rhsp) continue;
+                AstNode* assp = nullptr;
+                if (mode == AssignMode::DELAYED) {
+                    assp = new AstAssignDly{flp, lhsp, rhsp};
+                } else if (mode == AssignMode::BLOCKING) {
+                    assp = new AstAssign{flp, lhsp, rhsp};
+                } else {
+                    assp = new AstAssignW{flp, lhsp, rhsp};
+                }
+                bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, assp) : assp;
+            }
+            return bodyp;
+        };
+
         AstCaseItem* itemsp = nullptr;
         AstCaseItem* currentp = nullptr;
         for (const Node* const choicep : childEls(stmtp->child("selected_waveform_chain"))) {
-            AstConst* condp = nullptr;
-            const std::string kind = choicep->attr("kind");
-            if (kind == "choice_by_expression") {
-                const Node* const choiceExprp = choicep->child("choice_expression");
-                if (!choiceExprp) {
-                    unsupported(choicep, "selected choice without an expression");
-                    continue;
-                }
-                AstNodeExpr* const choiceValp = lowerExpr(choiceExprp, selectorp->dtypep());
-                if (!choiceValp) continue;
-                condp = VN_CAST(choiceValp, Const);
-                if (!condp) {
-                    VL_DO_DANGLING(choiceValp->deleteTree(), choiceValp);
-                    unsupported(choicep, "non-constant VHDL selected choice");
-                    continue;
-                }
-            } else if (kind != "choice_by_others") {
-                unsupported(choicep, "selected choice form '" + kind + "'");
-                continue;
-            }
-
             const bool sameAlternative = choicep->attr("same_alternative_flag") == "true";
-            if (!sameAlternative || !currentp) {
-                AstNode* bodyp = nullptr;
-                for (const Node* const wavep : childEls(choicep->child("associated_chain"))) {
-                    if (wavep->attr("kind") != "waveform_element") {
-                        unsupported(wavep,
-                                    "selected association form '" + wavep->attr("kind") + "'");
-                        continue;
-                    }
-                    const Node* const wep = wavep->child("we_value");
-                    if (!wep) {
-                        unsupported(wavep, "selected association without a value");
-                        continue;
-                    }
-                    AstNodeExpr* const lhsp = lowerLValue(stmtp, targetp);
-                    AstNodeExpr* const rhsp = lowerExpr(wep, lhsp ? lhsp->dtypep() : nullptr);
-                    if (!lhsp || !rhsp) continue;
-                    AstNode* assp = nullptr;
-                    if (mode == AssignMode::DELAYED) {
-                        assp = new AstAssignDly{flp, lhsp, rhsp};
-                    } else if (mode == AssignMode::BLOCKING) {
-                        assp = new AstAssign{flp, lhsp, rhsp};
-                    } else {
-                        assp = new AstAssignW{flp, lhsp, rhsp};
-                    }
-                    bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, assp) : assp;
-                }
-                currentp = new AstCaseItem{flp, condp, bodyp};
+            const std::string kind = choicep->attr("kind");
+            if (kind == "choice_by_others") {
+                currentp = new AstCaseItem{flp, nullptr, lowerBody(choicep)};
                 itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
                                 : currentp;
-            } else if (condp) {
-                currentp->addCondsp(condp);
+                continue;
             }
+            std::vector<AstConst*> conds
+                = lowerChoiceConditions(choicep, selectorp->dtypep(), "selected");
+            if (conds.empty()) continue;
+            if (!sameAlternative || !currentp) {
+                AstConst* const firstp = conds.front();
+                conds.erase(conds.begin());
+                currentp = new AstCaseItem{flp, firstp, lowerBody(choicep)};
+                itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
+                                : currentp;
+            }
+            for (AstConst* const condp : conds) currentp->addCondsp(condp);
         }
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
@@ -1966,37 +2481,28 @@ class VhdlXmlFrontend final {
         AstCaseItem* currentp = nullptr;
         for (const Node* const choicep :
              childEls(stmtp->child("case_statement_alternative_chain"))) {
-            AstConst* condp = nullptr;
-            const std::string kind = choicep->attr("kind");
-            if (kind == "choice_by_expression") {
-                const Node* const choiceExprp = choicep->child("choice_expression");
-                if (!choiceExprp) {
-                    unsupported(choicep, "case choice without an expression");
-                    continue;
-                }
-                AstNodeExpr* const choiceValp = lowerExpr(choiceExprp, selectorp->dtypep());
-                if (!choiceValp) continue;
-                // AstCaseItem conditions are constant values; V3Case builds the comparisons
-                condp = VN_CAST(choiceValp, Const);
-                if (!condp) {
-                    VL_DO_DANGLING(choiceValp->deleteTree(), choiceValp);
-                    unsupported(choicep, "non-constant VHDL case choice");
-                    continue;
-                }
-            } else if (kind != "choice_by_others") {
-                unsupported(choicep, "case choice form '" + kind + "'");
-                continue;
-            }
-
             const bool sameAlternative = choicep->attr("same_alternative_flag") == "true";
-            if (!sameAlternative || !currentp) {
-                AstNode* const bodyp = lowerStmtChain(choicep->child("associated_chain"), mode);
-                currentp = new AstCaseItem{flp, condp, bodyp};
+            const std::string kind = choicep->attr("kind");
+            if (kind == "choice_by_others") {
+                currentp = new AstCaseItem{
+                    flp, nullptr, lowerStmtChain(choicep->child("associated_chain"), mode)};
                 itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
                                 : currentp;
-            } else if (condp) {
-                currentp->addCondsp(condp);
+                continue;
             }
+            // AstCaseItem conditions are constant values; V3Case builds the comparisons
+            std::vector<AstConst*> conds
+                = lowerChoiceConditions(choicep, selectorp->dtypep(), "case");
+            if (conds.empty()) continue;
+            if (!sameAlternative || !currentp) {
+                AstConst* const firstp = conds.front();
+                conds.erase(conds.begin());
+                currentp = new AstCaseItem{
+                    flp, firstp, lowerStmtChain(choicep->child("associated_chain"), mode)};
+                itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
+                                : currentp;
+            }
+            for (AstConst* const condp : conds) currentp->addCondsp(condp);
         }
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
@@ -2237,6 +2743,17 @@ class VhdlXmlFrontend final {
         }
 
         const std::string key = vhdlFold(name);
+        // A loop parameter shadows a formal parameter or local of the same name
+        InlineBinding savedBinding;
+        bool hadInlineBinding = false;
+        if (m_inlineEnvp) {
+            const auto it = m_inlineEnvp->find(key);
+            if (it != m_inlineEnvp->end()) {
+                hadInlineBinding = true;
+                savedBinding = it->second;
+                m_inlineEnvp->erase(it);
+            }
+        }
         const int step = ascending ? 1 : -1;
         AstNode* headp = nullptr;
         for (int value = left; ascending ? value <= right : value >= right; value += step) {
@@ -2254,6 +2771,7 @@ class VhdlXmlFrontend final {
             if (!bodyp) continue;
             headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, bodyp) : bodyp;
         }
+        if (hadInlineBinding && m_inlineEnvp) (*m_inlineEnvp)[key] = savedBinding;
         return headp;
     }
 
@@ -2261,6 +2779,7 @@ class VhdlXmlFrontend final {
         const std::string kind = stmtp->attr("kind");
         if (kind == "simple_signal_assignment_statement") { return lowerAssignment(stmtp, mode); }
         if (kind == "variable_assignment_statement") return lowerVariableAssignment(stmtp);
+        if (kind == "procedure_call_statement") return lowerProcedureCall(stmtp, mode);
         if (kind == "case_statement") return lowerCase(stmtp, mode);
         if (kind == "for_loop_statement") return lowerForLoop(stmtp, mode);
         if (kind == "selected_waveform_assignment_statement") {
@@ -2318,10 +2837,18 @@ class VhdlXmlFrontend final {
     }
 
     void emitConcurrentAssignment(const Node* processp) {
-        AstNode* const bodyp
-            = lowerStmtChain(processp->child("sequential_statement_chain"), AssignMode::CONT);
-        if (!bodyp) return;
-        m_modp->addStmtsp(new AstAlways{flpOf(processp), VAlwaysKwd::CONT_ASSIGN, nullptr, bodyp});
+        AstNode* headp = nullptr;
+        for (const Node* const stmtp : childEls(processp->child("sequential_statement_chain"))) {
+            const std::string kind = stmtp->attr("kind");
+            // A concurrent procedure call is wrapped in a process with a generated wait;
+            // the AstAlways sensitivity below supplies the equivalent trigger
+            if (kind == "suspend_state_statement" || kind == "wait_statement") continue;
+            AstNode* const nodep = lowerStmt(stmtp, AssignMode::CONT);
+            if (!nodep) continue;
+            headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+        }
+        if (!headp) return;
+        m_modp->addStmtsp(new AstAlways{flpOf(processp), VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
     }
 
     static AstVar* astVarOf(AstNodeExpr* exprp) {
@@ -2467,7 +2994,7 @@ class VhdlXmlFrontend final {
             m_modp->addStmtsp(varp);
             m_scope[vhdlFold(name)] = varp;
             if (const Node* const defp = declp->child("default_value")) {
-                AstNodeExpr* const rhsp = lowerDefault(defp, varp->dtypep());
+                AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
                 if (rhsp) {
                     AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
                     m_modp->addStmtsp(new AstInitialStatic{dflp, new AstAssign{dflp, lhsp, rhsp}});
@@ -2689,7 +3216,7 @@ class VhdlXmlFrontend final {
             m_scope[vhdlFold(name)] = varp;
             if (const Node* const defp = declp->child("default_value")) {
                 varp->noCReset(true);
-                AstNodeExpr* const rhsp = lowerDefault(defp, varp->dtypep());
+                AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
                 if (rhsp) {
                     AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
                     m_modp->addStmtsp(new AstInitialStatic{dflp, new AstAssign{dflp, lhsp, rhsp}});
@@ -2706,6 +3233,11 @@ class VhdlXmlFrontend final {
             } else {
                 emitProcess(stmtp);
             }
+            return;
+        }
+        // A concurrent procedure call is wrapped in a plain process with a process origin
+        if (kind == "process_statement" && stmtp->child("process_origin")) {
+            emitConcurrentAssignment(stmtp);
             return;
         }
         if (kind == "component_instantiation_statement") {
@@ -2779,9 +3311,11 @@ class VhdlXmlFrontend final {
         // Nested specialization re-enters this function; keep the parent's state intact
         VL_RESTORER(m_modp);
         VL_RESTORER_COPY(m_scope);
+        VL_RESTORER_COPY(m_moduleScope);
         VL_RESTORER_COPY(m_components);
         m_modp = info.modp;
         m_scope = info.ports;
+        m_moduleScope.clear();
         m_components.clear();
 
         if (const Node* const declsp = archp->child("declaration_chain")) {
@@ -2811,7 +3345,7 @@ class VhdlXmlFrontend final {
 
                 if (const Node* const defp = declp->child("default_value")) {
                     varp->noCReset(true);
-                    AstNodeExpr* const rhsp = lowerDefault(defp, varp->dtypep());
+                    AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
                     if (rhsp) {
                         AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
                         m_modp->addStmtsp(
@@ -2820,6 +3354,9 @@ class VhdlXmlFrontend final {
                 }
             }
         }
+
+        // Subprogram bodies resolve names against the declarative part only
+        m_moduleScope = m_scope;
 
         if (const Node* const stmtsp = archp->child("concurrent_statement_chain")) {
             for (const Node* const stmtp : childEls(stmtsp)) lowerConcurrent(stmtp);
