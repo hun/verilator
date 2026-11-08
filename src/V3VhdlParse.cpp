@@ -282,6 +282,9 @@ class VhdlXmlFrontend final {
         std::vector<RecordMember> members;  // Declaration order, most significant first
     };
     std::map<const Node*, RecordInfo> m_records;  // Record type definition -> layout
+    using FuncEnv = std::map<std::string, AstNodeExpr*>;  // Function locals during inlining
+    FuncEnv* m_inlineEnvp = nullptr;  // Active function environment, or nullptr
+    std::set<const Node*> m_inlineBodies;  // Function bodies being inlined (recursion guard)
     int m_specDepth = 0;  // Generic specialization recursion depth
 
     // ---- XML access
@@ -448,6 +451,7 @@ class VhdlXmlFrontend final {
         return kind == "constant_declaration" || kind == "type_declaration"
                || kind == "anonymous_type_declaration" || kind == "subtype_declaration"
                || kind == "function_declaration" || kind == "procedure_declaration"
+               || kind == "function_body" || kind == "procedure_body"
                || kind == "attribute_declaration" || kind == "attribute_specification"
                || kind == "alias_declaration" || kind == "object_alias_declaration"
                || kind == "non_object_alias_declaration" || kind == "file_declaration"
@@ -457,6 +461,9 @@ class VhdlXmlFrontend final {
     VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) {
         VhdlDTypeSpec spec;
         if (!subtypep || depth > 16) return spec;
+        if (!subtypep->has("kind") && subtypep->has("ref")) {
+            return parseType(nodeById(subtypep->attr("ref")), depth + 1);
+        }
         const std::string kind = subtypep->attr("kind");
         if (kind == "integer_subtype_definition") {
             spec.isInteger = true;
@@ -597,6 +604,13 @@ class VhdlXmlFrontend final {
         if (!typep || !typep->has("ref")) return nullptr;
         const Node* const defp = nodeById(typep->attr("ref"));
         if (!defp) return nullptr;
+        const std::string kind = defp->attr("kind");
+        if (kind == "enumeration_type_definition") return enumDType(defp);
+        if (kind == "record_type_definition") return recordInfo(defp).dtypep;
+        if (kind == "array_subtype_definition"
+            && childEls(defp->child("index_constraint_list")).empty()) {
+            return nullptr;  // Unconstrained result type: use the expression's type
+        }
         return dtypeOf(parseType(defp), flpOf(nodep));
     }
 
@@ -922,11 +936,441 @@ class VhdlXmlFrontend final {
             return resizeExpr(valueExprp, intDType(flp));
         }
 
+        // User-defined functions: inline the analyzed body
+        if (functionDeclOf(nodep)) {
+            if (AstNodeExpr* const inlinedp = inlineFunction(nodep)) return inlinedp;
+        }
         unsupported(nodep, "function call '" + fn + "'");
         return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
     }
 
-    //! Lower a record aggregate: concatenate members, most significant first
+    // ---- User-defined function inlining
+
+    static void deleteFuncEnv(FuncEnv& env) {
+        for (auto& pair : env) {
+            AstNode* const nodep = pair.second;
+            if (nodep) VL_DO_DANGLING(nodep->deleteTree(), nodep);
+        }
+        env.clear();
+    }
+
+    static FuncEnv cloneFuncEnv(const FuncEnv& env) {
+        FuncEnv out;
+        for (const auto& pair : env) out[pair.first] = pair.second->cloneTree(false);
+        return out;
+    }
+
+    static void funcEnvSet(FuncEnv& env, const std::string& name, AstNodeExpr* nodep) {
+        const auto it = env.find(name);
+        if (it == env.end()) {
+            env[name] = nodep;
+            return;
+        }
+        AstNode* const oldp = it->second;
+        it->second = nodep;
+        if (oldp) VL_DO_DANGLING(oldp->deleteTree(), oldp);
+    }
+
+    //! Merge variable values of two branch environments into env under condp
+    void funcEnvMerge(FuncEnv& env, AstNodeExpr* const condp, const FuncEnv& thenEnv,
+                      const FuncEnv& elseEnv) {
+        std::set<std::string> names;
+        for (const auto& pair : thenEnv) names.insert(pair.first);
+        for (const auto& pair : elseEnv) names.insert(pair.first);
+        for (const auto& name : names) {
+            const auto thenIt = thenEnv.find(name);
+            const auto elseIt = elseEnv.find(name);
+            AstNodeExpr* thenp
+                = thenIt != thenEnv.end() ? thenIt->second->cloneTree(false) : nullptr;
+            AstNodeExpr* elsep
+                = elseIt != elseEnv.end() ? elseIt->second->cloneTree(false) : nullptr;
+            if (!thenp) thenp = elsep->cloneTree(false);
+            if (!elsep) elsep = thenp->cloneTree(false);
+            AstCond* const condp2
+                = new AstCond{condp->fileline(), condp->cloneTree(false), thenp, elsep};
+            condp2->dtypep(thenp->dtypep());
+            funcEnvSet(env, name, condp2);
+        }
+    }
+
+    //! Evaluate a function-body statement list; returns the function result of this path,
+    //! or nullptr when the path falls off the end of the list.  Updates env.
+    AstNodeExpr* evalFuncBlock(const std::vector<const Node*>& stmts, size_t index, FuncEnv& env,
+                               const Node* bodyp, int depth) {
+        VL_RESTORER(m_inlineEnvp);
+        m_inlineEnvp = &env;
+        if (depth > 64) {
+            error(bodyp, "VHDL function statement nesting is too deep");
+            return nullptr;
+        }
+        for (size_t i = index; i < stmts.size(); ++i) {
+            const Node* const stmtp = stmts[i];
+            const std::string kind = stmtp->attr("kind");
+            if (kind == "variable_assignment_statement") {
+                const Node* const targetp = stmtp->child("target");
+                const Node* const exprp = stmtp->child("expression");
+                if (!targetp || !exprp) {
+                    unsupported(stmtp, "VHDL variable assignment without a target");
+                    return nullptr;
+                }
+                AstNodeExpr* const valuep = lowerExpr(exprp, nullptr);
+                if (!valuep) return nullptr;
+                funcEnvSet(env, vhdlFold(targetp->attr("identifier")), valuep);
+                continue;
+            }
+            if (kind == "null_statement") continue;
+            if (kind == "return_statement") {
+                return lowerExpr(stmtp->child("expression"), nullptr);
+            }
+            if (kind == "if_statement") {
+                return evalFuncIf(stmtp, stmts, i, env, bodyp, depth + 1);
+            }
+            if (kind == "case_statement") {
+                return evalFuncCase(stmtp, stmts, i, env, bodyp, depth + 1);
+            }
+            unsupported(stmtp, "statement '" + kind + "' in a VHDL function body");
+            return nullptr;
+        }
+        return nullptr;
+    }
+
+    //! Evaluate an if/elsif/else statement plus the statements that follow it
+    AstNodeExpr* evalFuncIf(const Node* ifp, const std::vector<const Node*>& stmts, size_t index,
+                            FuncEnv& env, const Node* bodyp, int depth) {
+        VL_RESTORER(m_inlineEnvp);
+        m_inlineEnvp = &env;
+        AstNodeExpr* const condp = lowerExpr(ifp->child("condition"), bitDType(flpOf(ifp)));
+        if (!condp) return nullptr;
+        FuncEnv thenEnv = cloneFuncEnv(env);
+        AstNodeExpr* thenResultp = evalFuncBlock(
+            childEls(ifp->child("sequential_statement_chain")), 0, thenEnv, bodyp, depth);
+        FuncEnv elseEnv = cloneFuncEnv(env);
+        AstNodeExpr* elseResultp
+            = evalFuncElse(ifp->child("else_clause"), stmts, index + 1, elseEnv, bodyp, depth);
+        if (!thenResultp) { thenResultp = evalFuncBlock(stmts, index + 1, thenEnv, bodyp, depth); }
+        if (!elseResultp) { elseResultp = evalFuncBlock(stmts, index + 1, elseEnv, bodyp, depth); }
+        if (!thenResultp || !elseResultp) {
+            error(ifp, "VHDL function does not return a value on all paths");
+            if (thenResultp) VL_DO_DANGLING(thenResultp->deleteTree(), thenResultp);
+            if (elseResultp) VL_DO_DANGLING(elseResultp->deleteTree(), elseResultp);
+            deleteFuncEnv(thenEnv);
+            deleteFuncEnv(elseEnv);
+            return nullptr;
+        }
+        AstCond* const resultp = new AstCond{flpOf(ifp), condp, thenResultp, elseResultp};
+        resultp->dtypep(thenResultp->dtypep());
+        deleteFuncEnv(thenEnv);
+        deleteFuncEnv(elseEnv);
+        return resultp;
+    }
+
+    //! Evaluate an else/elsif clause chain, continuing with stmts[index] when it falls through
+    AstNodeExpr* evalFuncElse(const Node* elsep, const std::vector<const Node*>& stmts,
+                              size_t index, FuncEnv& env, const Node* bodyp, int depth) {
+        VL_RESTORER(m_inlineEnvp);
+        m_inlineEnvp = &env;
+        if (!elsep) return evalFuncBlock(stmts, index, env, bodyp, depth);
+        const std::string kind = elsep->attr("kind");
+        const Node* const condp = elsep->child("condition");
+        if (kind == "else" || !condp) {
+            AstNodeExpr* resultp = evalFuncBlock(
+                childEls(elsep->child("sequential_statement_chain")), 0, env, bodyp, depth);
+            if (!resultp) resultp = evalFuncBlock(stmts, index, env, bodyp, depth);
+            return resultp;
+        }
+        AstNodeExpr* const condExprp = lowerExpr(condp, bitDType(flpOf(elsep)));
+        if (!condExprp) return nullptr;
+        FuncEnv thenEnv = cloneFuncEnv(env);
+        AstNodeExpr* thenResultp = evalFuncBlock(
+            childEls(elsep->child("sequential_statement_chain")), 0, thenEnv, bodyp, depth);
+        FuncEnv elseEnv = cloneFuncEnv(env);
+        AstNodeExpr* elseResultp
+            = evalFuncElse(elsep->child("else_clause"), stmts, index, elseEnv, bodyp, depth);
+        if (!thenResultp) thenResultp = evalFuncBlock(stmts, index, thenEnv, bodyp, depth);
+        if (!elseResultp) elseResultp = evalFuncBlock(stmts, index, elseEnv, bodyp, depth);
+        if (!thenResultp || !elseResultp) {
+            error(elsep, "VHDL function does not return a value on all paths");
+            if (thenResultp) VL_DO_DANGLING(thenResultp->deleteTree(), thenResultp);
+            if (elseResultp) VL_DO_DANGLING(elseResultp->deleteTree(), elseResultp);
+            deleteFuncEnv(thenEnv);
+            deleteFuncEnv(elseEnv);
+            return nullptr;
+        }
+        AstCond* const resultp = new AstCond{flpOf(elsep), condExprp, thenResultp, elseResultp};
+        resultp->dtypep(thenResultp->dtypep());
+        deleteFuncEnv(thenEnv);
+        deleteFuncEnv(elseEnv);
+        return resultp;
+    }
+
+    //! Evaluate a case statement plus the statements that follow it
+    AstNodeExpr* evalFuncCase(const Node* casep, const std::vector<const Node*>& stmts,
+                              size_t index, FuncEnv& env, const Node* bodyp, int depth) {
+        VL_RESTORER(m_inlineEnvp);
+        m_inlineEnvp = &env;
+        AstNodeExpr* const selectorp = lowerExpr(casep->child("expression"), nullptr);
+        if (!selectorp) return nullptr;
+        struct CaseBranch final {
+            AstNodeExpr* condp = nullptr;  // nullptr for the others choice
+            AstNodeExpr* resultp = nullptr;
+            FuncEnv env;
+        };
+        std::vector<CaseBranch> branches;
+        size_t othersIndex = 0;
+        bool haveOthers = false;
+        bool allFellThrough = true;
+        for (const Node* const altp : childEls(casep->child("case_statement_alternative_chain"))) {
+            CaseBranch branch;
+            branch.env = cloneFuncEnv(env);
+            branch.resultp = evalFuncBlock(childEls(altp->child("associated_chain")), 0,
+                                           branch.env, bodyp, depth);
+            if (!branch.resultp) {
+                branch.resultp = evalFuncBlock(stmts, index + 1, branch.env, bodyp, depth);
+            }
+            allFellThrough = allFellThrough && !branch.resultp;
+            if (altp->attr("kind") == "choice_by_others") {
+                haveOthers = true;
+                othersIndex = branches.size();
+            } else if (const Node* const choicep = altp->child("choice_expression")) {
+                AstNodeExpr* const choiceValp = lowerExpr(choicep, selectorp->dtypep());
+                if (!choiceValp) {
+                    deleteFuncEnv(branch.env);
+                    if (branch.resultp)
+                        VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
+                    for (CaseBranch& other : branches) {
+                        if (other.resultp) {
+                            VL_DO_DANGLING(other.resultp->deleteTree(), other.resultp);
+                        }
+                        if (other.condp) VL_DO_DANGLING(other.condp->deleteTree(), other.condp);
+                        deleteFuncEnv(other.env);
+                    }
+                    return nullptr;
+                }
+                AstNodeExpr* const eqp
+                    = new AstEq{flpOf(altp), selectorp->cloneTree(false), choiceValp};
+                eqp->dtypep(bitDType(flpOf(altp)));
+                branch.condp = eqp;
+            } else {
+                unsupported(altp, "VHDL case choice form");
+                deleteFuncEnv(branch.env);
+                if (branch.resultp) VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
+                for (CaseBranch& other : branches) {
+                    if (other.resultp) VL_DO_DANGLING(other.resultp->deleteTree(), other.resultp);
+                    if (other.condp) VL_DO_DANGLING(other.condp->deleteTree(), other.condp);
+                    deleteFuncEnv(other.env);
+                }
+                return nullptr;
+            }
+            branches.push_back(branch);
+        }
+        if (allFellThrough) {
+            // Every branch continues after the case: merge the environments
+            const size_t baseIndex = haveOthers ? othersIndex : branches.size() - 1;
+            FuncEnv merged = cloneFuncEnv(branches[baseIndex].env);
+            for (size_t i = 0; i < branches.size(); ++i) {
+                if (i == baseIndex || !branches[i].condp) continue;
+                funcEnvMerge(merged, branches[i].condp, branches[i].env, merged);
+            }
+            for (CaseBranch& branch : branches) {
+                if (branch.condp) VL_DO_DANGLING(branch.condp->deleteTree(), branch.condp);
+                deleteFuncEnv(branch.env);
+            }
+            deleteFuncEnv(env);
+            env = std::move(merged);
+            VL_DO_DANGLING(selectorp->deleteTree(), selectorp);
+            return nullptr;
+        }
+        if (!haveOthers) { error(casep, "VHDL case in a function does not cover all choices"); }
+        AstNodeExpr* resultp = nullptr;
+        if (haveOthers) {
+            resultp = branches[othersIndex].resultp;
+            branches[othersIndex].resultp = nullptr;
+            if (!resultp) {
+                error(casep, "VHDL function does not return a value on all paths");
+                deleteFuncEnv(branches[othersIndex].env);
+                for (CaseBranch& branch : branches) {
+                    if (branch.resultp)
+                        VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
+                    if (branch.condp) VL_DO_DANGLING(branch.condp->deleteTree(), branch.condp);
+                    deleteFuncEnv(branch.env);
+                }
+                VL_DO_DANGLING(selectorp->deleteTree(), selectorp);
+                return nullptr;
+            }
+        }
+        for (size_t i = branches.size(); i-- > 0;) {
+            CaseBranch& branch = branches[i];
+            if (!branch.condp) continue;
+            if (!branch.resultp || !resultp) {
+                error(casep, "VHDL function does not return a value on all paths");
+                if (branch.resultp) VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
+                if (resultp) VL_DO_DANGLING(resultp->deleteTree(), resultp);
+                for (CaseBranch& other : branches) {
+                    if (other.condp) VL_DO_DANGLING(other.condp->deleteTree(), other.condp);
+                    deleteFuncEnv(other.env);
+                }
+                VL_DO_DANGLING(selectorp->deleteTree(), selectorp);
+                return nullptr;
+            }
+            AstCond* const condp
+                = new AstCond{flpOf(casep), branch.condp, branch.resultp, resultp};
+            condp->dtypep(branch.resultp->dtypep());
+            branch.condp = nullptr;
+            resultp = condp;
+        }
+        for (CaseBranch& branch : branches) {
+            if (branch.condp) VL_DO_DANGLING(branch.condp->deleteTree(), branch.condp);
+            deleteFuncEnv(branch.env);
+        }
+        VL_DO_DANGLING(selectorp->deleteTree(), selectorp);
+        return resultp;
+    }
+
+    //! Whether function-body statements can be lowered by inlining
+    static bool funcStatementsSupported(const Node* chainp, int depth) {
+        if (depth > 32) return false;
+        for (const Node* const stmtp : childEls(chainp)) {
+            const std::string kind = stmtp->attr("kind");
+            if (kind == "variable_assignment_statement" || kind == "return_statement"
+                || kind == "null_statement") {
+                continue;
+            }
+            if (kind == "if_statement") {
+                if (!funcStatementsSupported(stmtp->child("sequential_statement_chain"),
+                                             depth + 1)) {
+                    return false;
+                }
+                for (const Node* elsep = stmtp->child("else_clause"); elsep;
+                     elsep = elsep->child("else_clause")) {
+                    if (!funcStatementsSupported(elsep->child("sequential_statement_chain"),
+                                                 depth + 1)) {
+                        return false;
+                    }
+                    if (!elsep->child("condition")) break;
+                }
+                continue;
+            }
+            if (kind == "case_statement") {
+                for (const Node* const altp :
+                     childEls(stmtp->child("case_statement_alternative_chain"))) {
+                    if (!funcStatementsSupported(altp->child("associated_chain"), depth + 1)) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    //! Find the analyzed declaration of a called function, or nullptr
+    const Node* functionDeclOf(const Node* callp) const {
+        const Node* const implp = callp->child("implementation");
+        if (!implp || !implp->has("ref")) return nullptr;
+        const Node* const declp = nodeById(implp->attr("ref"));
+        if (!declp || declp->attr("kind") != "function_declaration") return nullptr;
+        return declp;
+    }
+
+    //! Inline a call to a user-defined pure function; nullptr if it cannot be inlined
+    AstNodeExpr* inlineFunction(const Node* nodep) {
+        const Node* const declp = functionDeclOf(nodep);
+        if (!declp) return nullptr;
+        const Node* const bodyrefp = declp->child("subprogram_body");
+        if (!bodyrefp) return nullptr;
+        const Node* const bodyp
+            = bodyrefp->has("ref") ? nodeById(bodyrefp->attr("ref")) : bodyrefp;
+        if (!bodyp || bodyp->attr("kind") != "function_body") return nullptr;
+        if (!funcStatementsSupported(bodyp->child("sequential_statement_chain"), 0)) {
+            return nullptr;
+        }
+        for (const Node* const declp2 : childEls(bodyp->child("declaration_chain"))) {
+            const std::string kind = declp2->attr("kind");
+            if (kind != "variable_declaration" && kind != "constant_declaration"
+                && !ignorableDeclaration(kind)) {
+                return nullptr;
+            }
+        }
+        if (!m_inlineBodies.insert(bodyp).second) return nullptr;  // Recursive call
+        AstNodeExpr* const resultp = inlineFunctionBody(nodep, declp, bodyp);
+        m_inlineBodies.erase(bodyp);
+        return resultp;
+    }
+
+    AstNodeExpr* inlineFunctionBody(const Node* callp, const Node* declp, const Node* bodyp) {
+        FileLine* const flp = flpOf(callp);
+        FuncEnv env;
+        const std::vector<const Node*> params
+            = childEls(declp->child("interface_declaration_chain"));
+        std::map<std::string, const Node*> actualByName;
+        std::vector<const Node*> positional;
+        for (const Node* const assocp : childEls(callp->child("parameter_association_chain"))) {
+            const Node* const formalp = assocp->child("formal");
+            const Node* const actualp = assocp->child("actual");
+            if (formalp) {
+                actualByName[vhdlFold(formalp->attr("identifier"))] = actualp;
+            } else {
+                positional.push_back(actualp);
+            }
+        }
+        size_t positionalIndex = 0;
+        for (const Node* const paramp : params) {
+            if (paramp->attr("kind") != "interface_constant_declaration") {
+                unsupported(paramp, "VHDL function parameter form");
+                deleteFuncEnv(env);
+                return nullptr;
+            }
+            const std::string name = vhdlFold(paramp->attr("identifier"));
+            const Node* actualp = nullptr;
+            const auto namedIt = actualByName.find(name);
+            if (namedIt != actualByName.end()) {
+                actualp = namedIt->second;
+            } else if (positionalIndex < positional.size()) {
+                actualp = positional[positionalIndex++];
+            }
+            if (!actualp) actualp = paramp->child("default_value");
+            if (!actualp) {
+                error(callp, "VHDL function call is missing argument '"
+                                 + paramp->attr("identifier") + "'");
+                deleteFuncEnv(env);
+                return nullptr;
+            }
+            AstNodeDType* const dtp
+                = dtypeOf(parseType(paramp->child("subtype_indication")), flpOf(paramp));
+            AstNodeExpr* const valuep = lowerExpr(actualp, dtp);
+            if (!valuep) {
+                deleteFuncEnv(env);
+                return nullptr;
+            }
+            funcEnvSet(env, name, valuep);
+        }
+        for (const Node* const declp2 : childEls(bodyp->child("declaration_chain"))) {
+            const std::string kind = declp2->attr("kind");
+            if (kind != "variable_declaration" && kind != "constant_declaration") continue;
+            const std::string name = vhdlFold(declp2->attr("identifier"));
+            AstNodeDType* const dtp
+                = dtypeOf(parseType(declp2->child("subtype_indication")), flpOf(declp2));
+            AstNodeExpr* valuep = nullptr;
+            if (const Node* const defp = declp2->child("default_value")) {
+                valuep = lowerExpr(defp, dtp);
+            }
+            if (!valuep) valuep = makeConst(flpOf(declp2), dtp, 0);
+            funcEnvSet(env, name, valuep);
+        }
+        VL_RESTORER(m_inlineEnvp);
+        m_inlineEnvp = &env;
+        AstNodeExpr* resultp = evalFuncBlock(childEls(bodyp->child("sequential_statement_chain")),
+                                             0, env, bodyp, 0);
+        if (!resultp) { error(callp, "VHDL function does not return a value on all paths"); }
+        deleteFuncEnv(env);
+        if (!resultp) return nullptr;
+        if (AstNodeDType* const resultDtp = typeRefDType(callp)) {
+            return resizeExpr(resultp, resultDtp);
+        }
+        return resultp;
+    }
+
     AstNodeExpr* lowerRecordAggregate(const Node* nodep, const Node* typeDefp) {
         FileLine* const flp = flpOf(nodep);
         const RecordInfo& info = recordInfo(typeDefp);
@@ -981,6 +1425,10 @@ class VhdlXmlFrontend final {
         FileLine* const flp = flpOf(nodep);
         const std::string kind = nodep->attr("kind");
 
+        if (kind == "simple_name" && m_inlineEnvp) {
+            const auto it = m_inlineEnvp->find(vhdlFold(nodep->attr("identifier")));
+            if (it != m_inlineEnvp->end()) return it->second->cloneTree(false);
+        }
         if (kind == "simple_name") {
             const std::string id = vhdlFold(nodep->attr("identifier"));
             if (id == "true" || id == "false") {
