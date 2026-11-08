@@ -1,6 +1,6 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //
-// DESCRIPTION: Verilator: VHDL user-defined subtypes test
+// DESCRIPTION: Verilator: VHDL user-defined and local subtype test
 //
 // This file ONLY is placed under the Creative Commons Public Domain.
 // SPDX-FileCopyrightText: 2026 Hannes Klas
@@ -23,6 +23,18 @@ int main(int argc, char** argv) {
     topp->eval();
     if (static_cast<int>(topp->y) != 0xa) {
         std::printf("%%Error: y=%d\n", static_cast<int>(topp->y));
+        ++fails;
+    }
+    if (static_cast<int>(topp->z) != 0xa) {
+        std::printf("%%Error: z=%d\n", static_cast<int>(topp->z));
+        ++fails;
+    }
+    if (static_cast<int>(topp->g) != 0xa) {
+        std::printf("%%Error: g=%d\n", static_cast<int>(topp->g));
+        ++fails;
+    }
+    if (static_cast<int>(topp->u) != 0xa) {
+        std::printf("%%Error: u=%d\n", static_cast<int>(topp->u));
         ++fails;
     }
 
