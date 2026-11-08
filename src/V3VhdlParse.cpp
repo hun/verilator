@@ -1895,6 +1895,7 @@ class VhdlXmlFrontend final {
 
         if (entityp) m_instantiatedEntities.insert(vhdlFold(unitName));
 
+        std::map<std::string, int64_t> bindings;
         if (const Node* const gmapp = stmtp->child("generic_map_aspect_chain")) {
             if (!targetp || !entityp) {
                 unsupported(stmtp, "generic map on a non-VHDL unit");
@@ -1903,7 +1904,6 @@ class VhdlXmlFrontend final {
             const std::vector<GenericDecl> generics = genericsOf(entityp);
             std::set<std::string> genericNames;
             for (const GenericDecl& decl : generics) genericNames.insert(vhdlFold(decl.name));
-            std::map<std::string, int64_t> bindings;
             bool bad = false;
             for (const Node* const assocp : childEls(gmapp)) {
                 const std::string kind = assocp->attr("kind");
@@ -1955,6 +1955,12 @@ class VhdlXmlFrontend final {
         if (targetp) {
             const auto compIt = m_components.find(vhdlFold(unitName));
             if (compIt != m_components.end()) {
+                // Validate under the instance's bindings: the component's port ranges may
+                // use its own generics, which specializeModule has since restored
+                VL_RESTORER_COPY(m_constBindings);
+                for (const auto& binding : bindings) {
+                    m_constBindings[binding.first] = binding.second;
+                }
                 validateComponent(compIt->second, *targetp, unitName);
             }
         }

@@ -20,6 +20,7 @@ int main(int argc, char** argv) {
     topp->a = 0xa5;
     topp->b = 2;
     topp->c = 0xc;
+    topp->d = 1;
     topp->eval();
     if (static_cast<int>(topp->y) != 0xa5) {
         std::printf("%%Error: y=%d\n", static_cast<int>(topp->y));
@@ -31,6 +32,10 @@ int main(int argc, char** argv) {
     }
     if (static_cast<int>(topp->w) != 0xc) {
         std::printf("%%Error: w=%d\n", static_cast<int>(topp->w));
+        ++fails;
+    }
+    if (static_cast<int>(topp->v) != 1) {
+        std::printf("%%Error: v=%d\n", static_cast<int>(topp->v));
         ++fails;
     }
 
