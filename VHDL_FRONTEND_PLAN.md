@@ -107,7 +107,8 @@ are written.
 |---|---|---|
 | Design units | `entity` + one `architecture` per entity | yes |
 | Generics | constant generics and generic type parameters, defaults, named/positional maps | yes |
-| Design units | `package` and `package body` (constants, types, subprograms) | no |
+| Design units | `package` and `package body` constants, types, subprograms (resolved at use) | yes |
+| Design units | deferred constants, package-level initialization state | no |
 | Ports | `in`, `out`, `inout`, `buffer` (mapped to `out`); named, positional and `open` maps | yes |
 | Types | `std_logic`, `std_ulogic`, `std_logic_vector`, `unsigned`, `signed`, `integer`/`natural`/`positive` with static ranges, `boolean`, enumerations | yes (arithmetic via the minimal `numeric_std` slice below) |
 | Types | records (packed vector, member select, aggregates) | yes |
@@ -425,6 +426,7 @@ completes WP1–WP4, adds the full WP5 and WP7, and reaches the 16–33 person-m
 |---|---|---|
 | 9-state values | collapse to 0/1/X/Z | `U`, `W`, `-` become X; `L`/`H` become 0/1 |
 | integer range | static checks only | runtime range violations are not detected; documented synthesis-oriented loss |
+| `assert`/`report` statements | ignored | synthesis (UG901) ignores them; VHDL-only simulation does not evaluate them |
 | delta cycles | VHDL signal assignment → NBA; Verilator NBA/settle scheduling | ordering across processes is not VHDL-identical; validate with differential tests |
 | process classification | explicit sensitivity list + NBA keeps a level-sensitive active | slower than VHDL-aware combinational inference; optimize later |
 | multiple architectures | last analyzed architecture is the default; explicit selection is an error | no configuration support in M1; M2 adds selection |

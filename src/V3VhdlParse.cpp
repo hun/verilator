@@ -1024,7 +1024,10 @@ class VhdlXmlFrontend final {
                 funcEnvSet(env, vhdlFold(targetp->attr("identifier")), valuep);
                 continue;
             }
-            if (kind == "null_statement") continue;
+            if (kind == "null_statement" || kind == "assertion_statement"
+                || kind == "report_statement") {
+                continue;
+            }
             if (kind == "return_statement") {
                 return lowerExpr(stmtp->child("expression"), nullptr);
             }
@@ -1238,7 +1241,8 @@ class VhdlXmlFrontend final {
         for (const Node* const stmtp : childEls(chainp)) {
             const std::string kind = stmtp->attr("kind");
             if (kind == "variable_assignment_statement" || kind == "return_statement"
-                || kind == "null_statement") {
+                || kind == "null_statement" || kind == "assertion_statement"
+                || kind == "report_statement") {
                 continue;
             }
             if (kind == "if_statement") {
@@ -2262,7 +2266,11 @@ class VhdlXmlFrontend final {
         if (kind == "selected_waveform_assignment_statement") {
             return lowerSelectedAssignment(stmtp, mode);
         }
-        if (kind == "null_statement") return nullptr;
+        // Assertions and reports are simulation diagnostics; synthesis (UG901) ignores them
+        if (kind == "null_statement" || kind == "assertion_statement"
+            || kind == "report_statement") {
+            return nullptr;
+        }
         if (kind == "if_statement") {
             FileLine* const flp = flpOf(stmtp);
             AstNodeExpr* const condp = lowerExpr(stmtp->child("condition"), bitDType(flp));
