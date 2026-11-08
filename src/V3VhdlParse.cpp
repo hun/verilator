@@ -257,7 +257,19 @@ class VhdlXmlFrontend final {
         std::vector<AstVar*> portList;  // Ports in declaration order
         std::map<std::string, AstVar*> ports;  // Folded port name -> Var
     };
-    std::map<std::string, ModuleInfo> m_modules;  // Folded entity name -> module
+    std::map<std::string, ModuleInfo> m_modules;  // Folded entity name -> base module
+
+    //! One generic of an entity, with its default value expression
+    struct GenericDecl final {
+        std::string name;
+        const Node* defaultp = nullptr;
+    };
+    std::map<std::string, const Node*> m_entityByName;  // Folded name -> entity
+    std::map<std::string, const Node*> m_archByEntityNodes;  // Folded name -> architecture
+    std::map<std::string, std::vector<GenericDecl>> m_entityGenerics;  // Folded name -> generics
+    std::map<std::string, ModuleInfo> m_specializations;  // Binding key -> specialized module
+    std::set<std::string> m_instantiatedEntities;  // Folded names of entities used by instances
+    int m_specDepth = 0;  // Generic specialization recursion depth
 
     // ---- XML access
 
@@ -1668,9 +1680,13 @@ class VhdlXmlFrontend final {
     }
 
     void createModule(const Node* entityp) {
+        createModuleFor(entityp, m_modules[vhdlFold(entityp->attr("identifier"))],
+                        entityp->attr("identifier"));
+    }
+
+    void createModuleFor(const Node* entityp, ModuleInfo& info, const std::string& modName) {
         FileLine* const flp = flpOf(entityp);
-        ModuleInfo& info = m_modules[vhdlFold(entityp->attr("identifier"))];
-        info.modp = new AstModule{flp, entityp->attr("identifier"), "work"};
+        info.modp = new AstModule{flp, modName, "work"};
         // One VHDL file may hold many design units; the SV filename convention does not apply
         flp->warnOff(V3ErrorCode::DECLFILENAME, true);
         int pinNum = 0;
@@ -1702,7 +1718,14 @@ class VhdlXmlFrontend final {
     }
 
     void populateModule(const Node* entityp, const Node* archp) {
-        ModuleInfo& info = m_modules[vhdlFold(entityp->attr("identifier"))];
+        populateModuleFor(entityp, archp, m_modules[vhdlFold(entityp->attr("identifier"))]);
+    }
+
+    void populateModuleFor(const Node* entityp, const Node* archp, ModuleInfo& info) {
+        // Nested specialization re-enters this function; keep the parent's state intact
+        VL_RESTORER(m_modp);
+        VL_RESTORER_COPY(m_scope);
+        VL_RESTORER_COPY(m_components);
         m_modp = info.modp;
         m_scope = info.ports;
         m_components.clear();
@@ -1750,10 +1773,6 @@ class VhdlXmlFrontend final {
         if (const Node* const stmtsp = archp->child("concurrent_statement_chain")) {
             for (const Node* const stmtp : childEls(stmtsp)) lowerConcurrent(stmtp);
         }
-
-        m_modp = nullptr;
-        m_scope.clear();
-        m_components.clear();
     }
 
     std::string instantiatedUnitName(const Node* unitp) const {
@@ -1802,15 +1821,59 @@ class VhdlXmlFrontend final {
         }
     }
 
+    std::vector<GenericDecl> genericsOf(const Node* entityp) const {
+        std::vector<GenericDecl> result;
+        const Node* const chainp = entityp->child("generic_chain");
+        if (!chainp) return result;
+        for (const Node* const declp : childEls(chainp)) {
+            if (declp->attr("kind") != "interface_constant_declaration") continue;
+            GenericDecl decl;
+            decl.name = declp->attr("identifier");
+            decl.defaultp = declp->child("default_value");
+            result.push_back(decl);
+        }
+        return result;
+    }
+
+    //! Emit (or reuse) a module specialized for one generic binding set
+    ModuleInfo* specializeModule(const Node* entityp,
+                                 const std::map<std::string, int64_t>& bindings) {
+        const std::string entityKey = vhdlFold(entityp->attr("identifier"));
+        std::string key = entityKey;
+        for (const auto& binding : bindings) {
+            key += "|" + binding.first + "=" + std::to_string(binding.second);
+        }
+        const auto found = m_specializations.find(key);
+        if (found != m_specializations.end()) return &found->second;
+        if (m_specDepth >= 32) {
+            error(entityp, "VHDL generic elaboration recursion is too deep");
+            return nullptr;
+        }
+        const auto archIt = m_archByEntityNodes.find(entityKey);
+        if (archIt == m_archByEntityNodes.end()) {
+            error(entityp, "Entity has no architecture for generic specialization");
+            return nullptr;
+        }
+
+        VL_RESTORER_COPY(m_constBindings);
+        for (const auto& binding : bindings) m_constBindings[binding.first] = binding.second;
+
+        ++m_specDepth;
+        ModuleInfo& info = m_specializations[key];
+        const std::string modName
+            = entityp->attr("identifier") + "__Vgen" + std::to_string(++m_genSeq);
+        createModuleFor(entityp, info, modName);
+        info.modp->inLibrary(true);
+        populateModuleFor(entityp, archIt->second, info);
+        --m_specDepth;
+        return &info;
+    }
+
     void lowerInstance(const Node* stmtp) {
         FileLine* const flp = flpOf(stmtp);
         const Node* const unitp = stmtp->child("instantiated_unit");
         if (!unitp) {
             unsupported(stmtp, "instantiation without an instantiated unit");
-            return;
-        }
-        if (stmtp->child("generic_map_aspect_chain")) {
-            unsupported(stmtp, "generic map on an instance");
             return;
         }
 
@@ -1820,13 +1883,75 @@ class VhdlXmlFrontend final {
             return;
         }
         const auto targetIt = m_modules.find(vhdlFold(unitName));
-        ModuleInfo* const targetp = targetIt == m_modules.end() ? nullptr : &targetIt->second;
+        ModuleInfo* targetp = targetIt == m_modules.end() ? nullptr : &targetIt->second;
+        const auto entityIt = m_entityByName.find(vhdlFold(unitName));
+        const Node* const entityp = entityIt == m_entityByName.end() ? nullptr : entityIt->second;
         // UG901: direct entity instantiation of a Verilog module is not supported
         const bool directEntity = unitp->attr("kind") == "entity_aspect_entity";
         if (directEntity && !targetp) {
             error(unitp, "Unknown VHDL entity '" + unitName + "' in direct entity instantiation");
             return;
         }
+
+        if (entityp) m_instantiatedEntities.insert(vhdlFold(unitName));
+
+        if (const Node* const gmapp = stmtp->child("generic_map_aspect_chain")) {
+            if (!targetp || !entityp) {
+                unsupported(stmtp, "generic map on a non-VHDL unit");
+                return;
+            }
+            const std::vector<GenericDecl> generics = genericsOf(entityp);
+            std::set<std::string> genericNames;
+            for (const GenericDecl& decl : generics) genericNames.insert(vhdlFold(decl.name));
+            std::map<std::string, int64_t> bindings;
+            bool bad = false;
+            for (const Node* const assocp : childEls(gmapp)) {
+                const std::string kind = assocp->attr("kind");
+                if (kind == "association_element_open") {
+                    // GHDL emits an open association for an un-mapped generic; the default
+                    // value is filled in below
+                    continue;
+                }
+                if (kind != "association_element_by_expression"
+                    && kind != "association_element_by_name") {
+                    unsupported(assocp, "generic association form '" + kind + "'");
+                    bad = true;
+                    continue;
+                }
+                const Node* const formalp = assocp->child("formal");
+                const Node* const actualp = assocp->child("actual");
+                int64_t value = 0;
+                if (!formalp || !actualp || !evalConst(actualp, value)) {
+                    unsupported(assocp, "non-static generic actual");
+                    bad = true;
+                    continue;
+                }
+                const std::string formalName = vhdlFold(formalp->attr("identifier"));
+                if (!genericNames.count(formalName)) {
+                    error(assocp, "Unknown generic '" + formalp->attr("identifier") + "' on '"
+                                      + unitName + "'");
+                    bad = true;
+                    continue;
+                }
+                bindings[formalName] = value;
+            }
+            if (bad) return;
+            for (const GenericDecl& decl : generics) {
+                const std::string formalName = vhdlFold(decl.name);
+                if (bindings.find(formalName) != bindings.end()) continue;
+                int64_t value = 0;
+                if (!decl.defaultp || !evalConst(decl.defaultp, value)) {
+                    error(stmtp,
+                          "Generic '" + decl.name + "' has no static default and is not mapped");
+                    return;
+                }
+                bindings[formalName] = value;
+            }
+            ModuleInfo* const spec = specializeModule(entityp, bindings);
+            if (!spec) return;
+            targetp = spec;
+        }
+
         if (targetp) {
             const auto compIt = m_components.find(vhdlFold(unitName));
             if (compIt != m_components.end()) {
@@ -1944,6 +2069,7 @@ public:
                                                         << entityName << "'; using the last one");
             }
             archByEntity[key] = archp;
+            m_archByEntityNodes[key] = archp;
         }
 
         std::set<std::string> entityKeys;
@@ -1959,12 +2085,33 @@ public:
                 error(entityp, "Entity '" + name + "' has no architecture; cannot elaborate it");
                 continue;
             }
+            m_entityByName[vhdlFold(name)] = entityp;
+            m_entityGenerics[vhdlFold(name)] = genericsOf(entityp);
             modules.emplace_back(entityp, it->second);
         }
 
         // Create all modules first so instances can bind to ports emitted later in the walk
         for (const auto& module : modules) createModule(module.first);
         for (const auto& module : modules) populateModule(module.first, module.second);
+
+        // A generic entity's base module (default bindings) is instantiable but must not
+        // compete as a top-level module when it is only reached through specializations
+        std::set<std::string> instantiated;
+        for (AstNodeModule* const modp : m_rootp->modulespList()) {
+            for (AstNode* const stmtp : modp->stmtspList()) {
+                if (const AstCell* const cellp = VN_CAST(stmtp, Cell)) {
+                    instantiated.insert(cellp->modName());
+                }
+            }
+        }
+        for (auto& entry : m_modules) {
+            const auto genIt = m_entityGenerics.find(entry.first);
+            if (genIt != m_entityGenerics.end() && !genIt->second.empty() && entry.second.modp
+                && (instantiated.count(entry.second.modp->name())
+                    || m_instantiatedEntities.count(entry.first))) {
+                entry.second.modp->inLibrary(true);
+            }
+        }
 
         for (const Node* const archp : m_archNodes) {
             const std::string entityName = entityNameOf(archp);
