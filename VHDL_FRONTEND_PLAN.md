@@ -35,6 +35,11 @@ reports "not supported yet" with the VHDL source location. The in-tree parser is
 the day the front end must be self-contained again; it is not reachable from
 `--language vhdl` today.
 
+Developer helpers: `nodist/ghdl_xml` dumps the analyzed GHDL XML that the frontend
+consumes, and `nodist/ghdl_synth_suite.py` runs the GHDL `synth` testsuite's design units
+through `--language vhdl --lint-only`, categorizing PASS/UNSUPPORTED/GHDL_ERROR/ERROR in a
+TSV report. Neither is installed with Verilator.
+
 | Work package | State |
 |---|---|
 | WP1 parser (in-tree) | reserved; not started |
