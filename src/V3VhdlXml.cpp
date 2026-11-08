@@ -89,7 +89,8 @@ class XmlParser final {
     void fail(const std::string& message) {
         if (m_failed) return;
         m_failed = true;
-        m_flp->v3error("Malformed GHDL XML at offset " + std::to_string(m_pos) + ": " + message);
+        m_flp->v3error("Malformed GHDL XML at offset " + std::to_string(m_pos) + ": "
+                       + message);  // LCOV_EXCL_LINE
     }
 
     void skipUntil(const char* terminator) {

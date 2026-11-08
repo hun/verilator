@@ -21,7 +21,7 @@ begin
   process (clk, rst) is
   begin
     if rst = '1' then
-      q <= '0';
+      q <= '1';
     elsif rising_edge(clk) then
       q <= d;
     end if;

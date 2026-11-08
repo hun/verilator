@@ -19,9 +19,9 @@ new value model and are out of scope.
 | Work package | State |
 |---|---|
 | WP0 plumbing | **done** on branch `vhdl-frontend-wp0` (`729df7a`, `bed81f2`) |
-| WP1 front end | **GHDL XML path implemented**: entities with ports, architecture signals, concurrent assignments, clocked processes (`rising_edge`/`falling_edge`), asynchronous-reset processes, `if`/`elsif`/`else`, `and`/`or`/`xor`/`not`, `+`/`-`, `=`/`/=`, type conversions, declaration initializers, and component/direct-entity instantiation with named, positional and open port maps. Plain sensitivity-list processes execute once at time zero, as VHDL requires. The in-tree lexer/parser remains reserved and is not used |
+| WP1 front end | **GHDL XML path implemented**: entities with ports, architecture signals, concurrent assignments, clocked processes (`rising_edge`/`falling_edge`), synchronous and asynchronous reset processes, `if`/`elsif`/`else`, `and`/`or`/`xor`/`not`, `+`/`-`, `=`/`/=`, type conversions, declaration initializers, and component/direct-entity instantiation with named, positional and open port maps. Component declarations are validated against the bound entity (direction and width). Processes execute once at time zero, as VHDL requires. The in-tree lexer/parser remains reserved and is not used |
 | WP2 semantics | provided by GHDL analysis; Verilator does not repeat it on this path |
-| WP3 elaboration | entity/architecture binding and VHDL-entity instance binding; generics, generate and component-interface validation are not implemented |
+| WP3 elaboration | entity/architecture binding, VHDL-entity instance binding and component-interface validation; generics and generate are not implemented |
 | WP4–WP8 | not started |
 
 The active frontend runs `ghdl --file-to-xml --std=08` out of process, parses the XML into a
@@ -312,7 +312,9 @@ analysis side (2026-11-08).
   accept it through generated stubs - that would compile designs Vivado rejects. GHDL
   agrees at analysis: `entity work.svmod` reports
   `unit "svmod" not found in library "work"` and aborts `--file-to-xml`, while a declared,
-  unbound component analyzes cleanly and defers binding.
+  unbound component analyzes cleanly and defers binding. Because GHDL checks only the port
+  map against the component declaration, the frontend validates the component's ports
+  (direction and width) against the bound entity before emitting the cell.
 - **Binding algorithm (UG901).** Treat the component name as a VHDL design-unit name and
   search `work`; if a VHDL unit is found, bind it; otherwise treat the name as a Verilog
   module name and search **case-sensitively**; bind the match. Configuration declarations
