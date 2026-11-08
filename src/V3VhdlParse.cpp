@@ -508,7 +508,7 @@ class VhdlXmlFrontend final {
                 // Generic type parameter: resolve through the instance's binding
                 return parseType(m_typeBindings.find(id)->second, depth + 1);
             }
-            if (id == "std_logic" || id == "boolean") {
+            if (id == "std_logic" || id == "std_ulogic" || id == "boolean") {
                 spec.kwd = VBasicDTypeKwd::LOGIC;
             } else if (id == "bit") {
                 spec.kwd = VBasicDTypeKwd::BIT;
@@ -580,8 +580,8 @@ class VhdlXmlFrontend final {
         if (mark == "signed") {
             spec.kwd = VBasicDTypeKwd::LOGIC;
             spec.signing = VSigning::SIGNED;
-        } else if (mark == "unsigned" || mark == "std_logic_vector" || mark == "std_logic"
-                   || mark == "std_ulogic") {
+        } else if (mark == "unsigned" || mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                   || mark == "std_logic" || mark == "std_ulogic") {
             spec.kwd = VBasicDTypeKwd::LOGIC;
             spec.signing = VSigning::UNSIGNED;
         } else if (mark == "bit_vector" || mark == "bit") {
@@ -2038,20 +2038,26 @@ class VhdlXmlFrontend final {
             if (!dtp) dtp = typeRefDType(nodep);
             if (!dtp) dtp = bitDType(flp);
             if (content.empty()) {
-                unsupported(nodep, "empty VHDL string literal");
+                unsupported(nodep, "empty string literal");
                 return makeConst(flp, dtp, 0);
             }
             uint32_t value = 0;
             for (const char ch : content) {
                 if (ch != '0' && ch != '1') {
-                    unsupported(nodep, "non-binary VHDL string literal");
+                    unsupported(nodep, "non-binary string literal");
                     return makeConst(flp, dtp, 0);
                 }
                 value = (value << 1) | (ch == '1' ? 1U : 0U);
             }
-            if (static_cast<int>(content.size()) != dtp->width()) {
+            const int contentWidth = static_cast<int>(content.size());
+            if (contentWidth > dtp->width()) {
                 error(nodep, "VHDL string literal length does not match its context");
                 return makeConst(flp, dtp, 0);
+            }
+            // A numeric_std operation may resize a shorter literal to the operand width
+            if (contentWidth < dtp->width() && dtp->isSigned() && content.front() == '1') {
+                const int shift = dtp->width() - contentWidth;
+                if (shift < 32) value |= ((1U << shift) - 1U) << contentWidth;
             }
             return makeConst(flp, dtp, value);
         }
