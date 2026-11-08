@@ -1024,6 +1024,66 @@ class VhdlXmlFrontend final {
         return attrValue(nodep, value);
     }
 
+    //! Evaluate a locally static boolean expression (if-generate conditions)
+    bool evalBool(const Node* nodep, bool& value) const {
+        if (!nodep) return false;
+        const std::string kind = nodep->attr("kind");
+        if (kind == "simple_name" || kind == "enumeration_literal") {
+            const std::string id = vhdlFold(nodep->attr("identifier"));
+            if (id == "true" || id == "false") {
+                value = id == "true";
+                return true;
+            }
+            return false;
+        }
+        if (kind == "and_operator" || kind == "or_operator" || kind == "xor_operator") {
+            bool lhsv = false;
+            bool rhsv = false;
+            if (!evalBool(nodep->child("left"), lhsv) || !evalBool(nodep->child("right"), rhsv)) {
+                return false;
+            }
+            if (kind == "and_operator") {
+                value = lhsv && rhsv;
+            } else if (kind == "or_operator") {
+                value = lhsv || rhsv;
+            } else {
+                value = lhsv != rhsv;
+            }
+            return true;
+        }
+        if (kind == "not_operator") {
+            bool operandv = false;
+            if (!evalBool(nodep->child("operand"), operandv)) return false;
+            value = !operandv;
+            return true;
+        }
+        if (kind == "equality_operator" || kind == "inequality_operator"
+            || kind == "less_than_operator" || kind == "less_than_or_equal_operator"
+            || kind == "greater_than_operator" || kind == "greater_than_or_equal_operator") {
+            int64_t lhsv = 0;
+            int64_t rhsv = 0;
+            if (!evalConst(nodep->child("left"), lhsv)
+                || !evalConst(nodep->child("right"), rhsv)) {
+                return false;
+            }
+            if (kind == "equality_operator") {
+                value = lhsv == rhsv;
+            } else if (kind == "inequality_operator") {
+                value = lhsv != rhsv;
+            } else if (kind == "less_than_operator") {
+                value = lhsv < rhsv;
+            } else if (kind == "less_than_or_equal_operator") {
+                value = lhsv <= rhsv;
+            } else if (kind == "greater_than_operator") {
+                value = lhsv > rhsv;
+            } else {
+                value = lhsv >= rhsv;
+            }
+            return true;
+        }
+        return false;
+    }
+
     //! Resolve one bound of a discrete range; limits may be references into the dump
     const Node* rangeBound(const Node* rangep, bool leftBound) const {
         const Node* boundp = rangep->child(leftBound ? "left_limit_expr" : "right_limit_expr");
@@ -1412,6 +1472,52 @@ class VhdlXmlFrontend final {
             new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
     }
 
+    void emitGenerateBody(const Node* bodyp, const std::string& suffix) {
+        VL_RESTORER_COPY(m_scope);
+        const std::string savedSuffix = m_genSuffix;
+        m_genSuffix = suffix;
+        emitGenerateDeclarations(bodyp);
+        if (const Node* const concp = bodyp->child("concurrent_statement_chain")) {
+            for (const Node* const stmtp2 : childEls(concp)) lowerConcurrent(stmtp2);
+        }
+        m_genSuffix = savedSuffix;
+    }
+
+    //! One else/elsif branch of an if-generate; recurses through the else chain
+    void lowerGenerateElse(const Node* elseClausep, const std::string& suffix) {
+        if (!elseClausep) return;
+        bool take = true;
+        if (const Node* const condp = elseClausep->child("condition")) {
+            if (!evalBool(condp, take)) {
+                unsupported(elseClausep, "non-static if-generate condition");
+                return;
+            }
+        }
+        if (take) {
+            if (const Node* const bodyp = elseClausep->child("generate_statement_body")) {
+                emitGenerateBody(bodyp, suffix);
+                return;
+            }
+        }
+        lowerGenerateElse(elseClausep->child("generate_else_clause"), suffix);
+    }
+
+    void lowerIfGenerate(const Node* stmtp) {
+        bool condition = false;
+        if (!evalBool(stmtp->child("condition"), condition)) {
+            unsupported(stmtp, "non-static if-generate condition");
+            return;
+        }
+        const std::string suffix = m_genSuffix + "__ifgen" + std::to_string(++m_varSeq);
+        if (condition) {
+            if (const Node* const bodyp = stmtp->child("generate_statement_body")) {
+                emitGenerateBody(bodyp, suffix);
+            }
+        } else {
+            lowerGenerateElse(stmtp->child("generate_else_clause"), suffix);
+        }
+    }
+
     void lowerForGenerate(const Node* stmtp) {
         const Node* const specp = stmtp->child("parameter_specification");
         if (!specp || specp->attr("kind") != "iterator_declaration") {
@@ -1441,14 +1547,7 @@ class VhdlXmlFrontend final {
             const int64_t savedValue = hadBinding ? saved->second : 0;
             m_constBindings[key] = value;
 
-            VL_RESTORER_COPY(m_scope);
-            const std::string savedSuffix = m_genSuffix;
-            m_genSuffix = savedSuffix + "__gen" + std::to_string(value);
-            emitGenerateDeclarations(bodyp);
-            if (const Node* const concp = bodyp->child("concurrent_statement_chain")) {
-                for (const Node* const stmtp2 : childEls(concp)) lowerConcurrent(stmtp2);
-            }
-            m_genSuffix = savedSuffix;
+            emitGenerateBody(bodyp, m_genSuffix + "__gen" + std::to_string(value));
 
             if (hadBinding) {
                 m_constBindings[key] = savedValue;
@@ -1476,8 +1575,7 @@ class VhdlXmlFrontend final {
             }
             FileLine* const dflp = flpOf(declp);
             const std::string name = declp->attr("identifier");
-            const std::string mangled
-                = "vhdlgen_" + std::to_string(++m_varSeq) + "__" + name;
+            const std::string mangled = "vhdlgen_" + std::to_string(++m_varSeq) + "__" + name;
             AstVar* const varp
                 = new AstVar{dflp, VVarType::VAR, mangled, dtypeOf(parseType(subtypep), dflp)};
             m_modp->addStmtsp(varp);
@@ -1487,8 +1585,7 @@ class VhdlXmlFrontend final {
                 AstNodeExpr* const rhsp = lowerDefault(defp, varp->dtypep());
                 if (rhsp) {
                     AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
-                    m_modp->addStmtsp(
-                        new AstInitialStatic{dflp, new AstAssign{dflp, lhsp, rhsp}});
+                    m_modp->addStmtsp(new AstInitialStatic{dflp, new AstAssign{dflp, lhsp, rhsp}});
                 }
             }
         }
@@ -1510,6 +1607,10 @@ class VhdlXmlFrontend final {
         }
         if (kind == "for_generate_statement") {
             lowerForGenerate(stmtp);
+            return;
+        }
+        if (kind == "if_generate_statement") {
+            lowerIfGenerate(stmtp);
             return;
         }
         unsupported(stmtp, "concurrent statement '" + kind + "'");
@@ -1768,8 +1869,8 @@ class VhdlXmlFrontend final {
             }
         }
 
-        AstCell* const cellp = new AstCell{flp, flp, stmtp->attr("label") + m_genSuffix,
-                                           modName, pinsp, nullptr, nullptr};
+        AstCell* const cellp = new AstCell{
+            flp, flp, stmtp->attr("label") + m_genSuffix, modName, pinsp, nullptr, nullptr};
         m_modp->addStmtsp(cellp);
     }
 
