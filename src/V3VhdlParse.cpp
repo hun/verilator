@@ -629,9 +629,18 @@ class VhdlXmlFrontend final {
 
     // ---- Statements
 
+    //! Target of an assignment; desugared assignments reference the outer target by id
+    const Node* targetNode(const Node* stmtp) const {
+        const Node* targetp = stmtp->child("target");
+        if (targetp && !targetp->has("kind") && targetp->has("ref")) {
+            targetp = nodeById(targetp->attr("ref"));
+        }
+        return targetp;
+    }
+
     AstNode* lowerAssignment(const Node* stmtp, AssignMode mode) {
         FileLine* const flp = flpOf(stmtp);
-        AstNodeExpr* const lhsp = lowerLValue(stmtp, stmtp->child("target"));
+        AstNodeExpr* const lhsp = lowerLValue(stmtp, targetNode(stmtp));
         if (!lhsp) return nullptr;
         const std::vector<const Node*> waves = childEls(stmtp->child("waveform_chain"));
         if (waves.size() != 1) {
@@ -686,6 +695,73 @@ class VhdlXmlFrontend final {
         return new AstAssign{flp, lhsp, rhsp};
     }
 
+    AstNode* lowerSelectedAssignment(const Node* stmtp, AssignMode mode) {
+        FileLine* const flp = flpOf(stmtp);
+        const Node* const targetp = targetNode(stmtp);
+        AstNodeExpr* const selectorp = lowerExpr(stmtp->child("expression"), nullptr);
+        if (!selectorp) return nullptr;
+
+        AstCaseItem* itemsp = nullptr;
+        AstCaseItem* currentp = nullptr;
+        for (const Node* const choicep : childEls(stmtp->child("selected_waveform_chain"))) {
+            AstConst* condp = nullptr;
+            const std::string kind = choicep->attr("kind");
+            if (kind == "choice_by_expression") {
+                const Node* const choiceExprp = choicep->child("choice_expression");
+                if (!choiceExprp) {
+                    unsupported(choicep, "selected choice without an expression");
+                    continue;
+                }
+                AstNodeExpr* const choiceValp = lowerExpr(choiceExprp, selectorp->dtypep());
+                if (!choiceValp) continue;
+                condp = VN_CAST(choiceValp, Const);
+                if (!condp) {
+                    VL_DO_DANGLING(choiceValp->deleteTree(), choiceValp);
+                    unsupported(choicep, "non-constant VHDL selected choice");
+                    continue;
+                }
+            } else if (kind != "choice_by_others") {
+                unsupported(choicep, "selected choice form '" + kind + "'");
+                continue;
+            }
+
+            const bool sameAlternative = choicep->attr("same_alternative_flag") == "true";
+            if (!sameAlternative || !currentp) {
+                AstNode* bodyp = nullptr;
+                for (const Node* const wavep : childEls(choicep->child("associated_chain"))) {
+                    if (wavep->attr("kind") != "waveform_element") {
+                        unsupported(wavep,
+                                    "selected association form '" + wavep->attr("kind") + "'");
+                        continue;
+                    }
+                    const Node* const wep = wavep->child("we_value");
+                    if (!wep) {
+                        unsupported(wavep, "selected association without a value");
+                        continue;
+                    }
+                    AstNodeExpr* const lhsp = lowerLValue(stmtp, targetp);
+                    AstNodeExpr* const rhsp = lowerExpr(wep, lhsp ? lhsp->dtypep() : nullptr);
+                    if (!lhsp || !rhsp) continue;
+                    AstNode* assp = nullptr;
+                    if (mode == AssignMode::DELAYED) {
+                        assp = new AstAssignDly{flp, lhsp, rhsp};
+                    } else if (mode == AssignMode::BLOCKING) {
+                        assp = new AstAssign{flp, lhsp, rhsp};
+                    } else {
+                        assp = new AstAssignW{flp, lhsp, rhsp};
+                    }
+                    bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, assp) : assp;
+                }
+                currentp = new AstCaseItem{flp, condp, bodyp};
+                itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
+                                : currentp;
+            } else if (condp) {
+                currentp->addCondsp(condp);
+            }
+        }
+        return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+    }
+
     AstNode* lowerCase(const Node* stmtp, AssignMode mode) {
         FileLine* const flp = flpOf(stmtp);
         AstNodeExpr* const selectorp = lowerExpr(stmtp->child("expression"), nullptr);
@@ -735,6 +811,9 @@ class VhdlXmlFrontend final {
         if (kind == "simple_signal_assignment_statement") { return lowerAssignment(stmtp, mode); }
         if (kind == "variable_assignment_statement") return lowerVariableAssignment(stmtp);
         if (kind == "case_statement") return lowerCase(stmtp, mode);
+        if (kind == "selected_waveform_assignment_statement") {
+            return lowerSelectedAssignment(stmtp, mode);
+        }
         if (kind == "null_statement") return nullptr;
         if (kind == "if_statement") {
             FileLine* const flp = flpOf(stmtp);
@@ -823,6 +902,47 @@ class VhdlXmlFrontend final {
         return true;
     }
 
+    //! Recognize the "clk'event and clk = '1'" clock idiom
+    bool eventEdge(const Node* condp, EdgeInfo& info) {
+        if (!condp || condp->attr("kind") != "and_operator") return false;
+        const Node* const lhsp = condp->child("left");
+        const Node* const rhsp = condp->child("right");
+        const Node* eventp = nullptr;
+        const Node* cmpp = nullptr;
+        if (lhsp && lhsp->attr("kind") == "event_attribute") {
+            eventp = lhsp;
+            cmpp = rhsp;
+        } else if (rhsp && rhsp->attr("kind") == "event_attribute") {
+            eventp = rhsp;
+            cmpp = lhsp;
+        } else {
+            return false;
+        }
+        if (!cmpp || cmpp->attr("kind") != "equality_operator") return false;
+        const Node* const prefixp = eventp->child("prefix");
+        if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
+        const Node* const cmpLhsp = cmpp->child("left");
+        const Node* const cmpRhsp = cmpp->child("right");
+        const Node* litp = nullptr;
+        const Node* namep = nullptr;
+        if (cmpLhsp && cmpLhsp->attr("kind") == "character_literal") {
+            litp = cmpLhsp;
+            namep = cmpRhsp;
+        } else if (cmpRhsp && cmpRhsp->attr("kind") == "character_literal") {
+            litp = cmpRhsp;
+            namep = cmpLhsp;
+        }
+        if (!litp || !namep || namep->attr("kind") != "simple_name") return false;
+        if (vhdlFold(namep->attr("identifier")) != vhdlFold(prefixp->attr("identifier"))) {
+            return false;
+        }
+        const std::string lit = litp->attr("identifier");
+        if (lit != "'1'" && lit != "'0'") return false;
+        info.edgeType = lit == "'1'" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+        info.sigp = lowerExpr(prefixp, nullptr);
+        return info.sigp != nullptr;
+    }
+
     //! Extract the reset signal/edge from a supported reset condition; also lowers the condition
     bool resetEdge(const Node* condp, AstNodeExpr*& sigp, VEdgeType& edgeType,
                    AstNodeExpr*& condExprp) {
@@ -908,7 +1028,8 @@ class VhdlXmlFrontend final {
         // Clocked idiom: a single "if rising_edge(clk)"/"if falling_edge(clk)" wrapper
         if (const Node* const ifp = singleTopIf(bodyp)) {
             EdgeInfo clock;
-            if (edgeCall(ifp->child("condition"), clock)) {
+            if (edgeCall(ifp->child("condition"), clock)
+                || eventEdge(ifp->child("condition"), clock)) {
                 if (ifp->child("else_clause")) {
                     unsupported(ifp, "else branch in a clocked process");
                     return;
@@ -925,7 +1046,8 @@ class VhdlXmlFrontend final {
             const Node* const elsep = ifp->child("else_clause");
             EdgeInfo clock2;
             if (elsep && elsep->attr("kind") == "elsif" && !elsep->child("else_clause")
-                && edgeCall(elsep->child("condition"), clock2)) {
+                && (edgeCall(elsep->child("condition"), clock2)
+                    || eventEdge(elsep->child("condition"), clock2))) {
                 AstNodeExpr* rstSigp = nullptr;
                 VEdgeType rstEdge = VEdgeType::ET_CHANGED;
                 AstNodeExpr* rstCondp = nullptr;
