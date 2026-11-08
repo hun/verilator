@@ -628,6 +628,31 @@ class VhdlXmlFrontend final {
             unsupported(nodep, "character literal " + id);
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
         }
+        if (kind == "left_attribute" || kind == "right_attribute" || kind == "high_attribute"
+            || kind == "low_attribute" || kind == "length_attribute"
+            || kind == "ascending_attribute" || kind == "left_array_attribute"
+            || kind == "right_array_attribute" || kind == "high_array_attribute"
+            || kind == "low_array_attribute" || kind == "length_array_attribute"
+            || kind == "ascending_array_attribute") {
+            int64_t value = 0;
+            if (!attrValue(nodep, value)) {
+                unsupported(nodep, "attribute " + kind);
+                return makeConst(flp, contextp ? contextp : intDType(flp), 0);
+            }
+            const bool isAscending
+                = kind == "ascending_attribute" || kind == "ascending_array_attribute";
+            AstNodeDType* const dtp = isAscending ? (contextp ? contextp : bitDType(flp))
+                                                  : (contextp ? contextp : intDType(flp));
+            return makeConst(flp, dtp, static_cast<uint64_t>(value));
+        }
+        if (kind == "enumeration_literal") {
+            const std::string id = vhdlFold(nodep->attr("identifier"));
+            if (id == "true" || id == "false") {
+                return makeConst(flp, contextp ? contextp : bitDType(flp), id == "true" ? 1U : 0U);
+            }
+            unsupported(nodep, "enumeration literal " + nodep->attr("identifier"));
+            return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+        }
         if (kind == "string_literal8") {
             const Node* const strp = nodep->child("string8_id");
             const std::string content = strp ? strp->attr("content") : std::string{};
@@ -917,6 +942,127 @@ class VhdlXmlFrontend final {
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
 
+    //! Value of a static array attribute ('left/'right/'high/'low/'length/'ascending)
+    bool attrValue(const Node* nodep, int64_t& value) const {
+        std::string kind = nodep->attr("kind");
+        const std::string suffix = "_array_attribute";
+        if (kind.size() > suffix.size()
+            && kind.compare(kind.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            kind.resize(kind.size() - suffix.size());
+        }
+        if (kind != "left" && kind != "right" && kind != "high" && kind != "low"
+            && kind != "length" && kind != "ascending") {
+            return false;
+        }
+        const Node* const prefixp = nodep->child("prefix");
+        if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
+        AstVar* const varp = lookupVar(prefixp);
+        if (!varp) return false;
+        const AstBasicDType* const basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
+        if (!basicp) return false;
+        const int left = basicp->left();
+        const int right = basicp->right();
+        if (kind == "left") {
+            value = left;
+        } else if (kind == "right") {
+            value = right;
+        } else if (kind == "high") {
+            value = std::max(left, right);
+        } else if (kind == "low") {
+            value = std::min(left, right);
+        } else if (kind == "length") {
+            value = basicp->width();
+        } else {
+            value = basicp->ascending() ? 1 : 0;
+        }
+        return true;
+    }
+
+    //! Evaluate a locally static integer expression from the dump
+    bool evalConst(const Node* nodep, int64_t& value) const {
+        if (!nodep) return false;
+        const std::string kind = nodep->attr("kind");
+        if (kind == "integer_literal") {
+            value = std::strtoll(nodep->attr("value").c_str(), nullptr, 10);
+            return true;
+        }
+        if (kind == "addition_operator" || kind == "subtraction_operator"
+            || kind == "multiplication_operator") {
+            int64_t lhsv = 0;
+            int64_t rhsv = 0;
+            if (!evalConst(nodep->child("left"), lhsv)
+                || !evalConst(nodep->child("right"), rhsv)) {
+                return false;
+            }
+            if (kind == "addition_operator") {
+                value = lhsv + rhsv;
+            } else if (kind == "subtraction_operator") {
+                value = lhsv - rhsv;
+            } else {
+                value = lhsv * rhsv;
+            }
+            return true;
+        }
+        if (kind == "negation_operator") {
+            int64_t operandv = 0;
+            if (!evalConst(nodep->child("operand"), operandv)) return false;
+            value = -operandv;
+            return true;
+        }
+        if (kind == "parentheses_expression") {
+            return evalConst(nodep->child("expression"), value);
+        }
+        if (kind == "simple_name") {
+            const auto it = m_constBindings.find(vhdlFold(nodep->attr("identifier")));
+            if (it != m_constBindings.end()) {
+                value = it->second;
+                return true;
+            }
+            return false;
+        }
+        return attrValue(nodep, value);
+    }
+
+    //! Resolve one bound of a discrete range; limits may be references into the dump
+    const Node* rangeBound(const Node* rangep, bool leftBound) const {
+        const Node* boundp = rangep->child(leftBound ? "left_limit_expr" : "right_limit_expr");
+        if (boundp) return boundp;
+        boundp = rangep->child(leftBound ? "left_limit" : "right_limit");
+        if (!boundp) return nullptr;
+        if (boundp->has("ref")) return nodeById(boundp->attr("ref"));
+        return boundp->has("kind") ? boundp : nullptr;
+    }
+
+    //! Evaluate a discrete range to integer bounds and direction
+    bool discreteRange(const Node* rangep, int& left, int& right, bool& ascending) const {
+        if (!rangep) return false;
+        ascending = rangep->attr("direction") == "to";
+        int64_t leftValue = 0;
+        int64_t rightValue = 0;
+        if (evalConst(rangeBound(rangep, true), leftValue)
+            && evalConst(rangeBound(rangep, false), rightValue)) {
+            left = static_cast<int>(leftValue);
+            right = static_cast<int>(rightValue);
+            return true;
+        }
+        // "for i in a'range" carries the array's range as an attribute origin
+        const Node* const originp = rangep->child("range_origin");
+        if (originp && originp->attr("kind") == "range_array_attribute") {
+            const Node* const prefixp = originp->child("prefix");
+            if (!prefixp) return false;
+            const auto it = m_scope.find(vhdlFold(prefixp->attr("identifier")));
+            if (it == m_scope.end()) return false;
+            const AstBasicDType* const basicp
+                = VN_CAST(it->second->dtypep()->skipRefp(), BasicDType);
+            if (!basicp || basicp->width() <= 1) return false;
+            left = basicp->left();
+            right = basicp->right();
+            ascending = basicp->ascending();
+            return true;
+        }
+        return false;
+    }
+
     AstNode* lowerForLoop(const Node* stmtp, AssignMode mode) {
         const Node* const specp = stmtp->child("parameter_specification");
         if (!specp || specp->attr("kind") != "iterator_declaration") {
@@ -926,20 +1072,15 @@ class VhdlXmlFrontend final {
         const std::string name = specp->attr("identifier");
         const Node* const subtypep = specp->child("subtype_indication");
         const Node* const rangep = subtypep ? subtypep->child("range_constraint") : nullptr;
-        if (!rangep) {
-            unsupported(stmtp, "for loop without a static range");
-            return nullptr;
-        }
         int left = 0;
         int right = 0;
-        if (!literalValue(rangep->child("left_limit_expr"), left)
-            || !literalValue(rangep->child("right_limit_expr"), right)) {
+        bool ascending = true;
+        if (!discreteRange(rangep, left, right, ascending)) {
             unsupported(stmtp, "non-static VHDL loop range");
             return nullptr;
         }
 
         const std::string key = vhdlFold(name);
-        const bool ascending = rangep->attr("direction") == "to";
         const int step = ascending ? 1 : -1;
         AstNode* headp = nullptr;
         for (int value = left; ascending ? value <= right : value >= right; value += step) {
@@ -1270,6 +1411,51 @@ class VhdlXmlFrontend final {
             new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
     }
 
+    void lowerForGenerate(const Node* stmtp) {
+        const Node* const specp = stmtp->child("parameter_specification");
+        if (!specp || specp->attr("kind") != "iterator_declaration") {
+            unsupported(stmtp, "for generate without an iterator specification");
+            return;
+        }
+        const Node* const subtypep = specp->child("subtype_indication");
+        const Node* const rangep = subtypep ? subtypep->child("range_constraint") : nullptr;
+        int left = 0;
+        int right = 0;
+        bool ascending = true;
+        if (!discreteRange(rangep, left, right, ascending)) {
+            unsupported(stmtp, "non-static VHDL generate range");
+            return;
+        }
+        const Node* const bodyp = stmtp->child("generate_statement_body");
+        if (!bodyp) {
+            unsupported(stmtp, "generate without a body");
+            return;
+        }
+        if (const Node* const declsp = bodyp->child("declaration_chain")) {
+            if (!childEls(declsp).empty()) {
+                unsupported(bodyp, "declarations inside a generate block");
+                return;
+            }
+        }
+
+        const std::string key = vhdlFold(specp->attr("identifier"));
+        const int step = ascending ? 1 : -1;
+        for (int value = left; ascending ? value <= right : value >= right; value += step) {
+            const auto saved = m_constBindings.find(key);
+            const bool hadBinding = saved != m_constBindings.end();
+            const int64_t savedValue = hadBinding ? saved->second : 0;
+            m_constBindings[key] = value;
+            if (const Node* const concp = bodyp->child("concurrent_statement_chain")) {
+                for (const Node* const stmtp2 : childEls(concp)) lowerConcurrent(stmtp2);
+            }
+            if (hadBinding) {
+                m_constBindings[key] = savedValue;
+            } else {
+                m_constBindings.erase(key);
+            }
+        }
+    }
+
     void lowerConcurrent(const Node* stmtp) {
         const std::string kind = stmtp->attr("kind");
         if (kind == "sensitized_process_statement") {
@@ -1282,6 +1468,10 @@ class VhdlXmlFrontend final {
         }
         if (kind == "component_instantiation_statement") {
             lowerInstance(stmtp);
+            return;
+        }
+        if (kind == "for_generate_statement") {
+            lowerForGenerate(stmtp);
             return;
         }
         unsupported(stmtp, "concurrent statement '" + kind + "'");
