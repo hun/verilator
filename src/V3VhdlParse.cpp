@@ -553,6 +553,27 @@ class VhdlXmlFrontend final {
         return new AstAssignW{flp, lhsp, rhsp};
     }
 
+    //! Lower an elsif/else clause chain attached to an if statement
+    AstNode* lowerElse(const Node* elsep, bool delayed) {
+        const std::string kind = elsep->attr("kind");
+        const Node* const condp = elsep->child("condition");
+        if (kind == "else" || (kind == "elsif" && !condp)) {
+            return lowerStmtChain(elsep->child("sequential_statement_chain"), delayed);
+        }
+        if (kind == "elsif") {
+            FileLine* const flp = flpOf(elsep);
+            AstNodeExpr* const condExprp = lowerExpr(condp, bitDType(flp));
+            AstNode* const thensp
+                = lowerStmtChain(elsep->child("sequential_statement_chain"), delayed);
+            AstNode* const elsesp = elsep->child("else_clause")
+                                        ? lowerElse(elsep->child("else_clause"), delayed)
+                                        : nullptr;
+            return new AstIf{flp, condExprp, thensp, elsesp};
+        }
+        unsupported(elsep, "else clause form '" + kind + "'");
+        return nullptr;
+    }
+
     AstNode* lowerStmt(const Node* stmtp, bool delayed) {
         const std::string kind = stmtp->attr("kind");
         if (kind == "simple_signal_assignment_statement") {
@@ -561,11 +582,13 @@ class VhdlXmlFrontend final {
         if (kind == "null_statement") return nullptr;
         if (kind == "if_statement") {
             FileLine* const flp = flpOf(stmtp);
-            if (stmtp->child("else_clause")) unsupported(stmtp, "else branch");
             AstNodeExpr* const condp = lowerExpr(stmtp->child("condition"), bitDType(flp));
             AstNode* const thensp
                 = lowerStmtChain(stmtp->child("sequential_statement_chain"), delayed);
-            return new AstIf{flp, condp, thensp};
+            AstNode* const elsesp = stmtp->child("else_clause")
+                                        ? lowerElse(stmtp->child("else_clause"), delayed)
+                                        : nullptr;
+            return new AstIf{flp, condp, thensp, elsesp};
         }
         unsupported(stmtp, "statement '" + kind + "'");
         return nullptr;
@@ -610,31 +633,107 @@ class VhdlXmlFrontend final {
         m_modp->addStmtsp(new AstAlways{flpOf(processp), VAlwaysKwd::CONT_ASSIGN, nullptr, bodyp});
     }
 
+    //! Edge information extracted from a rising_edge/falling_edge call
+    struct EdgeInfo final {
+        VEdgeType edgeType = VEdgeType::ET_CHANGED;
+        AstNodeExpr* sigp = nullptr;
+    };
+
+    bool edgeCall(const Node* condp, EdgeInfo& info) {
+        if (!condp || condp->attr("kind") != "function_call") return false;
+        const Node* const prefixp = condp->child("prefix");
+        const std::string fn = prefixp ? vhdlFold(prefixp->attr("identifier")) : std::string{};
+        if (fn != "rising_edge" && fn != "falling_edge") return false;
+        AstNodeExpr* const sigp = singleActual(condp);
+        if (!sigp) return false;
+        info.edgeType = fn == "rising_edge" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+        info.sigp = sigp;
+        return true;
+    }
+
+    //! Extract the reset signal/edge from a supported reset condition; also lowers the condition
+    bool resetEdge(const Node* condp, AstNodeExpr*& sigp, VEdgeType& edgeType,
+                   AstNodeExpr*& condExprp) {
+        const std::string kind = condp->attr("kind");
+        if (kind == "equality_operator") {
+            const Node* const lhsp = condp->child("left");
+            const Node* const rhsp = condp->child("right");
+            const Node* litp = nullptr;
+            const Node* namep = nullptr;
+            if (lhsp && lhsp->attr("kind") == "character_literal") {
+                litp = lhsp;
+                namep = rhsp;
+            } else if (rhsp && rhsp->attr("kind") == "character_literal") {
+                litp = rhsp;
+                namep = lhsp;
+            }
+            if (litp && namep && namep->attr("kind") == "simple_name") {
+                const std::string lit = litp->attr("identifier");
+                if (lit == "'1'" || lit == "'0'") {
+                    edgeType = lit == "'1'" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+                    sigp = lowerExpr(namep, nullptr);
+                    condExprp = lowerExpr(condp, bitDType(flpOf(condp)));
+                    return sigp && condExprp;
+                }
+            }
+        } else if (kind == "simple_name") {
+            edgeType = VEdgeType::ET_POSEDGE;
+            sigp = lowerExpr(condp, nullptr);
+            condExprp = lowerExpr(condp, bitDType(flpOf(condp)));
+            return sigp && condExprp;
+        } else if (kind == "not_operator") {
+            const Node* const operandp = condp->child("operand");
+            if (operandp && operandp->attr("kind") == "simple_name") {
+                edgeType = VEdgeType::ET_NEGEDGE;
+                sigp = lowerExpr(operandp, nullptr);
+                condExprp = lowerExpr(condp, bitDType(flpOf(condp)));
+                return sigp && condExprp;
+            }
+        }
+        unsupported(condp, "asynchronous reset condition");
+        return false;
+    }
+
     void emitProcess(const Node* processp) {
         FileLine* const flp = flpOf(processp);
         const Node* const bodyp = processp->child("sequential_statement_chain");
 
         // Clocked idiom: a single "if rising_edge(clk)"/"if falling_edge(clk)" wrapper
         if (const Node* const ifp = singleTopIf(bodyp)) {
-            const Node* const condp = ifp->child("condition");
-            if (condp && condp->attr("kind") == "function_call") {
-                const Node* const prefixp = condp->child("prefix");
-                const std::string fn
-                    = prefixp ? vhdlFold(prefixp->attr("identifier")) : std::string{};
-                if (fn == "rising_edge" || fn == "falling_edge") {
-                    if (ifp->child("else_clause")) {
-                        unsupported(ifp, "else branch in a clocked process");
-                        return;
-                    }
-                    AstNodeExpr* const sensp = singleActual(condp);
-                    if (!sensp) return;
-                    AstSenItem* const itemp = new AstSenItem{
-                        flp, fn == "rising_edge" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE,
-                        sensp};
-                    AstNode* const stmtsp
+            EdgeInfo clock;
+            if (edgeCall(ifp->child("condition"), clock)) {
+                if (ifp->child("else_clause")) {
+                    unsupported(ifp, "else branch in a clocked process");
+                    return;
+                }
+                AstSenItem* const itemp = new AstSenItem{flp, clock.edgeType, clock.sigp};
+                AstNode* const stmtsp
+                    = lowerStmtChain(ifp->child("sequential_statement_chain"), true);
+                m_modp->addStmtsp(
+                    new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemp}, stmtsp});
+                return;
+            }
+
+            // Asynchronous reset: "if reset then ... elsif edge(clk) then ..."
+            const Node* const elsep = ifp->child("else_clause");
+            EdgeInfo clock2;
+            if (elsep && elsep->attr("kind") == "elsif" && !elsep->child("else_clause")
+                && edgeCall(elsep->child("condition"), clock2)) {
+                AstNodeExpr* rstSigp = nullptr;
+                VEdgeType rstEdge = VEdgeType::ET_CHANGED;
+                AstNodeExpr* rstCondp = nullptr;
+                if (resetEdge(ifp->child("condition"), rstSigp, rstEdge, rstCondp)) {
+                    AstSenItem* const clkItemp = new AstSenItem{flp, clock2.edgeType, clock2.sigp};
+                    AstSenItem* const rstItemp = new AstSenItem{flp, rstEdge, rstSigp};
+                    AstSenTree* const senTreep = new AstSenTree{
+                        flp, AstNode::addNext<AstSenItem, AstSenItem>(clkItemp, rstItemp)};
+                    AstNode* const resetStmtsp
                         = lowerStmtChain(ifp->child("sequential_statement_chain"), true);
-                    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS,
-                                                    new AstSenTree{flp, itemp}, stmtsp});
+                    AstNode* const normalStmtsp
+                        = lowerStmtChain(elsep->child("sequential_statement_chain"), true);
+                    m_modp->addStmtsp(
+                        new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep,
+                                      new AstIf{flp, rstCondp, resetStmtsp, normalStmtsp}});
                     return;
                 }
             }
@@ -652,6 +751,7 @@ class VhdlXmlFrontend final {
                 }
                 AstNodeExpr* const exprp = lowerExpr(namep, nullptr);
                 if (!exprp) continue;
+                // VHDL processes execute once at time zero, then on each sensitivity event
                 AstSenItem* const itemp = new AstSenItem{flp, VEdgeType::ET_CHANGED, exprp};
                 itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
             }
@@ -661,6 +761,9 @@ class VhdlXmlFrontend final {
             return;
         }
         AstNode* const stmtsp = lowerStmtChain(bodyp, true);
+        if (!stmtsp) return;
+        // VHDL executes a process once at time zero, before any sensitivity event
+        m_modp->addStmtsp(new AstInitialStatic{flp, stmtsp->cloneTree(true)});
         m_modp->addStmtsp(
             new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
     }
