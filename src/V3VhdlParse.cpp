@@ -271,6 +271,17 @@ class VhdlXmlFrontend final {
     std::map<std::string, ModuleInfo> m_specializations;  // Binding key -> specialized module
     std::set<std::string> m_instantiatedEntities;  // Folded names of entities used by instances
     std::map<const Node*, AstNodeDType*> m_enumDtypes;  // Enum type definition -> dtype
+    struct RecordMember final {
+        std::string name;  // Element name as declared
+        AstNodeDType* dtypep = nullptr;  // Element dtype
+        int lsb = 0;  // Bit offset in the packed record
+        int width = 0;
+    };
+    struct RecordInfo final {
+        AstNodeDType* dtypep = nullptr;  // Packed vector dtype of the record
+        std::vector<RecordMember> members;  // Declaration order, most significant first
+    };
+    std::map<const Node*, RecordInfo> m_records;  // Record type definition -> layout
     int m_specDepth = 0;  // Generic specialization recursion depth
 
     // ---- XML access
@@ -382,11 +393,11 @@ class VhdlXmlFrontend final {
         return enumDType(defp);
     }
 
-    //! Enumeration type definition behind a type mark, or nullptr if not an enumeration
-    const Node* enumTypeDef(const Node* nodep) const {
+    //! Type definition of the requested kind behind a type mark, or nullptr
+    const Node* typeDefOfKind(const Node* nodep, const char* wantKind) const {
         for (int depth = 0; nodep && depth < 8; ++depth) {
             const std::string kind = nodep->attr("kind");
-            if (kind == "enumeration_type_definition") return nodep;
+            if (kind == wantKind) return nodep;
             const Node* nextp = nullptr;
             if (kind == "simple_name") {
                 const Node* const refp = nodep->child("named_entity");
@@ -401,6 +412,35 @@ class VhdlXmlFrontend final {
             nodep = nextp;
         }
         return nullptr;
+    }
+
+    //! Build (once) the packed-vector layout of a record type definition
+    const RecordInfo& recordInfo(const Node* typeDefp) {
+        const auto found = m_records.find(typeDefp);
+        if (found != m_records.end()) return found->second;
+        RecordInfo& info = m_records[typeDefp];
+        FileLine* const flp = flpOf(typeDefp);
+        int width = 0;
+        bool fourstate = false;
+        for (const Node* const elemp : childEls(typeDefp->child("elements_declaration_list"))) {
+            RecordMember member;
+            member.name = elemp->attr("identifier");
+            member.dtypep = dtypeOf(parseType(elemp->child("subtype_indication")), flpOf(elemp));
+            member.width = member.dtypep->width();
+            width += member.width;
+            fourstate |= member.dtypep->isFourstate();
+            info.members.push_back(member);
+        }
+        // The first declared element occupies the most significant bits
+        int lsb = width;
+        for (RecordMember& member : info.members) {
+            lsb -= member.width;
+            member.lsb = lsb;
+        }
+        info.dtypep = m_rootp->typeTablep()->findLogicBitDType(
+            flp, fourstate ? VBasicDTypeKwd::LOGIC : VBasicDTypeKwd::BIT, width, width,
+            VSigning::UNSIGNED);
+        return info;
     }
 
     //! Declarations resolved at their use sites, or not modeled by Verilator
@@ -455,6 +495,10 @@ class VhdlXmlFrontend final {
                             if (const Node* const defp = declp->child("type_definition")) {
                                 if (defp->attr("kind") == "enumeration_type_definition") {
                                     spec.dtp = enumDType(defp);
+                                    return spec;
+                                }
+                                if (defp->attr("kind") == "record_type_definition") {
+                                    spec.dtp = recordInfo(defp).dtypep;
                                     return spec;
                                 }
                             }
@@ -565,15 +609,40 @@ class VhdlXmlFrontend final {
 
     // ---- Expressions
 
-    //! Lower a simple, indexed or sliced name; write selects lvalue access
+    //! Lower a simple, indexed, sliced or selected name; write selects lvalue access
     AstNodeExpr* lowerName(const Node* nodep, bool write) {
         const std::string kind = nodep->attr("kind");
-        const Node* const namep
-            = (kind == "indexed_name" || kind == "slice_name") ? nodep->child("prefix") : nodep;
-        if (!namep || namep->attr("kind") != "simple_name") {
-            unsupported(nodep, "name form '" + kind + "'");
-            return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+        if (kind == "selected_element") {
+            // Record member: a bit slice of the packed record vector
+            AstNodeExpr* const basep = lowerName(nodep->child("prefix"), write);
+            const Node* const defp
+                = typeDefOfKind(nodep->child("prefix"), "record_type_definition");
+            if (!defp) {
+                error(nodep, "VHDL selection is not a record member");
+                return basep;
+            }
+            const std::string name = vhdlFold(nodep->attr("identifier"));
+            for (const RecordMember& member : recordInfo(defp).members) {
+                if (vhdlFold(member.name) == name) {
+                    AstSel* const selp = new AstSel{flpOf(nodep), basep, member.lsb, member.width};
+                    selp->dtypep(member.dtypep);
+                    return selp;
+                }
+            }
+            error(nodep, "VHDL record member '" + nodep->attr("identifier") + "' not found");
+            return basep;
         }
+        if (kind == "indexed_name" || kind == "slice_name") {
+            const Node* const prefixp = nodep->child("prefix");
+            if (!prefixp) {
+                unsupported(nodep, "name form '" + kind + "'");
+                return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+            }
+            AstNodeExpr* const basep = lowerName(prefixp, write);
+            return lowerVectorName(nodep, kind, basep);
+        }
+
+        const Node* const namep = nodep;
         const auto bindIt = m_constBindings.find(vhdlFold(namep->attr("identifier")));
         if (bindIt != m_constBindings.end()) {
             if (write) {
@@ -588,11 +657,14 @@ class VhdlXmlFrontend final {
             error(namep, "Unknown VHDL identifier '" + namep->attr("identifier") + "'");
             return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
         }
-        AstNodeExpr* const basep
-            = new AstVarRef{flpOf(namep), varp, write ? VAccess::WRITE : VAccess::READ};
-        if (kind == "simple_name") return basep;
+        return new AstVarRef{flpOf(namep), varp, write ? VAccess::WRITE : VAccess::READ};
+    }
 
-        const AstBasicDType* const basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
+    //! Lower an index or slice of an already-lowered vector expression
+    AstNodeExpr* lowerVectorName(const Node* nodep, const std::string& kind,
+                                 AstNodeExpr* const basep) {
+        FileLine* const flp = flpOf(nodep);
+        const AstBasicDType* const basicp = VN_CAST(basep->dtypep()->skipRefp(), BasicDType);
         if (!basicp || basicp->width() <= 1) {
             error(nodep, "Indexing a non-vector VHDL name is not supported yet");
             return basep;
@@ -661,7 +733,8 @@ class VhdlXmlFrontend final {
             return nullptr;
         }
         const std::string kind = targetp->attr("kind");
-        if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name") {
+        if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name"
+            || kind == "selected_element") {
             return lowerName(targetp, true);
         }
         unsupported(targetp, "assignment target form");
@@ -747,6 +820,56 @@ class VhdlXmlFrontend final {
         return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
     }
 
+    //! Lower a record aggregate: concatenate members, most significant first
+    AstNodeExpr* lowerRecordAggregate(const Node* nodep, const Node* typeDefp) {
+        FileLine* const flp = flpOf(nodep);
+        const RecordInfo& info = recordInfo(typeDefp);
+        std::vector<const Node*> exprs(info.members.size(), nullptr);
+        size_t position = 0;
+        for (const Node* const choicep : childEls(nodep->child("association_choices_chain"))) {
+            const std::string choiceKind = choicep->attr("kind");
+            const Node* const exprp = choicep->child("associated_expr");
+            if (choiceKind == "choice_by_name") {
+                const Node* const namep = choicep->child("choice_name");
+                const std::string name
+                    = namep ? vhdlFold(namep->attr("identifier")) : std::string{};
+                size_t index = info.members.size();
+                for (size_t i = 0; i < info.members.size(); ++i) {
+                    if (vhdlFold(info.members[i].name) == name) index = i;
+                }
+                if (index == info.members.size()) {
+                    error(nodep, "VHDL record aggregate member '" + name + "' not found");
+                    return nullptr;
+                }
+                exprs[index] = exprp;
+            } else if (choiceKind == "choice_by_none") {
+                if (position >= exprs.size()) {
+                    error(nodep, "VHDL record aggregate has too many elements");
+                    return nullptr;
+                }
+                exprs[position++] = exprp;
+            } else {
+                unsupported(choicep, "VHDL aggregate choice '" + choiceKind + "'");
+                return nullptr;
+            }
+        }
+        AstNodeExpr* resultp = nullptr;
+        for (size_t i = info.members.size(); i-- > 0;) {
+            const RecordMember& member = info.members[i];
+            if (!exprs[i]) {
+                error(nodep, "VHDL record aggregate is missing member '" + member.name + "'");
+                return nullptr;
+            }
+            AstNodeExpr* const valuep = lowerExpr(exprs[i], member.dtypep);
+            if (!valuep) return nullptr;
+            resultp = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, valuep, resultp})
+                              : valuep;
+        }
+        if (!resultp) return makeConst(flp, info.dtypep, 0);
+        resultp->dtypep(info.dtypep);
+        return resultp;
+    }
+
     AstNodeExpr* lowerExpr(const Node* nodep, AstNodeDType* contextp) {
         if (!nodep) return nullptr;
         FileLine* const flp = flpOf(nodep);
@@ -762,6 +885,21 @@ class VhdlXmlFrontend final {
                 return makeConst(flp, contextp ? contextp : intDType(flp),
                                  static_cast<uint64_t>(value));
             }
+            // Non-scalar constants resolve to their declaration's default value
+            if (const Node* const refp = nodep->child("named_entity")) {
+                if (refp->has("ref")) {
+                    const Node* const declp = nodeById(refp->attr("ref"));
+                    if (declp) {
+                        const std::string declKind = declp->attr("kind");
+                        if (declKind == "constant_declaration"
+                            || declKind == "interface_constant_declaration") {
+                            if (const Node* const defp = declp->child("default_value")) {
+                                return lowerExpr(defp, contextp);
+                            }
+                        }
+                    }
+                }
+            }
             // Enumeration literal: resolve the analyzed literal declaration
             if (const Node* const refp = nodep->child("named_entity")) {
                 if (refp->has("ref")) {
@@ -776,7 +914,8 @@ class VhdlXmlFrontend final {
                 }
             }
         }
-        if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name") {
+        if (kind == "simple_name" || kind == "indexed_name" || kind == "slice_name"
+            || kind == "selected_element") {
             return lowerName(nodep, false);
         }
         if (kind == "integer_literal") {
@@ -794,7 +933,8 @@ class VhdlXmlFrontend final {
         }
         if (kind == "left_type_attribute" || kind == "right_type_attribute"
             || kind == "high_type_attribute" || kind == "low_type_attribute") {
-            if (const Node* const defp = enumTypeDef(nodep->child("prefix"))) {
+            if (const Node* const defp
+                = typeDefOfKind(nodep->child("prefix"), "enumeration_type_definition")) {
                 const int lastp
                     = static_cast<int>(childEls(defp->child("enumeration_literal_list")).size())
                       - 1;
@@ -822,7 +962,8 @@ class VhdlXmlFrontend final {
         }
         if (kind == "pos_attribute" || kind == "succ_attribute" || kind == "pred_attribute"
             || kind == "val_attribute") {
-            const Node* const defp = enumTypeDef(nodep->child("prefix"));
+            const Node* const defp
+                = typeDefOfKind(nodep->child("prefix"), "enumeration_type_definition");
             if (!defp) {
                 unsupported(nodep, "attribute " + kind);
                 return makeConst(flp, contextp ? contextp : intDType(flp), 0);
@@ -901,6 +1042,19 @@ class VhdlXmlFrontend final {
             resultp->dtypep(dtp);
             return resultp;
         }
+        if (kind == "concatenation_operator") {
+            AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), nullptr);
+            if (!lhsp) return nullptr;
+            AstNodeExpr* const rhsp = lowerExpr(nodep->child("right"), nullptr);
+            if (!rhsp) return nullptr;
+            const int width = lhsp->dtypep()->width() + rhsp->dtypep()->width();
+            const bool fourstate = lhsp->dtypep()->isFourstate() || rhsp->dtypep()->isFourstate();
+            AstConcat* const concatp = new AstConcat{flp, lhsp, rhsp};
+            concatp->dtypep(m_rootp->typeTablep()->findLogicBitDType(
+                flp, fourstate ? VBasicDTypeKwd::LOGIC : VBasicDTypeKwd::BIT, width, width,
+                VSigning::UNSIGNED));
+            return concatp;
+        }
         if (kind == "not_operator") {
             AstNodeExpr* const operandp = lowerExpr(nodep->child("operand"), contextp);
             if (!operandp) return nullptr;
@@ -925,6 +1079,12 @@ class VhdlXmlFrontend final {
             if (!innerp) return nullptr;
             if (!contextp || innerp->dtypep() == contextp) return innerp;
             return resizeExpr(innerp, contextp);
+        }
+        if (kind == "aggregate") {
+            const Node* const defp = typeDefOfKind(nodep, "record_type_definition");
+            if (defp) return lowerRecordAggregate(nodep, defp);
+            unsupported(nodep, "VHDL aggregate of a non-record type");
+            return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
         }
         if (kind == "simple_aggregate") {
             // GHDL folds locally static expressions into an aggregate that retains the
