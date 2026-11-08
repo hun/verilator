@@ -241,6 +241,14 @@ class VhdlXmlFrontend final {
     std::map<std::string, AstVar*> m_scope;  // Current module: folded name -> Var
     AstModule* m_modp = nullptr;  // Module being emitted
 
+    //! Emitted module and its ports, used to bind instances across the hierarchy
+    struct ModuleInfo final {
+        AstModule* modp = nullptr;  // Emitted module
+        std::vector<AstVar*> portList;  // Ports in declaration order
+        std::map<std::string, AstVar*> ports;  // Folded port name -> Var
+    };
+    std::map<std::string, ModuleInfo> m_modules;  // Folded entity name -> module
+
     // ---- XML access
 
     FileLine* flpOf(const Node* nodep) const {
@@ -667,6 +675,10 @@ class VhdlXmlFrontend final {
             }
             return;
         }
+        if (kind == "component_instantiation_statement") {
+            lowerInstance(stmtp);
+            return;
+        }
         unsupported(stmtp, "concurrent statement '" + kind + "'");
     }
 
@@ -680,11 +692,12 @@ class VhdlXmlFrontend final {
         return VDirection::INPUT;
     }
 
-    void emitModule(const Node* entityp, const Node* archp) {
+    void createModule(const Node* entityp) {
         FileLine* const flp = flpOf(entityp);
-        m_modp = new AstModule{flp, entityp->attr("identifier"), "work"};
-        m_scope.clear();
-
+        ModuleInfo& info = m_modules[vhdlFold(entityp->attr("identifier"))];
+        info.modp = new AstModule{flp, entityp->attr("identifier"), "work"};
+        // One VHDL file may hold many design units; the SV filename convention does not apply
+        flp->warnOff(V3ErrorCode::DECLFILENAME, true);
         int pinNum = 0;
         if (const Node* const portsp = entityp->child("port_chain")) {
             for (const Node* const portp : childEls(portsp)) {
@@ -705,14 +718,26 @@ class VhdlXmlFrontend final {
                 varp->pinNum(++pinNum);
                 // VHDL ports are signals, so procedural assignment is legal
                 varp->declTyped(true);
-                m_modp->addStmtsp(varp);
-                m_scope[vhdlFold(pname)] = varp;
+                info.modp->addStmtsp(varp);
+                info.portList.push_back(varp);
+                info.ports[vhdlFold(pname)] = varp;
             }
         }
+        m_rootp->addModulesp(info.modp);
+    }
+
+    void populateModule(const Node* entityp, const Node* archp) {
+        ModuleInfo& info = m_modules[vhdlFold(entityp->attr("identifier"))];
+        m_modp = info.modp;
+        m_scope = info.ports;
 
         if (const Node* const declsp = archp->child("declaration_chain")) {
             for (const Node* const declp : childEls(declsp)) {
                 const std::string kind = declp->attr("kind");
+                if (kind == "component_declaration") {
+                    // Interface contract only; the instantiation is bound separately
+                    continue;
+                }
                 if (kind != "signal_declaration") {
                     unsupported(declp, "declaration '" + kind + "'");
                     continue;
@@ -745,8 +770,124 @@ class VhdlXmlFrontend final {
             for (const Node* const stmtp : childEls(stmtsp)) lowerConcurrent(stmtp);
         }
 
-        m_rootp->addModulesp(m_modp);
         m_modp = nullptr;
+        m_scope.clear();
+    }
+
+    std::string instantiatedUnitName(const Node* unitp) const {
+        std::string name = unitp->attr("identifier");
+        if (!name.empty()) return name;
+        // Direct entity instantiation: entity work.foo / entity lib.foo
+        if (const Node* const entityNamep = unitp->child("entity_name")) {
+            name = entityNamep->attr("identifier");
+            if (!name.empty()) return name;
+            if (const Node* const refp = entityNamep->child("named_entity")) {
+                if (const Node* const entityp = nodeById(refp->attr("ref"))) {
+                    return entityp->attr("identifier");
+                }
+            }
+        }
+        return {};
+    }
+
+    void lowerInstance(const Node* stmtp) {
+        FileLine* const flp = flpOf(stmtp);
+        const Node* const unitp = stmtp->child("instantiated_unit");
+        if (!unitp) {
+            unsupported(stmtp, "instantiation without an instantiated unit");
+            return;
+        }
+        if (stmtp->child("generic_map_aspect_chain")) {
+            unsupported(stmtp, "generic map on an instance");
+            return;
+        }
+
+        const std::string unitName = instantiatedUnitName(unitp);
+        if (unitName.empty()) {
+            unsupported(unitp, "instantiated unit form '" + unitp->attr("kind") + "'");
+            return;
+        }
+        const auto targetIt = m_modules.find(vhdlFold(unitName));
+        ModuleInfo* const targetp = targetIt == m_modules.end() ? nullptr : &targetIt->second;
+        // VHDL entity wins; otherwise leave the original spelling for the case-sensitive
+        // SystemVerilog fallback (see VHDL_FRONTEND_PLAN.md section 3.5.1)
+        const std::string modName = targetp ? targetp->modp->name() : unitName;
+
+        AstPin* pinsp = nullptr;
+        int positional = 0;
+        if (const Node* const mapChainp = stmtp->child("port_map_aspect_chain")) {
+            for (const Node* const assocp : childEls(mapChainp)) {
+                const std::string kind = assocp->attr("kind");
+                std::string formalName;
+                int pinNum = 0;
+                if (kind == "association_element_by_name" || kind == "association_element_open") {
+                    const Node* const formalp = assocp->child("formal");
+                    formalName = formalp ? formalp->attr("identifier") : std::string{};
+                    if (formalName.empty()) {
+                        unsupported(assocp, "port association without a formal");
+                        continue;
+                    }
+                } else if (kind == "association_element_by_position") {
+                    pinNum = ++positional;
+                } else {
+                    unsupported(assocp, "port association form '" + kind + "'");
+                    continue;
+                }
+
+                AstVar* modVarp = nullptr;
+                if (targetp) {
+                    if (!formalName.empty()) {
+                        const auto portIt = targetp->ports.find(vhdlFold(formalName));
+                        if (portIt == targetp->ports.end()) {
+                            error(assocp,
+                                  "Unknown port '" + formalName + "' on '" + unitName + "'");
+                            continue;
+                        }
+                        modVarp = portIt->second;
+                    } else {
+                        const int index = pinNum - 1;
+                        if (index < 0 || index >= static_cast<int>(targetp->portList.size())) {
+                            error(assocp, "Positional port " + std::to_string(pinNum)
+                                              + " is out of range on '" + unitName + "'");
+                            continue;
+                        }
+                        modVarp = targetp->portList[index];
+                    }
+                }
+
+                const Node* const actualp = assocp->child("actual");
+                AstNodeExpr* actualExprp = nullptr;
+                if (actualp) {
+                    actualExprp = lowerExpr(actualp, modVarp ? modVarp->dtypep() : nullptr);
+                    if (actualExprp && modVarp) {
+                        VAccess access = VAccess::READ;
+                        if (modVarp->isInout()) {
+                            access = VAccess::READWRITE;
+                        } else if (modVarp->isWritable()) {
+                            access = VAccess::WRITE;
+                        }
+                        if (AstNodeVarRef* const refp = VN_CAST(actualExprp, NodeVarRef)) {
+                            refp->access(access);
+                        } else if (access != VAccess::READ) {
+                            unsupported(actualp, "expression on a writable port connection");
+                            continue;
+                        }
+                    }
+                }
+                FileLine* const pinFlp = flpOf(assocp);
+                if (!actualExprp) {
+                    // VHDL "open" is an intentional disconnection
+                    pinFlp->warnOff(V3ErrorCode::PINCONNECTEMPTY, true);
+                }
+                AstPin* const pinp = new AstPin{pinFlp, pinNum, formalName, actualExprp};
+                pinp->modVarp(modVarp);
+                pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
+            }
+        }
+
+        AstCell* const cellp
+            = new AstCell{flp, flp, stmtp->attr("label"), modName, pinsp, nullptr, nullptr};
+        m_modp->addStmtsp(cellp);
     }
 
 public:
@@ -777,6 +918,7 @@ public:
         }
 
         std::set<std::string> entityKeys;
+        std::vector<std::pair<const Node*, const Node*>> modules;  // Entity, architecture
         for (const Node* const entityp : m_entityNodes) {
             const std::string name = entityp->attr("identifier");
             if (!entityKeys.insert(vhdlFold(name)).second) {
@@ -788,8 +930,12 @@ public:
                 error(entityp, "Entity '" + name + "' has no architecture; cannot elaborate it");
                 continue;
             }
-            emitModule(entityp, it->second);
+            modules.emplace_back(entityp, it->second);
         }
+
+        // Create all modules first so instances can bind to ports emitted later in the walk
+        for (const auto& module : modules) createModule(module.first);
+        for (const auto& module : modules) populateModule(module.first, module.second);
 
         for (const Node* const archp : m_archNodes) {
             const std::string entityName = entityNameOf(archp);
