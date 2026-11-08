@@ -42,6 +42,54 @@ from pathlib import Path
 ENTITY_RE = re.compile(r'^\s*entity\s+([A-Za-z][A-Za-z0-9_]*)\s+is\b',
                        re.IGNORECASE | re.MULTILINE)
 COMMENT_RE = re.compile(r'--[^\n]*')
+GHDL_FLAGS_RE = re.compile(
+    r'^\s*(?:export\s+)?(GHDL_STD_FLAGS|GHDL_FLAGS)\s*=\s*'
+    r'(?:"([^"]*)"|\'([^\']*)\'|(\S+))',
+    re.MULTILINE)
+TOP_RE = re.compile(r'\b(?:synth_tb|synth_only|synth_analyze)\s+([A-Za-z][A-Za-z0-9_]*)')
+SYNTH_TOP_RE = re.compile(r'\bsynth\b[^\n]*?\s-e\s+([A-Za-z][A-Za-z0-9_]*)')
+
+
+def script_tops(testdir):
+    """Top names explicitly named by the test's testsuite.sh."""
+    script = testdir / 'testsuite.sh'
+    if not script.is_file():
+        return set()
+    text = COMMENT_RE.sub('', script.read_text(errors='replace'))
+    tops = {match.group(1).lower() for match in TOP_RE.finditer(text)}
+    tops.update(match.group(1).lower() for match in SYNTH_TOP_RE.finditer(text))
+    return tops
+
+
+def script_case_files(testdir, top):
+    """Source files listed on a `synth ... -e <top>` line, if any."""
+    script = testdir / 'testsuite.sh'
+    if not script.is_file():
+        return []
+    text = COMMENT_RE.sub('', script.read_text(errors='replace'))
+    top_re = re.compile(r'\bsynth\b[^\n]*?\s-e\s+' + re.escape(top) + r'\b')
+    for line in text.splitlines():
+        if not top_re.search(line):
+            continue
+        files = [token for token in line.split() if token.endswith('.vhdl')]
+        files = [f for f in files if (testdir / f).is_file()]
+        if files:
+            return files
+    return []
+
+
+def ghdl_flags(testdir):
+    """Collect GHDL analysis flags set by a test's testsuite.sh."""
+    script = testdir / 'testsuite.sh'
+    if not script.is_file():
+        return ''
+    text = script.read_text(errors='replace')
+    flags = []
+    for match in GHDL_FLAGS_RE.finditer(text):
+        value = match.group(2) or match.group(3) or match.group(4) or ''
+        if value and value not in flags:
+            flags.append(value)
+    return ' '.join(flags)
 
 
 def repo_root():
@@ -94,6 +142,11 @@ def run_one(job):
     env = os.environ.copy()
     if args.ghdl:
         env['VERILATOR_GHDL'] = args.ghdl
+    flags = ghdl_flags(testdir)
+    if args.ghdl_flags:
+        flags = (flags + ' ' + args.ghdl_flags).strip()
+    if flags:
+        env['VERILATOR_GHDL_FLAGS'] = flags
     started = time.monotonic()
     try:
         result = subprocess.run(cmd,
@@ -138,6 +191,8 @@ def main():
                         default=str(root / 'bin' / 'verilator'),
                         help='Verilator executable (default: bin/verilator)')
     parser.add_argument('--ghdl', default=None, help='GHDL executable (sets VERILATOR_GHDL)')
+    parser.add_argument('--ghdl-flags', default='',
+                        help='extra GHDL analysis flags (VERILATOR_GHDL_FLAGS)')
     parser.add_argument('--outdir',
                         default=str(root / 'obj_dir' / 'ghdl_suite'),
                         help='directory for logs (default: obj_dir/ghdl_suite)')
@@ -187,6 +242,11 @@ def main():
             for name in entity_names(f):
                 entity_files.setdefault(name, []).append(f)
         tops = sorted(entity_files)
+        scripted = script_tops(testdir)
+        if scripted:
+            named = [t for t in tops if t in scripted]
+            if named:
+                tops = named
         if not tops:
             skipped.append((testdir.name, 'no entity found'))
             continue
@@ -196,7 +256,10 @@ def main():
             candidates = entity_files[top]
             chosen = sorted(candidates,
                             key=lambda f: (0 if f.stem.lower() == top else 1, f.name))[0]
-            if chosen.name.startswith('tb_'):
+            case_files = script_case_files(testdir, top)
+            if case_files:
+                files = [Path(f) for f in case_files]
+            elif chosen.name.startswith('tb_'):
                 # A testbench top also needs the design entity it exercises
                 design_name = chosen.stem[3:].lower()
                 designs = [f for f in design if f.stem.lower() == design_name]

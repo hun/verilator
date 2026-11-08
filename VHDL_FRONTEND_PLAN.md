@@ -38,7 +38,9 @@ the day the front end must be self-contained again; it is not reachable from
 Developer helpers: `nodist/ghdl_xml` dumps the analyzed GHDL XML that the frontend
 consumes, and `nodist/ghdl_synth_suite.py` runs the GHDL `synth` testsuite's design units
 through `--language vhdl --lint-only`, categorizing PASS/UNSUPPORTED/GHDL_ERROR/ERROR in a
-TSV report. Neither is installed with Verilator.
+TSV report. The runner reads `GHDL_STD_FLAGS`/`GHDL_FLAGS` from each test's `testsuite.sh`;
+`VERILATOR_GHDL_FLAGS` passes extra analysis flags to GHDL (for example `-fsynopsys`).
+Neither helper is installed with Verilator.
 
 | Work package | State |
 |---|---|

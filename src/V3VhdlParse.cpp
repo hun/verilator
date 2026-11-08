@@ -3764,6 +3764,10 @@ void V3VhdlParseImp::finishXml() {
     if (const char* const envp = std::getenv("VERILATOR_GHDL")) {
         if (*envp) ghdl = envp;
     }
+    std::string ghdlFlags;
+    if (const char* const envp = std::getenv("VERILATOR_GHDL_FLAGS")) {
+        if (*envp) ghdlFlags = envp;
+    }
 
     V3File::createMakeDir();
     const std::string makeDir = v3Global.opt.makeDir();
@@ -3774,7 +3778,9 @@ void V3VhdlParseImp::finishXml() {
     const auto quotePath = [](const std::string& path) { return "\"" + path + "\""; };
 
     std::string command = quotePath(ghdl);
-    command += " --file-to-xml --std=08 --workdir=" + quotePath(makeDir);
+    command += " --file-to-xml --std=08";
+    if (!ghdlFlags.empty()) command += " " + ghdlFlags;
+    command += " --workdir=" + quotePath(makeDir);
     for (const VhdlFile& vfile : m_files) command += " " + quotePath(vfile.filename);
     command += " > " + quotePath(xmlFile) + " 2> " + quotePath(errFile);
 
