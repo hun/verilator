@@ -3173,7 +3173,23 @@ class VhdlXmlFrontend final {
                 value = id == "true";
                 return true;
             }
+            if (kind != "simple_name") return false;
+            // Constants and generic defaults resolve through the analyzed reference
+            const Node* const refp = nodep->child("named_entity");
+            if (!refp || !refp->has("ref")) return false;
+            const Node* const declp = nodeById(refp->attr("ref"));
+            if (!declp) return false;
+            const std::string declKind = declp->attr("kind");
+            if (declKind == "enumeration_literal") return evalBool(declp, value);
+            if ((declKind == "constant_declaration"
+                 || declKind == "interface_constant_declaration")
+                && declp->child("default_value")) {
+                return evalBool(declp->child("default_value"), value);
+            }
             return false;
+        }
+        if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
+            return evalBool(nodep->child("expression"), value);
         }
         if (kind == "and_operator" || kind == "or_operator" || kind == "xor_operator") {
             bool lhsv = false;

@@ -8,12 +8,18 @@ library ieee;
 use ieee.std_logic_1164.all;
 
 entity t is
+  generic (
+    GEN : boolean := true;
+    INV : boolean := false
+  );
   port (
     a : in std_logic;
     b : in std_logic;
     c : in std_logic;
     y : out std_logic;
-    z : out std_logic
+    z : out std_logic;
+    w : out std_logic;
+    v : out std_logic
   );
 end;
 
@@ -38,5 +44,22 @@ begin
   else generate
   begin
     z <= c;
+  end generate;
+
+  -- Boolean generics, including a negated condition
+  g3 : if GEN generate
+  begin
+    w <= '1';
+  else generate
+  begin
+    w <= '0';
+  end generate;
+
+  g4 : if not INV generate
+  begin
+    v <= a;
+  else generate
+  begin
+    v <= b;
   end generate;
 end;

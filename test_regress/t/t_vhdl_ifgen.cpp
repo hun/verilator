@@ -35,6 +35,11 @@ int main(int argc, char** argv) {
                     std::printf("%%Error: a=%d b=%d c=%d z=%d\n", a, b, c, z);
                     ++fails;
                 }
+                if (static_cast<int>(topp->w) != 1 || static_cast<int>(topp->v) != a) {
+                    std::printf("%%Error: a=%d w=%d v=%d\n", a,
+                                static_cast<int>(topp->w), static_cast<int>(topp->v));
+                    ++fails;
+                }
             }
         }
     }
