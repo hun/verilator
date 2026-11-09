@@ -286,7 +286,17 @@ class VhdlXmlFrontend final {
         AstNodeDType* dtypep = nullptr;  // Packed vector dtype of the record
         std::vector<RecordMember> members;  // Declaration order, most significant first
     };
-    mutable std::map<const Node*, RecordInfo> m_records;  // Record type definition -> layout
+    struct RecordMemberSpec final {
+        std::string name;  // Element name as declared
+        const Node* subtypep = nullptr;  // Element subtype, possibly constrained
+    };
+    mutable std::map<const Node*, RecordInfo> m_records;  // Record type/subtype -> layout
+    std::map<AstVar*, RecordInfo> m_varRecords;  // Specialized record ports -> layout
+    //! A specialized port's type, and record layout when the port is a record
+    struct PortInfo final {
+        VhdlDTypeSpec spec;
+        RecordInfo record;  // Valid when record.dtypep is set
+    };
     mutable bool m_quietErrors = false;  // Type probes must not report diagnostics
     //! One name bound during subprogram inlining: an expression value, or an lvalue
     struct InlineBinding final {
@@ -450,23 +460,107 @@ class VhdlXmlFrontend final {
         return nullptr;
     }
 
-    //! Build (once) the packed-vector layout of a record type definition
-    const RecordInfo& recordInfo(const Node* typeDefp) const {
-        const auto found = m_records.find(typeDefp);
-        if (found != m_records.end()) return found->second;
-        RecordInfo& info = m_records[typeDefp];
-        FileLine* const flp = flpOf(typeDefp);
+    //! Follow a type/subtype name to its analyzed type node
+    const Node* typeNodeOfName(const Node* namep) const {
+        if (!namep) return nullptr;
+        const Node* const refp = namep->child("named_entity");
+        const Node* const declp = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+        if (!declp) return nullptr;
+        const std::string kind = declp->attr("kind");
+        if (kind == "subtype_declaration") {
+            return derefNode(declp->child("subtype_indication"));
+        }
+        if (kind == "type_declaration" || kind == "anonymous_type_declaration") {
+            if (const Node* const subp = declp->child("subtype_definition")) {
+                const Node* const typep = derefNode(subp);
+                if (typep) return typep;
+            }
+            return derefNode(declp->child("type_definition"));
+        }
+        return nullptr;
+    }
+
+    //! Record member declarations of a type/subtype, with element constraints applied
+    bool recordMemberSpecs(const Node* typep, std::vector<RecordMemberSpec>& members,
+                           int depth = 0) const {
+        if (!typep || depth > 16) return false;
+        const Node* const cur = derefNode(typep);
+        if (!cur) return false;
+        const std::string kind = cur->attr("kind");
+        if (kind == "record_type_definition") {
+            members.clear();
+            for (const Node* const elemp : childEls(cur->child("elements_declaration_list"))) {
+                RecordMemberSpec spec;
+                spec.name = elemp->attr("identifier");
+                spec.subtypep = elemp->child("subtype_indication");
+                if (!spec.subtypep) return false;
+                members.push_back(spec);
+            }
+            return !members.empty();
+        }
+        if (kind == "record_subtype_definition") {
+            const Node* parentp = derefNode(cur->child("parent_type"));
+            if (!parentp) parentp = typeNodeOfName(cur->child("subtype_type_mark"));
+            if (!parentp || !recordMemberSpecs(parentp, members, depth + 1)) return false;
+            // Element constraints in this subtype replace the parent's member subtypes
+            for (const Node* const consp : childEls(cur->child("owned_elements_chain"))) {
+                if (consp->attr("kind") != "record_element_constraint") continue;
+                const std::string name = vhdlFold(consp->attr("identifier"));
+                const Node* const subtypep = consp->child("subtype_indication");
+                if (!subtypep) continue;
+                for (RecordMemberSpec& member : members) {
+                    if (vhdlFold(member.name) == name) member.subtypep = subtypep;
+                }
+            }
+            return true;
+        }
+        if (kind == "simple_name") {
+            const Node* const typep2 = typeNodeOfName(cur);
+            if (!typep2 || typep2 == cur) return false;
+            return recordMemberSpecs(typep2, members, depth + 1);
+        }
+        return false;
+    }
+
+    //! Packed layout of a record type/subtype; false when a member has no width yet
+    bool recordLayout(const Node* typep, RecordInfo& info, bool* unconstrainedp = nullptr,
+                      int depth = 0) const {
+        if (unconstrainedp) *unconstrainedp = false;
+        const Node* const cur = derefNode(typep);
+        if (!cur) return false;
+        const auto found = m_records.find(cur);
+        if (found != m_records.end()) {
+            info = found->second;
+            return true;
+        }
+        std::vector<RecordMemberSpec> members;
+        if (!recordMemberSpecs(cur, members, depth)) return false;
+        FileLine* const flp = flpOf(cur);
+        info = RecordInfo{};
         int width = 0;
         bool fourstate = false;
-        for (const Node* const elemp : childEls(typeDefp->child("elements_declaration_list"))) {
+        for (const RecordMemberSpec& spec : members) {
+            const VhdlDTypeSpec probe = probeTypeSpec(spec.subtypep);
+            if (probe.isUnconstrained) {
+                if (unconstrainedp) *unconstrainedp = true;
+                return false;
+            }
+            const VhdlDTypeSpec memberSpec = parseType(spec.subtypep);
+            if (memberSpec.isUnconstrained) {
+                if (unconstrainedp) *unconstrainedp = true;
+                return false;
+            }
+            AstNodeDType* const dtypep = dtypeOf(memberSpec, flpOf(spec.subtypep));
+            if (!dtypep || dtypep->width() <= 0) return false;
             RecordMember member;
-            member.name = elemp->attr("identifier");
-            member.dtypep = dtypeOf(parseType(elemp->child("subtype_indication")), flpOf(elemp));
-            member.width = member.dtypep->width();
+            member.name = spec.name;
+            member.dtypep = dtypep;
+            member.width = dtypep->width();
             width += member.width;
-            fourstate |= member.dtypep->isFourstate();
+            fourstate |= dtypep->isFourstate();
             info.members.push_back(member);
         }
+        if (info.members.empty() || width <= 0) return false;
         // The first declared element occupies the most significant bits
         int lsb = width;
         for (RecordMember& member : info.members) {
@@ -476,7 +570,41 @@ class VhdlXmlFrontend final {
         info.dtypep = m_rootp->typeTablep()->findLogicBitDType(
             flp, fourstate ? VBasicDTypeKwd::LOGIC : VBasicDTypeKwd::BIT, width, width,
             VSigning::UNSIGNED);
-        return info;
+        m_records[cur] = info;
+        return true;
+    }
+
+    //! Record layout of an expression/name's analyzed type
+    bool recordLayoutOfName(const Node* nodep, RecordInfo& info) const {
+        if (!nodep) return false;
+        const Node* const typep = nodep->child("type");
+        const Node* const defp
+            = typep && typep->has("ref") ? nodeById(typep->attr("ref")) : nullptr;
+        if (defp && recordLayout(defp, info)) return true;
+        // An unconstrained record port specialized from its instance actual carries the
+        // layout only on the specialized port variable
+        if (nodep->attr("kind") == "simple_name") {
+            if (AstVar* const varp = lookupVar(nodep)) {
+                const auto found = m_varRecords.find(varp);
+                if (found != m_varRecords.end()) {
+                    info = found->second;
+                    return true;
+                }
+            }
+            if (m_inlineEnvp) {
+                const auto it = m_inlineEnvp->find(vhdlFold(nodep->attr("identifier")));
+                if (it != m_inlineEnvp->end()) {
+                    if (AstNodeVarRef* const refp = VN_CAST(it->second.exprp, NodeVarRef)) {
+                        const auto found = m_varRecords.find(refp->varp());
+                        if (found != m_varRecords.end()) {
+                            info = found->second;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     //! Declarations resolved at their use sites, or not modeled by Verilator
@@ -568,15 +696,9 @@ class VhdlXmlFrontend final {
             }
             return 0;
         }
-        if (kind == "record_type_definition") {
-            int width = 0;
-            for (const Node* const memberp : childEls(elemp->child("elements_declaration_list"))) {
-                const int memberWidth
-                    = elementWidth(memberp->child("subtype_indication"), depth + 1);
-                if (memberWidth <= 0) return 0;
-                width += memberWidth;
-            }
-            return width;
+        if (kind == "record_type_definition" || kind == "record_subtype_definition") {
+            RecordInfo info;
+            return recordLayout(elemp, info) ? info.dtypep->width() : 0;
         }
         return 0;
     }
@@ -672,9 +794,9 @@ class VhdlXmlFrontend final {
                             if (subp) {
                                 // A type_definition reached through a subtype_definition
                                 const std::string subKind = subp->attr("kind");
-                                if (subKind == "record_type_definition") {
-                                    spec.dtp = recordInfo(subp).dtypep;
-                                    return spec;
+                                if (subKind == "record_type_definition"
+                                    || subKind == "record_subtype_definition") {
+                                    return parseType(subp, depth + 1);
                                 }
                                 if (subKind == "enumeration_type_definition") {
                                     spec.dtp = enumDType(subp);
@@ -687,9 +809,9 @@ class VhdlXmlFrontend final {
                                     spec.dtp = enumDType(defp);
                                     return spec;
                                 }
-                                if (defp->attr("kind") == "record_type_definition") {
-                                    spec.dtp = recordInfo(defp).dtypep;
-                                    return spec;
+                                if (defp->attr("kind") == "record_type_definition"
+                                    || defp->attr("kind") == "record_subtype_definition") {
+                                    return parseType(defp, depth + 1);
                                 }
                             }
                         }
@@ -697,6 +819,18 @@ class VhdlXmlFrontend final {
                 }
                 error(subtypep,
                       "VHDL type '" + subtypep->attr("identifier") + "' is not supported yet");
+            }
+            return spec;
+        }
+        if (kind == "record_type_definition" || kind == "record_subtype_definition") {
+            RecordInfo info;
+            bool unconstrained = false;
+            if (recordLayout(subtypep, info, &unconstrained) && info.dtypep) {
+                spec.dtp = info.dtypep;
+            } else if (unconstrained) {
+                spec.isUnconstrained = true;
+            } else {
+                error(subtypep, "VHDL record type is not supported yet");
             }
             return spec;
         }
@@ -832,7 +966,9 @@ class VhdlXmlFrontend final {
         if (!defp) return nullptr;
         const std::string kind = defp->attr("kind");
         if (kind == "enumeration_type_definition") return enumDType(defp);
-        if (kind == "record_type_definition") return recordInfo(defp).dtypep;
+        if (kind == "record_type_definition" || kind == "record_subtype_definition") {
+            return probeTypeSpec(defp).dtp;
+        }
         if (kind == "array_subtype_definition"
             && childEls(defp->child("index_constraint_list")).empty()) {
             return nullptr;  // Unconstrained result type: use the expression's type
@@ -869,14 +1005,13 @@ class VhdlXmlFrontend final {
         if (kind == "selected_element") {
             // Record member: a bit slice of the packed record vector
             AstNodeExpr* const basep = lowerName(nodep->child("prefix"), write);
-            const Node* const defp
-                = typeDefOfKind(nodep->child("prefix"), "record_type_definition");
-            if (!defp) {
+            RecordInfo info;
+            if (!recordLayoutOfName(nodep->child("prefix"), info)) {
                 error(nodep, "VHDL selection is not a record member");
                 return basep;
             }
             const std::string name = vhdlFold(nodep->attr("identifier"));
-            for (const RecordMember& member : recordInfo(defp).members) {
+            for (const RecordMember& member : info.members) {
                 if (vhdlFold(member.name) == name) {
                     AstSel* const selp = new AstSel{flpOf(nodep), basep, member.lsb, member.width};
                     selp->dtypep(member.dtypep);
@@ -2133,9 +2268,8 @@ class VhdlXmlFrontend final {
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
 
-    AstNodeExpr* lowerRecordAggregate(const Node* nodep, const Node* typeDefp) {
+    AstNodeExpr* lowerRecordAggregate(const Node* nodep, const RecordInfo& info) {
         FileLine* const flp = flpOf(nodep);
-        const RecordInfo& info = recordInfo(typeDefp);
         std::vector<const Node*> exprs(info.members.size(), nullptr);
         size_t position = 0;
         for (const Node* const choicep : childEls(nodep->child("association_choices_chain"))) {
@@ -2836,8 +2970,10 @@ class VhdlXmlFrontend final {
             return resizeExpr(innerp, contextp);
         }
         if (kind == "aggregate") {
-            const Node* const defp = typeDefOfKind(nodep, "record_type_definition");
-            if (defp) return lowerRecordAggregate(nodep, defp);
+            RecordInfo recInfo;
+            if (recordLayoutOfName(nodep, recInfo)) {
+                return lowerRecordAggregate(nodep, recInfo);
+            }
             if (AstNodeExpr* const resultp = lowerArrayAggregate(nodep, contextp)) {
                 return resultp;
             }
@@ -4055,7 +4191,7 @@ class VhdlXmlFrontend final {
     }
 
     void createModuleFor(const Node* entityp, ModuleInfo& info, const std::string& modName,
-                         const std::map<std::string, VhdlDTypeSpec>* portSpecs = nullptr) {
+                         const std::map<std::string, PortInfo>* portInfos = nullptr) {
         FileLine* const flp = flpOf(entityp);
         info.modp = new AstModule{flp, modName, "work"};
         // One VHDL file may hold many design units; the SV filename convention does not apply
@@ -4075,12 +4211,17 @@ class VhdlXmlFrontend final {
                 FileLine* const pflp = flpOf(portp);
                 const std::string pname = portp->attr("identifier");
                 const VhdlDTypeSpec* specp = nullptr;
-                if (portSpecs) {
-                    const auto specIt = portSpecs->find(vhdlFold(pname));
-                    if (specIt != portSpecs->end()) specp = &specIt->second;
+                const PortInfo* portInfo = nullptr;
+                if (portInfos) {
+                    const auto infoIt = portInfos->find(vhdlFold(pname));
+                    if (infoIt != portInfos->end()) {
+                        portInfo = &infoIt->second;
+                        specp = &portInfo->spec;
+                    }
                 }
                 const VhdlDTypeSpec spec = specp ? *specp : parseType(subtypep);
                 AstVar* const varp = new AstVar{pflp, VVarType::PORT, pname, dtypeOf(spec, pflp)};
+                if (portInfo && portInfo->record.dtypep) m_varRecords[varp] = portInfo->record;
                 varp->direction(directionOf(portp->attr("mode")));
                 varp->pinNum(++pinNum);
                 // VHDL ports are signals, so procedural assignment is legal
@@ -4238,7 +4379,7 @@ class VhdlXmlFrontend final {
     ModuleInfo* specializeModule(const Node* entityp,
                                  const std::map<std::string, int64_t>& bindings,
                                  const std::map<std::string, const Node*>& typeBindings,
-                                 const std::map<std::string, VhdlDTypeSpec>& portSpecs = {}) {
+                                 const std::map<std::string, PortInfo>& portInfos = {}) {
         const std::string entityKey = vhdlFold(entityp->attr("identifier"));
         std::string key = entityKey;
         for (const auto& binding : bindings) {
@@ -4247,11 +4388,18 @@ class VhdlXmlFrontend final {
         for (const auto& binding : typeBindings) {
             key += "|" + binding.first + "@" + binding.second->attr("id");
         }
-        for (const auto& portSpec : portSpecs) {
-            key += "|P" + portSpec.first + "=" + std::to_string(portSpec.second.left) + ":"
-                   + std::to_string(portSpec.second.right) + ":"
-                   + (portSpec.second.ascending ? "to" : "downto") + ":"
-                   + std::to_string(portSpec.second.elemWidth);
+        for (const auto& portInfo : portInfos) {
+            const VhdlDTypeSpec& ps = portInfo.second.spec;
+            key += "|P" + portInfo.first + "=" + std::to_string(ps.left) + ":"
+                   + std::to_string(ps.right) + ":" + (ps.ascending ? "to" : "downto") + ":"
+                   + std::to_string(ps.elemWidth);
+            if (portInfo.second.record.dtypep) {
+                key += "R";
+                for (const RecordMember& member : portInfo.second.record.members) {
+                    key += ":" + member.name + "/" + std::to_string(member.lsb) + "/"
+                           + std::to_string(member.width);
+                }
+            }
         }
         const auto found = m_specializations.find(key);
         if (found != m_specializations.end()) return &found->second;
@@ -4274,7 +4422,7 @@ class VhdlXmlFrontend final {
         ModuleInfo& info = m_specializations[key];
         const std::string modName
             = entityp->attr("identifier") + "__Vgen" + std::to_string(++m_genSeq);
-        createModuleFor(entityp, info, modName, &portSpecs);
+        createModuleFor(entityp, info, modName, &portInfos);
         info.modp->inLibrary(true);
         populateModuleFor(entityp, archIt->second, info);
         --m_specDepth;
@@ -4330,8 +4478,9 @@ class VhdlXmlFrontend final {
 
     //! Ranges of an entity's unconstrained ports, taken from the instance's actuals
     bool gatherPortSpecs(const Node* stmtp, const Node* entityp,
-                         std::map<std::string, VhdlDTypeSpec>& portSpecs) {
+                         std::map<std::string, PortInfo>& portInfos) {
         std::map<std::string, const Node*> actualByName;
+        std::map<std::string, const Node*> individualByPort;
         std::vector<const Node*> positional;
         const std::map<const Node*, std::string> artificials = artificialOpenPorts(stmtp, entityp);
         if (const Node* const pmap = stmtp->child("port_map_aspect_chain")) {
@@ -4341,6 +4490,24 @@ class VhdlXmlFrontend final {
                 const std::string formalName
                     = formalp ? vhdlFold(formalp->attr("identifier")) : std::string{};
                 if (artificials.find(assocp) != artificials.end()) continue;
+                if (kind == "association_element_by_individual") {
+                    // Formal is a record member or slice; find its base port name
+                    const Node* basep = formalp;
+                    for (int depth = 0; basep && depth < 16; ++depth) {
+                        const std::string baseKind = basep->attr("kind");
+                        if (baseKind == "simple_name") break;
+                        const Node* const prefixp = basep->child("prefix");
+                        if (!prefixp) {
+                            basep = nullptr;
+                            break;
+                        }
+                        basep = prefixp;
+                    }
+                    if (basep && basep->attr("kind") == "simple_name") {
+                        individualByPort[vhdlFold(basep->attr("identifier"))] = assocp;
+                    }
+                    continue;
+                }
                 if (kind == "association_element_open") {
                     if (formalName.empty()) positional.push_back(nullptr);
                     continue;
@@ -4370,18 +4537,34 @@ class VhdlXmlFrontend final {
                 if (!probeTypeSpec(portp->child("subtype_indication")).isUnconstrained) {
                     continue;
                 }
-                if (!actualp) actualp = portp->child("default_value");
+                if (!actualp) {
+                    const auto individualIt = individualByPort.find(pname);
+                    if (individualIt != individualByPort.end()) {
+                        unsupported(individualIt->second, "individual record port association");
+                        return false;
+                    }
+                    actualp = portp->child("default_value");
+                }
                 if (!actualp) {
                     error(stmtp, "Unconstrained port '" + portp->attr("identifier")
                                      + "' is not connected");
                     return false;
                 }
-                VhdlDTypeSpec actualSpec;
-                if (!arraySpec(actualp, actualSpec)) {
-                    unsupported(actualp, "unconstrained port actual type");
-                    return false;
+                PortInfo portInfo;
+                const Node* const typep = actualp->child("type");
+                const Node* const defp
+                    = typep && typep->has("ref") ? nodeById(typep->attr("ref")) : nullptr;
+                if (!arraySpec(actualp, portInfo.spec)) {
+                    // Records use their analyzed (constrained) type directly
+                    const VhdlDTypeSpec probe = defp ? probeTypeSpec(defp) : VhdlDTypeSpec{};
+                    if (!probe.dtp) {
+                        unsupported(actualp, "unconstrained port actual type");
+                        return false;
+                    }
+                    portInfo.spec = probe;
                 }
-                portSpecs[pname] = actualSpec;
+                if (portInfo.spec.dtp && defp) recordLayout(defp, portInfo.record);
+                portInfos[pname] = portInfo;
             }
         }
         return true;
@@ -4415,9 +4598,9 @@ class VhdlXmlFrontend final {
 
         std::map<std::string, int64_t> bindings;
         std::map<std::string, const Node*> typeBindings;
-        std::map<std::string, VhdlDTypeSpec> portSpecs;
+        std::map<std::string, PortInfo> portInfos;
         if (entityp && hasUnconstrainedPorts(entityp)
-            && !gatherPortSpecs(stmtp, entityp, portSpecs)) {
+            && !gatherPortSpecs(stmtp, entityp, portInfos)) {
             return;
         }
         bool haveGenericMap = false;
@@ -4487,8 +4670,8 @@ class VhdlXmlFrontend final {
                 bindings[formalName] = value;
             }
         }
-        if (entityp && (haveGenericMap || !portSpecs.empty())) {
-            ModuleInfo* const spec = specializeModule(entityp, bindings, typeBindings, portSpecs);
+        if (entityp && (haveGenericMap || !portInfos.empty())) {
+            ModuleInfo* const spec = specializeModule(entityp, bindings, typeBindings, portInfos);
             if (!spec) return;
             targetp = spec;
         }
