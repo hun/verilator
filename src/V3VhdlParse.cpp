@@ -1459,6 +1459,42 @@ class VhdlXmlFrontend final {
             return resizeExpr(valueExprp, intDType(flp));
         }
 
+        if (fn == "to_stdlogicvector" || fn == "to_stdulogicvector" || fn == "to_slv"
+            || fn == "to_bitvector" || fn == "to_bv" || fn == "to_stdulogic") {
+            const Node* const valuep = actualOf(0);
+            if (!valuep) {
+                unsupported(nodep, fn + " without an argument");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            if (argsp.size() == 1) {
+                // Vector representation is identical; only the element type name differs
+                AstNodeExpr* const valueExprp = lowerExpr(valuep, contextp);
+                if (!valueExprp) return nullptr;
+                return valueExprp;
+            }
+            // numeric_std_unsigned overload: convert an integer to a sized vector
+            int64_t widthValue = 0;
+            if (argsp.size() != 2 || !evalConst(actualOf(1), widthValue) || widthValue <= 0
+                || widthValue > INT_MAX) {
+                unsupported(nodep, fn + " with a non-static width");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            const int width = static_cast<int>(widthValue);
+            AstNodeDType* const dtp = m_rootp->typeTablep()->findLogicBitDType(
+                flp, VBasicDTypeKwd::LOGIC, width, width, VSigning::UNSIGNED);
+            AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
+            if (!valueExprp) return nullptr;
+            AstNodeExpr* resultp = valueExprp;
+            const int valueWidth = valueExprp->dtypep()->width();
+            if (valueWidth > width) {
+                resultp = new AstSel{flp, valueExprp, 0, width};
+            } else if (valueWidth < width) {
+                resultp = new AstExtend{flp, valueExprp, width};
+            }
+            resultp->dtypep(dtp);
+            return resultp;
+        }
+
         // User-defined functions: inline the analyzed body
         if (fn == "and_reduce" || fn == "or_reduce" || fn == "xor_reduce" || fn == "nand_reduce"
             || fn == "nor_reduce" || fn == "xnor_reduce") {
