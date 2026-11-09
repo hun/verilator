@@ -3063,6 +3063,17 @@ class VhdlXmlFrontend final {
             notp->dtypep(operandp->dtypep());
             return notp;
         }
+        if (kind == "implicit_condition_operator") {
+            AstNodeExpr* const operandp = lowerExpr(nodep->child("operand"), nullptr);
+            if (!operandp) return nullptr;
+            if (operandp->dtypep()->width() == 1) {
+                AstEq* const eqp = new AstEq{flp, operandp, makeConst(flp, operandp->dtypep(), 1)};
+                eqp->dtypep(bitDType(flp));
+                return eqp;
+            }
+            unsupported(nodep, "implicit condition on a non-scalar");
+            return makeConst(flp, bitDType(flp), 0);
+        }
         if (kind == "reduction_and_operator" || kind == "reduction_or_operator"
             || kind == "reduction_xor_operator" || kind == "reduction_nand_operator"
             || kind == "reduction_nor_operator" || kind == "reduction_xnor_operator") {

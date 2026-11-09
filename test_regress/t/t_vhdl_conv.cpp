@@ -51,6 +51,7 @@ int main(int argc, char** argv) {
             const int red_nand = static_cast<int>(topp->red_nand);
             const int red_call = static_cast<int>(topp->red_call);
             const int red_func = static_cast<int>(topp->red_func);
+            const int imp = static_cast<int>(topp->imp);
             if (topp->wide != 0x123456789aULL) {
                 std::printf("%%Error: wide=%llx\n", static_cast<unsigned long long>(topp->wide));
                 ++fails;
@@ -83,6 +84,10 @@ int main(int argc, char** argv) {
             const int wantAnd = (a == 0xf) ? 1 : 0;
             const int wantOr = (a != 0) ? 1 : 0;
             const int wantXor = (__builtin_popcount(a) & 1) ? 1 : 0;
+            if (imp != (a & 1)) {
+                std::printf("%%Error: a=%d imp=%d\n", a, imp);
+                ++fails;
+            }
             if (red_and != wantAnd || red_func != wantAnd || red_or != wantOr
                 || red_call != wantOr || red_xor != wantXor || red_nand != !wantAnd) {
                 std::printf("%%Error: a=%d reductions %d %d %d %d %d %d\n", a, red_and,
