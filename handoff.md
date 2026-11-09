@@ -29,6 +29,7 @@ sanitizer or huge-allocation tests in a fresh shell with no `ulimit -v`.
 
 Commits today:
 
+- `c76ea3b` Support VHDL static ranges and aggregate forms
 - `1a57ce2` Handle an empty process(all) body when scanning for clock edges
 - `052499e` Classify GHDL synth-failure cases in the corpus runner
 - `730e2bc` Support VHDL match equality operators
@@ -71,12 +72,10 @@ Commits today:
 - `d9f4596` Fix VHDL operator widths and wide literals
 - `227b24d` Clean up VHDL diagnostic strings
 
-Working tree: uncommitted string-generic work (`src/V3VhdlParse.cpp`,
-`t_vhdl_string_generic.*`, this file).  Earlier commits listed above are on
-`vhdl-frontend-wp0`.
+Working tree: clean at `c76ea3b` on `vhdl-frontend-wp0`.
 
 Build/test status at stop: `make -j4 -C src` clean; the full `t_vhdl_*` suite
-passes (44 tests); the GHDL `synth` corpus was rerun (PASS 656, UNSUPPORTED 309,
+passes (45 tests); the GHDL `synth` corpus was rerun (PASS 665, UNSUPPORTED 300,
 ERROR 31, EXPECTED_FAIL 48, GHDL_ERROR 94, NO_TOP 1); `clang-format` clean.
 `make lint-py` was not rerun in this session -- the pinned dev tools are not
 installed here; the new test scripts pass `python3 -m py_compile`.
@@ -182,6 +181,12 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   array's range as well.
 - Non-static slices are supported when the width is statically known
   (`mem(a*8+7 downto a*8)`), including writes.
+- Static elaboration expressions: integer division, modulus, remainder,
+  exponentiation and `abs` in ranges; `'range` used as a constraint; aggregates
+  that determine their own bounds (qualified element choices and
+  range-attribute choices); shared `0 | 1 => value` alternatives; positional
+  associations that span several elements (`("01", "10")`); and function-local
+  aggregate assignments constrained by the target variable's type.
 - Expressions: arithmetic/comparison/logic/shift/rotate/concat, static
   attributes (including `'left`/`'right`/`'high`/`'low` on integer subtypes),
   type conversions, `numeric_std` conversions, qualified
@@ -282,24 +287,24 @@ Tests:
 - Both scripts are in `PY_PROGRAMS` and lint clean (pinned `ruff==0.14.8`,
   `pylint==4.0.9`, `mypy==1.19.0`; `make venv` per `docs/guide/install.rst`).
 
-### Baseline (`synth`, 1139 scripted cases, run after the feature work)
+### Baseline (`synth`, 1139 scripted cases)
 
 | status | count |
 |---|---|
-| PASS | 646 |
-| UNSUPPORTED | 317 |
-| EXPECTED_FAIL | 50 |
+| PASS | 665 |
+| UNSUPPORTED | 300 |
+| EXPECTED_FAIL | 48 |
 | GHDL_ERROR | 94 |
-| ERROR | 30 |
-| NO_TOP | 2 |
+| ERROR | 31 |
+| NO_TOP | 1 |
 
 Progress across the day's states (original / after width fixes / now):
-PASS 369 -> 360 -> 646; UNSUPPORTED 622 -> 642 -> 317;
-ERROR 38 -> 27 -> 30; GHDL_ERROR 107 -> 94; EXPECTED_FAIL 50; NO_TOP 3 -> 2.
+PASS 369 -> 360 -> 665; UNSUPPORTED 622 -> 642 -> 300;
+ERROR 38 -> 27 -> 31; GHDL_ERROR 107 -> 94; EXPECTED_FAIL 50 -> 48; NO_TOP 3 -> 1.
 `EXPECTED_FAIL` was split out of the older `ERROR`/`UNSUPPORTED`/`GHDL_ERROR`
 buckets for files the testsuite marks `synth_failure`, so the ERROR comparison
-is not apples-to-apples.  Net vs original: +277 PASS, -305 UNSUPPORTED,
--8 ERROR. The element-port step
+is not apples-to-apples.  Net vs original: +296 PASS, -322 UNSUPPORTED,
+-7 ERROR. The element-port step
 added `iassoc04`/`riassoc04` and X/weak logic literals (`toint02`, `toint03`,
 and related cases); the type-name step added the `issue2826`/`issue2834`
 package-qualified record designs and `issue1081`; aggregate targets added
