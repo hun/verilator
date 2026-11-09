@@ -1460,6 +1460,56 @@ class VhdlXmlFrontend final {
         }
 
         // User-defined functions: inline the analyzed body
+        if (fn == "and_reduce" || fn == "or_reduce" || fn == "xor_reduce" || fn == "nand_reduce"
+            || fn == "nor_reduce" || fn == "xnor_reduce") {
+            const Node* const valuep = actualOf(0);
+            if (!valuep) {
+                unsupported(nodep, "reduction without an argument");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
+            if (!valueExprp) return nullptr;
+            const std::string op = fn.substr(0, fn.size() - std::string{"_reduce"}.size());
+            return makeReduction(flp, op, valuep, valueExprp);
+        }
+        // VHDL-2008 allows operator-symbol calls, e.g. "or"(a) or "and"(a, b)
+        if (fn == "and" || fn == "or" || fn == "xor" || fn == "nand" || fn == "nor"
+            || fn == "xnor") {
+            if (argsp.size() == 1) {
+                const Node* const valuep = actualOf(0);
+                AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
+                if (!valueExprp) return nullptr;
+                return makeReduction(flp, fn, valuep, valueExprp);
+            }
+            if (argsp.size() != 2) {
+                unsupported(nodep, "operator symbol call with " + std::to_string(argsp.size())
+                                       + " arguments");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            AstNodeExpr* const lhsp = lowerExpr(actualOf(0), nullptr);
+            AstNodeExpr* const rhsp = lowerExpr(actualOf(1), lhsp ? lhsp->dtypep() : nullptr);
+            if (!lhsp || !rhsp) return nullptr;
+            AstNodeDType* const dtp = lhsp->dtypep();
+            AstNodeExpr* resultp;
+            if (fn == "and") {
+                resultp = new AstAnd{flp, lhsp, rhsp};
+            } else if (fn == "or") {
+                resultp = new AstOr{flp, lhsp, rhsp};
+            } else if (fn == "xor") {
+                resultp = new AstXor{flp, lhsp, rhsp};
+            } else {
+                AstNodeExpr* const innerp
+                    = (fn == "nand")  ? static_cast<AstNodeExpr*>(new AstAnd{flp, lhsp, rhsp})
+                      : (fn == "nor") ? static_cast<AstNodeExpr*>(new AstOr{flp, lhsp, rhsp})
+                                      : static_cast<AstNodeExpr*>(new AstXor{flp, lhsp, rhsp});
+                innerp->dtypep(dtp);
+                AstNot* const notp = new AstNot{flp, innerp};
+                notp->dtypep(dtp);
+                return notp;
+            }
+            resultp->dtypep(dtp);
+            return resultp;
+        }
         if (functionDeclOf(nodep)) {
             if (AstNodeExpr* const inlinedp = inlineFunction(nodep)) return inlinedp;
         }
@@ -2585,6 +2635,35 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
+    //! Lower a reduction (`and`/`or`/...) over one vector operand
+    AstNodeExpr* makeReduction(FileLine* flp, const std::string& op, const Node* operandNodep,
+                               AstNodeExpr* operandp) {
+        VhdlDTypeSpec layout;
+        if (multiArraySpec(operandNodep, layout) && layout.elemWidth > 1) {
+            unsupported(operandNodep, "reduction of a multi-bit element array");
+            return makeConst(flp, bitDType(flp), 0);
+        }
+        AstNodeExpr* resultp;
+        if (op == "and" || op == "nand") {
+            resultp = new AstRedAnd{flp, operandp};
+        } else if (op == "or" || op == "nor") {
+            resultp = new AstRedOr{flp, operandp};
+        } else {
+            resultp = new AstRedXor{flp, operandp};
+        }
+        const AstBasicDType* const basicp = VN_CAST(operandp->dtypep()->skipRefp(), BasicDType);
+        VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
+        if (basicp) kwd = basicp->keyword();
+        AstNodeDType* const dtp = m_rootp->typeTablep()->findBasicDType(flp, kwd);
+        resultp->dtypep(dtp);
+        if (op == "nand" || op == "nor" || op == "xnor") {
+            AstNot* const notp = new AstNot{flp, resultp};
+            notp->dtypep(dtp);
+            return notp;
+        }
+        return resultp;
+    }
+
     AstNodeExpr* lowerExpr(const Node* nodep, AstNodeDType* contextp) {
         if (!nodep) return nullptr;
         FileLine* const flp = flpOf(nodep);
@@ -2983,6 +3062,17 @@ class VhdlXmlFrontend final {
             AstNot* const notp = new AstNot{flp, operandp};
             notp->dtypep(operandp->dtypep());
             return notp;
+        }
+        if (kind == "reduction_and_operator" || kind == "reduction_or_operator"
+            || kind == "reduction_xor_operator" || kind == "reduction_nand_operator"
+            || kind == "reduction_nor_operator" || kind == "reduction_xnor_operator") {
+            const Node* const operandNodep = nodep->child("operand");
+            AstNodeExpr* const operandp = lowerExpr(operandNodep, nullptr);
+            if (!operandp) return nullptr;
+            const std::string op = kind.substr(std::string{"reduction_"}.size(),
+                                               kind.size() - std::string{"reduction_"}.size()
+                                                   - std::string{"_operator"}.size());
+            return makeReduction(flp, op, operandNodep, operandp);
         }
         if (kind == "equality_operator" || kind == "inequality_operator") {
             AstNodeExpr* lhsp = nullptr;
