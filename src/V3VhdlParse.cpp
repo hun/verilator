@@ -3108,6 +3108,8 @@ class VhdlXmlFrontend final {
     }
 
     void emitConcurrentAssignment(const Node* processp) {
+        // A conditional concurrent assignment gated by a clock edge is a register
+        if (emitClockedIf(processp, true)) return;
         AstNode* headp = nullptr;
         for (const Node* const stmtp : childEls(processp->child("sequential_statement_chain"))) {
             const std::string kind = stmtp->attr("kind");
@@ -3156,88 +3158,285 @@ class VhdlXmlFrontend final {
         return true;
     }
 
-    //! Recognize the "clk'event and clk = '1'" clock idiom
-    bool eventEdge(const Node* condp, EdgeInfo& info) {
-        if (!condp || condp->attr("kind") != "and_operator") return false;
-        const Node* const lhsp = condp->child("left");
-        const Node* const rhsp = condp->child("right");
-        const Node* eventp = nullptr;
-        const Node* cmpp = nullptr;
-        if (lhsp && lhsp->attr("kind") == "event_attribute") {
-            eventp = lhsp;
-            cmpp = rhsp;
-        } else if (rhsp && rhsp->attr("kind") == "event_attribute") {
-            eventp = rhsp;
-            cmpp = lhsp;
+    //! Flatten `and` and parenthesized conditions into their conjuncts
+    static void flattenConjuncts(const Node* nodep, std::vector<const Node*>& out) {
+        if (!nodep) return;
+        const std::string kind = nodep->attr("kind");
+        if (kind == "and_operator") {
+            flattenConjuncts(nodep->child("left"), out);
+            flattenConjuncts(nodep->child("right"), out);
+        } else if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
+            flattenConjuncts(nodep->child("expression"), out);
         } else {
-            return false;
+            out.push_back(nodep);
         }
-        if (!cmpp || cmpp->attr("kind") != "equality_operator") return false;
-        const Node* const prefixp = eventp->child("prefix");
-        if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
-        const Node* const cmpLhsp = cmpp->child("left");
-        const Node* const cmpRhsp = cmpp->child("right");
-        const Node* litp = nullptr;
-        const Node* namep = nullptr;
-        if (cmpLhsp && cmpLhsp->attr("kind") == "character_literal") {
-            litp = cmpLhsp;
-            namep = cmpRhsp;
-        } else if (cmpRhsp && cmpRhsp->attr("kind") == "character_literal") {
-            litp = cmpRhsp;
-            namep = cmpLhsp;
-        }
-        if (!litp || !namep || namep->attr("kind") != "simple_name") return false;
-        if (vhdlFold(namep->attr("identifier")) != vhdlFold(prefixp->attr("identifier"))) {
-            return false;
-        }
-        const std::string lit = litp->attr("identifier");
-        if (lit != "'1'" && lit != "'0'") return false;
-        info.edgeType = lit == "'1'" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
-        info.sigp = lowerExpr(prefixp, nullptr);
-        return info.sigp != nullptr;
     }
 
-    //! Extract the reset signal/edge from a supported reset condition; also lowers the condition
-    bool resetEdge(const Node* condp, AstNodeExpr*& sigp, VEdgeType& edgeType,
-                   AstNodeExpr*& condExprp) {
-        const std::string kind = condp->attr("kind");
-        if (kind == "equality_operator") {
-            const Node* const lhsp = condp->child("left");
-            const Node* const rhsp = condp->child("right");
-            const Node* litp = nullptr;
-            const Node* namep = nullptr;
-            if (lhsp && lhsp->attr("kind") == "character_literal") {
-                litp = lhsp;
-                namep = rhsp;
-            } else if (rhsp && rhsp->attr("kind") == "character_literal") {
-                litp = rhsp;
-                namep = lhsp;
-            }
-            if (litp && namep && namep->attr("kind") == "simple_name") {
-                const std::string lit = litp->attr("identifier");
-                if (lit == "'1'" || lit == "'0'") {
-                    edgeType = lit == "'1'" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
-                    sigp = lowerExpr(namep, nullptr);
-                    condExprp = lowerExpr(condp, bitDType(flpOf(condp)));
-                    return sigp && condExprp;
-                }
-            }
-        } else if (kind == "simple_name") {
-            edgeType = VEdgeType::ET_POSEDGE;
-            sigp = lowerExpr(condp, nullptr);
-            condExprp = lowerExpr(condp, bitDType(flpOf(condp)));
-            return sigp && condExprp;
-        } else if (kind == "not_operator") {
-            const Node* const operandp = condp->child("operand");
-            if (operandp && operandp->attr("kind") == "simple_name") {
-                edgeType = VEdgeType::ET_NEGEDGE;
-                sigp = lowerExpr(operandp, nullptr);
-                condExprp = lowerExpr(condp, bitDType(flpOf(condp)));
-                return sigp && condExprp;
+    static bool isSignalName(const Node* nodep, const std::string& folded) {
+        return nodep && nodep->attr("kind") == "simple_name"
+               && vhdlFold(nodep->attr("identifier")) == folded;
+    }
+
+    //! Static '0'/'1' value of a std_logic expression, or 0 when not known
+    char staticLogic(const Node* nodep, int depth = 0) const {
+        if (!nodep || depth > 16) return 0;
+        const std::string kind = nodep->attr("kind");
+        if (kind == "character_literal" || kind == "enumeration_literal") {
+            const std::string id = nodep->attr("identifier");
+            if (id == "'0'" || id == "0") return '0';
+            if (id == "'1'" || id == "1") return '1';
+            return 0;
+        }
+        if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
+            return staticLogic(nodep->child("expression"), depth + 1);
+        }
+        if (kind != "simple_name") return 0;
+        const Node* const refp = nodep->child("named_entity");
+        if (!refp || !refp->has("ref")) return 0;
+        const Node* const declp = nodeById(refp->attr("ref"));
+        if (!declp) return 0;
+        const std::string declKind = declp->attr("kind");
+        if (declKind == "enumeration_literal") return staticLogic(declp, depth + 1);
+        if ((declKind == "constant_declaration" || declKind == "interface_constant_declaration")
+            && declp->child("default_value")) {
+            return staticLogic(declp->child("default_value"), depth + 1);
+        }
+        return 0;
+    }
+
+    //! Decompose a condition into a clock edge and the remaining level conjuncts
+    bool splitClockCondition(const Node* condp, EdgeInfo& info,
+                             std::vector<const Node*>& levelp) {
+        levelp.clear();
+        std::vector<const Node*> parts;
+        flattenConjuncts(condp, parts);
+        int edgeCount = 0;
+        std::vector<size_t> events;
+        for (const Node* const partp : parts) {
+            EdgeInfo edge;
+            if (edgeCall(partp, edge)) {
+                info = edge;
+                ++edgeCount;
+            } else if (partp->attr("kind") == "event_attribute") {
+                events.push_back(levelp.size());
+                levelp.push_back(partp);
+            } else {
+                levelp.push_back(partp);
             }
         }
-        unsupported(condp, "asynchronous reset condition");
+        if (edgeCount > 1) return false;
+        if (edgeCount == 1) return true;
+        if (events.size() != 1) return false;
+        // "sig'event and sig = '1'": the comparison supplies the edge polarity
+        const Node* const eventp = levelp[events.front()];
+        const Node* const prefixp = eventp->child("prefix");
+        if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
+        const std::string sigName = vhdlFold(prefixp->attr("identifier"));
+        for (size_t i = 0; i < levelp.size(); ++i) {
+            if (i == events.front()) continue;
+            const Node* const cmpp = levelp[i];
+            const std::string cmpKind = cmpp->attr("kind");
+            if (cmpKind != "equality_operator" && cmpKind != "inequality_operator") continue;
+            const Node* const lhsp = cmpp->child("left");
+            const Node* const rhsp = cmpp->child("right");
+            const Node* namep = nullptr;
+            const Node* valuep = nullptr;
+            if (isSignalName(lhsp, sigName)) {
+                namep = lhsp;
+                valuep = rhsp;
+            } else if (isSignalName(rhsp, sigName)) {
+                namep = rhsp;
+                valuep = lhsp;
+            }
+            char value = namep ? staticLogic(valuep) : 0;
+            if (!value) continue;
+            if (cmpKind == "inequality_operator") value = value == '1' ? '0' : '1';
+            info.edgeType = value == '1' ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+            info.sigp = lowerExpr(namep, nullptr);
+            if (!info.sigp) return false;
+            std::vector<const Node*> rest;
+            for (size_t j = 0; j < levelp.size(); ++j) {
+                if (j != i && j != events.front()) rest.push_back(levelp[j]);
+            }
+            levelp.swap(rest);
+            return true;
+        }
         return false;
+    }
+
+    //! One branch of a clocked if/elsif chain
+    struct ClockBranch final {
+        const Node* nodep = nullptr;  // if_statement or elsif
+        bool clocked = false;  // This branch's condition holds the clock edge
+        EdgeInfo edge;  // Clock edge when clocked
+        std::vector<const Node*> levels;  // Remaining level conjuncts when clocked
+    };
+
+    enum class ClockChainStatus : uint8_t { NOT_CLOCKED, CLOCKED, ELSE_UNSUPPORTED };
+
+    //! Find the single branch of an if/elsif chain that holds the clock edge
+    ClockChainStatus analyzeClockChain(const Node* ifp, std::vector<ClockBranch>& branches,
+                                       int& clockIndex) {
+        branches.clear();
+        clockIndex = -1;
+        const Node* branchp = ifp;
+        while (branchp) {
+            ClockBranch branch;
+            branch.nodep = branchp;
+            std::vector<const Node*> levels;
+            EdgeInfo edge;
+            if (splitClockCondition(branchp->child("condition"), edge, levels)) {
+                branch.clocked = true;
+                branch.edge = edge;
+                branch.levels = levels;
+                if (clockIndex >= 0) return ClockChainStatus::NOT_CLOCKED;  // Multiple edges
+                clockIndex = static_cast<int>(branches.size());
+            }
+            branches.push_back(branch);
+            const Node* const elsep = branchp->child("else_clause");
+            if (!elsep) break;
+            if (elsep->attr("kind") != "elsif") {
+                return clockIndex >= 0 ? ClockChainStatus::ELSE_UNSUPPORTED
+                                       : ClockChainStatus::NOT_CLOCKED;
+            }
+            branchp = elsep;
+        }
+        return clockIndex >= 0 ? ClockChainStatus::CLOCKED : ClockChainStatus::NOT_CLOCKED;
+    }
+
+    //! Recognize a simple level reset condition; does not lower or report diagnostics
+    bool levelResetEdge(const Node* condp, AstVar*& varp, VEdgeType& edgeType) const {
+        if (!condp) return false;
+        const std::string kind = condp->attr("kind");
+        const Node* namep = nullptr;
+        if (kind == "simple_name") {
+            namep = condp;
+            edgeType = VEdgeType::ET_POSEDGE;
+        } else if (kind == "not_operator") {
+            namep = condp->child("operand");
+            edgeType = VEdgeType::ET_NEGEDGE;
+        } else if (kind == "equality_operator") {
+            const Node* const lhsp = condp->child("left");
+            const Node* const rhsp = condp->child("right");
+            const Node* valuep = nullptr;
+            if (lhsp && lhsp->attr("kind") == "simple_name") {
+                namep = lhsp;
+                valuep = rhsp;
+            } else if (rhsp && rhsp->attr("kind") == "simple_name") {
+                namep = rhsp;
+                valuep = lhsp;
+            }
+            const char value = valuep ? staticLogic(valuep) : 0;
+            if (!value) return false;
+            edgeType = value == '1' ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+        }
+        if (!namep || namep->attr("kind") != "simple_name") return false;
+        AstVar* const foundp = lookupVar(namep);
+        if (!foundp) return false;
+        varp = foundp;
+        return true;
+    }
+
+    //! Whether a condition references a signal from the sensitivity list
+    bool conditionUsesSensitivity(const Node* nodep, const Node* sensp,
+                                  const AstVar* loopp) const {
+        if (!nodep) return false;
+        if (nodep->attr("kind") == "simple_name") {
+            AstVar* const varp = lookupVar(nodep);
+            if (varp && varp != loopp && sensitivityHasVar(sensp, varp)) return true;
+        }
+        for (const std::unique_ptr<Node>& childp : nodep->children()) {
+            if (conditionUsesSensitivity(childp.get(), sensp, loopp)) return true;
+        }
+        return false;
+    }
+
+    //! Lower the non-edge part of a clocked branch condition; nullptr means "true"
+    AstNodeExpr* lowerLevelCondition(FileLine* flp, const std::vector<const Node*>& levelsp) {
+        AstNodeExpr* resultp = nullptr;
+        for (const Node* const levelp : levelsp) {
+            AstNodeExpr* const partp = lowerExpr(levelp, bitDType(flpOf(levelp)));
+            if (!partp) return nullptr;
+            if (!resultp) {
+                resultp = partp;
+            } else {
+                AstNodeExpr* const andp = new AstAnd{flp, resultp, partp};
+                andp->dtypep(bitDType(flp));
+                resultp = andp;
+            }
+        }
+        return resultp;
+    }
+
+    //! Lower an if/elsif chain; the clocked branch's edge is true on the clock and false
+    //! at time zero, when the edge function cannot see a previous value
+    AstNode* buildClockChain(FileLine* flp, const std::vector<ClockBranch>& branches,
+                             int clockIndex, AssignMode mode, bool atTimeZero) {
+        AstNode* resultp = nullptr;
+        for (size_t i = branches.size(); i-- > 0;) {
+            const ClockBranch& branch = branches[i];
+            const Node* const chainp = branch.nodep->child("sequential_statement_chain");
+            AstNodeExpr* condp = nullptr;
+            if (branch.clocked) {
+                if (!atTimeZero) condp = lowerLevelCondition(flp, branch.levels);
+                if (!condp) {
+                    condp = makeConst(flp, bitDType(flp), atTimeZero ? 0U : 1U);
+                }
+            } else {
+                condp = lowerExpr(branch.nodep->child("condition"), bitDType(flp));
+                if (!condp) return nullptr;
+            }
+            AstNode* const stmtsp = lowerStmtChain(chainp, mode);
+            resultp = new AstIf{flp, condp, stmtsp, resultp};
+        }
+        return resultp;
+    }
+
+    //! Emit a clocked process when a single top-level if/elsif chain holds exactly one
+    //! rising_edge/falling_edge/'event condition.  Returns false when not recognizable.
+    bool emitClockedIf(const Node* processp, bool concurrent) {
+        const Node* const ifp = singleTopIf(processp->child("sequential_statement_chain"));
+        if (!ifp) return false;
+        std::vector<ClockBranch> branches;
+        int clockIndex = -1;
+        const ClockChainStatus status = analyzeClockChain(ifp, branches, clockIndex);
+        if (status == ClockChainStatus::ELSE_UNSUPPORTED) {
+            unsupported(ifp, "else branch in a clocked process");
+            return true;
+        }
+        if (status != ClockChainStatus::CLOCKED) return false;
+        FileLine* const flp = flpOf(ifp);
+        EdgeInfo& clock = branches[clockIndex].edge;
+        AstVar* const clockVarp = astVarOf(clock.sigp);
+        AstSenItem* itemsp = new AstSenItem{flp, clock.edgeType, clock.sigp};
+        const Node* const sensp = processp->child("sensitivity_list");
+        for (int i = 0; i < clockIndex; ++i) {
+            const Node* const condp = branches[i].nodep->child("condition");
+            AstVar* rstVarp = nullptr;
+            VEdgeType rstEdge = VEdgeType::ET_CHANGED;
+            if (levelResetEdge(condp, rstVarp, rstEdge)) {
+                if (!concurrent && !sensitivityHasVar(sensp, rstVarp)) continue;
+                AstNodeExpr* const rstRefp = new AstVarRef{flp, rstVarp, VAccess::READ};
+                AstNode::addNext<AstSenItem, AstSenItem>(
+                    itemsp, new AstSenItem{flp, rstEdge, rstRefp});
+            } else if (conditionUsesSensitivity(condp, sensp, clockVarp)) {
+                // A level condition on another sensitivity-list signal is an asynchronous
+                // reset we cannot model
+                unsupported(condp, "asynchronous reset condition");
+                return true;
+            }
+        }
+        AstNode* const stmtsp
+            = buildClockChain(flp, branches, clockIndex, AssignMode::DELAYED, false);
+        if (!stmtsp) return false;
+        m_modp->addStmtsp(
+            new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
+        // VHDL executes the process once at time zero, before any clock edge
+        if (AstNode* const initp
+            = buildClockChain(flp, branches, clockIndex, AssignMode::BLOCKING, true)) {
+            m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+        }
+        return true;
     }
 
     //! Declarations of a process: variables live in a process-local scope
@@ -3280,64 +3479,8 @@ class VhdlXmlFrontend final {
         const Node* const bodyp = processp->child("sequential_statement_chain");
         emitProcessVariables(processp);
 
-        // Clocked idiom: a single "if rising_edge(clk)"/"if falling_edge(clk)" wrapper
-        if (const Node* const ifp = singleTopIf(bodyp)) {
-            EdgeInfo clock;
-            if (edgeCall(ifp->child("condition"), clock)
-                || eventEdge(ifp->child("condition"), clock)) {
-                if (ifp->child("else_clause")) {
-                    unsupported(ifp, "else branch in a clocked process");
-                    return;
-                }
-                AstSenItem* const itemp = new AstSenItem{flp, clock.edgeType, clock.sigp};
-                AstNode* const stmtsp = lowerStmtChain(ifp->child("sequential_statement_chain"),
-                                                       AssignMode::DELAYED);
-                m_modp->addStmtsp(
-                    new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemp}, stmtsp});
-                return;
-            }
-
-            // Asynchronous reset: "if reset then ... elsif edge(clk) then ..."
-            const Node* const elsep = ifp->child("else_clause");
-            EdgeInfo clock2;
-            if (elsep && elsep->attr("kind") == "elsif" && !elsep->child("else_clause")
-                && (edgeCall(elsep->child("condition"), clock2)
-                    || eventEdge(elsep->child("condition"), clock2))) {
-                AstNodeExpr* rstSigp = nullptr;
-                VEdgeType rstEdge = VEdgeType::ET_CHANGED;
-                AstNodeExpr* rstCondp = nullptr;
-                if (!resetEdge(ifp->child("condition"), rstSigp, rstEdge, rstCondp)) return;
-                // A reset signal in the sensitivity list makes the reset asynchronous
-                AstVar* const rstVarp = astVarOf(rstSigp);
-                const bool asyncReset
-                    = rstVarp && sensitivityHasVar(processp->child("sensitivity_list"), rstVarp);
-                AstSenItem* const clkItemp = new AstSenItem{flp, clock2.edgeType, clock2.sigp};
-                AstSenTree* senTreep = nullptr;
-                if (asyncReset) {
-                    AstSenItem* const rstItemp = new AstSenItem{flp, rstEdge, rstSigp};
-                    senTreep = new AstSenTree{
-                        flp, AstNode::addNext<AstSenItem, AstSenItem>(clkItemp, rstItemp)};
-                } else {
-                    senTreep = new AstSenTree{flp, clkItemp};
-                }
-                AstNode* const resetStmtsp = lowerStmtChain(
-                    ifp->child("sequential_statement_chain"), AssignMode::DELAYED);
-                AstNode* const normalStmtsp = lowerStmtChain(
-                    elsep->child("sequential_statement_chain"), AssignMode::DELAYED);
-                m_modp->addStmtsp(
-                    new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep,
-                                  new AstIf{flp, rstCondp, resetStmtsp, normalStmtsp}});
-                // The process also executes once at time zero; a level-true reset applies then
-                AstNodeExpr* const initCondp = lowerExpr(ifp->child("condition"), bitDType(flp));
-                AstNode* const initResetp = lowerStmtChain(
-                    ifp->child("sequential_statement_chain"), AssignMode::BLOCKING);
-                if (initResetp) {
-                    m_modp->addStmtsp(
-                        new AstInitialStatic{flp, new AstIf{flp, initCondp, initResetp}});
-                }
-                return;
-            }
-        }
+        // Clocked process: a single top-level if/elsif chain holding a clock edge
+        if (emitClockedIf(processp, false)) return;
 
         // Plain process: trigger on every sensitivity item
         AstSenItem* itemsp = nullptr;
