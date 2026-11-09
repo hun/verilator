@@ -23,15 +23,28 @@ entity t is
     o1 : out std_logic_vector(7 downto 0);
     ob : out std_logic_vector(7 downto 0);
     sq : out signed(7 downto 0);
-    w : out integer
+    w : out integer;
+    u4 : in std_ulogic_vector(3 downto 0);
+    uo : out std_ulogic_vector(3 downto 0);
+    eqf : out std_logic;
+    eqt : out std_logic;
+    wide : out std_logic_vector(39 downto 0)
   );
 end;
 
 architecture rtl of t is
   constant HI : integer := 7;
   signal u : unsigned(3 downto 0);
+  signal us : std_ulogic_vector(3 downto 0);
 begin
   u <= unsigned(a);
+  us <= u4;
+  uo <= us;
+  -- a shorter numeric_std literal operand is zero-extended, not an error
+  eqf <= '1' when unsigned'("010") = "00" else '0';
+  eqt <= '1' when unsigned'("000") = "00" else '0';
+  -- a literal wider than 32 bits must not be truncated
+  wide <= x"123456789A";
   -- resize of an unsigned value zero-extends; the width is a static expression
   y <= std_logic_vector(resize(u, N + 4));
   -- static to_signed folds to an aggregate with a literal origin

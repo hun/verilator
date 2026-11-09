@@ -32,11 +32,14 @@ int main(int argc, char** argv) {
                 topp->b = b;
                 topp->u = u;
                 topp->s = u & 15;
+                topp->w = u + 1;
+                topp->sw = u + 1;
                 topp->eval();
 
                 const int rem = a % b;
                 const int mod = (rem != 0 && ((rem < 0) != (b < 0))) ? rem + b : rem;
                 const int uu = u & 15;
+                const int ww = u + 1;
                 const int prev = (uu - 1) & 15;
                 const int andValue = uu & prev;
                 const int ssllBits = (sv << 1) & 15;
@@ -70,6 +73,15 @@ int main(int argc, char** argv) {
                     {"ssla", static_cast<int>(topp->ssla_o) & 15, ssllBits},
                     {"ssra", static_cast<int>(topp->ssra_o) & 15, ssraBits},
                     {"slt", static_cast<int>(topp->slt_o), sv < 0},
+                    {"vadd", static_cast<int>(topp->vadd_o), (uu + ww) & 0xff},
+                    {"vmul", static_cast<int>(topp->vmul_o), uu * ww},
+                    {"vdiv", static_cast<int>(topp->vdiv_o), (uu / ww) & 0xf},
+                    {"vmod", static_cast<int>(topp->vmod_o), uu % ww},
+                    {"vlt", static_cast<int>(topp->vlt_o), uu < ww},
+                    {"slt_w", static_cast<int>(topp->slt_w_o), sv < ww},
+                    {"sadd", static_cast<int>(topp->sadd_o) & 0xff, (sv + ww) & 0xff},
+                    {"lit_t", static_cast<int>(topp->lit_t_o), 1},
+                    {"lit_f", static_cast<int>(topp->lit_f_o), 0},
                 };
                 for (const Check& check : checks) {
                     if (check.got != check.want) {

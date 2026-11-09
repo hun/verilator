@@ -14,6 +14,8 @@ entity t is
     b     : in integer;
     u     : in unsigned(3 downto 0);
     s     : in signed(3 downto 0);
+    w     : in unsigned(7 downto 0);
+    sw    : in signed(7 downto 0);
     mul_o : out integer;
     div_o : out integer;
     mod_o : out integer;
@@ -36,7 +38,16 @@ entity t is
     ssrl_o : out signed(3 downto 0);
     ssla_o : out signed(3 downto 0);
     ssra_o : out signed(3 downto 0);
-    slt_o : out std_logic
+    slt_o  : out std_logic;
+    vadd_o : out unsigned(7 downto 0);
+    vmul_o : out unsigned(11 downto 0);
+    vdiv_o : out unsigned(3 downto 0);
+    vmod_o : out unsigned(3 downto 0);
+    vlt_o  : out std_logic;
+    slt_w_o : out std_logic;
+    sadd_o : out signed(7 downto 0);
+    lit_t_o : out std_logic;
+    lit_f_o : out std_logic
   );
 end;
 
@@ -68,4 +79,16 @@ begin
   ssla_o <= s sla 1;
   ssra_o <= s sra 1;
   slt_o <= '1' when s < 0 else '0';
+
+  -- Operands of different lengths: results follow the numeric_std lengths
+  vadd_o <= u + w;
+  vmul_o <= u * w;
+  vdiv_o <= u / w;
+  vmod_o <= u mod w;
+  vlt_o <= '1' when u < w else '0';
+  slt_w_o <= '1' when s < sw else '0';
+  sadd_o <= s + sw;
+  -- Shorter literals are extended to the comparison width
+  lit_t_o <= '1' when unsigned'("000") = "00" else '0';
+  lit_f_o <= '1' when unsigned'("010") = "00" else '0';
 end;

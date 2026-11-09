@@ -487,6 +487,73 @@ class VhdlXmlFrontend final {
                || kind == "use_clause";
     }
 
+    //! Width of one array element subtype, or 0 when it cannot be determined
+    int elementWidth(const Node* elemp, int depth = 0) const {
+        if (!elemp || depth > 16) return 0;
+        if (!elemp->has("kind") && elemp->has("ref")) {
+            return elementWidth(nodeById(elemp->attr("ref")), depth + 1);
+        }
+        const std::string kind = elemp->attr("kind");
+        if (kind == "enumeration_type_definition" || kind == "enumeration_subtype_definition") {
+            return 1;
+        }
+        if (kind == "integer_subtype_definition") {
+            return m_rootp->typeTablep()
+                ->findBasicDType(flpOf(elemp), VBasicDTypeKwd::INT)
+                ->width();
+        }
+        if (kind == "array_subtype_definition") {
+            const std::vector<const Node*> indices
+                = childEls(elemp->child("index_constraint_list"));
+            const Node* const rangep
+                = indices.size() == 1 ? indices.front()->child("range_constraint") : nullptr;
+            int64_t leftValue = 0;
+            int64_t rightValue = 0;
+            if (!rangep || !evalConst(rangeBound(rangep, true), leftValue)
+                || !evalConst(rangeBound(rangep, false), rightValue)) {
+                return 0;
+            }
+            return static_cast<int>(std::abs(leftValue - rightValue) + 1);
+        }
+        if (kind == "simple_name") {
+            const std::string id = vhdlFold(elemp->attr("identifier"));
+            if (id == "std_logic" || id == "std_ulogic" || id == "bit" || id == "boolean") {
+                return 1;
+            }
+            if (id == "integer" || id == "natural" || id == "positive") {
+                return m_rootp->typeTablep()
+                    ->findBasicDType(flpOf(elemp), VBasicDTypeKwd::INT)
+                    ->width();
+            }
+            const Node* const refp = elemp->child("named_entity");
+            const Node* const declp
+                = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+            if (!declp) return 0;
+            const std::string declKind = declp->attr("kind");
+            if (declKind == "subtype_declaration") {
+                return elementWidth(declp->child("subtype_indication"), depth + 1);
+            }
+            if (declKind == "type_declaration" || declKind == "anonymous_type_declaration") {
+                if (const Node* const defp = declp->child("type_definition")) {
+                    return elementWidth(defp, depth + 1);
+                }
+                return elementWidth(declp->child("subtype_definition"), depth + 1);
+            }
+            return 0;
+        }
+        if (kind == "record_type_definition") {
+            int width = 0;
+            for (const Node* const memberp : childEls(elemp->child("elements_declaration_list"))) {
+                const int memberWidth
+                    = elementWidth(memberp->child("subtype_indication"), depth + 1);
+                if (memberWidth <= 0) return 0;
+                width += memberWidth;
+            }
+            return width;
+        }
+        return 0;
+    }
+
     VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) {
         VhdlDTypeSpec spec;
         if (!subtypep || depth > 16) return spec;
@@ -589,6 +656,14 @@ class VhdlXmlFrontend final {
         } else {
             error(subtypep, "VHDL array type '" + mark + "' is not supported yet");
             return spec;
+        }
+        // The frontend models an array as one flat vector, which only matches VHDL when
+        // every element is a single bit
+        const Node* elemSubp = subtypep->child("element_subtype");
+        if (!elemSubp) elemSubp = subtypep->child("element_subtype_indication");
+        if (elementWidth(elemSubp) > 1) {
+            unsupported(subtypep, "array of multi-bit elements");
+            // Keep lowering with the flat layout; the error aborts the run
         }
         spec.isVector = true;
 
@@ -1881,6 +1956,28 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
+    //! Lower both sides of a comparison to a common width. VHDL compares operands of
+    //! different lengths by extending the shorter one, so the post-width AST needs a
+    //! single operand width.
+    void lowerComparison(const Node* nodep, AstNodeExpr*& lhsp, AstNodeExpr*& rhsp) {
+        lhsp = lowerExpr(nodep->child("left"), nullptr);
+        if (!lhsp) return;
+        // The left side's type orients a literal on the right side
+        rhsp = lowerExpr(nodep->child("right"), lhsp->dtypep());
+        if (!rhsp) return;
+        AstBasicDType* const lbasicp = VN_CAST(lhsp->dtypep()->skipRefp(), BasicDType);
+        const AstBasicDType* const rbasicp = VN_CAST(rhsp->dtypep()->skipRefp(), BasicDType);
+        if (!lbasicp || !rbasicp || lbasicp->keyword() == VBasicDTypeKwd::INT
+            || rbasicp->keyword() == VBasicDTypeKwd::INT)
+            return;
+        const int width = std::max(lbasicp->width(), rbasicp->width());
+        if (lbasicp->width() == width && rbasicp->width() == width) return;
+        AstNodeDType* const dtp = m_rootp->typeTablep()->findLogicBitDType(
+            flpOf(nodep), lbasicp->keyword(), width, width, lbasicp->numeric());
+        lhsp = resizeExpr(lhsp, dtp);
+        rhsp = resizeExpr(rhsp, dtp);
+    }
+
     AstNodeExpr* lowerExpr(const Node* nodep, AstNodeDType* contextp) {
         if (!nodep) return nullptr;
         FileLine* const flp = flpOf(nodep);
@@ -2039,25 +2136,28 @@ class VhdlXmlFrontend final {
                 unsupported(nodep, "empty string literal");
                 return makeConst(flp, dtp, 0);
             }
-            uint32_t value = 0;
+            const int contentWidth = static_cast<int>(content.size());
             for (const char ch : content) {
                 if (ch != '0' && ch != '1') {
                     unsupported(nodep, "non-binary string literal");
                     return makeConst(flp, dtp, 0);
                 }
-                value = (value << 1) | (ch == '1' ? 1U : 0U);
             }
-            const int contentWidth = static_cast<int>(content.size());
             if (contentWidth > dtp->width()) {
                 error(nodep, "VHDL string literal length does not match its context");
                 return makeConst(flp, dtp, 0);
             }
+            // Build the literal bit by bit: a fixed-width accumulator truncates wide literals
+            V3Number num{flp, dtp->width(), 0};
+            const int leading = contentWidth - 1;
+            for (int i = 0; i < contentWidth; ++i) num.setBit(leading - i, content[i]);
             // A numeric_std operation may resize a shorter literal to the operand width
             if (contentWidth < dtp->width() && dtp->isSigned() && content.front() == '1') {
-                const int shift = dtp->width() - contentWidth;
-                if (shift < 32) value |= ((1U << shift) - 1U) << contentWidth;
+                for (int bit = contentWidth; bit < dtp->width(); ++bit) num.setBit(bit, '1');
             }
-            return makeConst(flp, dtp, value);
+            AstConst* const constp = new AstConst{flp, num};
+            constp->dtypep(dtp);
+            return constp;
         }
         if (kind == "addition_operator" || kind == "subtraction_operator"
             || kind == "substraction_operator" || kind == "multiplication_operator"
@@ -2065,12 +2165,41 @@ class VhdlXmlFrontend final {
             || kind == "remainder_operator" || kind == "exponentiation_operator"
             || kind == "and_operator" || kind == "or_operator" || kind == "xor_operator"
             || kind == "nand_operator" || kind == "nor_operator" || kind == "xnor_operator") {
-            AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), contextp);
+            AstNodeExpr* lhsp = lowerExpr(nodep->child("left"), contextp);
             if (!lhsp) return nullptr;
-            AstNodeDType* const dtp = lhsp->dtypep();
-            AstNodeExpr* const rhsp = lowerExpr(nodep->child("right"), dtp);
+            AstNodeDType* const lhsDtp = lhsp->dtypep();
+            AstBasicDType* const lbasicp = VN_CAST(lhsDtp->skipRefp(), BasicDType);
+            const bool intOp = !lbasicp || lbasicp->keyword() == VBasicDTypeKwd::INT;
+            const bool powOp = kind == "exponentiation_operator";
+            // A numeric_std exponent is a natural, not a vector operand
+            AstNodeExpr* rhsp
+                = lowerExpr(nodep->child("right"), intOp || powOp ? intDType(flp) : lhsDtp);
             if (!rhsp) return nullptr;
-            const bool signedp = dtp->isSigned();
+            AstNodeDType* opDtp = lhsDtp;
+            int resultWidth = lhsDtp->width();
+            if (!intOp) {
+                const int lwidth = lhsDtp->width();
+                const int rwidth = rhsp->dtypep()->width();
+                // numeric_std result lengths: product sums the operand lengths, division
+                // and exponentiation keep the left length, other operators take the wider
+                if (kind == "multiplication_operator") {
+                    resultWidth = lwidth + rwidth;
+                } else if (kind == "division_operator" || kind == "remainder_operator"
+                           || kind == "modulus_operator" || powOp) {
+                    resultWidth = lwidth;
+                } else {
+                    resultWidth = std::max(lwidth, rwidth);
+                }
+                // A post-width AST needs equally wide operands. Keep a wider divisor or
+                // remainder operand whole and extract the result width below.
+                const int opWidth
+                    = powOp ? lwidth : std::max(resultWidth, std::max(lwidth, rwidth));
+                opDtp = m_rootp->typeTablep()->findLogicBitDType(flp, lbasicp->keyword(), opWidth,
+                                                                 opWidth, lbasicp->numeric());
+                lhsp = resizeExpr(lhsp, opDtp);
+                if (!powOp) rhsp = resizeExpr(rhsp, opDtp);
+            }
+            const bool signedp = opDtp->isSigned();
             AstNodeExpr* resultp = nullptr;
             if (kind == "addition_operator") {
                 resultp = new AstAdd{flp, lhsp, rhsp};
@@ -2089,7 +2218,7 @@ class VhdlXmlFrontend final {
                 AstNodeExpr* const remp
                     = signedp ? static_cast<AstNodeExpr*>(new AstModDivS{flp, lhsp, rhsp})
                               : static_cast<AstNodeExpr*>(new AstModDiv{flp, lhsp, rhsp});
-                remp->dtypep(dtp);
+                remp->dtypep(opDtp);
                 if (!signedp) {
                     resultp = remp;
                 } else {
@@ -2097,12 +2226,12 @@ class VhdlXmlFrontend final {
                     AstNodeExpr* const addRemp = remp->cloneTree(false);
                     AstNodeExpr* const signRemp = remp->cloneTree(false);
                     AstNodeExpr* const testRemp = remp->cloneTree(false);
-                    AstNodeExpr* const signZerop = makeConst(flp, dtp, 0);
-                    AstNodeExpr* const testZerop = makeConst(flp, dtp, 0);
+                    AstNodeExpr* const signZerop = makeConst(flp, opDtp, 0);
+                    AstNodeExpr* const testZerop = makeConst(flp, opDtp, 0);
                     AstNodeExpr* const remNegp = new AstLtS{flp, signRemp, signZerop};
                     remNegp->dtypep(bitDType(flp));
                     AstNodeExpr* const rhsNegp
-                        = new AstLtS{flp, rhsp->cloneTree(false), makeConst(flp, dtp, 0)};
+                        = new AstLtS{flp, rhsp->cloneTree(false), makeConst(flp, opDtp, 0)};
                     rhsNegp->dtypep(bitDType(flp));
                     AstNodeExpr* const diffSignp = new AstXor{flp, remNegp, rhsNegp};
                     diffSignp->dtypep(bitDType(flp));
@@ -2111,7 +2240,7 @@ class VhdlXmlFrontend final {
                     AstNodeExpr* const adjustp = new AstAnd{flp, nonzerop, diffSignp};
                     adjustp->dtypep(bitDType(flp));
                     AstNodeExpr* const sump = new AstAdd{flp, addRemp, rhsp->cloneTree(false)};
-                    sump->dtypep(dtp);
+                    sump->dtypep(opDtp);
                     resultp = new AstCond{flp, adjustp, sump, remp};
                 }
             } else if (kind == "exponentiation_operator") {
@@ -2124,26 +2253,32 @@ class VhdlXmlFrontend final {
                 resultp = new AstXor{flp, lhsp, rhsp};
             } else if (kind == "nand_operator") {
                 AstNodeExpr* const andp = new AstAnd{flp, lhsp, rhsp};
-                andp->dtypep(dtp);
+                andp->dtypep(opDtp);
                 resultp = new AstNot{flp, andp};
             } else if (kind == "nor_operator") {
                 AstNodeExpr* const orp = new AstOr{flp, lhsp, rhsp};
-                orp->dtypep(dtp);
+                orp->dtypep(opDtp);
                 resultp = new AstNot{flp, orp};
             } else {
                 AstNodeExpr* const xorp = new AstXor{flp, lhsp, rhsp};
-                xorp->dtypep(dtp);
+                xorp->dtypep(opDtp);
                 resultp = new AstNot{flp, xorp};
             }
-            resultp->dtypep(dtp);
+            resultp->dtypep(opDtp);
+            if (resultWidth != opDtp->width()) {
+                AstSel* const selp = new AstSel{flp, resultp, 0, resultWidth};
+                selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(
+                    flp, lbasicp->keyword(), resultWidth, resultWidth, lbasicp->numeric()));
+                return selp;
+            }
             return resultp;
         }
         if (kind == "less_than_operator" || kind == "less_than_or_equal_operator"
             || kind == "greater_than_operator" || kind == "greater_than_or_equal_operator") {
-            AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), nullptr);
-            if (!lhsp) return nullptr;
-            AstNodeExpr* const rhsp = lowerExpr(nodep->child("right"), lhsp->dtypep());
-            if (!rhsp) return nullptr;
+            AstNodeExpr* lhsp = nullptr;
+            AstNodeExpr* rhsp = nullptr;
+            lowerComparison(nodep, lhsp, rhsp);
+            if (!lhsp || !rhsp) return nullptr;
             const bool signedp = lhsp->dtypep()->isSigned();
             AstNodeExpr* resultp = nullptr;
             if (kind == "less_than_operator") {
@@ -2223,10 +2358,10 @@ class VhdlXmlFrontend final {
             return notp;
         }
         if (kind == "equality_operator" || kind == "inequality_operator") {
-            AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), nullptr);
-            if (!lhsp) return nullptr;
-            AstNodeExpr* const rhsp = lowerExpr(nodep->child("right"), lhsp->dtypep());
-            if (!rhsp) return nullptr;
+            AstNodeExpr* lhsp = nullptr;
+            AstNodeExpr* rhsp = nullptr;
+            lowerComparison(nodep, lhsp, rhsp);
+            if (!lhsp || !rhsp) return nullptr;
             AstNodeExpr* const resultp
                 = kind == "equality_operator"
                       ? static_cast<AstNodeExpr*>(new AstEq{flp, lhsp, rhsp})
