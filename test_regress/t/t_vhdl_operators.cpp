@@ -87,6 +87,10 @@ int main(int argc, char** argv) {
                     {"plus", static_cast<int>(topp->plus_o), a},
                     {"cond", static_cast<int>(topp->cond_o), uu & 1},
                     {"pkgconst", static_cast<int>(topp->pkgconst_o), 10},
+                    {"slow", static_cast<int>(topp->slow_o), -2},
+                    {"shigh", static_cast<int>(topp->shigh_o), 3},
+                    {"sleft", static_cast<int>(topp->sleft_o), -2},
+                    {"sright", static_cast<int>(topp->sright_o), 3},
                 };
                 for (const Check& check : checks) {
                     if (check.got != check.want) {

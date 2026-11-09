@@ -2855,6 +2855,29 @@ class VhdlXmlFrontend final {
                     = kind == "right_type_attribute" || kind == "high_type_attribute";
                 return makeConst(flp, enumDType(defp), static_cast<uint64_t>(isLast ? lastp : 0));
             }
+            // Integer subtype marks carry their range in the analyzed type
+            const Node* const prefixp = nodep->child("prefix");
+            const Node* const typep = prefixp ? prefixp->child("type") : nullptr;
+            const Node* const defp
+                = typep && typep->has("ref") ? nodeById(typep->attr("ref")) : nullptr;
+            const Node* const rangep = defp ? defp->child("range_constraint") : nullptr;
+            int64_t leftValue = 0;
+            int64_t rightValue = 0;
+            if (rangep && evalConst(rangeBound(rangep, true), leftValue)
+                && evalConst(rangeBound(rangep, false), rightValue)) {
+                int64_t value = 0;
+                if (kind == "left_type_attribute") {
+                    value = leftValue;
+                } else if (kind == "right_type_attribute") {
+                    value = rightValue;
+                } else if (kind == "high_type_attribute") {
+                    value = std::max(leftValue, rightValue);
+                } else {
+                    value = std::min(leftValue, rightValue);
+                }
+                return makeConst(flp, contextp ? contextp : intDType(flp),
+                                 static_cast<uint64_t>(value));
+            }
         }
         if (kind == "left_attribute" || kind == "right_attribute" || kind == "high_attribute"
             || kind == "low_attribute" || kind == "length_attribute"
