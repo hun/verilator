@@ -3221,6 +3221,61 @@ class VhdlXmlFrontend final {
                                                    - std::string{"_operator"}.size());
             return makeReduction(flp, op, operandNodep, operandp);
         }
+        if (kind == "match_equality_operator" || kind == "match_inequality_operator") {
+            AstNodeExpr* lhsp = nullptr;
+            AstNodeExpr* rhsp = nullptr;
+            lowerComparison(nodep, lhsp, rhsp);
+            if (!lhsp || !rhsp) return nullptr;
+            const int width = lhsp->dtypep()->width();
+            // A '-' character in a literal is a don't-care position for matching
+            std::vector<bool> wildcard(width, false);
+            bool anyWildcard = false;
+            for (const char* const side : {"left", "right"}) {
+                const Node* const exprNodep = nodep->child(side);
+                if (!exprNodep) continue;
+                std::string pattern;
+                if (exprNodep->attr("kind") == "string_literal8") {
+                    const Node* const strp = exprNodep->child("string8_id");
+                    if (strp) pattern = strp->attr("content");
+                } else if (exprNodep->attr("kind") == "character_literal"
+                           && exprNodep->attr("identifier") == "'-'") {
+                    pattern = "-";
+                }
+                for (size_t i = 0; i < pattern.size(); ++i) {
+                    if (pattern[i] != '-') continue;
+                    const int bit = static_cast<int>(pattern.size() - 1 - i);
+                    if (bit < 0 || bit >= width) continue;
+                    wildcard[bit] = true;
+                    anyWildcard = true;
+                }
+            }
+            AstNodeExpr* matchp = nullptr;
+            if (anyWildcard) {
+                AstNodeDType* const dtp = lhsp->dtypep();
+                // Keep the compared positions and clear the don't-care ones
+                V3Number keep{flp, width, 0};
+                for (int bit = 0; bit < width; ++bit) {
+                    if (!wildcard[bit]) keep.setBit(bit, '1');
+                }
+                AstNodeExpr* const xorp = new AstXor{flp, lhsp, rhsp};
+                xorp->dtypep(dtp);
+                AstConst* const keepp = new AstConst{flp, keep};
+                keepp->dtypep(dtp);
+                AstNodeExpr* const andp = new AstAnd{flp, xorp, keepp};
+                andp->dtypep(dtp);
+                matchp = new AstEqCase{flp, andp, makeConst(flp, dtp, 0)};
+            } else {
+                // Without a wildcard literal, matching is same-value equality
+                matchp = new AstEqCase{flp, lhsp, rhsp};
+            }
+            matchp->dtypep(bitDType(flp));
+            if (kind == "match_inequality_operator") {
+                AstNot* const notp = new AstNot{flp, matchp};
+                notp->dtypep(bitDType(flp));
+                matchp = notp;
+            }
+            return matchp;
+        }
         if (kind == "equality_operator" || kind == "inequality_operator") {
             AstNodeExpr* lhsp = nullptr;
             AstNodeExpr* rhsp = nullptr;
