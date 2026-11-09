@@ -23,7 +23,8 @@ test.compile(make_top_shell=False,
              make_main=False,
              verilator_flags2=[
                  '--language', 'vhdl', 't/t_vhdl_record_ind_u.vhdl',
-                 't/t_vhdl_record_ind_c.vhdl', '--exe', test.pli_filename
+                 't/t_vhdl_record_ind_c.vhdl', 't/t_vhdl_record_ind_o.vhdl', '--exe',
+                 test.pli_filename
              ])
 
 test.execute()

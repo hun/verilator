@@ -40,4 +40,12 @@ begin
       o.x => cx,
       o.y => cy
     );
+
+  -- The child's output port `a` is unassociated and shares its name with a
+  -- record member, so it must still resolve to an artificial open of `a`
+  w : entity work.child_o
+    port map (
+      i.a => a,
+      i.b => b
+    );
 end;
