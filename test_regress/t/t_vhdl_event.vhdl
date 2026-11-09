@@ -20,13 +20,15 @@ entity t is
     qc : out std_logic;
     qf : out std_logic;
     qr : out std_logic;
-    qe : out std_logic
+    qe : out std_logic;
+    qe2 : out std_logic
   );
 end;
 
 architecture rtl of t is
   constant EDGE : std_logic := '1';
   signal r : std_logic;
+  signal r2 : std_logic;
 begin
   process (clk) is
   begin
@@ -87,4 +89,17 @@ begin
 
   -- A conditional concurrent assignment gated by a clock edge
   qe <= '0' when rst = '1' else d when rising_edge(clk);
+
+  -- Enable branch, asynchronous reset branch, then the clock branch
+  process (clk, rst) is
+  begin
+    if en = '0' then
+      null;
+    elsif rst = '1' then
+      r2 <= '0';
+    elsif rising_edge(clk) then
+      r2 <= d;
+    end if;
+  end process;
+  qe2 <= r2;
 end;

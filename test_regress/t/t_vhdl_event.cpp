@@ -23,7 +23,8 @@ int main(int argc, char** argv) {
             ++fails;
         }
     };
-    const auto checkAll = [&](int q, int qg, int qp, int qn, int qc, int qf, int qr, int qe) {
+    const auto checkAll = [&](int q, int qg, int qp, int qn, int qc, int qf, int qr, int qe,
+                              int qe2) {
         check("q", static_cast<int>(topp->q), q);
         check("qg", static_cast<int>(topp->qg), qg);
         check("qp", static_cast<int>(topp->qp), qp);
@@ -32,6 +33,7 @@ int main(int argc, char** argv) {
         check("qf", static_cast<int>(topp->qf), qf);
         check("qr", static_cast<int>(topp->qr), qr);
         check("qe", static_cast<int>(topp->qe), qe);
+        check("qe2", static_cast<int>(topp->qe2), qe2);
     };
 
     // Initialize every register: a rising edge with d=0, then a falling edge
@@ -44,26 +46,33 @@ int main(int argc, char** argv) {
     topp->eval();
     topp->clk = 0;
     topp->eval();
-    checkAll(0, 0, 0, 0, 0, 0, 0, 0);
+    checkAll(0, 0, 0, 0, 0, 0, 0, 0, 0);
 
     // Rising edge with d=1 and en=1 loads every register
     topp->d = 1;
     topp->en = 1;
     topp->clk = 1;
     topp->eval();
-    checkAll(1, 1, 1, 1, 1, 0, 1, 1);
+    checkAll(1, 1, 1, 1, 1, 0, 1, 1, 1);
 
     // Falling edge updates the falling-edge register only
     topp->clk = 0;
     topp->eval();
-    checkAll(1, 1, 1, 1, 1, 1, 1, 1);
+    checkAll(1, 1, 1, 1, 1, 1, 1, 1, 1);
+
+    // Asynchronous reset with no clock edge clears the process reset and the
+    // conditional concurrent assignment
+    topp->rst = 1;
+    topp->eval();
+    checkAll(1, 1, 1, 1, 1, 1, 0, 0, 0);
+    topp->rst = 0;
 
     // Enable low holds the gated registers
     topp->en = 0;
     topp->d = 0;
     topp->clk = 1;
     topp->eval();
-    checkAll(0, 1, 1, 0, 0, 1, 0, 0);
+    checkAll(0, 1, 1, 0, 0, 1, 0, 0, 0);
 
     // Asynchronous reset takes effect without a clock edge
     topp->en = 1;
@@ -71,13 +80,13 @@ int main(int argc, char** argv) {
     topp->rst = 1;
     topp->clk = 0;
     topp->eval();
-    checkAll(0, 1, 1, 0, 0, 1, 0, 0);
+    checkAll(0, 1, 1, 0, 0, 1, 0, 0, 0);
 
     // Release the reset and clock the next value in
     topp->rst = 0;
     topp->clk = 1;
     topp->eval();
-    checkAll(1, 1, 1, 1, 1, 1, 1, 1);
+    checkAll(1, 1, 1, 1, 1, 1, 1, 1, 1);
 
     topp->final();
     delete topp;
