@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
                 {"o_alt", static_cast<int>(topp->o_alt), 0xc ^ a},
                 {"o_pos", static_cast<int>(topp->o_pos), 0x6 ^ a},
                 {"o_rng", static_cast<int>(topp->o_rng), a},
+                {"o_rec", static_cast<int>(topp->o_rec), 0x3},
                 {"o_child", static_cast<int>(topp->o_child), a & 1},
             };
             for (const Check& check : checks) {

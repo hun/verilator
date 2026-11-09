@@ -37,12 +37,20 @@ entity t is
     o_alt : out std_logic_vector(3 downto 0);
     o_pos : out std_logic_vector(3 downto 0);
     o_rng : out std_logic_vector(3 downto 0);
+    o_rec : out std_logic_vector(3 downto 0);
     o_child : out std_logic
   );
 end;
 
 architecture rtl of t is
+  type rec_t is record
+    m0 : std_logic;
+    m1 : std_logic;
+    m2 : std_logic_vector(1 downto 0);
+  end record;
+
   constant CAT : std_logic_vector(3 downto 0) := ("01", "10");
+  constant REC : rec_t := (m0 | m1 => '0', m2 => "11");
 
   function mask (len : natural) return std_logic_vector is
     variable res : std_logic_vector(len - 1 downto 0);
@@ -57,6 +65,7 @@ begin
   o_func <= mask(4) and not a;
   o_alt <= mask(4) xor a;
   o_pos <= CAT xor a;
+  o_rec <= REC.m0 & REC.m1 & REC.m2;
 
   process (a)
     variable v : std_logic_vector(a'range);

@@ -435,12 +435,30 @@ class VhdlXmlFrontend final {
         return enump;
     }
 
-    AstNodeDType* enumDTypeOfLiteral(const Node* litp) {
+    const Node* enumDefOfLiteral(const Node* litp) const {
         const Node* const typerefp = litp->child("type");
         if (!typerefp || !typerefp->has("ref")) return nullptr;
         const Node* const defp = nodeById(typerefp->attr("ref"));
         if (!defp || defp->attr("kind") != "enumeration_type_definition") return nullptr;
-        return enumDType(defp);
+        return defp;
+    }
+
+    //! The nine-literal IEEE std_logic/std_ulogic enumeration
+    static bool isLogicEnum(const Node* typeDefp) {
+        static const char* const names[]
+            = {"'U'", "'X'", "'0'", "'1'", "'Z'", "'W'", "'L'", "'H'", "'-'"};
+        const std::vector<const Node*> lits
+            = childEls(typeDefp->child("enumeration_literal_list"));
+        if (lits.size() != sizeof(names) / sizeof(names[0])) return false;
+        for (size_t i = 0; i < lits.size(); ++i) {
+            if (lits[i]->attr("identifier") != names[i]) return false;
+        }
+        return true;
+    }
+
+    AstNodeDType* enumDTypeOfLiteral(const Node* litp) const {
+        const Node* const defp = enumDefOfLiteral(litp);
+        return defp ? enumDType(defp) : nullptr;
     }
 
     //! Type definition of the requested kind behind a type mark, or nullptr
@@ -894,8 +912,7 @@ class VhdlXmlFrontend final {
                         }
                     }
                 }
-                error(subtypep,
-                      "VHDL type '" + subtypep->attr("identifier") + "' is not supported yet");
+                unsupported(subtypep, "type '" + subtypep->attr("identifier") + "'");
             }
             return spec;
         }
@@ -907,12 +924,12 @@ class VhdlXmlFrontend final {
             } else if (unconstrained) {
                 spec.isUnconstrained = true;
             } else {
-                error(subtypep, "VHDL record type is not supported yet");
+                unsupported(subtypep, "record type");
             }
             return spec;
         }
         if (kind != "array_subtype_definition" && kind != "array_type_definition") {
-            error(subtypep, "VHDL type form '" + kind + "' is not supported yet");
+            unsupported(subtypep, "type form '" + kind + "'");
             return spec;
         }
 
@@ -975,7 +992,7 @@ class VhdlXmlFrontend final {
                 spec.kwd = elemSpec.kwd;
                 spec.signing = elemSpec.signing;
             } else {
-                error(subtypep, "VHDL array type '" + mark + "' is not supported yet");
+                unsupported(subtypep, "array type '" + mark + "'");
                 return spec;
             }
         }
@@ -984,7 +1001,7 @@ class VhdlXmlFrontend final {
 
         const Node* const indicesp = subtypep->child("index_constraint_list");
         if (!indicesp) {
-            error(subtypep, "unconstrained VHDL array is not supported yet");
+            unsupported(subtypep, "unconstrained array");
             spec.isVector = false;  // Keep the tree buildable; the error aborts the run
             spec.isUnconstrained = true;
             return spec;
@@ -1005,7 +1022,7 @@ class VhdlXmlFrontend final {
         int leftValue = 0;
         int rightValue = 0;
         if (!discreteRange(rangep, leftValue, rightValue, spec.ascending)) {
-            error(rangep, "non-static VHDL range limit is not supported yet");
+            unsupported(rangep, "non-static range limit");
             spec.isVector = false;  // Keep the tree buildable; the error aborts the run
             return spec;
         }
@@ -1208,7 +1225,7 @@ class VhdlXmlFrontend final {
         FileLine* const flp = flpOf(nodep);
         const AstBasicDType* const basicp = VN_CAST(basep->dtypep()->skipRefp(), BasicDType);
         if (!basicp || basicp->width() <= 1) {
-            error(nodep, "Indexing a non-vector VHDL name is not supported yet");
+            unsupported(nodep, "indexing of a non-vector name");
             return basep;
         }
         // An array of multi-bit elements only carries its total bit width in the lowered
@@ -2494,9 +2511,19 @@ class VhdlXmlFrontend final {
         FileLine* const flp = flpOf(nodep);
         std::vector<const Node*> exprs(info.members.size(), nullptr);
         size_t position = 0;
+        const Node* lastExprp = nullptr;
         for (const Node* const choicep : childEls(nodep->child("association_choices_chain"))) {
             const std::string choiceKind = choicep->attr("kind");
-            const Node* const exprp = choicep->child("associated_expr");
+            const Node* exprp = choicep->child("associated_expr");
+            if (!exprp && choicep->attr("same_alternative_flag") == "true") {
+                // `m0 | m1 => value` shares one associated expression across its choices
+                exprp = lastExprp;
+            }
+            if (!exprp) {
+                error(nodep, "VHDL record aggregate member without a value");
+                return nullptr;
+            }
+            lastExprp = exprp;
             if (choiceKind == "choice_by_name") {
                 const Node* const namep = choicep->child("choice_name");
                 const std::string name
@@ -3090,6 +3117,26 @@ class VhdlXmlFrontend final {
             const std::string id = vhdlFold(nodep->attr("identifier"));
             if (id == "true" || id == "false") {
                 return makeConst(flp, contextp ? contextp : bitDType(flp), id == "true" ? 1U : 0U);
+            }
+            if (!contextp) {
+                // A std_logic/std_ulogic literal is one logic bit; without a context the
+                // enumeration dtype would be several bits wide and skew concatenations
+                const Node* const defp = enumDefOfLiteral(nodep);
+                if (defp && isLogicEnum(defp)) {
+                    const std::string raw = nodep->attr("identifier");
+                    char value = 0;
+                    if (raw.size() == 3 && logicLiteralChar(raw[1], value)) {
+                        AstNodeDType* const dtp = bitDType(flp);
+                        if (value == '0' || value == '1') {
+                            return makeConst(flp, dtp, value == '1' ? 1U : 0U);
+                        }
+                        V3Number num{flp, 1, 1};
+                        num.setBit(0, value);
+                        AstConst* const constp = new AstConst{flp, num};
+                        constp->dtypep(dtp);
+                        return constp;
+                    }
+                }
             }
             AstNodeDType* dtp = contextp ? contextp : enumDTypeOfLiteral(nodep);
             if (!dtp) {
