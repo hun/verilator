@@ -491,6 +491,15 @@ class VhdlXmlFrontend final {
                || kind == "use_clause";
     }
 
+    //! Follow a pure reference node to its target
+    const Node* derefNode(const Node* nodep) const {
+        for (int depth = 0; nodep && depth < 16 && !nodep->has("kind") && nodep->has("ref");
+             ++depth) {
+            nodep = nodeById(nodep->attr("ref"));
+        }
+        return nodep;
+    }
+
     //! Number of indices in a VHDL range; 0 for a null range
     static int rangeLength(int left, int right, bool ascending) {
         const int length = ascending ? right - left + 1 : left - right + 1;
@@ -515,8 +524,9 @@ class VhdlXmlFrontend final {
         if (kind == "array_subtype_definition") {
             const std::vector<const Node*> indices
                 = childEls(elemp->child("index_constraint_list"));
-            const Node* const rangep
+            const Node* rangep
                 = indices.size() == 1 ? indices.front()->child("range_constraint") : nullptr;
+            rangep = derefNode(rangep);
             int64_t leftValue = 0;
             int64_t rightValue = 0;
             if (!rangep || !evalConst(rangeBound(rangep, true), leftValue)
@@ -774,7 +784,7 @@ class VhdlXmlFrontend final {
             spec.isVector = false;
             return spec;
         }
-        const Node* const rangep = indices.front()->child("range_constraint");
+        const Node* const rangep = derefNode(indices.front()->child("range_constraint"));
         if (!rangep) {
             error(subtypep, "VHDL array without a range constraint");
             spec.isVector = false;
@@ -989,7 +999,7 @@ class VhdlXmlFrontend final {
         }
 
         // slice_name; only one-dimensional arrays can be sliced
-        const Node* const suffixp = nodep->child("suffix");
+        const Node* const suffixp = derefNode(nodep->child("suffix"));
         if (!suffixp || suffixp->attr("kind") != "range_expression") {
             unsupported(nodep, "slice form");
             return basep;
@@ -2341,7 +2351,7 @@ class VhdlXmlFrontend final {
                 exprs[slot] = lowerExpr(assocp, elemDtp);
                 if (!exprs[slot]) return nullptr;
             } else if (choiceKind == "choice_by_range") {
-                const Node* const rangep = choicep->child("choice_range");
+                const Node* const rangep = derefNode(choicep->child("choice_range"));
                 int64_t leftValue = 0;
                 int64_t rightValue = 0;
                 if (!rangep || !evalConst(rangeBound(rangep, true), leftValue)
@@ -3273,6 +3283,8 @@ class VhdlXmlFrontend final {
 
     //! Resolve one bound of a discrete range; limits may be references into the dump
     const Node* rangeBound(const Node* rangep, bool leftBound) const {
+        rangep = derefNode(rangep);
+        if (!rangep) return nullptr;
         const Node* boundp = rangep->child(leftBound ? "left_limit_expr" : "right_limit_expr");
         if (boundp) return boundp;
         boundp = rangep->child(leftBound ? "left_limit" : "right_limit");
@@ -4009,7 +4021,8 @@ class VhdlXmlFrontend final {
                         entityp->attr("identifier"));
     }
 
-    void createModuleFor(const Node* entityp, ModuleInfo& info, const std::string& modName) {
+    void createModuleFor(const Node* entityp, ModuleInfo& info, const std::string& modName,
+                         const std::map<std::string, VhdlDTypeSpec>* portSpecs = nullptr) {
         FileLine* const flp = flpOf(entityp);
         info.modp = new AstModule{flp, modName, "work"};
         // One VHDL file may hold many design units; the SV filename convention does not apply
@@ -4028,8 +4041,13 @@ class VhdlXmlFrontend final {
                 }
                 FileLine* const pflp = flpOf(portp);
                 const std::string pname = portp->attr("identifier");
-                AstVar* const varp
-                    = new AstVar{pflp, VVarType::PORT, pname, dtypeOf(parseType(subtypep), pflp)};
+                const VhdlDTypeSpec* specp = nullptr;
+                if (portSpecs) {
+                    const auto specIt = portSpecs->find(vhdlFold(pname));
+                    if (specIt != portSpecs->end()) specp = &specIt->second;
+                }
+                const VhdlDTypeSpec spec = specp ? *specp : parseType(subtypep);
+                AstVar* const varp = new AstVar{pflp, VVarType::PORT, pname, dtypeOf(spec, pflp)};
                 varp->direction(directionOf(portp->attr("mode")));
                 varp->pinNum(++pinNum);
                 // VHDL ports are signals, so procedural assignment is legal
@@ -4138,6 +4156,8 @@ class VhdlXmlFrontend final {
                                  + "' direction does not match the entity");
             }
             if (const Node* const subtypep = portp->child("subtype_indication")) {
+                // An unconstrained component port takes the actual's width
+                if (probeTypeSpec(subtypep).isUnconstrained) continue;
                 const int width = dtypeOf(parseType(subtypep), flpOf(portp))->width();
                 if (width != varp->width()) {
                     error(portp, "Component '" + unitName + "' port '" + name + "' width "
@@ -4146,6 +4166,17 @@ class VhdlXmlFrontend final {
                 }
             }
         }
+    }
+
+    //! Whether an entity has ports whose range comes from the instantiation
+    bool hasUnconstrainedPorts(const Node* entityp) const {
+        const Node* const portsp = entityp->child("port_chain");
+        if (!portsp) return false;
+        for (const Node* const portp : childEls(portsp)) {
+            if (portp->attr("kind") != "interface_signal_declaration") continue;
+            if (probeTypeSpec(portp->child("subtype_indication")).isUnconstrained) return true;
+        }
+        return false;
     }
 
     //! Whether an entity has generic type parameters (needing specialization)
@@ -4173,7 +4204,8 @@ class VhdlXmlFrontend final {
     //! Emit (or reuse) a module specialized for one generic binding set
     ModuleInfo* specializeModule(const Node* entityp,
                                  const std::map<std::string, int64_t>& bindings,
-                                 const std::map<std::string, const Node*>& typeBindings) {
+                                 const std::map<std::string, const Node*>& typeBindings,
+                                 const std::map<std::string, VhdlDTypeSpec>& portSpecs = {}) {
         const std::string entityKey = vhdlFold(entityp->attr("identifier"));
         std::string key = entityKey;
         for (const auto& binding : bindings) {
@@ -4181,6 +4213,12 @@ class VhdlXmlFrontend final {
         }
         for (const auto& binding : typeBindings) {
             key += "|" + binding.first + "@" + binding.second->attr("id");
+        }
+        for (const auto& portSpec : portSpecs) {
+            key += "|P" + portSpec.first + "=" + std::to_string(portSpec.second.left) + ":"
+                   + std::to_string(portSpec.second.right) + ":"
+                   + (portSpec.second.ascending ? "to" : "downto") + ":"
+                   + std::to_string(portSpec.second.elemWidth);
         }
         const auto found = m_specializations.find(key);
         if (found != m_specializations.end()) return &found->second;
@@ -4203,11 +4241,117 @@ class VhdlXmlFrontend final {
         ModuleInfo& info = m_specializations[key];
         const std::string modName
             = entityp->attr("identifier") + "__Vgen" + std::to_string(++m_genSeq);
-        createModuleFor(entityp, info, modName);
+        createModuleFor(entityp, info, modName, &portSpecs);
         info.modp->inLibrary(true);
         populateModuleFor(entityp, archIt->second, info);
         --m_specDepth;
         return &info;
+    }
+
+    //! Default value expression of an entity port, if any
+    const Node* portDefault(const Node* entityp, const std::string& foldedName) const {
+        const Node* const portsp = entityp ? entityp->child("port_chain") : nullptr;
+        if (!portsp) return nullptr;
+        for (const Node* const portp : childEls(portsp)) {
+            if (portp->attr("kind") != "interface_signal_declaration") continue;
+            if (vhdlFold(portp->attr("identifier")) != foldedName) continue;
+            return portp->child("default_value");
+        }
+        return nullptr;
+    }
+
+    //! GHDL's artificial open associations, resolved to the entity port they represent
+    std::map<const Node*, std::string> artificialOpenPorts(const Node* stmtp,
+                                                           const Node* entityp) const {
+        std::map<const Node*, std::string> result;
+        const Node* const pmap = stmtp->child("port_map_aspect_chain");
+        if (!pmap || !entityp) return result;
+        std::vector<std::string> ports;
+        if (const Node* const portsp = entityp->child("port_chain")) {
+            for (const Node* const portp : childEls(portsp)) {
+                if (portp->attr("kind") == "interface_signal_declaration") {
+                    ports.push_back(vhdlFold(portp->attr("identifier")));
+                }
+            }
+        }
+        std::set<std::string> used;
+        for (const Node* const assocp : childEls(pmap)) {
+            const Node* const formalp = assocp->child("formal");
+            if (formalp && !formalp->attr("identifier").empty()) {
+                used.insert(vhdlFold(formalp->attr("identifier")));
+            }
+        }
+        size_t next = 0;
+        for (const Node* const assocp : childEls(pmap)) {
+            if (assocp->attr("kind") != "association_element_open") continue;
+            const Node* const formalp = assocp->child("formal");
+            if (formalp && !formalp->attr("identifier").empty()) continue;
+            while (next < ports.size() && used.count(ports[next])) ++next;
+            if (next >= ports.size()) continue;
+            result[assocp] = ports[next];
+            used.insert(ports[next]);
+            ++next;
+        }
+        return result;
+    }
+
+    //! Ranges of an entity's unconstrained ports, taken from the instance's actuals
+    bool gatherPortSpecs(const Node* stmtp, const Node* entityp,
+                         std::map<std::string, VhdlDTypeSpec>& portSpecs) {
+        std::map<std::string, const Node*> actualByName;
+        std::vector<const Node*> positional;
+        const std::map<const Node*, std::string> artificials = artificialOpenPorts(stmtp, entityp);
+        if (const Node* const pmap = stmtp->child("port_map_aspect_chain")) {
+            for (const Node* const assocp : childEls(pmap)) {
+                const std::string kind = assocp->attr("kind");
+                const Node* const formalp = assocp->child("formal");
+                const std::string formalName
+                    = formalp ? vhdlFold(formalp->attr("identifier")) : std::string{};
+                if (artificials.find(assocp) != artificials.end()) continue;
+                if (kind == "association_element_open") {
+                    if (formalName.empty()) positional.push_back(nullptr);
+                    continue;
+                }
+                const Node* const actualp = assocp->child("actual");
+                if (!actualp) continue;
+                if (!formalName.empty()) {
+                    actualByName[formalName] = actualp;
+                } else {
+                    positional.push_back(actualp);
+                }
+            }
+        }
+        size_t position = 0;
+        if (const Node* const portsp = entityp->child("port_chain")) {
+            for (const Node* const portp : childEls(portsp)) {
+                if (portp->attr("kind") != "interface_signal_declaration") continue;
+                const std::string pname = vhdlFold(portp->attr("identifier"));
+                const Node* actualp = nullptr;
+                const auto namedIt = actualByName.find(pname);
+                if (namedIt != actualByName.end()) {
+                    actualp = namedIt->second;
+                } else if (position < positional.size()) {
+                    actualp = positional[position];
+                }
+                ++position;
+                if (!probeTypeSpec(portp->child("subtype_indication")).isUnconstrained) {
+                    continue;
+                }
+                if (!actualp) actualp = portp->child("default_value");
+                if (!actualp) {
+                    error(stmtp, "Unconstrained port '" + portp->attr("identifier")
+                                     + "' is not connected");
+                    return false;
+                }
+                VhdlDTypeSpec actualSpec;
+                if (!arraySpec(actualp, actualSpec)) {
+                    unsupported(actualp, "unconstrained port actual type");
+                    return false;
+                }
+                portSpecs[pname] = actualSpec;
+            }
+        }
+        return true;
     }
 
     void lowerInstance(const Node* stmtp) {
@@ -4238,7 +4382,15 @@ class VhdlXmlFrontend final {
 
         std::map<std::string, int64_t> bindings;
         std::map<std::string, const Node*> typeBindings;
-        if (const Node* const gmapp = stmtp->child("generic_map_aspect_chain")) {
+        std::map<std::string, VhdlDTypeSpec> portSpecs;
+        if (entityp && hasUnconstrainedPorts(entityp)
+            && !gatherPortSpecs(stmtp, entityp, portSpecs)) {
+            return;
+        }
+        bool haveGenericMap = false;
+        const Node* const gmapp = stmtp->child("generic_map_aspect_chain");
+        if (gmapp) {
+            haveGenericMap = true;
             if (!entityp) {
                 unsupported(stmtp, "generic map on a non-VHDL unit");
                 return;
@@ -4301,7 +4453,9 @@ class VhdlXmlFrontend final {
                 }
                 bindings[formalName] = value;
             }
-            ModuleInfo* const spec = specializeModule(entityp, bindings, typeBindings);
+        }
+        if (entityp && (haveGenericMap || !portSpecs.empty())) {
+            ModuleInfo* const spec = specializeModule(entityp, bindings, typeBindings, portSpecs);
             if (!spec) return;
             targetp = spec;
         }
@@ -4328,22 +4482,22 @@ class VhdlXmlFrontend final {
 
         AstPin* pinsp = nullptr;
         int positional = 0;
+        const std::map<const Node*, std::string> artificials = artificialOpenPorts(stmtp, entityp);
         if (const Node* const mapChainp = stmtp->child("port_map_aspect_chain")) {
             for (const Node* const assocp : childEls(mapChainp)) {
                 const std::string kind = assocp->attr("kind");
                 std::string formalName;
                 int pinNum = 0;
-                if (kind == "association_element_by_name"
-                    || kind == "association_element_by_expression"
-                    || kind == "association_element_open") {
+                const auto artIt = artificials.find(assocp);
+                if (artIt != artificials.end()) {
+                    formalName = artIt->second;
+                } else if (kind == "association_element_by_name"
+                           || kind == "association_element_by_expression"
+                           || kind == "association_element_open") {
                     const Node* const formalp = assocp->child("formal");
                     formalName = formalp ? formalp->attr("identifier") : std::string{};
                     if (formalName.empty()) {
-                        if (kind == "association_element_open") {
-                            unsupported(assocp, "port association without a formal");
-                            continue;
-                        }
-                        // A bare actual is a positional association
+                        // A bare actual or open is a positional association
                         pinNum = ++positional;
                     }
                 } else if (kind == "association_element_by_position") {
@@ -4404,9 +4558,14 @@ class VhdlXmlFrontend final {
                 FileLine* const pinFlp = flpOf(assocp);
                 if (!actualExprp) {
                     if (modVarp && modVarp->isNonOutput()) {
-                        error(assocp, "open on an input or inout port with a default value is not "
-                                      "supported yet");
-                        continue;
+                        const Node* const defp = portDefault(entityp, vhdlFold(modVarp->name()));
+                        if (defp) {
+                            actualExprp = lowerExpr(defp, modVarp->dtypep());
+                        } else {
+                            error(assocp,
+                                  "open on an input or inout port without a default value");
+                            continue;
+                        }
                     }
                     // VHDL "open" on an output is an intentional disconnection
                     pinFlp->warnOff(V3ErrorCode::PINCONNECTEMPTY, true);
@@ -4465,8 +4624,11 @@ public:
             }
             m_entityByName[vhdlFold(name)] = entityp;
             m_entityGenerics[vhdlFold(name)] = genericsOf(entityp);
-            // A type-generic entity has no single port type; only its specializations emit
-            if (!hasTypeGenerics(entityp)) modules.emplace_back(entityp, it->second);
+            // A type-generic entity or one with unconstrained ports has no single port
+            // type; only its specializations emit
+            if (!hasTypeGenerics(entityp) && !hasUnconstrainedPorts(entityp)) {
+                modules.emplace_back(entityp, it->second);
+            }
         }
 
         // Create all modules first so instances can bind to ports emitted later in the walk
