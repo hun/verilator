@@ -15,7 +15,9 @@ and categorizes the result:
 
   PASS          Verilator accepted the design
   UNSUPPORTED   the frontend reported "is not supported yet"
-  GHDL_ERROR    GHDL rejected the sources (including expected-failure tests)
+  GHDL_ERROR    GHDL analysis rejected the sources
+  EXPECTED_FAIL the testsuite marks the file as an expected `synth_failure` and the
+                frontend rejected it, as expected
   NO_TOP        no entity matching the requested top was found
   ERROR         any other Verilator failure
 
@@ -47,6 +49,7 @@ GHDL_FLAGS_RE = re.compile(
     r'(?:"([^"]*)"|\'([^\']*)\'|(\S+))', re.MULTILINE)
 TOP_RE = re.compile(r'\b(?:synth_tb|synth_only|synth_analyze)\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_TOP_RE = re.compile(r'\bsynth\b[^\n]*?\s-e\s+([A-Za-z][A-Za-z0-9_]*)')
+SYNTH_FAIL_RE = re.compile(r'\bsynth_failure\b([^\n]*)')
 
 
 def script_tops(testdir):
@@ -75,6 +78,20 @@ def script_case_files(testdir, top):
         if files:
             return files
     return []
+
+
+def script_synth_failures(testdir):
+    """Source files listed on `synth_failure` lines of the test's testsuite.sh."""
+    script = testdir / 'testsuite.sh'
+    if not script.is_file():
+        return set()
+    text = COMMENT_RE.sub('', script.read_text(errors='replace'))
+    files = set()
+    for match in SYNTH_FAIL_RE.finditer(text):
+        for token in match.group(1).split():
+            if token.endswith('.vhdl'):
+                files.add(token)
+    return files
 
 
 def ghdl_flags(testdir):
@@ -127,7 +144,7 @@ def classify(returncode, output):
 
 def run_one(job):  # pylint: disable=too-many-locals
     """Lint one test case and return its result record."""
-    (suite, testdir, top, files, args) = job
+    (suite, testdir, top, files, expected_fail, args) = job
     workdir = Path(args.outdir) / suite / f'{testdir.name}__{top}'
     workdir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -165,6 +182,9 @@ def run_one(job):  # pylint: disable=too-many-locals
         output = (exc.stdout or b'').decode(errors='replace')
         status, detail = 'ERROR', f'timeout after {args.timeout}s'
         returncode = -1
+    if expected_fail and status != 'PASS':
+        status = 'EXPECTED_FAIL'
+        detail = 'expected synth failure: ' + detail
     elapsed = time.monotonic() - started
     (workdir / 'verilator.log').write_text(output)
     return {
@@ -260,6 +280,7 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
         if not tops:
             skipped.append((testdir.name, 'no entity found'))
             continue
+        synth_failures = script_synth_failures(testdir)
         for top in tops:
             # GHDL's testsuite analyzes each top's own file, not every file in the
             # directory; passing all of them would merge alternative implementations
@@ -276,10 +297,10 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
                 files = designs[:1] + [chosen]
             else:
                 files = [chosen]
-            jobs.append((args.suite, testdir, top, files, args))
+            jobs.append((args.suite, testdir, top, files, chosen.name in synth_failures, args))
 
     if args.list:
-        for _suite, testdir, top, _files, _args in jobs:
+        for _suite, testdir, top, _files, _expected_fail, _args in jobs:
             print(f'{testdir.name}\t{top}')
         for name, why in skipped:
             print(f'{name}\tSKIP ({why})')
