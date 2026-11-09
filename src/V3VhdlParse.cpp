@@ -2873,6 +2873,19 @@ class VhdlXmlFrontend final {
         FileLine* const flp = flpOf(stmtp);
         AstNodeExpr* const lhsp = lowerLValue(stmtp, targetNode(stmtp));
         if (!lhsp) return nullptr;
+        if (mode != AssignMode::CONT) {
+            // V3Tristate/V3Inst model inout ports as continuously driven; a procedural
+            // assignment would reach DFG as a non-read reference
+            bool inoutPort = false;
+            lhsp->foreach([&](AstVarRef* refp) {
+                AstVar* const varp = refp->varp();
+                if (varp->isIO() && varp->direction().isInout()) inoutPort = true;
+            });
+            if (inoutPort) {
+                unsupported(stmtp, "procedural assignment to an inout port");
+                return nullptr;
+            }
+        }
         const std::vector<const Node*> waves = childEls(stmtp->child("waveform_chain"));
         if (waves.size() != 1) {
             unsupported(stmtp, "multiple waveform elements");
@@ -3314,6 +3327,7 @@ class VhdlXmlFrontend final {
 
     //! Evaluate a discrete range to integer bounds and direction
     bool discreteRange(const Node* rangep, int& left, int& right, bool& ascending) const {
+        rangep = derefNode(rangep);
         if (!rangep) return false;
         ascending = rangep->attr("direction") == "to";
         int64_t leftValue = 0;
@@ -4550,15 +4564,9 @@ class VhdlXmlFrontend final {
                 const Node* const actualp = assocp->child("actual");
                 AstNodeExpr* actualExprp = nullptr;
                 if (actualp) {
-                    VAccess access = VAccess::READ;
-                    if (modVarp) {
-                        if (modVarp->isInout()) {
-                            access = VAccess::READWRITE;
-                        } else if (modVarp->isWritable()) {
-                            access = VAccess::WRITE;
-                        }
-                    }
-                    if (access == VAccess::READ) {
+                    // V3LinkLValue marks writable pin actuals as lvalues (WRITE); an inout
+                    // connection is an lvalue here, not a read/write reference
+                    if (!modVarp || !modVarp->isWritable()) {
                         actualExprp = lowerExpr(actualp, modVarp ? modVarp->dtypep() : nullptr);
                     } else {
                         const std::string actualKind = actualp->attr("kind");
@@ -4568,10 +4576,6 @@ class VhdlXmlFrontend final {
                             continue;
                         }
                         actualExprp = lowerName(actualp, true);
-                        if (actualExprp && access == VAccess::READWRITE) {
-                            actualExprp->foreach(
-                                [](AstVarRef* refp) { refp->access(VAccess::READWRITE); });
-                        }
                     }
                 }
                 FileLine* const pinFlp = flpOf(assocp);
@@ -4645,7 +4649,12 @@ public:
             m_entityGenerics[vhdlFold(name)] = genericsOf(entityp);
             // A type-generic entity or one with unconstrained ports has no single port
             // type; only its specializations emit
-            if (!hasTypeGenerics(entityp) && !hasUnconstrainedPorts(entityp)) {
+            const bool unconstrainedPorts = hasUnconstrainedPorts(entityp);
+            if (unconstrainedPorts && !v3Global.opt.topModule().empty()
+                && vhdlFold(name) == vhdlFold(v3Global.opt.topModule())) {
+                unsupported(entityp, "unconstrained port on a top-level entity");
+            }
+            if (!hasTypeGenerics(entityp) && !unconstrainedPorts) {
                 modules.emplace_back(entityp, it->second);
             }
         }
