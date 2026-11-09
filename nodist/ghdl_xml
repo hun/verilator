@@ -6,7 +6,6 @@
 # or the Perl Artistic License Version 2.0.
 # SPDX-FileCopyrightText: 2026 Hannes Klas
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
-
 """Run ``ghdl --file-to-xml`` on VHDL sources.
 
 This is the analyzed IR that Verilator's VHDL frontend lowers.  Use it to inspect
@@ -28,6 +27,7 @@ import tempfile
 
 
 def main():
+    """Command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('files', nargs='+', help='VHDL source files')
@@ -35,7 +35,8 @@ def main():
                         default=os.environ.get('VERILATOR_GHDL', 'ghdl'),
                         help='GHDL executable (default: $VERILATOR_GHDL or ghdl)')
     parser.add_argument('--std', default='08', help='VHDL standard (default: 08)')
-    parser.add_argument('--workdir', default=None,
+    parser.add_argument('--workdir',
+                        default=None,
                         help='GHDL work directory (default: a temporary directory)')
     parser.add_argument('-o', '--output', default=None, help='write XML here instead of stdout')
     args = parser.parse_args()

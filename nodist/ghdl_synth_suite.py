@@ -6,7 +6,6 @@
 # or the Perl Artistic License Version 2.0.
 # SPDX-FileCopyrightText: 2026 Hannes Klas
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
-
 """Run GHDL testsuite design files through Verilator's VHDL frontend.
 
 The GHDL testsuite (https://github.com/ghdl/ghdl/tree/master/testsuite) is a large
@@ -32,6 +31,7 @@ Examples:
 
 import argparse
 import concurrent.futures
+import fnmatch
 import os
 import re
 import subprocess
@@ -44,8 +44,7 @@ ENTITY_RE = re.compile(r'^\s*entity\s+([A-Za-z][A-Za-z0-9_]*)\s+is\b',
 COMMENT_RE = re.compile(r'--[^\n]*')
 GHDL_FLAGS_RE = re.compile(
     r'^\s*(?:export\s+)?(GHDL_STD_FLAGS|GHDL_FLAGS)\s*=\s*'
-    r'(?:"([^"]*)"|\'([^\']*)\'|(\S+))',
-    re.MULTILINE)
+    r'(?:"([^"]*)"|\'([^\']*)\'|(\S+))', re.MULTILINE)
 TOP_RE = re.compile(r'\b(?:synth_tb|synth_only|synth_analyze)\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_TOP_RE = re.compile(r'\bsynth\b[^\n]*?\s-e\s+([A-Za-z][A-Za-z0-9_]*)')
 
@@ -93,10 +92,12 @@ def ghdl_flags(testdir):
 
 
 def repo_root():
+    """Repository root directory."""
     return Path(__file__).resolve().parent.parent
 
 
 def entity_names(path):
+    """Lowercased entity names declared in a VHDL file."""
     try:
         text = path.read_text(errors='replace')
     except OSError:
@@ -106,6 +107,7 @@ def entity_names(path):
 
 
 def classify(returncode, output):
+    """Categorize one Verilator run's status and the matching diagnostic."""
     if returncode == 0:
         return 'PASS', ''
     if 'is not supported yet' in output or 'UNSUPPORTED' in output:
@@ -119,12 +121,12 @@ def classify(returncode, output):
     if ('was not found in design' in output or 'No top module' in output
             or "Can't find module" in output):
         return 'NO_TOP', ''
-    detail = next((line.strip() for line in output.splitlines()
-                   if line.startswith('%Error')), '')
+    detail = next((line.strip() for line in output.splitlines() if line.startswith('%Error')), '')
     return 'ERROR', detail
 
 
-def run_one(job):
+def run_one(job):  # pylint: disable=too-many-locals
+    """Lint one test case and return its result record."""
     (suite, testdir, top, files, args) = job
     workdir = Path(args.outdir) / suite / f'{testdir.name}__{top}'
     workdir.mkdir(parents=True, exist_ok=True)
@@ -177,7 +179,8 @@ def run_one(job):
     }
 
 
-def main():
+def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    """Command-line entry point."""
     root = repo_root()
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -191,22 +194,31 @@ def main():
                         default=str(root / 'bin' / 'verilator'),
                         help='Verilator executable (default: bin/verilator)')
     parser.add_argument('--ghdl', default=None, help='GHDL executable (sets VERILATOR_GHDL)')
-    parser.add_argument('--ghdl-flags', default='',
+    parser.add_argument('--ghdl-flags',
+                        default='',
                         help='extra GHDL analysis flags (VERILATOR_GHDL_FLAGS)')
     parser.add_argument('--outdir',
                         default=str(root / 'obj_dir' / 'ghdl_suite'),
                         help='directory for logs (default: obj_dir/ghdl_suite)')
-    parser.add_argument('--only', action='append', default=[],
+    parser.add_argument('--only',
+                        action='append',
+                        default=[],
                         help='only run test directories matching this glob (repeatable, '
                         'comma separated)')
     parser.add_argument('--start-at', default=None, help='skip tests sorting before this name')
     parser.add_argument('--limit', type=int, default=0, help='maximum number of test directories')
-    parser.add_argument('--jobs', type=int, default=min(32, os.cpu_count() or 1),
+    parser.add_argument('--jobs',
+                        type=int,
+                        default=min(32,
+                                    os.cpu_count() or 1),
                         help='parallel jobs (default: min(32, CPUs))')
     parser.add_argument('--timeout', type=int, default=120, help='per-run timeout in seconds')
-    parser.add_argument('--include-testbenches', action='store_true',
+    parser.add_argument('--include-testbenches',
+                        action='store_true',
                         help='also lint tb_*.vhdl testbenches')
-    parser.add_argument('--fail-on', choices=['none', 'error', 'any'], default='none',
+    parser.add_argument('--fail-on',
+                        choices=['none', 'error', 'any'],
+                        default='none',
                         help='exit non-zero on ERROR (error) or any non-PASS (any)')
     parser.add_argument('--list', action='store_true', help='list test directories and tops')
     args = parser.parse_args()
@@ -225,9 +237,7 @@ def main():
     if args.start_at:
         testdirs = [p for p in testdirs if p.name >= args.start_at]
     if patterns:
-        import fnmatch
-        testdirs = [p for p in testdirs
-                    if any(fnmatch.fnmatch(p.name, pat) for pat in patterns)]
+        testdirs = [p for p in testdirs if any(fnmatch.fnmatch(p.name, pat) for pat in patterns)]
     if args.limit:
         testdirs = testdirs[:args.limit]
 
@@ -255,7 +265,7 @@ def main():
             # directory; passing all of them would merge alternative implementations
             candidates = entity_files[top]
             chosen = sorted(candidates,
-                            key=lambda f: (0 if f.stem.lower() == top else 1, f.name))[0]
+                            key=lambda f, top=top: (0 if f.stem.lower() == top else 1, f.name))[0]
             case_files = script_case_files(testdir, top)
             if case_files:
                 files = [Path(f) for f in case_files]
@@ -269,7 +279,7 @@ def main():
             jobs.append((args.suite, testdir, top, files, args))
 
     if args.list:
-        for suite, testdir, top, _files, _args in jobs:
+        for _suite, testdir, top, _files, _args in jobs:
             print(f'{testdir.name}\t{top}')
         for name, why in skipped:
             print(f'{name}\tSKIP ({why})')
@@ -307,8 +317,8 @@ def main():
     for r in results:
         counts[r['status']] = counts.get(r['status'], 0) + 1
     print()
-    print(f"Summary: {len(results)} cases, " +
-          ', '.join(f'{k}={v}' for k, v in sorted(counts.items())))
+    print(f"Summary: {len(results)} cases, " + ', '.join(f'{k}={v}'
+                                                         for k, v in sorted(counts.items())))
     if skipped:
         print(f'Skipped {len(skipped)} test directories without entities')
     print(f'Report: {report}')

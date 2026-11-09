@@ -529,6 +529,8 @@ PY_PROGRAMS = \
   nodist/dot_importer \
   nodist/fuzzer/actual_fail \
   nodist/fuzzer/generate_dictionary \
+  nodist/ghdl_synth_suite.py \
+  nodist/ghdl_xml \
   nodist/install_test \
   nodist/lint_py_test_filter \
   nodist/log_changes \
