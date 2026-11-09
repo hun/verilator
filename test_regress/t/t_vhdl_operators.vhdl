@@ -60,12 +60,22 @@ entity t is
     ror_o : out unsigned(3 downto 0);
     plus_o : out integer;
     cond_o : out std_logic;
-    pkgconst_o : out unsigned(3 downto 0)
+    pkgconst_o : out unsigned(3 downto 0);
+    slow_o : out integer;
+    shigh_o : out integer;
+    sleft_o : out integer;
+    sright_o : out integer
   );
 end;
 
 architecture rtl of t is
+  subtype small is integer range -2 to 3;
 begin
+  slow_o <= small'low;
+  shigh_o <= small'high;
+  sleft_o <= small'left;
+  sright_o <= small'right;
+
   mul_o <= a * b;
   div_o <= a / b;
   mod_o <= a mod b;
