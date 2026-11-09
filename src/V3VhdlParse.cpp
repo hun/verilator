@@ -625,6 +625,8 @@ class VhdlXmlFrontend final {
                || kind == "attribute_declaration" || kind == "attribute_specification"
                || kind == "alias_declaration" || kind == "object_alias_declaration"
                || kind == "non_object_alias_declaration" || kind == "file_declaration"
+               || kind == "package_instantiation_declaration"
+               || kind == "attribute_implicit_declaration" || kind == "psl_default_clock"
                || kind == "use_clause";
     }
 
@@ -4491,6 +4493,8 @@ class VhdlXmlFrontend final {
 
     void lowerConcurrent(const Node* stmtp) {
         const std::string kind = stmtp->attr("kind");
+        // PSL verification directives have no synthesis meaning
+        if (kind == "psl_default_clock") return;
         if (kind == "sensitized_process_statement") {
             if (stmtp->child("process_origin")) {
                 emitConcurrentAssignment(stmtp);
