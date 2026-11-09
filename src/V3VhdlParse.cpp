@@ -4530,6 +4530,51 @@ class VhdlXmlFrontend final {
         return true;
     }
 
+    //! Process variables declared by a process, in the current scope
+    std::set<AstVar*> processVariables(const Node* processp) const {
+        std::set<AstVar*> vars;
+        for (const Node* const declp : childEls(processp->child("declaration_chain"))) {
+            if (declp->attr("kind") != "variable_declaration") continue;
+            const auto it = m_scope.find(vhdlFold(declp->attr("identifier")));
+            if (it != m_scope.end()) vars.insert(it->second);
+        }
+        return vars;
+    }
+
+    //! Lower a process(all) as one always whose sensitivity is every signal it reads
+    bool emitProcessAll(const Node* processp) {
+        const Node* const sensp = processp->child("sensitivity_list");
+        if (!sensp || sensp->attr("list-id") != "all") return false;
+        FileLine* const flp = flpOf(processp);
+        const Node* const bodyp = processp->child("sequential_statement_chain");
+        AstNode* const stmtsp = lowerStmtChain(bodyp, AssignMode::DELAYED);
+        if (!stmtsp) return true;
+        // process(all) is sensitive to the signals it reads, not to its variables
+        const std::set<AstVar*> processVars = processVariables(processp);
+        std::vector<AstVar*> readsv;
+        std::set<AstVar*> seen;
+        stmtsp->foreachAndNext([&](AstNode* ap) {
+            AstNodeVarRef* const refp = VN_CAST(ap, NodeVarRef);
+            if (!refp || !refp->access().isReadOrRW()) return;
+            AstVar* const varp = refp->varp();
+            if (processVars.count(varp) || !seen.insert(varp).second) return;
+            readsv.push_back(varp);
+        });
+        AstSenItem* itemsp = nullptr;
+        for (AstVar* const varp : readsv) {
+            AstNodeExpr* const refp = new AstVarRef{flp, varp, VAccess::READ};
+            AstSenItem* const itemp = new AstSenItem{flp, VEdgeType::ET_CHANGED, refp};
+            itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+        }
+        // VHDL executes the process once at time zero, before any sensitivity event
+        AstNode* const initp = lowerStmtChain(bodyp, AssignMode::BLOCKING);
+        if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+        if (!itemsp) return true;  // Reads no signal, so nothing can retrigger it
+        m_modp->addStmtsp(
+            new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
+        return true;
+    }
+
     //! One top-level statement of a process when splitting it
     struct ProcessPart final {
         const Node* nodep = nullptr;  // The top-level statement
@@ -4615,7 +4660,7 @@ class VhdlXmlFrontend final {
     static void collectVarRefs(AstNode* nodep, const std::set<AstVar*>& processVars,
                                std::set<AstVar*>& writep, std::set<AstVar*>& vars) {
         if (!nodep) return;
-        nodep->foreach([&](AstNode* ap) {
+        nodep->foreachAndNext([&](AstNode* ap) {
             AstNodeVarRef* const refp = VN_CAST(ap, NodeVarRef);
             if (!refp) return;
             if (refp->access().isWriteOrRW()) writep.insert(refp->varp());
@@ -4666,12 +4711,11 @@ class VhdlXmlFrontend final {
 
         // Variable assignment is immediate, so a variable used by more than one top-level
         // statement keeps the statements order-dependent and cannot be split
-        std::set<AstVar*> processVars;
+        const std::set<AstVar*> processVars = processVariables(processp);
         for (const Node* const declp : childEls(processp->child("declaration_chain"))) {
             if (declp->attr("kind") != "variable_declaration") continue;
             const auto it = m_scope.find(vhdlFold(declp->attr("identifier")));
             if (it == m_scope.end()) continue;
-            processVars.insert(it->second);
             int referencedBy = 0;
             for (const ProcessPart& part : parts) {
                 if (nodeReferencesVar(part.nodep, it->second) && ++referencedBy > 1) {
@@ -4825,6 +4869,7 @@ class VhdlXmlFrontend final {
         if (emitSingleClockProcess(processp)) return;
         if (emitClockedIf(processp, false)) return;
         if (emitSplitProcess(processp)) return;
+        if (emitProcessAll(processp)) return;
 
         // Plain process: trigger on every sensitivity item
         AstSenItem* const itemsp = changedSensitivity(processp, flp);
