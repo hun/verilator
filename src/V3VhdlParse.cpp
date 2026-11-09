@@ -685,7 +685,14 @@ class VhdlXmlFrontend final {
             }
         }
         // The array is modeled as one flat vector with elemWidth bits per element
-        const int elemWidth = elementWidth(elemSubp);
+        const VhdlDTypeSpec elemSpec = probeTypeSpec(elemSubp);
+        int elemWidth = 0;
+        if (elemSpec.dtp) {
+            elemWidth = elemSpec.dtp->width();  // Enum/record element width
+        } else if (elemSpec.isVector) {
+            elemWidth = dtypeOf(elemSpec, flpOf(subtypep))->width();  // Nested array bits
+        }
+        if (elemWidth <= 0) elemWidth = elementWidth(elemSubp);
         if (elemWidth <= 0) {
             unsupported(subtypep, "array element type");
             return spec;
@@ -701,7 +708,6 @@ class VhdlXmlFrontend final {
             spec.kwd = VBasicDTypeKwd::BIT;
         } else {
             // A named element type (subtype, record, enumeration, ...): use its analyzed type
-            const VhdlDTypeSpec elemSpec = probeTypeSpec(elemSubp);
             const AstBasicDType* elemBasicp = nullptr;
             if (elemSpec.dtp) elemBasicp = VN_CAST(elemSpec.dtp->skipRefp(), BasicDType);
             if (elemSpec.isVector) {
