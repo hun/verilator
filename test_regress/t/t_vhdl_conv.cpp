@@ -74,6 +74,28 @@ int main(int argc, char** argv) {
                 std::printf("%%Error: t2=%d\n", t2);
                 ++fails;
             }
+            const int agg0 = static_cast<int>(topp->agg0);
+            const int agg1 = static_cast<int>(topp->agg1);
+            const int agg2 = static_cast<int>(topp->agg2);
+            const int agg3 = static_cast<int>(topp->agg3);
+            const int wantAgg0
+                = (((a >> 2) & 1) ? 0x01 : 0x00) | (((a >> 3) & 1) ? 0xfe : 0x00);
+            if (agg0 != wantAgg0) {
+                std::printf("%%Error: a=%d agg0=%d\n", a, agg0);
+                ++fails;
+            }
+            if (agg1 != (((a & 1) ? 0xf0 : 0x00) | ((a & 2) ? 0x0f : 0x00))) {
+                std::printf("%%Error: a=%d agg1=%d\n", a, agg1);
+                ++fails;
+            }
+            if (agg2 != a) {
+                std::printf("%%Error: a=%d agg2=%d\n", a, agg2);
+                ++fails;
+            }
+            if (agg3 != ((((a >> 1) & 1) ? 0x8 : 0) | (((a >> 2) & 1) ? 0x1 : 0))) {
+                std::printf("%%Error: a=%d agg3=%d\n", a, agg3);
+                ++fails;
+            }
             if (o0 != 0x00 || o1 != 0xff || ob != ((b & 1) ? 0xff : 0x00)) {
                 std::printf("%%Error: b=%d o0=%d o1=%d ob=%d\n", b, o0, o1, ob);
                 ++fails;

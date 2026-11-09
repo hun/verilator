@@ -2081,6 +2081,126 @@ class VhdlXmlFrontend final {
         rhsp = resizeExpr(rhsp, dtp);
     }
 
+    //! Lower an array aggregate: positional, named (single or range) and `others` choices
+    AstNodeExpr* lowerArrayAggregate(const Node* nodep, AstNodeDType* contextp) {
+        FileLine* const flp = flpOf(nodep);
+        VhdlDTypeSpec layout;
+        const bool haveLayout = arraySpec(nodep, layout);
+        AstNodeDType* const targetDtp = contextp ? contextp : typeRefDType(nodep);
+        if (!targetDtp || targetDtp->width() <= 0) return nullptr;
+        const int elemWidth = haveLayout ? layout.elemWidth : 1;
+        const int totalWidth = targetDtp->width();
+        if (elemWidth <= 0 || totalWidth % elemWidth != 0) return nullptr;
+        const int elements = totalWidth / elemWidth;
+        int left = 0;
+        int right = elements - 1;
+        bool ascending = true;
+        if (haveLayout) {
+            left = layout.left;
+            right = layout.right;
+            ascending = layout.ascending;
+        } else if (const AstBasicDType* const basicp
+                   = VN_CAST(targetDtp->skipRefp(), BasicDType)) {
+            left = basicp->left();
+            right = basicp->right();
+            ascending = basicp->ascending();
+        }
+        const int baseIndex = ascending ? left : right;
+        AstNodeDType* elemDtp = nullptr;
+        if (elemWidth > 1) {
+            VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
+            VSigning signing = VSigning::UNSIGNED;
+            if (haveLayout) {
+                kwd = layout.kwd;
+                signing = layout.signing;
+            }
+            elemDtp = m_rootp->typeTablep()->findLogicBitDType(flp, kwd, elemWidth, elemWidth,
+                                                               signing);
+        }
+        // A single `others` choice is a replication; avoid one node per element
+        const std::vector<const Node*> choices
+            = childEls(nodep->child("association_choices_chain"));
+        if (choices.size() == 1 && choices.front()->attr("kind") == "choice_by_others") {
+            AstNodeExpr* const elemp = lowerExpr(choices.front()->child("associated_expr"),
+                                                 elemDtp);
+            if (!elemp) return nullptr;
+            const int width = elemp->dtypep()->width();
+            if (width <= 0 || totalWidth % width != 0) return nullptr;
+            AstReplicate* const repp
+                = new AstReplicate{flp, elemp, static_cast<uint32_t>(totalWidth / width)};
+            repp->dtypep(targetDtp);
+            return repp;
+        }
+        const auto slotOf = [&](int64_t index) -> int {
+            const int64_t slot = index - baseIndex;
+            if (slot < 0 || slot >= elements) return -1;
+            return static_cast<int>(slot);
+        };
+        std::vector<AstNodeExpr*> exprs(static_cast<size_t>(elements), nullptr);
+        const Node* othersp = nullptr;
+        int position = 0;
+        for (const Node* const choicep
+             : childEls(nodep->child("association_choices_chain"))) {
+            const Node* const assocp = choicep->child("associated_expr");
+            if (!assocp) return nullptr;
+            const std::string choiceKind = choicep->attr("kind");
+            if (choiceKind == "choice_by_others") {
+                othersp = assocp;
+            } else if (choiceKind == "choice_by_expression") {
+                int64_t index = 0;
+                if (!evalConst(choicep->child("choice_expression"), index)) return nullptr;
+                const int slot = slotOf(index);
+                if (slot < 0) return nullptr;
+                exprs[slot] = lowerExpr(assocp, elemDtp);
+                if (!exprs[slot]) return nullptr;
+            } else if (choiceKind == "choice_by_range") {
+                const Node* const rangep = choicep->child("choice_range");
+                int64_t leftValue = 0;
+                int64_t rightValue = 0;
+                if (!rangep || !evalConst(rangeBound(rangep, true), leftValue)
+                    || !evalConst(rangeBound(rangep, false), rightValue)) {
+                    return nullptr;
+                }
+                const int64_t lowv = std::min(leftValue, rightValue);
+                const int64_t highv = std::max(leftValue, rightValue);
+                for (int64_t index = lowv; index <= highv; ++index) {
+                    const int slot = slotOf(index);
+                    if (slot < 0) return nullptr;
+                    exprs[slot] = lowerExpr(assocp, elemDtp);
+                    if (!exprs[slot]) return nullptr;
+                }
+            } else if (choiceKind == "choice_by_none") {
+                const int index = ascending ? left + position : left - position;
+                ++position;
+                const int slot = slotOf(index);
+                if (slot < 0) return nullptr;
+                exprs[slot] = lowerExpr(assocp, elemDtp);
+                if (!exprs[slot]) return nullptr;
+            } else {
+                return nullptr;
+            }
+        }
+        if (othersp) {
+            for (AstNodeExpr*& valuep : exprs) {
+                if (valuep) continue;
+                valuep = lowerExpr(othersp, elemDtp);
+                if (!valuep) return nullptr;
+            }
+        }
+        AstNodeExpr* resultp = nullptr;
+        for (size_t i = 0; i < exprs.size(); ++i) {
+            AstNodeExpr* const valuep = exprs[i];
+            if (!valuep) {
+                error(nodep, "VHDL aggregate is missing elements");
+                return nullptr;
+            }
+            resultp
+                = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, valuep, resultp}) : valuep;
+        }
+        resultp->dtypep(targetDtp);
+        return resultp;
+    }
+
     AstNodeExpr* lowerExpr(const Node* nodep, AstNodeDType* contextp) {
         if (!nodep) return nullptr;
         FileLine* const flp = flpOf(nodep);
@@ -2502,32 +2622,8 @@ class VhdlXmlFrontend final {
         if (kind == "aggregate") {
             const Node* const defp = typeDefOfKind(nodep, "record_type_definition");
             if (defp) return lowerRecordAggregate(nodep, defp);
-            // Array aggregate: (others => expr)
-            const std::vector<const Node*> choices
-                = childEls(nodep->child("association_choices_chain"));
-            if (choices.size() == 1 && choices.front()->attr("kind") == "choice_by_others") {
-                const Node* const assocp = choices.front()->child("associated_expr");
-                AstNodeDType* const arrayDtp = typeRefDType(nodep);
-                AstNodeDType* const targetDtp = contextp ? contextp : arrayDtp;
-                if (assocp && targetDtp && targetDtp->width() > 0) {
-                    // An array of vectors constrains each associated element
-                    VhdlDTypeSpec layout;
-                    AstNodeDType* elemDtp = nullptr;
-                    if (multiArraySpec(nodep, layout)) {
-                        elemDtp = m_rootp->typeTablep()->findLogicBitDType(
-                            flp, layout.kwd, layout.elemWidth, layout.elemWidth, layout.signing);
-                    }
-                    AstNodeExpr* const elemp = lowerExpr(assocp, elemDtp);
-                    if (!elemp) return nullptr;
-                    const int elemWidth = elemp->dtypep()->width();
-                    const int targetWidth = targetDtp->width();
-                    if (elemWidth > 0 && targetWidth % elemWidth == 0) {
-                        AstReplicate* const repp = new AstReplicate{
-                            flp, elemp, static_cast<uint32_t>(targetWidth / elemWidth)};
-                        repp->dtypep(targetDtp);
-                        return repp;
-                    }
-                }
+            if (AstNodeExpr* const resultp = lowerArrayAggregate(nodep, contextp)) {
+                return resultp;
             }
             unsupported(nodep, "aggregate of a non-record type");
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);

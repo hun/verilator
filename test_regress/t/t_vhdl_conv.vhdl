@@ -22,6 +22,10 @@ entity t is
     o0 : out std_logic_vector(7 downto 0);
     o1 : out std_logic_vector(7 downto 0);
     ob : out std_logic_vector(7 downto 0);
+    agg0 : out std_logic_vector(7 downto 0);
+    agg1 : out std_logic_vector(7 downto 0);
+    agg2 : out std_logic_vector(3 downto 0);
+    agg3 : out std_logic_vector(3 downto 0);
     sq : out signed(7 downto 0);
     w : out integer;
     u4 : in std_ulogic_vector(3 downto 0);
@@ -60,6 +64,10 @@ begin
   o0 <= (others => '0');
   o1 <= (others => '1');
   ob <= (others => b(0));
+  agg0 <= (0 => a(2), others => a(3));
+  agg1 <= (7 downto 4 => a(0), others => a(1));
+  agg2 <= (a(3), a(2), a(1), a(0));
+  agg3 <= (3 => a(1), 0 => a(2), others => '0');
   -- a signed qualification must keep its signing through sra
   sq <= signed'(x"F0") sra 1;
   w <= to_integer(u);
