@@ -572,14 +572,20 @@ class VhdlXmlFrontend final {
                    && kind != "type_declaration" && kind != "anonymous_type_declaration") {
             return false;
         }
-        // A probe must not repeat diagnostics the declaration already reported
-        const bool savedQuiet = m_quietErrors;
-        m_quietErrors = true;
-        const VhdlDTypeSpec parsed = parseType(defp);
-        m_quietErrors = savedQuiet;
+        const VhdlDTypeSpec parsed = probeTypeSpec(defp);
         if (!parsed.isVector) return false;
         spec = parsed;
         return true;
+    }
+
+    //! Resolve a type without reporting diagnostics
+    VhdlDTypeSpec probeTypeSpec(const Node* subtypep) const {
+        // A probe must not repeat diagnostics the declaration already reported
+        const bool savedQuiet = m_quietErrors;
+        m_quietErrors = true;
+        const VhdlDTypeSpec spec = parseType(subtypep);
+        m_quietErrors = savedQuiet;
+        return spec;
     }
 
     //! Whether a name or expression is an array of multi-bit elements
@@ -656,14 +662,15 @@ class VhdlXmlFrontend final {
             return spec;
         }
 
+        const Node* elemSubp = subtypep->child("element_subtype");
+        if (!elemSubp) elemSubp = subtypep->child("element_subtype_indication");
         const Node* const markp = subtypep->child("subtype_type_mark");
         std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
         if (mark.empty()) {
             // Anonymous array type (type X is array (...) of T): derive from the element type
-            const Node* const elemRefp = subtypep->child("element_subtype");
             const Node* elemp = nullptr;
-            if (elemRefp) {
-                elemp = elemRefp->has("ref") ? nodeById(elemRefp->attr("ref")) : elemRefp;
+            if (elemSubp) {
+                elemp = elemSubp->has("ref") ? nodeById(elemSubp->attr("ref")) : elemSubp;
             }
             if (elemp) {
                 if (const Node* const elemMarkp = elemp->child("subtype_type_mark")) {
@@ -677,6 +684,12 @@ class VhdlXmlFrontend final {
                 }
             }
         }
+        // The array is modeled as one flat vector with elemWidth bits per element
+        const int elemWidth = elementWidth(elemSubp);
+        if (elemWidth <= 0) {
+            unsupported(subtypep, "array element type");
+            return spec;
+        }
         if (mark == "signed") {
             spec.kwd = VBasicDTypeKwd::LOGIC;
             spec.signing = VSigning::SIGNED;
@@ -687,16 +700,24 @@ class VhdlXmlFrontend final {
         } else if (mark == "bit_vector" || mark == "bit") {
             spec.kwd = VBasicDTypeKwd::BIT;
         } else {
-            error(subtypep, "VHDL array type '" + mark + "' is not supported yet");
-            return spec;
-        }
-        // The array is modeled as one flat vector with elemWidth bits per element
-        const Node* elemSubp = subtypep->child("element_subtype");
-        if (!elemSubp) elemSubp = subtypep->child("element_subtype_indication");
-        const int elemWidth = elementWidth(elemSubp);
-        if (elemWidth <= 0) {
-            unsupported(subtypep, "array element type");
-            return spec;
+            // A named element type (subtype, record, enumeration, ...): use its analyzed type
+            const VhdlDTypeSpec elemSpec = probeTypeSpec(elemSubp);
+            const AstBasicDType* elemBasicp = nullptr;
+            if (elemSpec.dtp) elemBasicp = VN_CAST(elemSpec.dtp->skipRefp(), BasicDType);
+            if (elemSpec.isVector) {
+                spec.kwd = elemSpec.kwd;
+                spec.signing = elemSpec.signing;
+            } else if (elemBasicp) {
+                spec.kwd = elemBasicp->keyword();
+                spec.signing = elemBasicp->numeric();
+            } else if (!elemSpec.isInteger) {
+                // A named scalar subtype of bit or std_logic
+                spec.kwd = elemSpec.kwd;
+                spec.signing = elemSpec.signing;
+            } else {
+                error(subtypep, "VHDL array type '" + mark + "' is not supported yet");
+                return spec;
+            }
         }
         spec.elemWidth = elemWidth;
         spec.isVector = true;
