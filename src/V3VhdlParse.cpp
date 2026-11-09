@@ -4454,6 +4454,21 @@ class VhdlXmlFrontend final {
         return true;
     }
 
+    //! First clock edge or event attribute in a statement tree, or nullptr
+    static const Node* findClockEdge(const Node* nodep) {
+        const std::string kind = nodep->attr("kind");
+        if (kind == "event_attribute") return nodep;
+        if (kind == "function_call") {
+            const Node* const prefixp = nodep->child("prefix");
+            const std::string fn = prefixp ? vhdlFold(prefixp->attr("identifier")) : std::string{};
+            if (fn == "rising_edge" || fn == "falling_edge") return nodep;
+        }
+        for (const std::unique_ptr<Node>& childp : nodep->children()) {
+            if (const Node* const foundp = findClockEdge(childp.get())) return foundp;
+        }
+        return nullptr;
+    }
+
     //! Whether a statement tree contains a wait or suspend state
     static bool nodeHasWait(const Node* nodep) {
         const std::string kind = nodep->attr("kind");
@@ -4545,8 +4560,12 @@ class VhdlXmlFrontend final {
     bool emitProcessAll(const Node* processp) {
         const Node* const sensp = processp->child("sensitivity_list");
         if (!sensp || sensp->attr("list-id") != "all") return false;
-        FileLine* const flp = flpOf(processp);
         const Node* const bodyp = processp->child("sequential_statement_chain");
+        if (const Node* const edgep = findClockEdge(bodyp)) {
+            unsupported(edgep, "clock edge in a process(all)");
+            return true;
+        }
+        FileLine* const flp = flpOf(processp);
         AstNode* const stmtsp = lowerStmtChain(bodyp, AssignMode::DELAYED);
         if (!stmtsp) return true;
         // process(all) is sensitive to the signals it reads, not to its variables
@@ -4862,6 +4881,10 @@ class VhdlXmlFrontend final {
         const Node* const bodyp = processp->child("sequential_statement_chain");
         emitProcessVariables(processp);
 
+        // process(all) is sensitive to every signal it reads, including any clock, so its
+        // clock edges cannot become edge-triggered always blocks
+        if (emitProcessAll(processp)) return;
+
         // Clocked process: a single top-level if/elsif chain holding a clock edge
         if (clockedIfFastPath(processp)) {
             if (emitClockedIf(processp, false)) return;
@@ -4869,7 +4892,6 @@ class VhdlXmlFrontend final {
         if (emitSingleClockProcess(processp)) return;
         if (emitClockedIf(processp, false)) return;
         if (emitSplitProcess(processp)) return;
-        if (emitProcessAll(processp)) return;
 
         // Plain process: trigger on every sensitivity item
         AstSenItem* const itemsp = changedSensitivity(processp, flp);
