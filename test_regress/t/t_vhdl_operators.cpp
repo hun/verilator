@@ -82,6 +82,11 @@ int main(int argc, char** argv) {
                     {"sadd", static_cast<int>(topp->sadd_o) & 0xff, (sv + ww) & 0xff},
                     {"lit_t", static_cast<int>(topp->lit_t_o), 1},
                     {"lit_f", static_cast<int>(topp->lit_f_o), 0},
+                    {"rol", static_cast<int>(topp->rol_o), ((uu << 1) | (uu >> 3)) & 15},
+                    {"ror", static_cast<int>(topp->ror_o), ((uu >> 2) | (uu << 2)) & 15},
+                    {"plus", static_cast<int>(topp->plus_o), a},
+                    {"cond", static_cast<int>(topp->cond_o), uu & 1},
+                    {"pkgconst", static_cast<int>(topp->pkgconst_o), 10},
                 };
                 for (const Check& check : checks) {
                     if (check.got != check.want) {

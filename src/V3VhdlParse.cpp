@@ -1395,32 +1395,7 @@ class VhdlXmlFrontend final {
                 unsupported(nodep, fn + " without two arguments");
                 return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
             }
-            AstNodeDType* const dtp = valueExprp->dtypep();
-            const int width = dtp->width();
-            // Counts at or beyond the width wrap, so rotate by count mod width
-            AstNodeExpr* const nmodp
-                = new AstModDiv{flp, amountExprp, makeConst(flp, intDType(flp), width)};
-            nmodp->dtypep(intDType(flp));
-            AstNodeExpr* const restp
-                = new AstSub{flp, makeConst(flp, intDType(flp), width), nmodp->cloneTree(false)};
-            restp->dtypep(intDType(flp));
-            AstNodeExpr* const innerShiftp
-                = fn == "rotate_left"
-                      ? static_cast<AstNodeExpr*>(
-                            new AstShiftL{flp, valueExprp, nmodp->cloneTree(false), width})
-                      : static_cast<AstNodeExpr*>(
-                            new AstShiftR{flp, valueExprp, nmodp->cloneTree(false), width});
-            AstNodeExpr* const outerShiftp
-                = fn == "rotate_left"
-                      ? static_cast<AstNodeExpr*>(
-                            new AstShiftR{flp, valueExprp->cloneTree(false), restp, width})
-                      : static_cast<AstNodeExpr*>(
-                            new AstShiftL{flp, valueExprp->cloneTree(false), restp, width});
-            innerShiftp->dtypep(dtp);
-            outerShiftp->dtypep(dtp);
-            AstNodeExpr* const resultp = new AstOr{flp, innerShiftp, outerShiftp};
-            resultp->dtypep(dtp);
-            return resultp;
+            return makeRotate(flp, valueExprp, amountExprp, fn == "rotate_left");
         }
         if (fn == "minimum" || fn == "maximum") {
             const Node* const lhsp = actualOf(0);
@@ -2689,6 +2664,35 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
+    //! Rotate a vector left or right by the amount, wrapping the shifted-out bits
+    AstNodeExpr* makeRotate(FileLine* flp, AstNodeExpr* valueExprp, AstNodeExpr* amountExprp,
+                            bool left) {
+        AstNodeDType* const dtp = valueExprp->dtypep();
+        const int width = dtp->width();
+        // Counts at or beyond the width wrap, so rotate by count mod width
+        AstNodeExpr* const nmodp
+            = new AstModDiv{flp, amountExprp, makeConst(flp, intDType(flp), width)};
+        nmodp->dtypep(intDType(flp));
+        AstNodeExpr* const restp
+            = new AstSub{flp, makeConst(flp, intDType(flp), width), nmodp->cloneTree(false)};
+        restp->dtypep(intDType(flp));
+        AstNodeExpr* const innerShiftp
+            = left ? static_cast<AstNodeExpr*>(
+                         new AstShiftL{flp, valueExprp, nmodp->cloneTree(false), width})
+                   : static_cast<AstNodeExpr*>(
+                         new AstShiftR{flp, valueExprp, nmodp->cloneTree(false), width});
+        AstNodeExpr* const outerShiftp
+            = left ? static_cast<AstNodeExpr*>(
+                         new AstShiftR{flp, valueExprp->cloneTree(false), restp, width})
+                   : static_cast<AstNodeExpr*>(
+                         new AstShiftL{flp, valueExprp->cloneTree(false), restp, width});
+        innerShiftp->dtypep(dtp);
+        outerShiftp->dtypep(dtp);
+        AstNodeExpr* const resultp = new AstOr{flp, innerShiftp, outerShiftp};
+        resultp->dtypep(dtp);
+        return resultp;
+    }
+
     //! Truncate or extend a value to a width-bit logic vector
     AstNodeExpr* sizedVector(FileLine* flp, AstNodeExpr* valueExprp, int width, bool signExtend,
                              VSigning signing = VSigning::UNSIGNED) {
@@ -2797,6 +2801,19 @@ class VhdlXmlFrontend final {
                             = std::strtoll(declp->attr("enum_pos").c_str(), nullptr, 10);
                         return makeConst(flp, dtp, static_cast<uint64_t>(pos));
                     }
+                }
+            }
+        }
+        if (kind == "selected_name") {
+            // A package-qualified constant resolves to its declared value
+            const Node* const refp = nodep->child("named_entity");
+            const Node* const declp
+                = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+            if (declp
+                && (declp->attr("kind") == "constant_declaration"
+                    || declp->attr("kind") == "interface_constant_declaration")) {
+                if (const Node* const defp = declp->child("default_value")) {
+                    return lowerExpr(defp, contextp);
                 }
             }
         }
@@ -3089,6 +3106,12 @@ class VhdlXmlFrontend final {
             resultp->dtypep(dtp);
             return resultp;
         }
+        if (kind == "rol_operator" || kind == "ror_operator") {
+            AstNodeExpr* const valuep = lowerExpr(nodep->child("left"), nullptr);
+            AstNodeExpr* const amountp = lowerExpr(nodep->child("right"), nullptr);
+            if (!valuep || !amountp) return nullptr;
+            return makeRotate(flp, valuep, amountp, kind == "rol_operator");
+        }
         if (kind == "sll_operator" || kind == "srl_operator" || kind == "sla_operator"
             || kind == "sra_operator") {
             AstNodeExpr* const lhsp = lowerExpr(nodep->child("left"), nullptr);
@@ -3135,7 +3158,11 @@ class VhdlXmlFrontend final {
             notp->dtypep(operandp->dtypep());
             return notp;
         }
-        if (kind == "implicit_condition_operator") {
+        if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
+            return lowerExpr(nodep->child("expression"), contextp);
+        }
+        if (kind == "identity_operator") { return lowerExpr(nodep->child("operand"), contextp); }
+        if (kind == "implicit_condition_operator" || kind == "condition_operator") {
             AstNodeExpr* const operandp = lowerExpr(nodep->child("operand"), nullptr);
             if (!operandp) return nullptr;
             if (operandp->dtypep()->width() == 1) {
