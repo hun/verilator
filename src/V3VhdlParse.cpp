@@ -1480,19 +1480,37 @@ class VhdlXmlFrontend final {
                 return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
             }
             const int width = static_cast<int>(widthValue);
-            AstNodeDType* const dtp = m_rootp->typeTablep()->findLogicBitDType(
-                flp, VBasicDTypeKwd::LOGIC, width, width, VSigning::UNSIGNED);
             AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
             if (!valueExprp) return nullptr;
-            AstNodeExpr* resultp = valueExprp;
-            const int valueWidth = valueExprp->dtypep()->width();
-            if (valueWidth > width) {
-                resultp = new AstSel{flp, valueExprp, 0, width};
-            } else if (valueWidth < width) {
-                resultp = new AstExtend{flp, valueExprp, width};
+            return sizedVector(flp, valueExprp, width, false);
+        }
+        if (fn == "conv_std_logic_vector") {
+            // std_logic_arith: keep the value's signedness when sizing
+            int64_t widthValue = 0;
+            const Node* const valuep = actualOf(0);
+            if (!valuep || argsp.size() != 2 || !evalConst(actualOf(1), widthValue)
+                || widthValue <= 0 || widthValue > INT_MAX) {
+                unsupported(nodep, "conv_std_logic_vector with a non-static width");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
             }
-            resultp->dtypep(dtp);
-            return resultp;
+            AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
+            if (!valueExprp) return nullptr;
+            const bool signExtend = valueExprp->dtypep()->isSigned();
+            return sizedVector(flp, valueExprp, static_cast<int>(widthValue), signExtend);
+        }
+        if (fn == "conv_unsigned" || fn == "conv_signed") {
+            int64_t widthValue = 0;
+            const Node* const valuep = actualOf(0);
+            if (!valuep || argsp.size() != 2 || !evalConst(actualOf(1), widthValue)
+                || widthValue <= 0 || widthValue > INT_MAX) {
+                unsupported(nodep, fn + " with a non-static width");
+                return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            }
+            AstNodeExpr* const valueExprp = lowerExpr(valuep, nullptr);
+            if (!valueExprp) return nullptr;
+            const bool signedResult = fn == "conv_signed";
+            return sizedVector(flp, valueExprp, static_cast<int>(widthValue), signedResult,
+                               signedResult ? VSigning::SIGNED : VSigning::UNSIGNED);
         }
 
         // User-defined functions: inline the analyzed body
@@ -2668,6 +2686,24 @@ class VhdlXmlFrontend final {
                               : valuep;
         }
         resultp->dtypep(targetDtp);
+        return resultp;
+    }
+
+    //! Truncate or extend a value to a width-bit logic vector
+    AstNodeExpr* sizedVector(FileLine* flp, AstNodeExpr* valueExprp, int width, bool signExtend,
+                             VSigning signing = VSigning::UNSIGNED) {
+        AstNodeDType* const dtp = m_rootp->typeTablep()->findLogicBitDType(
+            flp, VBasicDTypeKwd::LOGIC, width, width, signing);
+        const int valueWidth = valueExprp->dtypep()->width();
+        AstNodeExpr* resultp = valueExprp;
+        if (valueWidth > width) {
+            resultp = new AstSel{flp, valueExprp, 0, width};
+        } else if (valueWidth < width) {
+            resultp = signExtend
+                          ? static_cast<AstNodeExpr*>(new AstExtendS{flp, valueExprp, width})
+                          : static_cast<AstNodeExpr*>(new AstExtend{flp, valueExprp, width});
+        }
+        resultp->dtypep(dtp);
         return resultp;
     }
 
