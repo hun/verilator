@@ -4511,7 +4511,10 @@ class VhdlXmlFrontend final {
         std::set<std::string> used;
         for (const Node* const assocp : childEls(pmap)) {
             const Node* const formalp = assocp->child("formal");
-            if (formalp && !formalp->attr("identifier").empty()) {
+            // An element formal names a member or slice; its base port is covered by
+            // GHDL's separate by-individual marker
+            if (formalp && formalp->attr("kind") == "simple_name"
+                && !formalp->attr("identifier").empty()) {
                 used.insert(vhdlFold(formalp->attr("identifier")));
             }
         }
