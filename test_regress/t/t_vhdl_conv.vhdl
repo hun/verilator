@@ -7,6 +7,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use ieee.std_logic_misc.all;
 
 entity t is
   generic (N : integer := 4);
@@ -39,6 +40,12 @@ entity t is
     at1 : out std_logic_vector(3 downto 0);
     vt0 : out std_logic_vector(3 downto 0);
     vt1 : out std_logic_vector(3 downto 0);
+    red_and : out std_logic;
+    red_or : out std_logic;
+    red_xor : out std_logic;
+    red_nand : out std_logic;
+    red_call : out std_logic;
+    red_func : out std_logic;
     wide : out std_logic_vector(39 downto 0)
   );
 end;
@@ -67,6 +74,13 @@ begin
   ch <= 'H';
   -- an aggregate assignment target splits the value left to right
   (at0, at1) <= b;
+  -- reduction operators, operator-symbol calls and std_logic_misc helpers
+  red_and <= and a;
+  red_or <= or a;
+  red_xor <= xor a;
+  red_nand <= nand a;
+  red_call <= "or"(a);
+  red_func <= and_reduce(a);
   process(a)
     variable v0, v1 : std_logic_vector(3 downto 0);
   begin
