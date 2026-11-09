@@ -296,6 +296,13 @@ class VhdlXmlFrontend final {
     mutable std::map<const Node*, RecordInfo> m_records;  // Record type/subtype -> layout
     std::map<AstVar*, RecordInfo> m_varRecords;  // Record ports -> layout
     std::map<AstVar*, VhdlDTypeSpec> m_varSpecs;  // Array ports -> analyzed array layout
+    //! Linear value of a process variable: base*scale + offset; used for slice widths
+    struct VarRelation final {
+        AstNodeExpr* basep = nullptr;  // Varying part, null when fully constant
+        int64_t scale = 0;  // Multiplier of basep
+        int64_t offset = 0;  // Constant part
+    };
+    std::map<AstVar*, VarRelation> m_varRelations;  // Current straight-line variable values
     //! A specialized port's type, and record layout when the port is a record
     struct PortInfo final {
         VhdlDTypeSpec spec;
@@ -1146,7 +1153,21 @@ class VhdlXmlFrontend final {
                 unsupported(nodep, "name form '" + kind + "'");
                 return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
             }
-            AstNodeExpr* const basep = lowerName(prefixp, write);
+            AstNodeExpr* basep = nullptr;
+            const std::string prefixKind = prefixp->attr("kind");
+            if (prefixKind == "function_call" || prefixKind == "type_conversion"
+                || prefixKind == "qualified_expression" || prefixKind == "parentheses_expression"
+                || prefixKind == "parenthesis_expression") {
+                // A slice of an expression result, e.g. f(x)(7 downto 0)
+                if (write) {
+                    unsupported(nodep, "assignment to a slice of an expression");
+                    return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+                }
+                basep = lowerExpr(prefixp, nullptr);
+            } else {
+                basep = lowerName(prefixp, write);
+            }
+            if (!basep) return nullptr;
             return lowerVectorName(nodep, kind, basep);
         }
 
@@ -1224,22 +1245,23 @@ class VhdlXmlFrontend final {
                                  AstNodeExpr* const basep) {
         FileLine* const flp = flpOf(nodep);
         const AstBasicDType* const basicp = VN_CAST(basep->dtypep()->skipRefp(), BasicDType);
-        if (!basicp || basicp->width() <= 1) {
+        // An array of multi-bit elements only carries its total bit width in the lowered
+        // dtype; the VHDL index range and element width come from the analyzed type
+        VhdlDTypeSpec layout;
+        const bool haveLayout = stringGenericSpec(nodep->child("prefix"), layout)
+                                || arraySpec(nodep->child("prefix"), layout);
+        // A one-bit scalar is not indexable; a one-element array still is
+        if (!basicp || (basicp->width() <= 1 && !haveLayout)) {
             unsupported(nodep, "indexing of a non-vector name");
             return basep;
         }
-        // An array of multi-bit elements only carries its total bit width in the lowered
-        // dtype; the VHDL index range and element width come from the analyzed type
+        const bool multi = haveLayout && layout.elemWidth > 1;
         if (kind == "indexed_name") {
             const std::vector<const Node*> indices = childEls(nodep->child("index_list"));
             if (indices.size() != 1) {
                 unsupported(nodep, "multi-dimensional index");
                 return basep;
             }
-            VhdlDTypeSpec layout;
-            const bool haveLayout = stringGenericSpec(nodep->child("prefix"), layout)
-                                    || arraySpec(nodep->child("prefix"), layout);
-            const bool multi = haveLayout && layout.elemWidth > 1;
             const int elemWidth = multi ? layout.elemWidth : 1;
             const int totalWidth = basicp->width();
             // The rightmost element is the least significant one
@@ -1291,10 +1313,6 @@ class VhdlXmlFrontend final {
             return basep;
         }
         // An array of multi-bit elements keeps one element width per slice element
-        VhdlDTypeSpec layout;
-        const bool haveLayout = stringGenericSpec(nodep->child("prefix"), layout)
-                                || arraySpec(nodep->child("prefix"), layout);
-        const bool multi = haveLayout && layout.elemWidth > 1;
         const bool ascending = suffixp->attr("direction") == "to";
         const bool arrayAscending = haveLayout ? layout.ascending : basicp->ascending();
         if (ascending != arrayAscending) {
@@ -2572,10 +2590,60 @@ class VhdlXmlFrontend final {
         int64_t offset = 0;  // Constant part
     };
 
-    //! Split a linear integer expression; false when two different bases are mixed
-    static bool splitLinear(AstNodeExpr* exprp, LinearSplit& out) {
+    //! Evaluate an integer expression made only of constants
+    static bool constIntValue(AstNodeExpr* exprp, int64_t& value) {
         if (AstConst* const constp = VN_CAST(exprp, Const)) {
-            out.offset = constp->num().toSInt();
+            // VHDL integer bounds are 32-bit and two-state
+            if (constp->width() > 32 || constp->num().isFourState()) return false;
+            value = constp->num().toSInt();
+            return true;
+        }
+        int64_t lhsv = 0;
+        int64_t rhsv = 0;
+        if (AstAdd* const addp = VN_CAST(exprp, Add)) {
+            if (!constIntValue(addp->lhsp(), lhsv) || !constIntValue(addp->rhsp(), rhsv)) {
+                return false;
+            }
+            value = lhsv + rhsv;
+            return true;
+        }
+        if (AstSub* const subp = VN_CAST(exprp, Sub)) {
+            if (!constIntValue(subp->lhsp(), lhsv) || !constIntValue(subp->rhsp(), rhsv)) {
+                return false;
+            }
+            value = lhsv - rhsv;
+            return true;
+        }
+        if (AstMul* const mulp = VN_CAST(exprp, Mul)) {
+            if (!constIntValue(mulp->lhsp(), lhsv) || !constIntValue(mulp->rhsp(), rhsv)) {
+                return false;
+            }
+            value = lhsv * rhsv;
+            return true;
+        }
+        if (AstDivS* const divp = VN_CAST(exprp, DivS)) {
+            if (!constIntValue(divp->lhsp(), lhsv) || !constIntValue(divp->rhsp(), rhsv)
+                || !rhsv) {
+                return false;
+            }
+            value = lhsv / rhsv;
+            return true;
+        }
+        if (AstNegate* const negp = VN_CAST(exprp, Negate)) {
+            if (!constIntValue(negp->lhsp(), lhsv)) return false;
+            value = -lhsv;
+            return true;
+        }
+        return false;
+    }
+
+    //! Split a linear integer expression; false when two different bases are mixed
+    bool splitLinear(AstNodeExpr* exprp, LinearSplit& out) const {
+        int64_t constValue = 0;
+        if (constIntValue(exprp, constValue)) {
+            out.basep = nullptr;
+            out.scale = 0;
+            out.offset = constValue;
             return true;
         }
         if (AstAdd* const addp = VN_CAST(exprp, Add)) {
@@ -2636,6 +2704,15 @@ class VhdlXmlFrontend final {
             out.offset = -vals.offset;
             return true;
         }
+        if (AstVarRef* const refp = VN_CAST(exprp, VarRef)) {
+            const auto it = m_varRelations.find(refp->varp());
+            if (it != m_varRelations.end()) {
+                out.basep = it->second.basep;
+                out.scale = it->second.scale;
+                out.offset = it->second.offset;
+                return true;
+            }
+        }
         out.basep = exprp;
         out.scale = 1;
         out.offset = 0;
@@ -2643,7 +2720,7 @@ class VhdlXmlFrontend final {
     }
 
     //! Difference of two slice bounds plus one, when the varying parts cancel
-    static bool staticRangeWidth(AstNodeExpr* highp, AstNodeExpr* lowp, int64_t& width) {
+    bool staticRangeWidth(AstNodeExpr* highp, AstNodeExpr* lowp, int64_t& width) const {
         LinearSplit highs;
         LinearSplit lows;
         if (!splitLinear(highp, highs) || !splitLinear(lowp, lows)) return false;
@@ -3669,8 +3746,10 @@ class VhdlXmlFrontend final {
         if (kind == "elsif") {
             FileLine* const flp = flpOf(elsep);
             AstNodeExpr* const condExprp = lowerExpr(condp, bitDType(flp));
+            const std::map<AstVar*, VarRelation> savedRelations = m_varRelations;
             AstNode* const thensp
                 = lowerStmtChain(elsep->child("sequential_statement_chain"), mode);
+            m_varRelations = savedRelations;
             AstNode* const elsesp = elsep->child("else_clause")
                                         ? lowerElse(elsep->child("else_clause"), mode)
                                         : nullptr;
@@ -3695,6 +3774,20 @@ class VhdlXmlFrontend final {
         if (!lhsp) return nullptr;
         AstNodeExpr* const rhsp = lowerExpr(exprp, lhsp->dtypep());
         if (!rhsp) return nullptr;
+        // Track straight-line linear values so slice widths can cancel variable bounds
+        if (AstVarRef* const targetRefp = VN_CAST(lhsp, VarRef)) {
+            const AstBasicDType* const rhsBasicp = VN_CAST(rhsp->dtypep()->skipRefp(), BasicDType);
+            LinearSplit split;
+            if (rhsBasicp && rhsBasicp->keyword() == VBasicDTypeKwd::INT
+                && splitLinear(rhsp, split)
+                && !(VN_CAST(split.basep, VarRef)
+                     && VN_CAST(split.basep, VarRef)->varp() == targetRefp->varp())) {
+                m_varRelations[targetRefp->varp()]
+                    = VarRelation{split.basep, split.scale, split.offset};
+            } else {
+                m_varRelations.erase(targetRefp->varp());
+            }
+        }
         // Variable assignment is immediate, unlike signal assignment
         return new AstAssign{flp, lhsp, rhsp};
     }
@@ -3813,6 +3906,7 @@ class VhdlXmlFrontend final {
 
         AstCaseItem* itemsp = nullptr;
         AstCaseItem* currentp = nullptr;
+        const std::map<AstVar*, VarRelation> savedRelations = m_varRelations;
         for (const Node* const choicep :
              childEls(stmtp->child("case_statement_alternative_chain"))) {
             const bool sameAlternative = choicep->attr("same_alternative_flag") == "true";
@@ -3822,6 +3916,7 @@ class VhdlXmlFrontend final {
                     flp, nullptr, lowerStmtChain(choicep->child("associated_chain"), mode)};
                 itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
                                 : currentp;
+                m_varRelations = savedRelations;
                 continue;
             }
             // AstCaseItem conditions are constant values; V3Case builds the comparisons
@@ -3835,9 +3930,12 @@ class VhdlXmlFrontend final {
                     flp, firstp, lowerStmtChain(choicep->child("associated_chain"), mode)};
                 itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, currentp)
                                 : currentp;
+                m_varRelations = savedRelations;
             }
             for (AstConst* const condp : conds) currentp->addCondsp(condp);
         }
+        // A branch may have changed any tracked variable
+        m_varRelations.clear();
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
 
@@ -4201,6 +4299,8 @@ class VhdlXmlFrontend final {
             headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, bodyp) : bodyp;
         }
         if (hadInlineBinding && m_inlineEnvp) (*m_inlineEnvp)[key] = savedBinding;
+        // The loop may execute zero times, so nothing tracked inside it survives
+        m_varRelations.clear();
         return headp;
     }
 
@@ -4208,7 +4308,12 @@ class VhdlXmlFrontend final {
         const std::string kind = stmtp->attr("kind");
         if (kind == "simple_signal_assignment_statement") { return lowerAssignment(stmtp, mode); }
         if (kind == "variable_assignment_statement") return lowerVariableAssignment(stmtp);
-        if (kind == "procedure_call_statement") return lowerProcedureCall(stmtp, mode);
+        if (kind == "procedure_call_statement") {
+            AstNode* const resultp = lowerProcedureCall(stmtp, mode);
+            // The procedure may assign any variable through an out/inout actual
+            m_varRelations.clear();
+            return resultp;
+        }
         if (kind == "case_statement") return lowerCase(stmtp, mode);
         if (kind == "for_loop_statement") return lowerForLoop(stmtp, mode);
         if (kind == "selected_waveform_assignment_statement") {
@@ -4222,11 +4327,15 @@ class VhdlXmlFrontend final {
         if (kind == "if_statement") {
             FileLine* const flp = flpOf(stmtp);
             AstNodeExpr* const condp = lowerExpr(stmtp->child("condition"), bitDType(flp));
+            const std::map<AstVar*, VarRelation> savedRelations = m_varRelations;
             AstNode* const thensp
                 = lowerStmtChain(stmtp->child("sequential_statement_chain"), mode);
+            m_varRelations = savedRelations;
             AstNode* const elsesp = stmtp->child("else_clause")
                                         ? lowerElse(stmtp->child("else_clause"), mode)
                                         : nullptr;
+            // A branch may have changed any tracked variable
+            m_varRelations.clear();
             return new AstIf{flp, condp, thensp, elsesp};
         }
         unsupported(stmtp, "statement '" + kind + "'");
@@ -4883,6 +4992,7 @@ class VhdlXmlFrontend final {
             itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
         }
         // VHDL executes the process once at time zero, before any sensitivity event
+        m_varRelations.clear();
         AstNode* const initp = lowerStmtChain(bodyp, AssignMode::BLOCKING);
         if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
         if (!itemsp) return true;  // Reads no signal, so nothing can retrigger it
@@ -5200,6 +5310,7 @@ class VhdlXmlFrontend final {
         if (!stmtsp) return;
         // VHDL executes a process once at time zero, before any sensitivity event. Blocking
         // assignments are used there: no other process observes the interim delta.
+        m_varRelations.clear();
         AstNode* const initp = lowerStmtChain(bodyp, AssignMode::BLOCKING);
         if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
         m_modp->addStmtsp(
@@ -5334,6 +5445,8 @@ class VhdlXmlFrontend final {
 
     void lowerConcurrent(const Node* stmtp) {
         const std::string kind = stmtp->attr("kind");
+        // Variable values do not flow between concurrent statements or processes
+        m_varRelations.clear();
         // PSL verification directives have no synthesis meaning
         if (kind == "psl_default_clock") return;
         if (kind == "block_statement") {

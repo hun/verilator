@@ -38,7 +38,21 @@ int main(int argc, char** argv) {
             check("y", static_cast<int>(topp->y), (a >> ((i & 1) * 8)) & 0xff);
             check("z", static_cast<int>(topp->z), (a >> (i * 2)) & 3);
             check("ay", static_cast<int>(topp->ay), (a >> ((i & 1) ? 0 : 8)) & 0xff);
+            check("vy", static_cast<int>(topp->vy), (a >> ((i & 1) * 8)) & 0xff);
+            check("fy", static_cast<int>(topp->fy), (a >> 8) & 0xff);
         }
+    }
+
+    // Variable slice as a write target in process(all)
+    topp->a = 0x1234;
+    topp->din = 0x5a;
+    for (int sel = 0; sel < 4; ++sel) {
+        topp->sel = sel;
+        topp->eval();
+        int want = 0x1234;
+        if (sel & 1) want = (want & 0xff00) | 0x5a;
+        if (sel & 2) want = (want & 0x00ff) | (0x5a << 8);
+        check("tq", static_cast<int>(topp->tq), want);
     }
 
     // Dynamic slice as an assignment target
