@@ -24,7 +24,12 @@ end;
 architecture rtl of t is
   package inst_pkg is new work.gen_pkg generic map (N => 3);
 begin
-  g : for i in 0 to 3 generate
-    y(i) <= a(i);
-  end generate;
+  blk : block
+    signal tmp : std_logic_vector(3 downto 0);
+  begin
+    tmp <= a;
+    g : for i in 0 to 3 generate
+      y(i) <= tmp(i);
+    end generate;
+  end block;
 end;

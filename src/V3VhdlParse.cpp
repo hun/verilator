@@ -4495,6 +4495,23 @@ class VhdlXmlFrontend final {
         const std::string kind = stmtp->attr("kind");
         // PSL verification directives have no synthesis meaning
         if (kind == "psl_default_clock") return;
+        if (kind == "block_statement") {
+            if (stmtp->child("block_header") || stmtp->child("guard_expression")
+                || stmtp->child("guard")) {
+                unsupported(stmtp, "block with a port, generic or guard header");
+                return;
+            }
+            // A block is a flat scope with uniquely named local signals
+            VL_RESTORER_COPY(m_scope);
+            const std::string savedSuffix = m_genSuffix;
+            m_genSuffix += "__blk" + std::to_string(++m_varSeq);
+            emitGenerateDeclarations(stmtp);
+            for (const Node* const stmtp2 : childEls(stmtp->child("concurrent_statement_chain"))) {
+                lowerConcurrent(stmtp2);
+            }
+            m_genSuffix = savedSuffix;
+            return;
+        }
         if (kind == "sensitized_process_statement") {
             if (stmtp->child("process_origin")) {
                 emitConcurrentAssignment(stmtp);
