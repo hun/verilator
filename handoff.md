@@ -29,6 +29,13 @@ sanitizer or huge-allocation tests in a fresh shell with no `ulimit -v`.
 
 Commits today:
 
+- `1a57ce2` Handle an empty process(all) body when scanning for clock edges
+- `052499e` Classify GHDL synth-failure cases in the corpus runner
+- `730e2bc` Support VHDL match equality operators
+- `2c491d1` Reject clock edges inside process(all)
+- `9dfc2bd` Lower VHDL process(all) sensitivity from body reads
+- `c08dab1` Lower VHDL multi-clock and wait-until processes
+- `42ed440` Add VHDL frontend handoff notes
 - `9bf78d4` Tighten VHDL condition and enum semantics, add conversion tests
 - `93a5e2c` Flatten VHDL block statements
 - `afe54e3` Ignore VHDL package instantiations and PSL clock directives
@@ -64,10 +71,10 @@ Commits today:
 - `d9f4596` Fix VHDL operator widths and wide literals
 - `227b24d` Clean up VHDL diagnostic strings
 
-Working tree is clean apart from this untracked handoff file.
+The working tree is clean; this handoff file is tracked.
 
 Build/test status at stop: `make -j4 -C src` clean; the full `t_vhdl_*` suite
-passes (39 tests); the GHDL `synth` corpus was rerun; `clang-format` clean.
+passes (43 tests); the GHDL `synth` corpus was rerun; `clang-format` clean.
 `make lint-py` was not rerun in this session -- the pinned dev tools are not
 installed here; the new test scripts pass `python3 -m py_compile`.
 
@@ -132,8 +139,23 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
 - Clock idioms: `rising_edge`/`falling_edge` and `sig'event [and sig =/= '0'/'1']`,
   composed of `and`/parentheses with level enables, in if/elsif chains with
   enable/reset branches, including concurrent conditional clocked assignments.
-  Rejected cleanly when the model would lose behaviour: clock branch not last,
-  `else` in a clocked chain, complex asynchronous resets, multiple clock edges.
+  Rejected cleanly when the model would lose behaviour: complex asynchronous
+  resets and clock edges on signals outside the sensitivity list.
+- Processes whose sensitivity list is a single signal are lowered as one
+  `always` on that signal and clock edges become the signal's level, which is
+  exact because the process only runs on that signal's events.  This keeps
+  later/`else` branches, multiple edges (`rising_edge`/`falling_edge` in one
+  chain) and process variables in source order.
+- Processes with several clocked statements, or clocked statements mixed with
+  unclocked ones, are split into one `always` per distinct clock sensitivity
+  plus one for the unclocked remainder when process variables and assignment
+  targets are provably disjoint; otherwise they are a clean Unsupported.
+- Wait-based processes with a top-level `wait until <clock edge>` (and any
+  statements before it, which the process loop re-executes after each wakeup)
+  become an edge-triggered `always` plus a time-zero initial.
+- `process(all)` becomes one `always` whose ET_CHANGED sensitivity is every
+  signal the lowered body reads (process variables excluded), plus a time-zero
+  initial.  A clock edge inside `process(all)` remains unsupported.
 - Types: `std_logic(_vector)`, `std_ulogic(_vector)`, `bit(_vector)`,
   `unsigned`/`signed`, integers/subtypes, booleans, enums, records (including
   package-qualified `work.pkg.type` marks and unconstrained array types used as
@@ -162,7 +184,10 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   `std_logic_arith.conv_std_logic_vector`/`conv_unsigned`/`conv_signed`.
   Rotate operators (`rol`/`ror`), unary `+`, explicit `??` conditions,
   redundant parentheses, and package-qualified constants
-  (`work.pkg.constant`).
+  (`work.pkg.constant`).  VHDL-2008 matching equality/inequality (`?=`, `?/=`)
+  with `'-'` don't-care positions in a literal; without a wildcard literal it is
+  same-value (`===`) equality.  Matching relational operators (`?<` and
+  friends) and `'Z'` in a match literal remain unsupported.
 - Four-state logic literals: `'X'`, `'U'`, `'W'`, `'-'` map to unknown and
   `'L'`/`'H'` to 0/1, in character and string literals. `'Z'` stays a clean
   Unsupported because driving high impedance reaches the unresolved
@@ -191,7 +216,20 @@ Tests:
 - `t_vhdl_slice` — non-static slices (read and write), ascending order.
 - `t_vhdl_event` — clock idioms, level gates, `'event` forms, async reset,
   concurrent clocked assignment.
-- `t_vhdl_clock_bad` — rejected clock chains.
+- `t_vhdl_split` — two same-edge statement chains that share a target, a clocked
+  statement mixed with an unclocked one, two clocks with disjoint targets and
+  disjoint process variables, a later branch that runs on the falling edge (and
+  both edges in one chain), and a variable carried across statements.
+- `t_vhdl_wait` — `wait until` on rising/falling edges and the `'event` form,
+  including the loop-back execution of statements before the wait and a
+  variable initialized before it.
+- `t_vhdl_process_all` — process(all) with a variable, if/else and output
+  updates on input changes without a clock.
+- `t_vhdl_match` — matching equality/inequality with don't-care positions,
+  wildcards in the middle and same-value matching without wildcards.
+- `t_vhdl_clock_bad` — rejected clock chains (later branch with a multi-signal
+  sensitivity list, complex asynchronous reset, different clocks sharing a
+  target, a clock edge in process(all)).
 - `t_vhdl_unconst_port` — unconstrained entity ports at several widths, slices,
   defaults, component binding.
 - `t_vhdl_record_sub` — constrained record subtypes, layered constraints,
@@ -218,6 +256,9 @@ Tests:
 - `nodist/ghdl_xml` — dumps the analyzed GHDL XML consumed by the frontend.
 - `nodist/ghdl_synth_suite.py` — lints GHDL's `synth` testsuite through
   `--language vhdl --lint-only`, categorizes results, writes a TSV report.
+  Files the test's `testsuite.sh` marks with `synth_failure` are categorized
+  `EXPECTED_FAIL` when the frontend rejects them and `PASS` when it accepts
+  them, so negative tests do not inflate the `ERROR` bucket.
   - Default testsuite: `$GHDL_TESTSUITE` or `../ghdl/testsuite`.
   - Parses `GHDL_STD_FLAGS`/`GHDL_FLAGS` from each test's `testsuite.sh`.
   - Logs/report: `obj_dir/ghdl_suite/synth/` (gitignored).
@@ -229,16 +270,20 @@ Tests:
 
 | status | count |
 |---|---|
-| PASS | 595 |
-| UNSUPPORTED | 405 |
-| GHDL_ERROR | 107 |
-| ERROR | 29 |
-| NO_TOP | 3 |
+| PASS | 646 |
+| UNSUPPORTED | 317 |
+| EXPECTED_FAIL | 50 |
+| GHDL_ERROR | 94 |
+| ERROR | 30 |
+| NO_TOP | 2 |
 
 Progress across the day's states (original / after width fixes / now):
-PASS 369 -> 360 -> 595; UNSUPPORTED 622 -> 642 -> 405;
-ERROR 38 -> 27 -> 29; GHDL_ERROR 107; NO_TOP 3.
-Net vs original: +226 PASS, -217 UNSUPPORTED, -9 ERROR. The element-port step
+PASS 369 -> 360 -> 646; UNSUPPORTED 622 -> 642 -> 317;
+ERROR 38 -> 27 -> 30; GHDL_ERROR 107 -> 94; EXPECTED_FAIL 50; NO_TOP 3 -> 2.
+`EXPECTED_FAIL` was split out of the older `ERROR`/`UNSUPPORTED`/`GHDL_ERROR`
+buckets for files the testsuite marks `synth_failure`, so the ERROR comparison
+is not apples-to-apples.  Net vs original: +277 PASS, -305 UNSUPPORTED,
+-8 ERROR. The element-port step
 added `iassoc04`/`riassoc04` and X/weak logic literals (`toint02`, `toint03`,
 and related cases); the type-name step added the `issue2826`/`issue2834`
 package-qualified record designs and `issue1081`; aggregate targets added
@@ -254,27 +299,31 @@ identifiers, out-of-range constants) and 6 pre-existing internal faults
 
 Main remaining UNSUPPORTED buckets:
 
-- stdlib function calls (~72; 25 are `rising_edge` in process bodies that mix
-  several top-level edge-ifs or combinational statements)
-- concurrent statements (~67; wait-based processes, PSL assertion/assume
-  directives)
-- expressions (~31; event attributes outside the clock idiom, match operators,
-  floating-point and physical literals)
-- processes without a sensitivity list (~40; non-synthesizable `wait` style)
-- non-static range limits (~22; unconstrained top generics, function returns)
-- character literals (13) / string literal characters (10) — non-logic characters
-  and `'Z'` (see item 4)
-- generic map on units with no VHDL entity (~16)
-- type forms/declarations (~14; remaining anonymous array and aggregate forms),
-  `'low` on string generics (13)
-- null arrays (~11; intentionally zero-width designs)
-- array aggregates of multi-dimensional/odd forms (~11)
-- indexing a non-vector name (~11; multidimensional and remaining constants)
-- non-static slice bounds (~6; width not statically known)
+- generic map on units with no VHDL entity (14; the runner analyses one top
+  file and cross-language binding is WP3)
+- PSL assertion/assume directives (13) — verification only, ignored by
+  synthesis but rejected rather than dropped
+- `'low`/`'high` on string generics (13)
+- string literal characters (10) and character literals (9; mostly `'Z'`)
+- array aggregates of multi-dimensional/odd forms (9) and null arrays (8;
+  intentionally zero-width designs)
+- non-static slice bounds (8) and non-static generic actuals (4)
+- `external_signal_name` (7), event attributes on a signal other than the
+  single sensitivity signal or on a slice (4), matching relational operators
+  (`?<`/`?<=`/`?>`/`?>=`)
+- unsupported library/user function calls: `ffs` (6), `get_val` (4), `is_x`
+  (3) and other numeric/float helpers
+- array type `integer` as an element type (6), indexing a non-vector name (8)
+- unconstrained port on a top-level entity (5), interface view ports (3)
+- non-static range limits (~8; unconstrained top generics, function returns)
 
-ERROR buckets: 13 unresolved instances (`Cannot find VHDL entity or module`),
-4 entities without architectures, 4 unknown identifiers, 2 literal/slice
-mismatches, and 6 pre-existing internal faults (4 `V3DfgSynthesize` width
+Waits that are not a top-level clock edge (inside loops, `wait on`, `wait for`)
+and clock edges inside `process(all)` remain unsupported.
+
+ERROR buckets: 15 unresolved instances (`Cannot find VHDL entity or module`;
+two more surfaced now that more architectures elaborate), 4 entities without
+architectures, 4 unknown identifiers, 1 string-literal length mismatch,
+and 6 pre-existing internal faults (4 `V3DfgSynthesize` width
 mismatches; 2 `Non-ReadOnly reference` from inout-port-to-pin nets, e.g.
 `issue1387/repro2`, `issue3225/tb`).
 
@@ -284,18 +333,22 @@ mismatches; 2 `Non-ReadOnly reference` from inout-port-to-pin nets, e.g.
    configuration declarations. Mixed VHDL/SV invocations are still rejected and
    VHDL mode never auto-loads `.v`; unresolved instances are clean errors.
    This is a separate milestone, not a small follow-up.
-2. Clocked processes with multiple top-level edge-ifs, mixed
-   combinational+clocked bodies, or shared process variables (~25 rising_edge
-   cases) — splitting them is only safe after proving no shared
-   variables/overlapping drivers.
-3. Wait-based processes without sensitivity lists (~40) — non-synthesizable.
+2. Clocked processes that remain rejected: multiple sensitivity signals with
+   process variables shared between clocked and unclocked statements
+   (`dff14`-style), different clocks sharing a variable (`mem02/dpram4`), and
+   clocks not in the sensitivity list.  Splitting these is only safe with a
+   real liveness/ordering analysis.
+3. Waits that are not a top-level clock edge (inside loops, `wait on`,
+   `wait for`) and clock edges inside `process(all)` — the remaining
+   process-form gaps.
 4. Inout ports connected to inout pins can still hit a core DFG assertion
    (V3Tristate-generated `__Vcellinpt__` chain used as an RHS); needs core work
    or a broader frontend rejection. The same limitation keeps `'Z'` literals
    and individual associations of inout ports unsupported.
 5. String generics and array attributes on them (`seq'low`, 13 cases).
 6. Remaining non-logic character/string literal contexts (`'a'`, `'Z'`,
-   characters used as an enum type rather than as logic values).
+   characters used as an enum type rather than as logic values), and
+   matching relational operators (`?<`/`?<=`/`?>`/`?>=`).
 7. Function-local variable element assignment inside inlined functions (deep
    value rewrite; currently a clean `Unsupported`).
 8. In an environment with `help2man`, lz4 headers, `wavediff` and without a
@@ -311,8 +364,23 @@ mismatches; 2 `Non-ReadOnly reference` from inout-port-to-pin nets, e.g.
 - Function locals are bound to expressions, not `AstVar`s: only simple-name
   assignments update them; constants bound via inlining are visible to
   `evalConst` through `m_inlineEnvp`.
-- Clock chains: the clock branch must be last; branches before it on a
-  sensitivity-list signal must be simple level resets; an `else` is rejected.
+- Clock chains: with a single sensitivity signal, later branches, `else` and both
+  edges in one chain are lowered exactly (the edge becomes the signal's level).
+  Otherwise the clock branch must be last, branches before it on a
+  sensitivity-list signal must be simple level resets, and an `else` is rejected.
+- Process splitting only groups same-sensitivity statements; different clock
+  groups and the unclocked remainder must have disjoint assignment targets and
+  no shared process variables, else the process stays a clean Unsupported.
+- `emitSingleClockProcess` runs before `emitClockedIf` whenever the fast path
+  does not apply; a single top-level clocked chain still takes the edge-sensitivity
+  fast path.
+- `process(all)` sensitivity is inferred from the read references of the
+  lowered body (process variables excluded), so it is recomputed after every
+  lowering; a body that reads no signal gets only the time-zero initial.
+- Match operators build the don't-care mask from the XML literal text, because
+  lowering `'-'` and `'X'` both become an unknown bit; `'-'` is a wildcard,
+  `'X'` is a value.  Unknown data bits compare via case equality, so only the
+  documented 2-state collapse differs from full VHDL matching.
 - VHDL mode skips `V3LinkDot`, so `V3LinkCells` defers unresolved cells with
   `AstNotFoundModule`, and `Verilator.cpp` reports surviving ones after
   `V3Dead::deadifyModules`; unreachable instances still pass.
