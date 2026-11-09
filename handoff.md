@@ -29,6 +29,7 @@ sanitizer or huge-allocation tests in a fresh shell with no `ulimit -v`.
 
 Commits today:
 
+- `bd8f2c8` Fix VHDL contextless logic literals and grouped record aggregates
 - `5556440` Remove unused VHDL aggregate type inference
 - `c76ea3b` Support VHDL static ranges and aggregate forms
 - `1a57ce2` Handle an empty process(all) body when scanning for clock edges
@@ -73,7 +74,7 @@ Commits today:
 - `d9f4596` Fix VHDL operator widths and wide literals
 - `227b24d` Clean up VHDL diagnostic strings
 
-Working tree: clean at `5556440` on `vhdl-frontend-wp0`.
+Working tree: clean at `bd8f2c8` on `vhdl-frontend-wp0`.
 
 Build/test status at stop: `make -j4 -C src` clean; the full `t_vhdl_*` suite
 passes (45 tests); the GHDL `synth` corpus was rerun (PASS 665, UNSUPPORTED 300,
@@ -184,8 +185,9 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   (`mem(a*8+7 downto a*8)`), including writes.
 - Static elaboration expressions: integer division, modulus, remainder,
   exponentiation and `abs` in ranges; `'range` used as a constraint; aggregates
-  that determine their own bounds (qualified element choices and
-  range-attribute choices); shared `0 | 1 => value` alternatives; positional
+  whose GHDL-determined type supplies their bounds (qualified element choices
+  and range-attribute choices); shared `0 | 1 => value` alternatives in array
+  and record aggregates; positional
   associations that span several elements (`("01", "10")`); and function-local
   aggregate assignments constrained by the target variable's type.
 - Expressions: arithmetic/comparison/logic/shift/rotate/concat, static
@@ -321,31 +323,35 @@ identifiers, out-of-range constants) and 6 pre-existing internal faults
 
 Main remaining UNSUPPORTED buckets:
 
-- generic map on units with no VHDL entity (14; the runner analyses one top
-  file and cross-language binding is WP3)
+- waits without a top-level clock edge (44; `wait on`, `wait for`, waits inside
+  loops)
 - PSL assertion/assume directives (21) — verification only, ignored by
   synthesis but rejected rather than dropped.  The string-generic `issue` tops
   now lower fully and stop only at these directives; the two standalone
   `sequencer` tops stop at the top-level unbound-generic diagnostic, and
   `issue1850/issue` still stops at its unsupported `process_statement`.
+- generic map on units with no VHDL entity (14; the runner analyses one top
+  file and cross-language binding is WP3)
+- non-static slice bounds and multi-dimensional arrays (10 each)
 - generic without a default on the selected top entity (10) — previously these
   passed lint-only as body-less base modules; the frontend now rejects them
   instead of silently emitting an empty top.
-- string literal characters (9) and character literals (9; mostly `'Z'`)
-- array aggregates of multi-dimensional/odd forms (9) and null arrays (8;
-  intentionally zero-width designs)
-- non-static slice bounds (8) and non-static generic actuals (4)
-- `external_signal_name` (7), event attributes on a signal other than the
-  single sensitivity signal or on a slice (4), matching relational operators
-  (`?<`/`?<=`/`?>`/`?>=`)
+- indexing a non-vector name (10)
+- character literals `'Z'` (9) and string-literal characters (8)
+- process variables shared by clocked and unclocked statements (8) and null
+  arrays (8; intentionally zero-width designs)
+- non-static range limits (7; pure function calls and variable-derived bounds)
+- `external_signal_name` (7)
 - unsupported library/user function calls: `ffs` (6), `get_val` (4), `is_x`
-  (3) and other numeric/float helpers
-- array type `integer` as an element type (6), indexing a non-vector name (8)
-- unconstrained port on a top-level entity (5), interface view ports (3)
-- non-static range limits (~8; unconstrained top generics, function returns)
+  (3), `init_ram` (3) and other numeric/file helpers
+- asynchronous reset conditions (6) and array element type `integer` (6)
+- unconstrained port on a top-level entity (5), `exit_statement` (5)
+- interface view ports (3), non-static `resize` widths (3), assignment to a
+  variable element in an inlined function (3)
+- `floating_point_literal` (3) and `event_attribute` on non-sensitivity names
+  (3)
 
-Waits that are not a top-level clock edge (inside loops, `wait on`, `wait for`)
-and clock edges inside `process(all)` remain unsupported.
+Clock edges inside `process(all)` also remain unsupported.
 
 ERROR buckets: 15 unresolved instances (`Cannot find VHDL entity or module`;
 two more surfaced now that more architectures elaborate), 4 entities without
@@ -418,6 +424,10 @@ configuration-bound component; `issue1117/ent` moved ERROR -> PASS.
   lowering `'-'` and `'X'` both become an unknown bit; `'-'` is a wildcard,
   `'X'` is a value.  Unknown data bits compare via case equality, so only the
   documented 2-state collapse differs from full VHDL matching.
+- A `std_logic`/`std_ulogic` literal with no context lowers to one logic bit;
+  `isLogicEnum` detects the nine-literal IEEE types. GHDL's enum dtype for them
+  is 4 bits, which would otherwise skew concatenations and element aggregates.
+  User enums keep their enum dtype.
 - VHDL mode skips `V3LinkDot`, so `V3LinkCells` defers unresolved cells with
   `AstNotFoundModule`, and `Verilator.cpp` reports surviving ones after
   `V3Dead::deadifyModules`; unreachable instances still pass.

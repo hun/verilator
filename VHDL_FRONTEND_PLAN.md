@@ -26,7 +26,7 @@ new value model and are out of scope.
 | WP3 elaboration | entity/architecture binding, VHDL-entity instance binding, component-interface validation, for-generate unrolling and if-generate selection; generic defaults and generic maps are elaborated (constant and generic type parameters, with per-binding module specialization) |
 | WP4 lowering | implemented for the supported subset: post-width AST with port `AstVar`s, `AstAssignW`/`AstAssignDly`/`AstAssign`, `AstSenTree` edge/change sensitivity, process splitting, aggregate targets, subprogram inlining, record/array packing |
 | WP5 std packages | partial intrinsic subset: `numeric_std`, `std_logic_misc`, `std_logic_arith` conversions, operator-symbol calls; no full package simulation |
-| WP6 test infrastructure | 44 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
+| WP6 test infrastructure | 45 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
 | WP7 hardening | ongoing: clean Unsupported/Error diagnostics, corpus triage, process-form rejection, control-file handling |
 | WP8 mixed language (M2) | not started |
 
@@ -413,6 +413,9 @@ Validate the contract with a debug-only checker in `V3VhdlLink` rather than rely
 downstream assertions.
 
 ## 5. Work packages
+
+Current status of each WP is tracked in "Implementation status" above; the deliverables and
+exit criteria below are unchanged.
 
 | WP | Deliverable | Exit criterion | Est. |
 |---|---|---|---|
