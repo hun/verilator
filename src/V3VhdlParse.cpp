@@ -291,7 +291,8 @@ class VhdlXmlFrontend final {
         const Node* subtypep = nullptr;  // Element subtype, possibly constrained
     };
     mutable std::map<const Node*, RecordInfo> m_records;  // Record type/subtype -> layout
-    std::map<AstVar*, RecordInfo> m_varRecords;  // Specialized record ports -> layout
+    std::map<AstVar*, RecordInfo> m_varRecords;  // Record ports -> layout
+    std::map<AstVar*, VhdlDTypeSpec> m_varSpecs;  // Array ports -> analyzed array layout
     //! A specialized port's type, and record layout when the port is a record
     struct PortInfo final {
         VhdlDTypeSpec spec;
@@ -506,7 +507,10 @@ class VhdlXmlFrontend final {
             for (const Node* const consp : childEls(cur->child("owned_elements_chain"))) {
                 if (consp->attr("kind") != "record_element_constraint") continue;
                 const std::string name = vhdlFold(consp->attr("identifier"));
-                const Node* const subtypep = consp->child("subtype_indication");
+                // A declared element constraint uses a subtype indication; the
+                // constraint of an individual association carries the actual's type
+                const Node* subtypep = consp->child("subtype_indication");
+                if (!subtypep) subtypep = consp->child("type");
                 if (!subtypep) continue;
                 for (RecordMemberSpec& member : members) {
                     if (vhdlFold(member.name) == name) member.subtypep = subtypep;
@@ -986,6 +990,23 @@ class VhdlXmlFrontend final {
     }
     AstNodeDType* intDType(FileLine* flp) const {
         return m_rootp->typeTablep()->findBasicDType(flp, VBasicDTypeKwd::INT);
+    }
+
+    //! Map a std_logic character to Verilator's logic value; false when not a logic char
+    static bool logicLiteralChar(char ch, char& value) {
+        switch (ch) {
+        case '0':
+        case 'L': value = '0'; return true;
+        case '1':
+        case 'H': value = '1'; return true;
+        // 'Z' is absent: a high-impedance driver reaches an unresolved
+        // V3Tristate/DFG limitation, so it stays a clean Unsupported
+        case 'X':
+        case 'W':
+        case 'U':
+        case '-': value = 'x'; return true;
+        default: return false;
+        }
     }
 
     AstConst* makeConst(FileLine* flp, AstNodeDType* dtypep, uint64_t value) const {
@@ -2631,11 +2652,21 @@ class VhdlXmlFrontend final {
         }
         if (kind == "character_literal") {
             const std::string id = nodep->attr("identifier");
-            if (id == "'0'" || id == "'1'") {
-                return makeConst(flp, contextp ? contextp : bitDType(flp), id == "'1'" ? 1U : 0U);
+            AstNodeDType* const dtp = contextp ? contextp : bitDType(flp);
+            char value = 0;
+            if (id.size() == 3 && logicLiteralChar(id[1], value)) {
+                if (value == '0' || value == '1' || dtp->isFourstate()) {
+                    if (value == '1') return makeConst(flp, dtp, 1);
+                    if (value == '0') return makeConst(flp, dtp, 0);
+                    V3Number num{flp, dtp->width(), 1};
+                    num.setBit(0, value);
+                    AstConst* const constp = new AstConst{flp, num};
+                    constp->dtypep(dtp);
+                    return constp;
+                }
             }
             unsupported(nodep, "character literal " + id);
-            return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+            return makeConst(flp, dtp, 0);
         }
         if (kind == "left_type_attribute" || kind == "right_type_attribute"
             || kind == "high_type_attribute" || kind == "low_type_attribute") {
@@ -2715,11 +2746,21 @@ class VhdlXmlFrontend final {
                 return makeConst(flp, dtp, 0);
             }
             const int contentWidth = static_cast<int>(content.size());
+            std::vector<char> values;
+            values.reserve(content.size());
             for (const char ch : content) {
+                char value = ch;
                 if (ch != '0' && ch != '1') {
-                    unsupported(nodep, "non-binary string literal");
-                    return makeConst(flp, dtp, 0);
+                    if (!dtp->isFourstate()) {
+                        unsupported(nodep, "non-binary string literal");
+                        return makeConst(flp, dtp, 0);
+                    }
+                    if (!logicLiteralChar(ch, value)) {
+                        unsupported(nodep, "string literal character");
+                        return makeConst(flp, dtp, 0);
+                    }
                 }
+                values.push_back(value);
             }
             if (contentWidth > dtp->width()) {
                 error(nodep, "VHDL string literal length does not match its context");
@@ -2728,9 +2769,9 @@ class VhdlXmlFrontend final {
             // Build the literal bit by bit: a fixed-width accumulator truncates wide literals
             V3Number num{flp, dtp->width(), 0};
             const int leading = contentWidth - 1;
-            for (int i = 0; i < contentWidth; ++i) num.setBit(leading - i, content[i]);
+            for (int i = 0; i < contentWidth; ++i) num.setBit(leading - i, values[i]);
             // A numeric_std operation may resize a shorter literal to the operand width
-            if (contentWidth < dtp->width() && dtp->isSigned() && content.front() == '1') {
+            if (contentWidth < dtp->width() && dtp->isSigned() && values.front() == '1') {
                 for (int bit = contentWidth; bit < dtp->width(); ++bit) num.setBit(bit, '1');
             }
             AstConst* const constp = new AstConst{flp, num};
@@ -4226,7 +4267,14 @@ class VhdlXmlFrontend final {
                 }
                 const VhdlDTypeSpec spec = specp ? *specp : parseType(subtypep);
                 AstVar* const varp = new AstVar{pflp, VVarType::PORT, pname, dtypeOf(spec, pflp)};
-                if (portInfo && portInfo->record.dtypep) m_varRecords[varp] = portInfo->record;
+                if (spec.isVector) m_varSpecs[varp] = spec;
+                if (portInfo && portInfo->record.dtypep) {
+                    m_varRecords[varp] = portInfo->record;
+                } else {
+                    // A constrained record port carries its layout in its own subtype
+                    RecordInfo recordInfo;
+                    if (recordLayout(subtypep, recordInfo)) m_varRecords[varp] = recordInfo;
+                }
                 varp->direction(directionOf(portp->attr("mode")));
                 varp->pinNum(++pinNum);
                 // VHDL ports are signals, so procedural assignment is legal
@@ -4481,6 +4529,122 @@ class VhdlXmlFrontend final {
         return result;
     }
 
+    //! Base port name of an element association, or empty when the formal is not one
+    static std::string formalElementBase(const Node* formalp) {
+        const Node* namep = formalp;
+        for (int depth = 0; namep && depth < 16; ++depth) {
+            const std::string kind = namep->attr("kind");
+            if (kind == "simple_name") return vhdlFold(namep->attr("identifier"));
+            if (kind != "selected_element" && kind != "indexed_name" && kind != "slice_name") {
+                return {};
+            }
+            namep = namep->child("prefix");
+        }
+        return {};
+    }
+
+    //! One part of a port, as selected by an individual association
+    struct PortMemberRef final {
+        int lsb = 0;
+        int width = 0;
+        AstNodeDType* dtypep = nullptr;
+    };
+
+    //! Resolve an array element or slice of a port (`port(index)`, `port(a downto b)`)
+    bool resolvePortSlice(const Node* formalp, AstVar* const portVarp, PortMemberRef& ref) const {
+        const auto specIt = m_varSpecs.find(portVarp);
+        if (specIt == m_varSpecs.end()) return false;
+        const VhdlDTypeSpec& spec = specIt->second;
+        const int elemWidth = spec.elemWidth > 0 ? spec.elemWidth : 1;
+        const int totalWidth = portVarp->dtypep()->width();
+        VhdlDTypeSpec elemSpec = spec;
+        int lsb = 0;
+        int elems = 1;
+        if (formalp->attr("kind") == "indexed_name") {
+            const std::vector<const Node*> indices = childEls(formalp->child("index_list"));
+            if (indices.size() != 1) return false;
+            int64_t index = 0;
+            if (!evalConst(indices.front(), index) || index < INT_MIN || index > INT_MAX) {
+                return false;
+            }
+            const int indexValue = static_cast<int>(index);
+            lsb = (spec.ascending ? spec.right - indexValue : indexValue - spec.right) * elemWidth;
+            elemSpec.left = indexValue;
+            elemSpec.right = indexValue;
+        } else {
+            const Node* const suffixp = derefNode(formalp->child("suffix"));
+            if (!suffixp || suffixp->attr("kind") != "range_expression") return false;
+            const bool ascending = suffixp->attr("direction") == "to";
+            int64_t leftValue = 0;
+            int64_t rightValue = 0;
+            if (ascending != spec.ascending || !evalConst(rangeBound(suffixp, true), leftValue)
+                || !evalConst(rangeBound(suffixp, false), rightValue) || leftValue < INT_MIN
+                || leftValue > INT_MAX || rightValue < INT_MIN || rightValue > INT_MAX) {
+                return false;
+            }
+            const int left = static_cast<int>(leftValue);
+            const int right = static_cast<int>(rightValue);
+            elems = rangeLength(left, right, ascending);
+            if (elems <= 0) return false;
+            lsb = (ascending ? spec.right - right : right - spec.right) * elemWidth;
+            elemSpec.left = left;
+            elemSpec.right = right;
+            elemSpec.ascending = ascending;
+        }
+        const int width = elems * elemWidth;
+        if (lsb < 0 || lsb + width > totalWidth) return false;
+        ref.lsb = lsb;
+        ref.width = width;
+        ref.dtypep = dtypeOf(elemSpec, flpOf(formalp));
+        return true;
+    }
+
+    //! Resolve an individually associated port part (`port.member`, `port(slice)`)
+    bool resolvePortMember(const Node* formalp, AstVar* const portVarp, PortMemberRef& ref) const {
+        std::vector<const Node*> path;
+        const Node* namep = formalp;
+        for (int depth = 0; namep && depth < 16; ++depth) {
+            const std::string kind = namep->attr("kind");
+            if (kind == "simple_name") break;
+            if (kind != "selected_element" && kind != "indexed_name" && kind != "slice_name") {
+                return false;
+            }
+            path.push_back(namep);
+            namep = namep->child("prefix");
+        }
+        if (!namep || path.empty()) return false;
+        if (vhdlFold(namep->attr("identifier")) != vhdlFold(portVarp->name())) return false;
+        std::reverse(path.begin(), path.end());
+        const std::string outerKind = path.back()->attr("kind");
+        if (outerKind == "indexed_name" || outerKind == "slice_name") {
+            // Only a whole array port can be indexed or sliced in an association
+            return path.size() == 1 && resolvePortSlice(path.front(), portVarp, ref);
+        }
+        const auto found = m_varRecords.find(portVarp);
+        if (found == m_varRecords.end()) return false;
+        RecordInfo info = found->second;
+        int lsb = 0;
+        AstNodeDType* dtypep = info.dtypep;
+        for (size_t index = 0; index < path.size(); ++index) {
+            const std::string name = vhdlFold(path[index]->attr("identifier"));
+            const RecordMember* memberp = nullptr;
+            for (const RecordMember& member : info.members) {
+                if (vhdlFold(member.name) == name) {
+                    memberp = &member;
+                    break;
+                }
+            }
+            if (!memberp) return false;
+            lsb += memberp->lsb;
+            dtypep = memberp->dtypep;
+            if (index + 1 < path.size() && !recordLayoutOfName(path[index], info)) return false;
+        }
+        ref.lsb = lsb;
+        ref.width = dtypep->width();
+        ref.dtypep = dtypep;
+        return true;
+    }
+
     //! Ranges of an entity's unconstrained ports, taken from the instance's actuals
     bool gatherPortSpecs(const Node* stmtp, const Node* entityp,
                          std::map<std::string, PortInfo>& portInfos) {
@@ -4496,21 +4660,15 @@ class VhdlXmlFrontend final {
                     = formalp ? vhdlFold(formalp->attr("identifier")) : std::string{};
                 if (artificials.find(assocp) != artificials.end()) continue;
                 if (kind == "association_element_by_individual") {
-                    // Formal is a record member or slice; find its base port name
-                    const Node* basep = formalp;
-                    for (int depth = 0; basep && depth < 16; ++depth) {
-                        const std::string baseKind = basep->attr("kind");
-                        if (baseKind == "simple_name") break;
-                        const Node* const prefixp = basep->child("prefix");
-                        if (!prefixp) {
-                            basep = nullptr;
-                            break;
-                        }
-                        basep = prefixp;
-                    }
-                    if (basep && basep->attr("kind") == "simple_name") {
-                        individualByPort[vhdlFold(basep->attr("identifier"))] = assocp;
-                    }
+                    // GHDL's marker for one individually associated port; its actual type
+                    // definition holds the record constraint built from the element actuals
+                    const std::string base = formalElementBase(formalp);
+                    if (!base.empty()) individualByPort[base] = assocp;
+                    continue;
+                }
+                if (formalp && formalp->attr("kind") != "simple_name"
+                    && !formalElementBase(formalp).empty()) {
+                    // An element actual carries no whole-port constraint of its own
                     continue;
                 }
                 if (kind == "association_element_open") {
@@ -4545,8 +4703,25 @@ class VhdlXmlFrontend final {
                 if (!actualp) {
                     const auto individualIt = individualByPort.find(pname);
                     if (individualIt != individualByPort.end()) {
-                        unsupported(individualIt->second, "individual record port association");
-                        return false;
+                        // The record constraint comes from GHDL's actual type definition
+                        const Node* const defp
+                            = individualIt->second->child("actual_type_definition");
+                        if (!defp) {
+                            unsupported(individualIt->second,
+                                        "individual port association of a non-record port");
+                            return false;
+                        }
+                        const VhdlDTypeSpec probe = probeTypeSpec(defp);
+                        if (!probe.dtp && !probe.isVector) {
+                            unsupported(individualIt->second,
+                                        "individual port association actual type");
+                            return false;
+                        }
+                        PortInfo portInfo;
+                        portInfo.spec = probe;
+                        recordLayout(defp, portInfo.record);
+                        portInfos[pname] = portInfo;
+                        continue;
                     }
                     actualp = portp->child("default_value");
                 }
@@ -4704,8 +4879,31 @@ class VhdlXmlFrontend final {
         AstPin* pinsp = nullptr;
         int positional = 0;
         const std::map<const Node*, std::string> artificials = artificialOpenPorts(stmtp, entityp);
+        // Individually associated port parts: GHDL emits one marker per port plus one
+        // entry per associated element
+        std::map<std::string, std::vector<const Node*>> elementAssocs;
+        std::set<const Node*> elementNodes;
         if (const Node* const mapChainp = stmtp->child("port_map_aspect_chain")) {
             for (const Node* const assocp : childEls(mapChainp)) {
+                const Node* const formalp = assocp->child("formal");
+                const std::string formalKind = formalp ? formalp->attr("kind") : std::string{};
+                if (assocp->attr("kind") == "association_element_by_individual") {
+                    elementNodes.insert(assocp);
+                    continue;
+                }
+                if (formalKind == "selected_element" || formalKind == "indexed_name"
+                    || formalKind == "slice_name") {
+                    const std::string base = formalElementBase(formalp);
+                    if (!base.empty()) {
+                        elementAssocs[base].push_back(assocp);
+                        elementNodes.insert(assocp);
+                    }
+                }
+            }
+        }
+        if (const Node* const mapChainp = stmtp->child("port_map_aspect_chain")) {
+            for (const Node* const assocp : childEls(mapChainp)) {
+                if (elementNodes.count(assocp)) continue;
                 const std::string kind = assocp->attr("kind");
                 std::string formalName;
                 int pinNum = 0;
@@ -4785,6 +4983,115 @@ class VhdlXmlFrontend final {
                 pinp->modVarp(modVarp);
                 pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
             }
+        }
+        // Element associations connect disjoint parts of one port
+        for (const auto& entry : elementAssocs) {
+            const std::string& portName = entry.first;
+            const Node* const flpNode = entry.second.front();
+            if (!targetp) continue;
+            const auto portIt = targetp->ports.find(portName);
+            if (portIt == targetp->ports.end()) {
+                error(flpNode, "Unknown port '" + portName + "' on '" + unitName + "'");
+                continue;
+            }
+            AstVar* const modVarp = portIt->second;
+            if (m_varRecords.find(modVarp) == m_varRecords.end()
+                && m_varSpecs.find(modVarp) == m_varSpecs.end()) {
+                unsupported(flpNode, "individual port association of this port type");
+                continue;
+            }
+            if (modVarp->isInout()) {
+                unsupported(flpNode, "individual port association of an inout port");
+                continue;
+            }
+
+            struct ElementConnection final {
+                int lsb = 0;
+                int width = 0;
+                AstNodeDType* dtypep = nullptr;
+                const Node* actualp = nullptr;
+            };
+            std::vector<ElementConnection> connections;
+            bool bad = false;
+            for (const Node* const assocp : entry.second) {
+                PortMemberRef ref;
+                if (!resolvePortMember(assocp->child("formal"), modVarp, ref)) {
+                    unsupported(assocp, "individual port association form");
+                    bad = true;
+                    break;
+                }
+                const Node* const actualp = assocp->child("actual");
+                if (!actualp) {
+                    if (modVarp->isInput()) {
+                        error(assocp, "open on a record input port element");
+                        bad = true;
+                        break;
+                    }
+                    continue;
+                }
+                ElementConnection connection;
+                connection.lsb = ref.lsb;
+                connection.width = ref.width;
+                connection.dtypep = ref.dtypep;
+                connection.actualp = actualp;
+                connections.push_back(connection);
+            }
+            if (bad) continue;
+
+            FileLine* const flp = flpOf(flpNode);
+            AstNodeExpr* actualExprp = nullptr;
+            if (modVarp->isInput()) {
+                // The first record member occupies the most significant bits
+                std::sort(connections.begin(), connections.end(),
+                          [](const ElementConnection& lhsp, const ElementConnection& rhsp) {
+                              return lhsp.lsb > rhsp.lsb;
+                          });
+                for (const ElementConnection& connection : connections) {
+                    AstNodeExpr* const valuep = lowerExpr(connection.actualp, connection.dtypep);
+                    if (!valuep) {
+                        actualExprp = nullptr;
+                        break;
+                    }
+                    // Iterating from the most significant element, append lower elements
+                    actualExprp
+                        = actualExprp
+                              ? static_cast<AstNodeExpr*>(new AstConcat{flp, actualExprp, valuep})
+                              : valuep;
+                }
+                if (!actualExprp) continue;
+                actualExprp->dtypep(modVarp->dtypep());
+            } else {
+                // Outputs: drive each element actual from its slice of a packed temporary
+                AstVar* const tempVarp
+                    = new AstVar{flp, VVarType::VAR,
+                                 "vhdlind_" + std::to_string(++m_varSeq) + "__" + modVarp->name(),
+                                 modVarp->dtypep()};
+                m_modp->addStmtsp(tempVarp);
+                AstNode* headp = nullptr;
+                for (const ElementConnection& connection : connections) {
+                    const std::string actualKind = connection.actualp->attr("kind");
+                    if (actualKind != "simple_name" && actualKind != "indexed_name"
+                        && actualKind != "slice_name" && actualKind != "selected_element") {
+                        unsupported(connection.actualp,
+                                    "expression on a writable port connection");
+                        bad = true;
+                        break;
+                    }
+                    AstNodeExpr* const lhsp = lowerName(connection.actualp, true);
+                    AstSel* const rhsp
+                        = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
+                                     connection.lsb, connection.width};
+                    rhsp->dtypep(connection.dtypep);
+                    AstNode* const assp = new AstAssign{flp, lhsp, rhsp};
+                    headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assp) : assp;
+                }
+                if (bad) continue;
+                m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
+                actualExprp = new AstVarRef{flp, tempVarp, VAccess::WRITE};
+            }
+            AstPin* const pinp = new AstPin{flp, 0, modVarp->name(), actualExprp};
+            pinp->modVarp(modVarp);
+            pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
         }
 
         AstCell* const cellp = new AstCell{

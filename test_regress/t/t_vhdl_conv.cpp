@@ -38,6 +38,9 @@ int main(int argc, char** argv) {
             const int uo = static_cast<int>(topp->uo);
             const int eqf = static_cast<int>(topp->eqf);
             const int eqt = static_cast<int>(topp->eqt);
+            const int lh = static_cast<int>(topp->lh);
+            const int xz = static_cast<int>(topp->xz);
+            const int ch = static_cast<int>(topp->ch);
             if (topp->wide != 0x123456789aULL) {
                 std::printf("%%Error: wide=%llx\n", static_cast<unsigned long long>(topp->wide));
                 ++fails;
@@ -48,6 +51,15 @@ int main(int argc, char** argv) {
             }
             if (eqf != 0 || eqt != 1) {
                 std::printf("%%Error: eqf=%d eqt=%d\n", eqf, eqt);
+                ++fails;
+            }
+            if (lh != 0x6 || ch != 1) {
+                std::printf("%%Error: lh=%d ch=%d\n", lh, ch);
+                ++fails;
+            }
+            // The unknown bits stay unknown; the known bits retain their positions
+            if ((xz & 0xC) != 0x4) {
+                std::printf("%%Error: xz=%d\n", xz);
                 ++fails;
             }
             if (y != a) {

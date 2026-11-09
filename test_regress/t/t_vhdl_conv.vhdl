@@ -32,6 +32,9 @@ entity t is
     uo : out std_ulogic_vector(3 downto 0);
     eqf : out std_logic;
     eqt : out std_logic;
+    lh : out std_logic_vector(3 downto 0);
+    xz : out std_logic_vector(3 downto 0);
+    ch : out std_logic;
     wide : out std_logic_vector(39 downto 0)
   );
 end;
@@ -49,6 +52,10 @@ begin
   eqt <= '1' when unsigned'("000") = "00" else '0';
   -- a literal wider than 32 bits must not be truncated
   wide <= x"123456789A";
+  -- weak and strong logic values map to their resolved levels
+  lh <= "L1H0";
+  xz <= "01X-";
+  ch <= 'H';
   -- resize of an unsigned value zero-extends; the width is a static expression
   y <= std_logic_vector(resize(u, N + 4));
   -- static to_signed folds to an aggregate with a literal origin
