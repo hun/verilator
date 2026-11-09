@@ -28,6 +28,18 @@ int main(int argc, char** argv) {
         std::printf("%%Error: y=%d\n", static_cast<int>(topp->y));
         ++fails;
     }
+    if (static_cast<int>(topp->m0) != 0) {
+        std::printf("%%Error: m0=%d\n", static_cast<int>(topp->m0));
+        ++fails;
+    }
+    if (static_cast<int>(topp->mhi) != 3) {
+        std::printf("%%Error: mhi=%d\n", static_cast<int>(topp->mhi));
+        ++fails;
+    }
+    if (static_cast<int>(topp->ar0) != 1) {
+        std::printf("%%Error: ar0=%d\n", static_cast<int>(topp->ar0));
+        ++fails;
+    }
 
     topp->final();
     delete topp;

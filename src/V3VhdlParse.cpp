@@ -932,6 +932,25 @@ class VhdlXmlFrontend final {
         }
         AstVar* const varp = lookupVar(namep);
         if (!varp) {
+            // Indexing/slicing a constant resolves through its declared value
+            if (const Node* const refp = namep->child("named_entity")) {
+                if (refp->has("ref")) {
+                    const Node* const declp = nodeById(refp->attr("ref"));
+                    if (declp) {
+                        const std::string declKind = declp->attr("kind");
+                        if (declKind == "constant_declaration"
+                            || declKind == "interface_constant_declaration") {
+                            if (write) {
+                                error(nodep, "VHDL constant cannot be assigned");
+                                return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+                            }
+                            if (const Node* const defp = declp->child("default_value")) {
+                                return lowerExpr(defp, nullptr);
+                            }
+                        }
+                    }
+                }
+            }
             error(namep, "Unknown VHDL identifier '" + namep->attr("identifier") + "'");
             return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
         }
