@@ -29,6 +29,7 @@ sanitizer or huge-allocation tests in a fresh shell with no `ulimit -v`.
 
 Commits today:
 
+- `5556440` Remove unused VHDL aggregate type inference
 - `c76ea3b` Support VHDL static ranges and aggregate forms
 - `1a57ce2` Handle an empty process(all) body when scanning for clock edges
 - `052499e` Classify GHDL synth-failure cases in the corpus runner
@@ -72,7 +73,7 @@ Commits today:
 - `d9f4596` Fix VHDL operator widths and wide literals
 - `227b24d` Clean up VHDL diagnostic strings
 
-Working tree: clean at `c76ea3b` on `vhdl-frontend-wp0`.
+Working tree: clean at `5556440` on `vhdl-frontend-wp0`.
 
 Build/test status at stop: `make -j4 -C src` clean; the full `t_vhdl_*` suite
 passes (45 tests); the GHDL `synth` corpus was rerun (PASS 665, UNSUPPORTED 300,
