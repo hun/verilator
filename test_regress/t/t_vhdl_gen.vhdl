@@ -7,6 +7,13 @@
 library ieee;
 use ieee.std_logic_1164.all;
 
+package gen_pkg is
+  generic (N : integer);
+end package;
+
+library ieee;
+use ieee.std_logic_1164.all;
+
 entity t is
   port (
     a : in std_logic_vector(3 downto 0);
@@ -15,6 +22,7 @@ entity t is
 end;
 
 architecture rtl of t is
+  package inst_pkg is new work.gen_pkg generic map (N => 3);
 begin
   g : for i in 0 to 3 generate
     y(i) <= a(i);

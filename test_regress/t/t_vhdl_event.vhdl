@@ -26,6 +26,9 @@ entity t is
 end;
 
 architecture rtl of t is
+  -- A PSL verification directive has no synthesis meaning
+  default clock is rising_edge(clk);
+
   constant EDGE : std_logic := '1';
   signal r : std_logic;
   signal r2 : std_logic;
