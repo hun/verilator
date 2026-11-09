@@ -35,6 +35,10 @@ entity t is
     lh : out std_logic_vector(3 downto 0);
     xz : out std_logic_vector(3 downto 0);
     ch : out std_logic;
+    at0 : out std_logic_vector(3 downto 0);
+    at1 : out std_logic_vector(3 downto 0);
+    vt0 : out std_logic_vector(3 downto 0);
+    vt1 : out std_logic_vector(3 downto 0);
     wide : out std_logic_vector(39 downto 0)
   );
 end;
@@ -61,6 +65,15 @@ begin
   lh <= "L1H0";
   xz <= "01X-";
   ch <= 'H';
+  -- an aggregate assignment target splits the value left to right
+  (at0, at1) <= b;
+  process(a)
+    variable v0, v1 : std_logic_vector(3 downto 0);
+  begin
+    (v0, v1) := a & a;
+    vt0 <= v0;
+    vt1 <= v1;
+  end process;
   -- resize of an unsigned value zero-extends; the width is a static expression
   y <= std_logic_vector(resize(u, N + 4));
   -- static to_signed folds to an aggregate with a literal origin

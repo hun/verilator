@@ -41,6 +41,10 @@ int main(int argc, char** argv) {
             const int lh = static_cast<int>(topp->lh);
             const int xz = static_cast<int>(topp->xz);
             const int ch = static_cast<int>(topp->ch);
+            const int at0 = static_cast<int>(topp->at0);
+            const int at1 = static_cast<int>(topp->at1);
+            const int vt0 = static_cast<int>(topp->vt0);
+            const int vt1 = static_cast<int>(topp->vt1);
             if (topp->wide != 0x123456789aULL) {
                 std::printf("%%Error: wide=%llx\n", static_cast<unsigned long long>(topp->wide));
                 ++fails;
@@ -60,6 +64,14 @@ int main(int argc, char** argv) {
             // The unknown bits stay unknown; the known bits retain their positions
             if ((xz & 0xC) != 0x4) {
                 std::printf("%%Error: xz=%d\n", xz);
+                ++fails;
+            }
+            if (at0 != ((b >> 4) & 0xf) || at1 != (b & 0xf)) {
+                std::printf("%%Error: b=%d at0=%d at1=%d\n", b, at0, at1);
+                ++fails;
+            }
+            if (vt0 != a || vt1 != a) {
+                std::printf("%%Error: a=%d vt0=%d vt1=%d\n", a, vt0, vt1);
                 ++fails;
             }
             if (y != a) {
