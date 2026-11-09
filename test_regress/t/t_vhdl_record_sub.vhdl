@@ -26,13 +26,14 @@ use work.recpkg.all;
 entity child is
   port (
     i : in rec_t;
-    o : out std_logic_vector(7 downto 0)
+    -- Selects the low nibble of member x, whose width depends on the subtype
+    o : out std_logic_vector(3 downto 0)
   );
 end;
 
 architecture rtl of child is
 begin
-  o <= i.y;
+  o <= i.x(3 downto 0);
 end;
 
 library ieee;
@@ -49,7 +50,8 @@ entity t is
     oby : out std_logic_vector(7 downto 0);
     ocx : out std_logic_vector(7 downto 0);
     ocy : out std_logic_vector(3 downto 0);
-    co : out std_logic_vector(7 downto 0)
+    co1 : out std_logic_vector(3 downto 0);
+    co2 : out std_logic_vector(3 downto 0)
   );
 end;
 
@@ -73,5 +75,7 @@ begin
   ocx <= rc.x;
   ocy <= rc.y;
 
-  u : entity work.child port map (i => r1, o => co);
+  -- Two specializations with the same total width but different member layouts
+  u1 : entity work.child port map (i => r1, o => co1);
+  u2 : entity work.child port map (i => rc, o => co2);
 end;

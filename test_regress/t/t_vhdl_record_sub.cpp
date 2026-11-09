@@ -27,10 +27,14 @@ int main(int argc, char** argv) {
                 int got;
                 int want;
             } checks[] = {
-                {"oax", static_cast<int>(topp->oax), a4}, {"oay", static_cast<int>(topp->oay), b8},
-                {"obx", static_cast<int>(topp->obx), a4}, {"oby", static_cast<int>(topp->oby), b8},
-                {"ocx", static_cast<int>(topp->ocx), b8}, {"ocy", static_cast<int>(topp->ocy), a4},
-                {"co", static_cast<int>(topp->co), b8},
+                {"oax", static_cast<int>(topp->oax), a4},
+                {"oay", static_cast<int>(topp->oay), b8},
+                {"obx", static_cast<int>(topp->obx), a4},
+                {"oby", static_cast<int>(topp->oby), b8},
+                {"ocx", static_cast<int>(topp->ocx), b8},
+                {"ocy", static_cast<int>(topp->ocy), a4},
+                {"co1", static_cast<int>(topp->co1), a4},
+                {"co2", static_cast<int>(topp->co2), b8 & 0xf},
             };
             for (const auto& check : checks) {
                 if (check.got != check.want) {
