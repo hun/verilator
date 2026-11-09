@@ -658,7 +658,7 @@ class VhdlXmlFrontend final {
                 ->findBasicDType(flpOf(elemp), VBasicDTypeKwd::INT)
                 ->width();
         }
-        if (kind == "array_subtype_definition") {
+        if (kind == "array_subtype_definition" || kind == "array_type_definition") {
             const std::vector<const Node*> indices
                 = childEls(elemp->child("index_constraint_list"));
             const Node* rangep
@@ -770,7 +770,8 @@ class VhdlXmlFrontend final {
         if (kind == "enumeration_subtype_definition") {
             return parseType(subtypep->child("subtype_type_mark"), depth + 1);
         }
-        if (kind == "simple_name") {
+        if (kind == "simple_name" || kind == "selected_name") {
+            // `pkg.type` resolves through the same named_entity reference
             const std::string id = vhdlFold(subtypep->attr("identifier"));
             if (m_typeBindings.find(id) != m_typeBindings.end()) {
                 // Generic type parameter: resolve through the instance's binding
@@ -818,10 +819,8 @@ class VhdlXmlFrontend final {
                                     spec.dtp = enumDType(defp);
                                     return spec;
                                 }
-                                if (defp->attr("kind") == "record_type_definition"
-                                    || defp->attr("kind") == "record_subtype_definition") {
-                                    return parseType(defp, depth + 1);
-                                }
+                                // Record and array type definitions resolve recursively
+                                return parseType(defp, depth + 1);
                             }
                         }
                     }
@@ -843,7 +842,7 @@ class VhdlXmlFrontend final {
             }
             return spec;
         }
-        if (kind != "array_subtype_definition") {
+        if (kind != "array_subtype_definition" && kind != "array_type_definition") {
             error(subtypep, "VHDL type form '" + kind + "' is not supported yet");
             return spec;
         }
@@ -978,9 +977,18 @@ class VhdlXmlFrontend final {
         if (kind == "record_type_definition" || kind == "record_subtype_definition") {
             return probeTypeSpec(defp).dtp;
         }
-        if (kind == "array_subtype_definition"
+        if ((kind == "array_subtype_definition" || kind == "array_type_definition")
             && childEls(defp->child("index_constraint_list")).empty()) {
             return nullptr;  // Unconstrained result type: use the expression's type
+        }
+        if (kind == "simple_name" || kind == "selected_name") {
+            // The name may resolve to an unconstrained array type
+            const Node* const typep2 = typeNodeOfName(defp);
+            const std::string kind2 = typep2 ? typep2->attr("kind") : std::string{};
+            if ((kind2 == "array_subtype_definition" || kind2 == "array_type_definition")
+                && childEls(typep2->child("index_constraint_list")).empty()) {
+                return nullptr;
+            }
         }
         return dtypeOf(parseType(defp), flpOf(nodep));
     }
