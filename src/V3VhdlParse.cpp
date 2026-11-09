@@ -490,6 +490,12 @@ class VhdlXmlFrontend final {
                || kind == "use_clause";
     }
 
+    //! Number of indices in a VHDL range; 0 for a null range
+    static int rangeLength(int left, int right, bool ascending) {
+        const int length = ascending ? right - left + 1 : left - right + 1;
+        return length > 0 ? length : 0;
+    }
+
     //! Width of one array element subtype, or 0 when it cannot be determined
     int elementWidth(const Node* elemp, int depth = 0) const {
         if (!elemp || depth > 16) return 0;
@@ -516,7 +522,14 @@ class VhdlXmlFrontend final {
                 || !evalConst(rangeBound(rangep, false), rightValue)) {
                 return 0;
             }
-            return static_cast<int>(std::abs(leftValue - rightValue) + 1);
+            const bool ascending = rangep->attr("direction") == "to";
+            const int elems = rangeLength(static_cast<int>(leftValue),
+                                          static_cast<int>(rightValue), ascending);
+            const Node* elemsubp = elemp->child("element_subtype");
+            if (!elemsubp) elemsubp = elemp->child("element_subtype_indication");
+            const int elemWidth = elementWidth(elemsubp, depth + 1);
+            if (elems <= 0 || elemWidth <= 0) return 0;
+            return elems * elemWidth;
         }
         if (kind == "simple_name") {
             const std::string id = vhdlFold(elemp->attr("identifier"));
@@ -638,7 +651,19 @@ class VhdlXmlFrontend final {
                             if (subp && !subp->has("kind") && subp->has("ref")) {
                                 subp = nodeById(subp->attr("ref"));
                             }
-                            if (subp) return parseType(subp, depth + 1);
+                            if (subp) {
+                                // A type_definition reached through a subtype_definition
+                                const std::string subKind = subp->attr("kind");
+                                if (subKind == "record_type_definition") {
+                                    spec.dtp = recordInfo(subp).dtypep;
+                                    return spec;
+                                }
+                                if (subKind == "enumeration_type_definition") {
+                                    spec.dtp = enumDType(subp);
+                                    return spec;
+                                }
+                                return parseType(subp, depth + 1);
+                            }
                             if (const Node* const defp = declp->child("type_definition")) {
                                 if (defp->attr("kind") == "enumeration_type_definition") {
                                     spec.dtp = enumDType(defp);
@@ -757,6 +782,10 @@ class VhdlXmlFrontend final {
         }
         spec.left = static_cast<int>(leftValue);
         spec.right = static_cast<int>(rightValue);
+        if (rangeLength(spec.left, spec.right, spec.ascending) <= 0) {
+            unsupported(subtypep, "null array");
+            spec.isVector = false;  // Keep the tree buildable; the error aborts the run
+        }
         return spec;
     }
 
@@ -765,7 +794,7 @@ class VhdlXmlFrontend final {
         AstTypeTable* const tablep = m_rootp->typeTablep();
         if (spec.isInteger) return tablep->findBasicDType(flp, VBasicDTypeKwd::INT);
         if (!spec.isVector) return tablep->findBasicDType(flp, spec.kwd);
-        const int elems = std::abs(spec.left - spec.right) + 1;
+        const int elems = rangeLength(spec.left, spec.right, spec.ascending);
         // An array of vectors keeps only its total bit width; the VHDL index range and
         // element width are recovered from the analyzed type where needed
         if (spec.elemWidth > 1) {
@@ -977,7 +1006,12 @@ class VhdlXmlFrontend final {
         const int elemWidth = multi ? layout.elemWidth : 1;
         const int lowIndex = ascending ? left : right;
         const int offset = (lowIndex - baseIndex) * elemWidth;
-        const int width = (std::abs(left - right) + 1) * elemWidth;
+        const int elems = rangeLength(left, right, ascending);
+        if (elems <= 0) {
+            unsupported(nodep, "null slice");
+            return basep;
+        }
+        const int width = elems * elemWidth;
         if (offset < 0 || offset + width > basicp->width()) {
             error(nodep, "VHDL slice is out of range");
             return basep;
@@ -2882,7 +2916,7 @@ class VhdlXmlFrontend final {
             } else if (kind == "low") {
                 value = std::min(left, right);
             } else if (kind == "length") {
-                value = std::abs(left - right) + 1;
+                value = rangeLength(left, right, layout.ascending);
             } else {
                 value = layout.ascending ? 1 : 0;
             }
