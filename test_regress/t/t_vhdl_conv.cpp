@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
                 std::printf("%%Error: b=%d at0=%d at1=%d\n", b, at0, at1);
                 ++fails;
             }
-            if (vt0 != a || vt1 != a) {
+            if (vt0 != a || vt1 != ((~a) & 0xf)) {
                 std::printf("%%Error: a=%d vt0=%d vt1=%d\n", a, vt0, vt1);
                 ++fails;
             }
