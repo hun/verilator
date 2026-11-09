@@ -46,6 +46,7 @@ entity t is
     red_nand : out std_logic;
     red_call : out std_logic;
     red_func : out std_logic;
+    imp : out std_logic;
     wide : out std_logic_vector(39 downto 0)
   );
 end;
@@ -87,6 +88,11 @@ begin
     (v0, v1) := a & a;
     vt0 <= v0;
     vt1 <= v1;
+    if a(0) then
+      imp <= '1';
+    else
+      imp <= '0';
+    end if;
   end process;
   -- resize of an unsigned value zero-extends; the width is a static expression
   y <= std_logic_vector(resize(u, N + 4));
