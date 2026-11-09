@@ -757,7 +757,7 @@ class VhdlXmlFrontend final {
         if (kind == "indexed_name") {
             const std::vector<const Node*> indices = childEls(nodep->child("index_list"));
             if (indices.size() != 1) {
-                unsupported(nodep, "multi-dimensional VHDL index");
+                unsupported(nodep, "multi-dimensional index");
                 return basep;
             }
             const int baseIndex = basicp->ascending() ? basicp->left() : basicp->right();
@@ -783,14 +783,14 @@ class VhdlXmlFrontend final {
         // slice_name
         const Node* const suffixp = nodep->child("suffix");
         if (!suffixp || suffixp->attr("kind") != "range_expression") {
-            unsupported(nodep, "VHDL slice form");
+            unsupported(nodep, "slice form");
             return basep;
         }
         int64_t leftValue = 0;
         int64_t rightValue = 0;
         if (!evalConst(rangeBound(suffixp, true), leftValue)
             || !evalConst(rangeBound(suffixp, false), rightValue)) {
-            unsupported(nodep, "non-static VHDL slice bounds");
+            unsupported(nodep, "non-static slice bounds");
             return basep;
         }
         if (leftValue < INT_MIN || leftValue > INT_MAX || rightValue < INT_MIN
@@ -1077,7 +1077,7 @@ class VhdlXmlFrontend final {
                 const Node* const targetp = stmtp->child("target");
                 const Node* const exprp = stmtp->child("expression");
                 if (!targetp || !exprp) {
-                    unsupported(stmtp, "VHDL variable assignment without a target");
+                    unsupported(stmtp, "variable assignment without a target");
                     return nullptr;
                 }
                 AstNodeExpr* const valuep = lowerExpr(exprp, nullptr);
@@ -1221,7 +1221,7 @@ class VhdlXmlFrontend final {
                 eqp->dtypep(bitDType(flpOf(altp)));
                 branch.condp = eqp;
             } else {
-                unsupported(altp, "VHDL case choice form");
+                unsupported(altp, "case choice form");
                 deleteFuncEnv(branch.env);
                 if (branch.resultp) VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
                 for (CaseBranch& other : branches) {
@@ -1393,13 +1393,13 @@ class VhdlXmlFrontend final {
             if (paramKind != "interface_constant_declaration"
                 && paramKind != "interface_signal_declaration"
                 && paramKind != "interface_variable_declaration") {
-                unsupported(paramp, "VHDL function parameter form");
+                unsupported(paramp, "function parameter form");
                 deleteFuncEnv(env);
                 return nullptr;
             }
             const std::string paramMode = paramp->attr("mode");
             if (!paramMode.empty() && paramMode != "in") {
-                unsupported(paramp, "VHDL function parameter mode '" + paramMode + "'");
+                unsupported(paramp, "function parameter mode '" + paramMode + "'");
                 deleteFuncEnv(env);
                 return nullptr;
             }
@@ -1725,9 +1725,7 @@ class VhdlXmlFrontend final {
             const Node* const stmtp = stmts[i];
             const std::string kind = stmtp->attr("kind");
             if (kind == "return_statement") {
-                if (stmtp->child("expression")) {
-                    unsupported(stmtp, "VHDL procedure return value");
-                }
+                if (stmtp->child("expression")) { unsupported(stmtp, "procedure return value"); }
                 fallsThroughp = false;
                 return headp;
             }
@@ -1862,7 +1860,7 @@ class VhdlXmlFrontend final {
                 }
                 exprs[position++] = exprp;
             } else {
-                unsupported(choicep, "VHDL aggregate choice '" + choiceKind + "'");
+                unsupported(choicep, "aggregate choice '" + choiceKind + "'");
                 return nullptr;
             }
         }
@@ -2286,7 +2284,7 @@ class VhdlXmlFrontend final {
                     }
                 }
             }
-            unsupported(nodep, "VHDL aggregate of a non-record type");
+            unsupported(nodep, "aggregate of a non-record type");
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
         }
         if (kind == "simple_aggregate") {
@@ -2295,7 +2293,7 @@ class VhdlXmlFrontend final {
             if (const Node* const originp = nodep->child("literal_origin")) {
                 return lowerExpr(originp, contextp);
             }
-            unsupported(nodep, "static VHDL aggregate");
+            unsupported(nodep, "static aggregate");
             return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
         }
         if (kind == "function_call") { return lowerCall(nodep, contextp); }
@@ -2744,7 +2742,7 @@ class VhdlXmlFrontend final {
         int right = 0;
         bool ascending = true;
         if (!discreteRange(rangep, left, right, ascending)) {
-            unsupported(stmtp, "non-static VHDL loop range");
+            unsupported(stmtp, "non-static loop range");
             return nullptr;
         }
 
@@ -3167,7 +3165,7 @@ class VhdlXmlFrontend final {
         int right = 0;
         bool ascending = true;
         if (!discreteRange(rangep, left, right, ascending)) {
-            unsupported(stmtp, "non-static VHDL generate range");
+            unsupported(stmtp, "non-static generate range");
             return;
         }
         const Node* const bodyp = stmtp->child("generate_statement_body");
