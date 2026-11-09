@@ -225,7 +225,19 @@ static void process() {
             // Commit to the widths we've chosen; Make widthMin==width
             V3WidthCommit::widthCommit(v3Global.rootp());
         } else {
-            // The VHDL frontend emits a post-width-commit AST, so there is nothing to width
+            // The VHDL frontend emits a post-width-commit AST, so there is nothing to width.
+            // V3LinkDot, which VHDL mode skips, normally reports cells to missing modules and
+            // binds their pins. Dead module removal has run, so every remaining cell is
+            // instantiated; report unresolved ones before later passes dereference their pins.
+            v3Global.rootp()->foreach([](AstNode* nodep) {
+                AstCell* const cellp = VN_CAST(nodep, Cell);
+                if (!cellp) return;
+                if (!cellp->modp() || VN_IS(cellp->modp(), NotFoundModule)) {
+                    cellp->v3error("Cannot find VHDL entity or module '"
+                                   << cellp->modName() << "' for instance '" << cellp->name()
+                                   << "'");
+                }
+            });
             V3Error::abortIfErrors();
         }
         v3Global.assertDTypesResolved(true);

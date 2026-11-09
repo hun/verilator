@@ -335,6 +335,16 @@ class LinkCellsVisitor final : public VNVisitor {
     AstNodeModule* resolveModule(AstNode* nodep, const string& modName, const string& libname) {
         AstNodeModule* modp = findModuleSym(modName, libname);
         if (!modp) {
+            if (v3Global.vhdlMode()) {
+                // Cross-language binding is not implemented, and a VHDL run must not pull
+                // SystemVerilog sources in.  Defer the error like a missing file so dead
+                // module removal can drop unreachable instances before it is reported.
+                AstNotFoundModule* const nfp
+                    = new AstNotFoundModule{nodep->fileline(), modName, libname};
+                v3Global.rootp()->addModulesp(nfp);
+                readModNames(nfp);
+                return nfp;
+            }
             autoLoad(nodep, modName);
             // Check again
             modp = findModuleSym(modName, libname);
