@@ -233,6 +233,7 @@ struct VhdlDTypeSpec final {
     bool ascending = false;
     bool isUnconstrained = false;  // Unconstrained array (formal parameter or port)
     int elemWidth = 1;  // Bits per element; >1 for an array of builtin vectors
+    AstNodeDType* elemDtp = nullptr;  // Element dtype for arrays of enums
 };
 
 //! How a lowered signal assignment is emitted
@@ -250,6 +251,7 @@ class VhdlXmlFrontend final {
     std::map<std::string, AstVar*> m_scope;  // Current scope: folded name -> Var
     std::map<std::string, AstVar*> m_moduleScope;  // Module declarative part: folded name -> Var
     std::map<std::string, int64_t> m_constBindings;  // Loop parameters during unrolling
+    std::map<std::string, std::string> m_stringBindings;  // String generic values
     std::map<std::string, const Node*> m_typeBindings;  // Generic type name -> actual type mark
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
@@ -269,6 +271,7 @@ class VhdlXmlFrontend final {
     struct GenericDecl final {
         std::string name;
         const Node* defaultp = nullptr;
+        bool isString = false;  // Generic of type string; its value is a literal
     };
     std::map<std::string, const Node*> m_entityByName;  // Folded name -> entity
     std::map<std::string, const Node*> m_archByEntityNodes;  // Folded name -> architecture
@@ -534,7 +537,8 @@ class VhdlXmlFrontend final {
         if (!cur) return false;
         // Member ranges can depend on generics or generate parameters; a node-keyed cache
         // is only valid outside any binding context
-        const bool cacheable = m_constBindings.empty() && m_typeBindings.empty();
+        const bool cacheable
+            = m_constBindings.empty() && m_stringBindings.empty() && m_typeBindings.empty();
         if (cacheable) {
             const auto found = m_records.find(cur);
             if (found != m_records.end()) {
@@ -743,6 +747,69 @@ class VhdlXmlFrontend final {
         const VhdlDTypeSpec spec = parseType(subtypep);
         m_quietErrors = savedQuiet;
         return spec;
+    }
+
+    //! Contents of a string literal node, if the expression is one
+    static bool stringLiteral(const Node* exprp, std::string& content) {
+        if (!exprp || exprp->attr("kind") != "string_literal8") return false;
+        const Node* const strp = exprp->child("string8_id");
+        if (!strp) return false;
+        content = strp->attr("content");
+        return true;
+    }
+
+    //! A string generic's analyzed type is unconstrained; the actual supplies the range
+    bool stringGenericSpec(const Node* namep, VhdlDTypeSpec& spec) const {
+        if (!namep || namep->attr("kind") != "simple_name") return false;
+        const auto it = m_stringBindings.find(vhdlFold(namep->attr("identifier")));
+        if (it == m_stringBindings.end() || it->second.empty()) return false;
+        spec.kwd = VBasicDTypeKwd::LOGIC;
+        spec.signing = VSigning::UNSIGNED;
+        spec.isVector = true;
+        spec.left = 1;
+        spec.right = static_cast<int>(it->second.size());
+        spec.ascending = true;
+        spec.elemDtp = stringElemDType(namep);
+        spec.elemWidth = spec.elemDtp ? spec.elemDtp->width() : 8;
+        return true;
+    }
+
+    //! Element dtype of the array type behind a string generic name
+    AstNodeDType* stringElemDType(const Node* namep) const {
+        const Node* const refp = namep->child("named_entity");
+        const Node* const declp = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+        const Node* const typep = declp ? declp->child("type") : nullptr;
+        const Node* const defp
+            = typep && typep->has("ref") ? nodeById(typep->attr("ref")) : nullptr;
+        if (!defp) return nullptr;
+        const Node* elemp = defp->child("element_subtype");
+        if (!elemp) elemp = defp->child("element_subtype_indication");
+        if (elemp && !elemp->has("kind") && elemp->has("ref")) {
+            elemp = nodeById(elemp->attr("ref"));
+        }
+        if (elemp && elemp->attr("kind") == "enumeration_type_definition") {
+            return enumDType(elemp);
+        }
+        return nullptr;
+    }
+
+    //! Packed constant for a string generic value; elements are character enum positions
+    AstConst* stringConst(FileLine* flp, const std::string& content) const {
+        const int length = static_cast<int>(content.size());
+        const int width = length * 8;
+        AstNodeDType* const dtp = m_rootp->typeTablep()->findLogicBitDType(
+            flp, VBasicDTypeKwd::LOGIC, width, width, VSigning::UNSIGNED);
+        V3Number num{flp, width, 0};
+        for (int i = 0; i < length; ++i) {
+            const unsigned code = static_cast<unsigned char>(content[i]);
+            const int byteOffset = (length - 1 - i) * 8;
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((code >> bit) & 1U) num.setBit(byteOffset + bit, 1);
+            }
+        }
+        AstConst* const constp = new AstConst{flp, num};
+        constp->dtypep(dtp);
+        return constp;
     }
 
     //! Dtype of a subprogram formal; nullptr when the formal is unconstrained
@@ -1092,6 +1159,14 @@ class VhdlXmlFrontend final {
                 return valuep;
             }
         }
+        const auto stringIt = m_stringBindings.find(vhdlFold(namep->attr("identifier")));
+        if (stringIt != m_stringBindings.end()) {
+            if (write) {
+                error(nodep, "VHDL generic constant cannot be assigned");
+                return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+            }
+            return stringConst(flpOf(nodep), stringIt->second);
+        }
         const auto bindIt = m_constBindings.find(vhdlFold(namep->attr("identifier")));
         if (bindIt != m_constBindings.end()) {
             if (write) {
@@ -1146,7 +1221,8 @@ class VhdlXmlFrontend final {
                 return basep;
             }
             VhdlDTypeSpec layout;
-            const bool haveLayout = arraySpec(nodep->child("prefix"), layout);
+            const bool haveLayout = stringGenericSpec(nodep->child("prefix"), layout)
+                                    || arraySpec(nodep->child("prefix"), layout);
             const bool multi = haveLayout && layout.elemWidth > 1;
             const int elemWidth = multi ? layout.elemWidth : 1;
             const int totalWidth = basicp->width();
@@ -1154,8 +1230,12 @@ class VhdlXmlFrontend final {
             const bool ascending = haveLayout ? layout.ascending : basicp->ascending();
             const int arrayRight = haveLayout ? layout.right : basicp->right();
             const auto setSelDType = [&](AstSel* selp) {
-                selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flp, layout.kwd, elemWidth,
-                                                                      elemWidth, layout.signing));
+                if (layout.elemDtp) {
+                    selp->dtypep(layout.elemDtp);
+                } else {
+                    selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(
+                        flp, layout.kwd, elemWidth, elemWidth, layout.signing));
+                }
             };
             if (indices.front()->attr("kind") == "integer_literal") {
                 const int index = static_cast<int>(
@@ -1196,7 +1276,8 @@ class VhdlXmlFrontend final {
         }
         // An array of multi-bit elements keeps one element width per slice element
         VhdlDTypeSpec layout;
-        const bool haveLayout = arraySpec(nodep->child("prefix"), layout);
+        const bool haveLayout = stringGenericSpec(nodep->child("prefix"), layout)
+                                || arraySpec(nodep->child("prefix"), layout);
         const bool multi = haveLayout && layout.elemWidth > 1;
         const bool ascending = suffixp->attr("direction") == "to";
         const bool arrayAscending = haveLayout ? layout.ascending : basicp->ascending();
@@ -1738,11 +1819,60 @@ class VhdlXmlFrontend final {
             FuncEnv env;
         };
         std::vector<CaseBranch> branches;
+        const auto deleteBranches = [&]() {
+            for (CaseBranch& branch : branches) {
+                if (branch.resultp) VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
+                if (branch.condp) VL_DO_DANGLING(branch.condp->deleteTree(), branch.condp);
+                deleteFuncEnv(branch.env);
+            }
+        };
         size_t othersIndex = 0;
         bool haveOthers = false;
         bool allFellThrough = true;
         for (const Node* const altp : childEls(casep->child("case_statement_alternative_chain"))) {
+            if (altp->attr("kind") == "choice_by_others") {
+                CaseBranch branch;
+                branch.env = cloneFuncEnv(env);
+                branch.resultp = evalFuncBlock(childEls(altp->child("associated_chain")), 0,
+                                               branch.env, bodyp, depth);
+                if (!branch.resultp) {
+                    branch.resultp = evalFuncBlock(stmts, index + 1, branch.env, bodyp, depth);
+                }
+                allFellThrough = allFellThrough && !branch.resultp;
+                haveOthers = true;
+                othersIndex = branches.size();
+                branches.push_back(std::move(branch));
+                continue;
+            }
+            const Node* const choicep = altp->child("choice_expression");
+            if (!choicep) {
+                unsupported(altp, "case choice form");
+                deleteBranches();
+                return nullptr;
+            }
+            AstNodeExpr* const choiceValp = lowerExpr(choicep, selectorp->dtypep());
+            if (!choiceValp) {
+                deleteBranches();
+                return nullptr;
+            }
+            AstNodeExpr* const eqp
+                = new AstEq{flpOf(altp), selectorp->cloneTree(false), choiceValp};
+            eqp->dtypep(bitDType(flpOf(altp)));
+            if (altp->attr("same_alternative_flag") == "true") {
+                // A later choice of the same `when` list selects the same result
+                if (branches.empty() || !branches.back().condp) {
+                    VL_DO_DANGLING(eqp->deleteTree(), eqp);
+                    unsupported(altp, "case choice without a preceding alternative");
+                    deleteBranches();
+                    return nullptr;
+                }
+                AstNodeExpr* const orp = new AstOr{flpOf(altp), branches.back().condp, eqp};
+                orp->dtypep(bitDType(flpOf(altp)));
+                branches.back().condp = orp;
+                continue;
+            }
             CaseBranch branch;
+            branch.condp = eqp;
             branch.env = cloneFuncEnv(env);
             branch.resultp = evalFuncBlock(childEls(altp->child("associated_chain")), 0,
                                            branch.env, bodyp, depth);
@@ -1750,40 +1880,7 @@ class VhdlXmlFrontend final {
                 branch.resultp = evalFuncBlock(stmts, index + 1, branch.env, bodyp, depth);
             }
             allFellThrough = allFellThrough && !branch.resultp;
-            if (altp->attr("kind") == "choice_by_others") {
-                haveOthers = true;
-                othersIndex = branches.size();
-            } else if (const Node* const choicep = altp->child("choice_expression")) {
-                AstNodeExpr* const choiceValp = lowerExpr(choicep, selectorp->dtypep());
-                if (!choiceValp) {
-                    deleteFuncEnv(branch.env);
-                    if (branch.resultp)
-                        VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
-                    for (CaseBranch& other : branches) {
-                        if (other.resultp) {
-                            VL_DO_DANGLING(other.resultp->deleteTree(), other.resultp);
-                        }
-                        if (other.condp) VL_DO_DANGLING(other.condp->deleteTree(), other.condp);
-                        deleteFuncEnv(other.env);
-                    }
-                    return nullptr;
-                }
-                AstNodeExpr* const eqp
-                    = new AstEq{flpOf(altp), selectorp->cloneTree(false), choiceValp};
-                eqp->dtypep(bitDType(flpOf(altp)));
-                branch.condp = eqp;
-            } else {
-                unsupported(altp, "case choice form");
-                deleteFuncEnv(branch.env);
-                if (branch.resultp) VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
-                for (CaseBranch& other : branches) {
-                    if (other.resultp) VL_DO_DANGLING(other.resultp->deleteTree(), other.resultp);
-                    if (other.condp) VL_DO_DANGLING(other.condp->deleteTree(), other.condp);
-                    deleteFuncEnv(other.env);
-                }
-                return nullptr;
-            }
-            branches.push_back(branch);
+            branches.push_back(std::move(branch));
         }
         if (allFellThrough) {
             // Every branch continues after the case: merge the environments
@@ -2831,7 +2928,7 @@ class VhdlXmlFrontend final {
         if (kind == "character_literal") {
             const std::string id = nodep->attr("identifier");
             AstNodeDType* const dtp = contextp ? contextp : bitDType(flp);
-            if (contextp && VN_CAST(contextp->skipRefp(), EnumDType)) {
+            if (contextp && VN_CAST(contextp->skipRefToEnump(), EnumDType)) {
                 // In a character or user enumeration context the value is the enum position
                 const Node* const refp = nodep->child("named_entity");
                 const Node* const declp
@@ -2875,8 +2972,23 @@ class VhdlXmlFrontend final {
             const Node* const rangep = defp ? defp->child("range_constraint") : nullptr;
             int64_t leftValue = 0;
             int64_t rightValue = 0;
-            if (rangep && evalConst(rangeBound(rangep, true), leftValue)
-                && evalConst(rangeBound(rangep, false), rightValue)) {
+            bool haveBounds = false;
+            if (rangep) {
+                // `subtype T is natural range arr'range` carries the array's range
+                const Node* const rp = derefNode(rangep);
+                if (rp && rp->attr("kind") == "range_array_attribute") {
+                    VhdlDTypeSpec layout;
+                    if (arraySpec(rp->child("prefix"), layout)) {
+                        leftValue = layout.left;
+                        rightValue = layout.right;
+                        haveBounds = true;
+                    }
+                } else {
+                    haveBounds = evalConst(rangeBound(rangep, true), leftValue)
+                                 && evalConst(rangeBound(rangep, false), rightValue);
+                }
+            }
+            if (haveBounds) {
                 int64_t value = 0;
                 if (kind == "left_type_attribute") {
                     value = leftValue;
@@ -3644,20 +3756,10 @@ class VhdlXmlFrontend final {
         }
         const Node* const prefixp = nodep->child("prefix");
         if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
-        AstVar* const varp = lookupVar(prefixp);
-        const AstBasicDType* basicp = nullptr;
-        if (varp) {
-            basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
-        } else if (m_inlineEnvp) {
-            const auto it = m_inlineEnvp->find(vhdlFold(prefixp->attr("identifier")));
-            if (it != m_inlineEnvp->end() && it->second.exprp) {
-                basicp = VN_CAST(it->second.exprp->dtypep()->skipRefp(), BasicDType);
-            }
-        }
-        if (!varp && !basicp) return false;
-        // An array of multi-bit elements stores only its bit width in the dtype
+        // An array of multi-bit elements stores only its bit width in the dtype; a string
+        // generic's analyzed type is unconstrained and its actual supplies the range
         VhdlDTypeSpec layout;
-        if (multiArraySpec(prefixp, layout)) {
+        if (stringGenericSpec(prefixp, layout) || multiArraySpec(prefixp, layout)) {
             const int left = layout.left;
             const int right = layout.right;
             if (kind == "left") {
@@ -3674,6 +3776,16 @@ class VhdlXmlFrontend final {
                 value = layout.ascending ? 1 : 0;
             }
             return true;
+        }
+        AstVar* const varp = lookupVar(prefixp);
+        const AstBasicDType* basicp = nullptr;
+        if (varp) {
+            basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
+        } else if (m_inlineEnvp) {
+            const auto it = m_inlineEnvp->find(vhdlFold(prefixp->attr("identifier")));
+            if (it != m_inlineEnvp->end() && it->second.exprp) {
+                basicp = VN_CAST(it->second.exprp->dtypep()->skipRefp(), BasicDType);
+            }
         }
         if (!basicp) return false;
         const int left = basicp->left();
@@ -5210,6 +5322,19 @@ class VhdlXmlFrontend final {
     }
 
     void populateModule(const Node* entityp, const Node* archp) {
+        // A base module stands for the generic defaults.  Integer defaults already resolve
+        // lazily through the declaration, but a string value has no node to fall back to.
+        VL_RESTORER_COPY(m_stringBindings);
+        const auto genIt = m_entityGenerics.find(vhdlFold(entityp->attr("identifier")));
+        if (genIt != m_entityGenerics.end()) {
+            for (const GenericDecl& decl : genIt->second) {
+                if (!decl.isString || !decl.defaultp) continue;
+                std::string content;
+                if (stringLiteral(decl.defaultp, content) && !content.empty()) {
+                    m_stringBindings[vhdlFold(decl.name)] = content;
+                }
+            }
+        }
         populateModuleFor(entityp, archp, m_modules[vhdlFold(entityp->attr("identifier"))]);
     }
 
@@ -5328,6 +5453,15 @@ class VhdlXmlFrontend final {
         return false;
     }
 
+    //! Whether a constant generic has no default, so a base module has no value for it
+    static bool hasUnboundGeneric(const Node* entityp) {
+        for (const Node* const declp : childEls(entityp->child("generic_chain"))) {
+            if (declp->attr("kind") != "interface_constant_declaration") continue;
+            if (!declp->child("default_value")) return true;
+        }
+        return false;
+    }
+
     //! Whether an entity has generic type parameters (needing specialization)
     static bool hasTypeGenerics(const Node* entityp) {
         for (const Node* const declp : childEls(entityp->child("generic_chain"))) {
@@ -5345,6 +5479,8 @@ class VhdlXmlFrontend final {
             GenericDecl decl;
             decl.name = declp->attr("identifier");
             decl.defaultp = declp->child("default_value");
+            const Node* const subtypep = declp->child("subtype_indication");
+            decl.isString = subtypep && vhdlFold(subtypep->attr("identifier")) == "string";
             result.push_back(decl);
         }
         return result;
@@ -5353,12 +5489,17 @@ class VhdlXmlFrontend final {
     //! Emit (or reuse) a module specialized for one generic binding set
     ModuleInfo* specializeModule(const Node* entityp,
                                  const std::map<std::string, int64_t>& bindings,
+                                 const std::map<std::string, std::string>& stringBindings,
                                  const std::map<std::string, const Node*>& typeBindings,
                                  const std::map<std::string, PortInfo>& portInfos = {}) {
         const std::string entityKey = vhdlFold(entityp->attr("identifier"));
         std::string key = entityKey;
         for (const auto& binding : bindings) {
             key += "|" + binding.first + "=" + std::to_string(binding.second);
+        }
+        for (const auto& binding : stringBindings) {
+            key += "|S" + binding.first + "=" + std::to_string(binding.second.size()) + ":"
+                   + binding.second;
         }
         for (const auto& binding : typeBindings) {
             key += "|" + binding.first + "@" + binding.second->attr("id");
@@ -5389,8 +5530,12 @@ class VhdlXmlFrontend final {
         }
 
         VL_RESTORER_COPY(m_constBindings);
+        VL_RESTORER_COPY(m_stringBindings);
         VL_RESTORER_COPY(m_typeBindings);
         for (const auto& binding : bindings) m_constBindings[binding.first] = binding.second;
+        for (const auto& binding : stringBindings) {
+            m_stringBindings[binding.first] = binding.second;
+        }
         for (const auto& binding : typeBindings) m_typeBindings[binding.first] = binding.second;
 
         ++m_specDepth;
@@ -5702,6 +5847,7 @@ class VhdlXmlFrontend final {
         if (entityp) m_instantiatedEntities.insert(vhdlFold(unitName));
 
         std::map<std::string, int64_t> bindings;
+        std::map<std::string, std::string> stringBindings;
         std::map<std::string, const Node*> typeBindings;
         std::map<std::string, PortInfo> portInfos;
         if (entityp && hasUnconstrainedPorts(entityp)
@@ -5717,46 +5863,84 @@ class VhdlXmlFrontend final {
                 return;
             }
             const std::vector<GenericDecl> generics = genericsOf(entityp);
+            const std::vector<const Node*> genericChain
+                = childEls(entityp->child("generic_chain"));
             std::set<std::string> genericNames;
             for (const GenericDecl& decl : generics) genericNames.insert(vhdlFold(decl.name));
             bool bad = false;
+            size_t positional = 0;
+            // Resolve an association's formal name; a bare actual is positional
+            const auto formalNameOf = [&](const Node* assocp, std::string& formalName) -> bool {
+                const Node* const formalp = assocp->child("formal");
+                if (formalp) {
+                    formalName = vhdlFold(formalp->attr("identifier"));
+                    return true;
+                }
+                if (positional >= genericChain.size()) return false;
+                formalName = vhdlFold(genericChain[positional++]->attr("identifier"));
+                return true;
+            };
             for (const Node* const assocp : childEls(gmapp)) {
                 const std::string kind = assocp->attr("kind");
                 if (kind == "association_element_open") {
                     // GHDL emits an open association for an un-mapped generic; the default
                     // value is filled in below
+                    if (!assocp->child("formal")) ++positional;
                     continue;
                 }
                 if (kind == "association_element_type") {
                     // Generic type parameter: the actual is a type mark
-                    const Node* const formalp = assocp->child("formal");
                     const Node* const actualp = assocp->child("actual");
-                    if (!formalp || !actualp) {
+                    std::string formalName;
+                    if (!actualp || !formalNameOf(assocp, formalName)) {
                         unsupported(assocp, "generic type association without a type mark");
                         bad = true;
                         continue;
                     }
-                    typeBindings[vhdlFold(formalp->attr("identifier"))] = actualp;
+                    typeBindings[formalName] = actualp;
                     continue;
                 }
                 if (kind != "association_element_by_expression"
-                    && kind != "association_element_by_name") {
+                    && kind != "association_element_by_name"
+                    && kind != "association_element_by_position") {
                     unsupported(assocp, "generic association form '" + kind + "'");
                     bad = true;
                     continue;
                 }
-                const Node* const formalp = assocp->child("formal");
                 const Node* const actualp = assocp->child("actual");
-                int64_t value = 0;
-                if (!formalp || !actualp || !evalConst(actualp, value)) {
-                    unsupported(assocp, "non-static generic actual");
+                std::string formalName;
+                if (!actualp || !formalNameOf(assocp, formalName)) {
+                    unsupported(assocp, "generic association without a formal and actual");
                     bad = true;
                     continue;
                 }
-                const std::string formalName = vhdlFold(formalp->attr("identifier"));
-                if (!genericNames.count(formalName)) {
-                    error(assocp, "Unknown generic '" + formalp->attr("identifier") + "' on '"
-                                      + unitName + "'");
+                const auto declIt
+                    = std::find_if(generics.begin(), generics.end(), [&](const GenericDecl& decl) {
+                          return vhdlFold(decl.name) == formalName;
+                      });
+                if (!genericNames.count(formalName) || declIt == generics.end()) {
+                    error(assocp, "Unknown generic '" + formalName + "' on '" + unitName + "'");
+                    bad = true;
+                    continue;
+                }
+                if (declIt->isString) {
+                    std::string content;
+                    if (!stringLiteral(actualp, content)) {
+                        unsupported(assocp, "non-literal string generic actual");
+                        bad = true;
+                        continue;
+                    }
+                    if (content.empty()) {
+                        unsupported(assocp, "empty string generic actual");
+                        bad = true;
+                        continue;
+                    }
+                    stringBindings[formalName] = content;
+                    continue;
+                }
+                int64_t value = 0;
+                if (!evalConst(actualp, value)) {
+                    unsupported(assocp, "non-static generic actual");
                     bad = true;
                     continue;
                 }
@@ -5766,6 +5950,21 @@ class VhdlXmlFrontend final {
             for (const GenericDecl& decl : generics) {
                 const std::string formalName = vhdlFold(decl.name);
                 if (bindings.find(formalName) != bindings.end()) continue;
+                if (stringBindings.find(formalName) != stringBindings.end()) continue;
+                if (decl.isString) {
+                    std::string content;
+                    if (!decl.defaultp || !stringLiteral(decl.defaultp, content)) {
+                        error(stmtp, "Generic '" + decl.name
+                                         + "' has no static default and is not mapped");
+                        return;
+                    }
+                    if (content.empty()) {
+                        unsupported(decl.defaultp, "empty string generic default");
+                        return;
+                    }
+                    stringBindings[formalName] = content;
+                    continue;
+                }
                 int64_t value = 0;
                 if (!decl.defaultp || !evalConst(decl.defaultp, value)) {
                     error(stmtp,
@@ -5775,8 +5974,13 @@ class VhdlXmlFrontend final {
                 bindings[formalName] = value;
             }
         }
+        if (entityp && !haveGenericMap && hasUnboundGeneric(entityp)) {
+            error(stmtp, "Generic without a default on '" + unitName + "' requires a generic map");
+            return;
+        }
         if (entityp && (haveGenericMap || !portInfos.empty())) {
-            ModuleInfo* const spec = specializeModule(entityp, bindings, typeBindings, portInfos);
+            ModuleInfo* const spec
+                = specializeModule(entityp, bindings, stringBindings, typeBindings, portInfos);
             if (!spec) return;
             targetp = spec;
         }
@@ -5787,9 +5991,13 @@ class VhdlXmlFrontend final {
                 // Validate under the instance's bindings: the component's port ranges may
                 // use its own generics, which specializeModule has since restored
                 VL_RESTORER_COPY(m_constBindings);
+                VL_RESTORER_COPY(m_stringBindings);
                 VL_RESTORER_COPY(m_typeBindings);
                 for (const auto& binding : bindings) {
                     m_constBindings[binding.first] = binding.second;
+                }
+                for (const auto& binding : stringBindings) {
+                    m_stringBindings[binding.first] = binding.second;
                 }
                 for (const auto& binding : typeBindings) {
                     m_typeBindings[binding.first] = binding.second;
@@ -6074,6 +6282,10 @@ public:
                 && vhdlFold(name) == vhdlFold(v3Global.opt.topModule())) {
                 unsupported(entityp, "unconstrained port on a top-level entity");
             }
+            if (hasUnboundGeneric(entityp) && !v3Global.opt.topModule().empty()
+                && vhdlFold(name) == vhdlFold(v3Global.opt.topModule())) {
+                unsupported(entityp, "generic without a default on a top-level entity");
+            }
             if (!hasTypeGenerics(entityp) && !unconstrainedPorts) {
                 modules.emplace_back(entityp, it->second);
             }
@@ -6081,7 +6293,11 @@ public:
 
         // Create all modules first so instances can bind to ports emitted later in the walk
         for (const auto& module : modules) createModule(module.first);
-        for (const auto& module : modules) populateModule(module.first, module.second);
+        // A base module with a generic that has no default has no single body; only its
+        // specializations are emitted
+        for (const auto& module : modules) {
+            if (!hasUnboundGeneric(module.first)) populateModule(module.first, module.second);
+        }
 
         // A generic entity's base module (default bindings) is instantiable but must not
         // compete as a top-level module when it is only reached through specializations
