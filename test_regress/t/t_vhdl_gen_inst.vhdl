@@ -25,7 +25,8 @@ use ieee.std_logic_1164.all;
 entity t is
   port (
     a : in std_logic_vector(3 downto 0);
-    y : out std_logic_vector(3 downto 0)
+    y : out std_logic_vector(3 downto 0);
+    z : out std_logic_vector(1 downto 0)
   );
 end;
 
@@ -46,4 +47,8 @@ begin
     u1 : entity work.bit_inv port map (x => a(i + 2), y => s);
     y(i + 2) <= s;
   end generate;
+
+  -- Positional association with an expression actual and a sliced output
+  u3 : entity work.bit_inv port map (not a(0), z(0));
+  u4 : entity work.bit_inv port map (x => not a(1), y => z(1));
 end;

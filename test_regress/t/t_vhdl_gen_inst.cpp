@@ -21,8 +21,13 @@ int main(int argc, char** argv) {
         topp->a = a;
         topp->eval();
         const int y = static_cast<int>(topp->y);
+        const int z = static_cast<int>(topp->z);
         if (y != ((~a) & 0xf)) {
             std::printf("%%Error: a=%d y=%d expected %d\n", a, y, (~a) & 0xf);
+            ++fails;
+        }
+        if (z != (a & 0x3)) {
+            std::printf("%%Error: a=%d z=%d expected %d\n", a, z, a & 0x3);
             ++fails;
         }
     }

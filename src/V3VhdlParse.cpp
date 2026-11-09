@@ -4301,12 +4301,18 @@ class VhdlXmlFrontend final {
                 const std::string kind = assocp->attr("kind");
                 std::string formalName;
                 int pinNum = 0;
-                if (kind == "association_element_by_name" || kind == "association_element_open") {
+                if (kind == "association_element_by_name"
+                    || kind == "association_element_by_expression"
+                    || kind == "association_element_open") {
                     const Node* const formalp = assocp->child("formal");
                     formalName = formalp ? formalp->attr("identifier") : std::string{};
                     if (formalName.empty()) {
-                        unsupported(assocp, "port association without a formal");
-                        continue;
+                        if (kind == "association_element_open") {
+                            unsupported(assocp, "port association without a formal");
+                            continue;
+                        }
+                        // A bare actual is a positional association
+                        pinNum = ++positional;
                     }
                 } else if (kind == "association_element_by_position") {
                     pinNum = ++positional;
@@ -4339,19 +4345,29 @@ class VhdlXmlFrontend final {
                 const Node* const actualp = assocp->child("actual");
                 AstNodeExpr* actualExprp = nullptr;
                 if (actualp) {
-                    actualExprp = lowerExpr(actualp, modVarp ? modVarp->dtypep() : nullptr);
-                    if (actualExprp && modVarp) {
-                        VAccess access = VAccess::READ;
+                    VAccess access = VAccess::READ;
+                    if (modVarp) {
                         if (modVarp->isInout()) {
                             access = VAccess::READWRITE;
                         } else if (modVarp->isWritable()) {
                             access = VAccess::WRITE;
                         }
-                        if (AstNodeVarRef* const refp = VN_CAST(actualExprp, NodeVarRef)) {
-                            refp->access(access);
-                        } else if (access != VAccess::READ) {
+                    }
+                    if (access == VAccess::READ) {
+                        actualExprp = lowerExpr(actualp, modVarp ? modVarp->dtypep() : nullptr);
+                    } else {
+                        const std::string actualKind = actualp->attr("kind");
+                        if (actualKind != "simple_name" && actualKind != "indexed_name"
+                            && actualKind != "slice_name"
+                            && actualKind != "selected_element") {
                             unsupported(actualp, "expression on a writable port connection");
                             continue;
+                        }
+                        actualExprp = lowerName(actualp, true);
+                        if (actualExprp && access == VAccess::READWRITE) {
+                            actualExprp->foreach([](AstVarRef* refp) {
+                                refp->access(VAccess::READWRITE);
+                            });
                         }
                     }
                 }
