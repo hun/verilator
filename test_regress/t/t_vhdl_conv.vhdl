@@ -7,6 +7,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use ieee.numeric_std_unsigned.all;
 use ieee.std_logic_misc.all;
 
 entity t is
@@ -47,6 +48,8 @@ entity t is
     red_call : out std_logic;
     red_func : out std_logic;
     imp : out std_logic;
+    conv1 : out std_logic_vector(3 downto 0);
+    conv2 : out std_logic_vector(7 downto 0);
     wide : out std_logic_vector(39 downto 0)
   );
 end;
@@ -82,6 +85,9 @@ begin
   red_nand <= nand a;
   red_call <= "or"(a);
   red_func <= and_reduce(a);
+  -- one-argument identity conversion and the sized numeric_std_unsigned form
+  conv1 <= to_stdlogicvector(us);
+  conv2 <= to_stdlogicvector(to_integer(unsigned(a)), 8);
   process(a)
     variable v0, v1 : std_logic_vector(3 downto 0);
   begin

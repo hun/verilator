@@ -52,6 +52,8 @@ int main(int argc, char** argv) {
             const int red_call = static_cast<int>(topp->red_call);
             const int red_func = static_cast<int>(topp->red_func);
             const int imp = static_cast<int>(topp->imp);
+            const int conv1 = static_cast<int>(topp->conv1);
+            const int conv2 = static_cast<int>(topp->conv2);
             if (topp->wide != 0x123456789aULL) {
                 std::printf("%%Error: wide=%llx\n", static_cast<unsigned long long>(topp->wide));
                 ++fails;
@@ -86,6 +88,10 @@ int main(int argc, char** argv) {
             const int wantXor = (__builtin_popcount(a) & 1) ? 1 : 0;
             if (imp != (a & 1)) {
                 std::printf("%%Error: a=%d imp=%d\n", a, imp);
+                ++fails;
+            }
+            if (conv1 != a || conv2 != a) {
+                std::printf("%%Error: a=%d conv1=%d conv2=%d\n", a, conv1, conv2);
                 ++fails;
             }
             if (red_and != wantAnd || red_func != wantAnd || red_or != wantOr
