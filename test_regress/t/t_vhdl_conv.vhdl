@@ -43,10 +43,15 @@ architecture rtl of t is
   constant HI : integer := 7;
   signal u : unsigned(3 downto 0);
   signal us : std_ulogic_vector(3 downto 0);
+
+  function inv(x : std_ulogic_vector) return std_ulogic_vector is
+  begin
+    return not x;
+  end;
 begin
   u <= unsigned(a);
   us <= u4;
-  uo <= us;
+  uo <= inv(us);
   -- a shorter numeric_std literal operand is zero-extended, not an error
   eqf <= '1' when unsigned'("010") = "00" else '0';
   eqt <= '1' when unsigned'("000") = "00" else '0';

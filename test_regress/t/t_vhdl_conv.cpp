@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
                 std::printf("%%Error: wide=%llx\n", static_cast<unsigned long long>(topp->wide));
                 ++fails;
             }
-            if (uo != a) {
+            if (uo != ((~a) & 0xf)) {
                 std::printf("%%Error: a=%d uo=%d\n", a, uo);
                 ++fails;
             }

@@ -25,7 +25,7 @@ use work.recpkg.all;
 -- The port type is the unconstrained record; its member widths come from the actual
 entity child is
   port (
-    i : in rec_t;
+    i : in work.recpkg.rec_t;
     -- Selects the low nibble of member x, whose width depends on the subtype
     o : out std_logic_vector(3 downto 0)
   );
