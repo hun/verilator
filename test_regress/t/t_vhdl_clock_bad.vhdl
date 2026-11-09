@@ -18,9 +18,9 @@ end;
 
 architecture rtl of last_branch is
 begin
-  process (clk) is
+  process (clk, en) is
   begin
-    -- A later branch also runs on non-clock wakeups in VHDL
+    -- The later branch also runs when en changes, not only on a clock edge
     if rising_edge(clk) then
       q <= d;
     elsif en = '1' then

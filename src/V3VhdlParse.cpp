@@ -627,7 +627,7 @@ class VhdlXmlFrontend final {
                || kind == "non_object_alias_declaration" || kind == "file_declaration"
                || kind == "package_instantiation_declaration"
                || kind == "attribute_implicit_declaration" || kind == "psl_default_clock"
-               || kind == "use_clause";
+               || kind == "suspend_state_declaration" || kind == "use_clause";
     }
 
     //! Follow a pure reference node to its target
@@ -4251,6 +4251,18 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
+    //! Whether emitClockedIf can lower the process without a fallback
+    bool clockedIfFastPath(const Node* processp) {
+        const Node* const ifp = singleTopIf(processp->child("sequential_statement_chain"));
+        if (!ifp) return false;
+        std::vector<ClockBranch> branches;
+        int clockIndex = -1;
+        if (analyzeClockChain(ifp, branches, clockIndex) != ClockChainStatus::CLOCKED) {
+            return false;
+        }
+        return clockIndex == static_cast<int>(branches.size()) - 1;
+    }
+
     //! Emit a clocked process when a single top-level if/elsif chain holds exactly one
     //! rising_edge/falling_edge/'event condition.  Returns false when not recognizable.
     bool emitClockedIf(const Node* processp, bool concurrent) {
@@ -4303,6 +4315,469 @@ class VhdlXmlFrontend final {
         return true;
     }
 
+    //! One branch of an if/elsif/else chain with clock edges classified
+    struct LevelBranch final {
+        const Node* nodep = nullptr;  // if_statement, elsif or else_clause
+        bool clocked = false;  // The condition holds a clock edge
+        VEdgeType edgeType = VEdgeType::ET_CHANGED;  // Edge polarity when clocked
+        std::vector<const Node*> levels;  // Non-edge conjuncts when clocked
+    };
+
+    //! Classify every branch of an if/elsif/else chain.  Returns false when a branch holds
+    //! an edge on a signal other than the single sensitivity signal.
+    bool classifyLevelChain(const Node* ifp, AstVar* clkVarp, std::vector<LevelBranch>& branches,
+                            bool& anyEdge) {
+        branches.clear();
+        anyEdge = false;
+        const Node* branchp = ifp;
+        while (branchp) {
+            LevelBranch branch;
+            branch.nodep = branchp;
+            if (const Node* const condp = branchp->child("condition")) {
+                std::vector<const Node*> levels;
+                EdgeInfo edge;
+                if (splitClockCondition(condp, edge, levels)) {
+                    AstVar* const edgeVarp = astVarOf(edge.sigp);
+                    VL_DO_DANGLING(edge.sigp->deleteTree(), edge.sigp);
+                    if (!edgeVarp || edgeVarp != clkVarp) {
+                        unsupported(condp, "clock edge on a signal outside the sensitivity list");
+                        return false;
+                    }
+                    branch.clocked = true;
+                    branch.edgeType = edge.edgeType;
+                    branch.levels = std::move(levels);
+                    anyEdge = true;
+                }
+            }
+            branches.push_back(std::move(branch));
+            const Node* const elsep = branchp->child("else_clause");
+            if (!elsep) break;
+            if (elsep->attr("kind") != "elsif") {
+                LevelBranch elseBranch;
+                elseBranch.nodep = elsep;
+                branches.push_back(std::move(elseBranch));
+                break;
+            }
+            branchp = elsep;
+        }
+        return true;
+    }
+
+    //! Lower a classified chain.  A clock edge becomes the clock level, which is exact
+    //! because the process only runs on that clock's events.
+    AstNode* lowerLevelChain(FileLine* flp, const std::vector<LevelBranch>& branches,
+                             AstVar* clkVarp, AssignMode mode, bool atTimeZero) {
+        AstNode* resultp = nullptr;
+        for (size_t i = branches.size(); i-- > 0;) {
+            const LevelBranch& branch = branches[i];
+            AstNodeExpr* condp = nullptr;
+            if (branch.clocked) {
+                if (!atTimeZero) {
+                    condp = lowerLevelCondition(flp, branch.levels);
+                    const uint64_t level = branch.edgeType == VEdgeType::ET_POSEDGE ? 1U : 0U;
+                    AstEqCase* const levelCondp
+                        = new AstEqCase{flp, new AstVarRef{flp, clkVarp, VAccess::READ},
+                                        makeConst(flp, clkVarp->dtypep(), level)};
+                    levelCondp->dtypep(bitDType(flp));
+                    if (condp) {
+                        AstAnd* const andp = new AstAnd{flp, condp, levelCondp};
+                        andp->dtypep(bitDType(flp));
+                        condp = andp;
+                    } else {
+                        condp = levelCondp;
+                    }
+                }
+                if (!condp) condp = makeConst(flp, bitDType(flp), 0U);
+            } else if (branch.nodep->child("condition")) {
+                condp = lowerExpr(branch.nodep->child("condition"), bitDType(flp));
+                if (!condp) return nullptr;
+            } else {
+                condp = makeConst(flp, bitDType(flp), 1U);
+            }
+            AstNode* const stmtsp
+                = lowerStmtChain(branch.nodep->child("sequential_statement_chain"), mode);
+            resultp = new AstIf{flp, condp, stmtsp, resultp};
+        }
+        return resultp;
+    }
+
+    //! Lower a process whose sensitivity list is a single signal as one always.  Clock
+    //! edge conditions become that signal's level, so statements sharing variables stay in
+    //! one block in source order.
+    bool emitSingleClockProcess(const Node* processp) {
+        const std::vector<const Node*> sensEls = childEls(processp->child("sensitivity_list"));
+        if (sensEls.size() != 1) return false;
+        const Node* const namep = sensEls.front()->attr("ref").empty()
+                                      ? sensEls.front()
+                                      : nodeById(sensEls.front()->attr("ref"));
+        AstVar* const clkVarp = namep ? lookupVar(namep) : nullptr;
+        if (!clkVarp) return false;
+
+        const Node* const bodyp = processp->child("sequential_statement_chain");
+        std::vector<std::vector<LevelBranch>> chains;
+        bool anyEdge = false;
+        for (const Node* const stmtp : childEls(bodyp)) {
+            std::vector<LevelBranch> branches;
+            if (stmtp->attr("kind") == "if_statement") {
+                bool edge = false;
+                if (!classifyLevelChain(stmtp, clkVarp, branches, edge)) return true;
+                anyEdge |= edge;
+            }
+            chains.push_back(std::move(branches));
+        }
+        if (!anyEdge) return false;
+
+        FileLine* const flp = flpOf(processp);
+        const std::vector<const Node*> stmts = childEls(bodyp);
+        AstNode* stmtsp = nullptr;
+        AstNode* initp = nullptr;
+        for (size_t i = 0; i < stmts.size(); ++i) {
+            AstNode* const nodep = chains[i].empty() ? lowerStmt(stmts[i], AssignMode::DELAYED)
+                                                     : lowerLevelChain(flp, chains[i], clkVarp,
+                                                                       AssignMode::DELAYED, false);
+            if (!nodep) continue;
+            stmtsp = stmtsp ? AstNode::addNext<AstNode, AstNode>(stmtsp, nodep) : nodep;
+            AstNode* const initNode
+                = chains[i].empty()
+                      ? lowerStmt(stmts[i], AssignMode::BLOCKING)
+                      : lowerLevelChain(flp, chains[i], clkVarp, AssignMode::BLOCKING, true);
+            if (!initNode) continue;
+            initp = initp ? AstNode::addNext<AstNode, AstNode>(initp, initNode) : initNode;
+        }
+        if (!stmtsp) return true;
+        AstNodeExpr* const clkRefp = new AstVarRef{flp, clkVarp, VAccess::READ};
+        AstSenItem* const itemsp = new AstSenItem{flp, VEdgeType::ET_CHANGED, clkRefp};
+        m_modp->addStmtsp(
+            new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
+        // VHDL executes the process once at time zero, where no signal has had an event
+        if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+        return true;
+    }
+
+    //! Whether a statement tree contains a wait or suspend state
+    static bool nodeHasWait(const Node* nodep) {
+        const std::string kind = nodep->attr("kind");
+        if (kind == "wait_statement" || kind == "suspend_state_statement") return true;
+        for (const std::unique_ptr<Node>& childp : nodep->children()) {
+            if (nodeHasWait(childp.get())) return true;
+        }
+        return false;
+    }
+
+    //! Lower `process begin [pre...] wait until <clock edge>; body end process;`.  VHDL
+    //! processes loop forever, so the pre-wait statements run at time zero and again after
+    //! the body before the next wait.
+    bool emitWaitProcess(const Node* processp) {
+        const std::vector<const Node*> stmts
+            = childEls(processp->child("sequential_statement_chain"));
+        size_t waitIndex = stmts.size();
+        for (size_t i = 0; i < stmts.size(); ++i) {
+            if (stmts[i]->attr("kind") == "wait_statement") {
+                waitIndex = i;
+                break;
+            }
+        }
+        if (waitIndex == stmts.size()) return false;
+        for (size_t i = 0; i < stmts.size(); ++i) {
+            if (i == waitIndex || stmts[i]->attr("kind") == "suspend_state_statement") continue;
+            if (nodeHasWait(stmts[i])) {
+                unsupported(stmts[i], "wait statement after the clock wait");
+                return true;
+            }
+        }
+        const Node* const waitp = stmts[waitIndex];
+        EdgeInfo edge;
+        std::vector<const Node*> levels;
+        const Node* const condp = waitp->child("condition_clause");
+        if (!condp || !splitClockCondition(condp, edge, levels) || !levels.empty()
+            || !astVarOf(edge.sigp)) {
+            unsupported(waitp, "wait statement without a simple clock edge");
+            return true;
+        }
+        for (size_t i = waitIndex + 1; i < stmts.size(); ++i) {
+            if (nodeHasWait(stmts[i])) {
+                unsupported(stmts[i], "wait statement after the clock wait");
+                return true;
+            }
+        }
+
+        VL_RESTORER_COPY(m_scope);
+        emitProcessVariables(processp);
+        FileLine* const flp = flpOf(processp);
+        const auto lowerRange = [&](size_t begin, size_t end, AssignMode mode) {
+            AstNode* headp = nullptr;
+            for (size_t i = begin; i < end; ++i) {
+                if (stmts[i]->attr("kind") == "suspend_state_statement") continue;
+                AstNode* const nodep = lowerStmt(stmts[i], mode);
+                if (!nodep) continue;
+                headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+            }
+            return headp;
+        };
+        // The process runs from the start once, at time zero
+        if (AstNode* const initp = lowerRange(0, waitIndex, AssignMode::BLOCKING)) {
+            m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+        }
+        // Each clock edge runs the body, then the loop wraps to the pre-wait statements
+        AstNode* stmtsp = lowerRange(waitIndex + 1, stmts.size(), AssignMode::DELAYED);
+        if (AstNode* const loopp = lowerRange(0, waitIndex, AssignMode::DELAYED)) {
+            stmtsp = stmtsp ? AstNode::addNext<AstNode, AstNode>(stmtsp, loopp) : loopp;
+        }
+        if (!stmtsp) return true;
+        AstSenItem* const itemsp = new AstSenItem{flp, edge.edgeType, edge.sigp};
+        m_modp->addStmtsp(
+            new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, stmtsp});
+        return true;
+    }
+
+    //! One top-level statement of a process when splitting it
+    struct ProcessPart final {
+        const Node* nodep = nullptr;  // The top-level statement
+        bool clocked = false;  // The statement is a recognized clocked if chain
+        std::vector<ClockBranch> branches;  // Chain branches when clocked
+        int clockIndex = -1;  // Branch holding the clock edge when clocked
+    };
+
+    //! Sensitivity implied by one clocked part: the clock edge plus level resets
+    struct PartSensitivity final {
+        AstVar* clockVarp = nullptr;
+        VEdgeType clockEdge = VEdgeType::ET_CHANGED;
+        std::vector<std::pair<AstVar*, VEdgeType>> resets;
+
+        bool operator==(const PartSensitivity& rhs) const {
+            return clockVarp == rhs.clockVarp && clockEdge == rhs.clockEdge
+                   && resets == rhs.resets;
+        }
+    };
+
+    //! Derive the sensitivity of a clocked part; false when it cannot be modeled
+    bool partSensitivityOf(const Node* processp, const ProcessPart& part, PartSensitivity& sens) {
+        sens.clockVarp = astVarOf(part.branches[part.clockIndex].edge.sigp);
+        sens.clockEdge = part.branches[part.clockIndex].edge.edgeType;
+        sens.resets.clear();
+        const Node* const sensp = processp->child("sensitivity_list");
+        for (int i = 0; i < part.clockIndex; ++i) {
+            const Node* const condp = part.branches[i].nodep->child("condition");
+            AstVar* rstVarp = nullptr;
+            VEdgeType rstEdge = VEdgeType::ET_CHANGED;
+            if (levelResetEdge(condp, rstVarp, rstEdge)) {
+                if (!sensitivityHasVar(sensp, rstVarp)) continue;
+                sens.resets.emplace_back(rstVarp, rstEdge);
+            } else if (conditionUsesSensitivity(condp, sensp, sens.clockVarp)) {
+                unsupported(condp, "asynchronous reset condition");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void addClockSensitivity(FileLine* flp, const PartSensitivity& sens, AstSenItem*& itemsp) {
+        AstNodeExpr* const clockRefp = new AstVarRef{flp, sens.clockVarp, VAccess::READ};
+        AstSenItem* const edgeItemp = new AstSenItem{flp, sens.clockEdge, clockRefp};
+        itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, edgeItemp) : edgeItemp;
+        for (const std::pair<AstVar*, VEdgeType>& reset : sens.resets) {
+            AstNodeExpr* const refp = new AstVarRef{flp, reset.first, VAccess::READ};
+            AstSenItem* const itemp = new AstSenItem{flp, reset.second, refp};
+            itemsp = AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp);
+        }
+    }
+
+    //! An ET_CHANGED item for every signal in the process sensitivity list
+    AstSenItem* changedSensitivity(const Node* processp, FileLine* flp) {
+        AstSenItem* itemsp = nullptr;
+        for (const Node* const elp : childEls(processp->child("sensitivity_list"))) {
+            const Node* const namep = elp->attr("ref").empty() ? elp : nodeById(elp->attr("ref"));
+            if (!namep) {
+                error(elp, "Dangling sensitivity-list reference");
+                continue;
+            }
+            AstNodeExpr* const exprp = lowerExpr(namep, nullptr);
+            if (!exprp) continue;
+            AstSenItem* const itemp = new AstSenItem{flp, VEdgeType::ET_CHANGED, exprp};
+            itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+        }
+        return itemsp;
+    }
+
+    //! Whether a statement tree references a process variable anywhere
+    bool nodeReferencesVar(const Node* nodep, const AstVar* varp) const {
+        if (nodep->attr("kind") == "simple_name") {
+            const auto it = m_scope.find(vhdlFold(nodep->attr("identifier")));
+            if (it != m_scope.end() && it->second == varp) return true;
+        }
+        for (const std::unique_ptr<Node>& childp : nodep->children()) {
+            if (nodeReferencesVar(childp.get(), varp)) return true;
+        }
+        return false;
+    }
+
+    //! Record the signals written and the process variables touched by a lowered tree
+    static void collectVarRefs(AstNode* nodep, const std::set<AstVar*>& processVars,
+                               std::set<AstVar*>& writep, std::set<AstVar*>& vars) {
+        if (!nodep) return;
+        nodep->foreach([&](AstNode* ap) {
+            AstNodeVarRef* const refp = VN_CAST(ap, NodeVarRef);
+            if (!refp) return;
+            if (refp->access().isWriteOrRW()) writep.insert(refp->varp());
+            if (processVars.count(refp->varp())) vars.insert(refp->varp());
+        });
+    }
+
+    static bool setsIntersect(const std::set<AstVar*>& a, const std::set<AstVar*>& b) {
+        for (const AstVar* const ap : a) {
+            if (b.count(const_cast<AstVar*>(ap))) return true;
+        }
+        return false;
+    }
+
+    //! Split a process with several clocked statements, or clocked statements mixed with
+    //! unclocked ones, into one always per clock edge plus one for the unclocked part.
+    //! Signal assignments take effect when the process suspends, so statements whose
+    //! targets are disjoint are independent.  Returns false when nothing was split.
+    bool emitSplitProcess(const Node* processp) {
+        std::vector<ProcessPart> parts;
+        int clockedCount = 0;
+        for (const Node* const stmtp : childEls(processp->child("sequential_statement_chain"))) {
+            ProcessPart part;
+            part.nodep = stmtp;
+            if (stmtp->attr("kind") == "if_statement") {
+                int clockIndex = -1;
+                const ClockChainStatus status
+                    = analyzeClockChain(stmtp, part.branches, clockIndex);
+                if (status == ClockChainStatus::ELSE_UNSUPPORTED) {
+                    unsupported(stmtp, "else branch in a clocked process");
+                    return true;
+                }
+                if (status == ClockChainStatus::CLOCKED) {
+                    if (clockIndex != static_cast<int>(part.branches.size()) - 1) {
+                        unsupported(stmtp, "clock edge before a later branch");
+                        return true;
+                    }
+                    part.clocked = true;
+                    part.clockIndex = clockIndex;
+                    ++clockedCount;
+                }
+            }
+            parts.push_back(std::move(part));
+        }
+        if (!clockedCount) return false;
+        // A single clocked chain is handled by emitClockedIf
+        if (clockedCount == 1 && parts.size() == 1) return false;
+
+        // Variable assignment is immediate, so a variable used by more than one top-level
+        // statement keeps the statements order-dependent and cannot be split
+        std::set<AstVar*> processVars;
+        for (const Node* const declp : childEls(processp->child("declaration_chain"))) {
+            if (declp->attr("kind") != "variable_declaration") continue;
+            const auto it = m_scope.find(vhdlFold(declp->attr("identifier")));
+            if (it == m_scope.end()) continue;
+            processVars.insert(it->second);
+            int referencedBy = 0;
+            for (const ProcessPart& part : parts) {
+                if (nodeReferencesVar(part.nodep, it->second) && ++referencedBy > 1) {
+                    unsupported(processp,
+                                "process variable shared by clocked and unclocked statements");
+                    return true;
+                }
+            }
+        }
+
+        std::vector<PartSensitivity> groupSens;
+        std::vector<std::vector<const ProcessPart*>> groupParts;
+        std::vector<const ProcessPart*> levelParts;
+        for (const ProcessPart& part : parts) {
+            if (!part.clocked) {
+                levelParts.push_back(&part);
+                continue;
+            }
+            PartSensitivity sens;
+            if (!partSensitivityOf(processp, part, sens)) return true;
+            size_t group = 0;
+            while (group < groupSens.size() && !(groupSens[group] == sens)) ++group;
+            if (group == groupSens.size()) {
+                groupSens.push_back(sens);
+                groupParts.emplace_back();
+            }
+            groupParts[group].push_back(&part);
+        }
+
+        FileLine* const flp = flpOf(processp);
+        std::vector<AstNode*> groupStmtsp(groupParts.size(), nullptr);
+        std::vector<std::set<AstVar*>> groupWritep(groupParts.size());
+        std::vector<std::set<AstVar*>> groupVars(groupParts.size());
+        for (size_t group = 0; group < groupParts.size(); ++group) {
+            AstNode* stmtsp = nullptr;
+            for (const ProcessPart* const partp : groupParts[group]) {
+                AstNode* const chainp
+                    = buildClockChain(flpOf(partp->nodep), partp->branches, partp->clockIndex,
+                                      AssignMode::DELAYED, false);
+                if (!chainp) continue;
+                stmtsp = stmtsp ? AstNode::addNext<AstNode, AstNode>(stmtsp, chainp) : chainp;
+            }
+            groupStmtsp[group] = stmtsp;
+            collectVarRefs(stmtsp, processVars, groupWritep[group], groupVars[group]);
+        }
+        AstNode* levelStmtsp = nullptr;
+        for (const ProcessPart* const partp : levelParts) {
+            AstNode* const nodep = lowerStmt(partp->nodep, AssignMode::DELAYED);
+            if (!nodep) continue;
+            levelStmtsp
+                = levelStmtsp ? AstNode::addNext<AstNode, AstNode>(levelStmtsp, nodep) : nodep;
+        }
+        std::set<AstVar*> levelWritep;
+        std::set<AstVar*> levelVars;
+        collectVarRefs(levelStmtsp, processVars, levelWritep, levelVars);
+
+        // Two always blocks driving one target have no defined order
+        for (size_t i = 0; i < groupStmtsp.size(); ++i) {
+            for (size_t j = i + 1; j < groupStmtsp.size(); ++j) {
+                if (setsIntersect(groupWritep[i], groupWritep[j])
+                    || setsIntersect(groupVars[i], groupVars[j])) {
+                    unsupported(processp,
+                                "clocked statements with different edges share a target");
+                    return true;
+                }
+            }
+            if (setsIntersect(groupWritep[i], levelWritep)
+                || setsIntersect(groupVars[i], levelVars)) {
+                unsupported(processp, "clocked and unclocked statements share a target");
+                return true;
+            }
+        }
+
+        for (size_t group = 0; group < groupStmtsp.size(); ++group) {
+            if (!groupStmtsp[group]) continue;
+            AstSenItem* itemsp = nullptr;
+            addClockSensitivity(flp, groupSens[group], itemsp);
+            m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp},
+                                            groupStmtsp[group]});
+        }
+        if (levelStmtsp) {
+            AstSenItem* const itemsp = changedSensitivity(processp, flp);
+            if (!itemsp) {
+                unsupported(processp, "process without a sensitivity list");
+                return true;
+            }
+            m_modp->addStmtsp(
+                new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, levelStmtsp});
+        }
+        // VHDL executes the process once at time zero, in statement order, before any edge
+        AstNode* initialp = nullptr;
+        for (const ProcessPart& part : parts) {
+            AstNode* nodep = nullptr;
+            if (part.clocked) {
+                nodep = buildClockChain(flpOf(part.nodep), part.branches, part.clockIndex,
+                                        AssignMode::BLOCKING, true);
+            } else {
+                nodep = lowerStmt(part.nodep, AssignMode::BLOCKING);
+            }
+            if (!nodep) continue;
+            initialp = initialp ? AstNode::addNext<AstNode, AstNode>(initialp, nodep) : nodep;
+        }
+        if (initialp) m_modp->addStmtsp(new AstInitialStatic{flp, initialp});
+        return true;
+    }
+
     //! Declarations of a process: variables live in a process-local scope
     void emitProcessVariables(const Node* processp) {
         const Node* const declsp = processp->child("declaration_chain");
@@ -4344,25 +4819,15 @@ class VhdlXmlFrontend final {
         emitProcessVariables(processp);
 
         // Clocked process: a single top-level if/elsif chain holding a clock edge
+        if (clockedIfFastPath(processp)) {
+            if (emitClockedIf(processp, false)) return;
+        }
+        if (emitSingleClockProcess(processp)) return;
         if (emitClockedIf(processp, false)) return;
+        if (emitSplitProcess(processp)) return;
 
         // Plain process: trigger on every sensitivity item
-        AstSenItem* itemsp = nullptr;
-        if (const Node* const sensp = processp->child("sensitivity_list")) {
-            for (const Node* const elp : childEls(sensp)) {
-                const Node* const namep
-                    = elp->attr("ref").empty() ? elp : nodeById(elp->attr("ref"));
-                if (!namep) {
-                    error(elp, "Dangling sensitivity-list reference");
-                    continue;
-                }
-                AstNodeExpr* const exprp = lowerExpr(namep, nullptr);
-                if (!exprp) continue;
-                // VHDL processes execute once at time zero, then on each sensitivity event
-                AstSenItem* const itemp = new AstSenItem{flp, VEdgeType::ET_CHANGED, exprp};
-                itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
-            }
-        }
+        AstSenItem* const itemsp = changedSensitivity(processp, flp);
         if (!itemsp) {
             unsupported(processp, "process without a sensitivity list");
             return;
@@ -4533,9 +4998,12 @@ class VhdlXmlFrontend final {
             return;
         }
         // A concurrent procedure call is wrapped in a plain process with a process origin
-        if (kind == "process_statement" && stmtp->child("process_origin")) {
-            emitConcurrentAssignment(stmtp);
-            return;
+        if (kind == "process_statement") {
+            if (stmtp->child("process_origin")) {
+                emitConcurrentAssignment(stmtp);
+                return;
+            }
+            if (emitWaitProcess(stmtp)) return;
         }
         if (kind == "component_instantiation_statement") {
             lowerInstance(stmtp);
