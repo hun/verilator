@@ -231,6 +231,7 @@ struct VhdlDTypeSpec final {
     int left = 0;
     int right = 0;
     bool ascending = false;
+    int elemWidth = 1;  // Bits per element; >1 for an array of builtin vectors
 };
 
 //! How a lowered signal assignment is emitted
@@ -273,7 +274,7 @@ class VhdlXmlFrontend final {
     std::map<std::string, std::vector<GenericDecl>> m_entityGenerics;  // Folded name -> generics
     std::map<std::string, ModuleInfo> m_specializations;  // Binding key -> specialized module
     std::set<std::string> m_instantiatedEntities;  // Folded names of entities used by instances
-    std::map<const Node*, AstNodeDType*> m_enumDtypes;  // Enum type definition -> dtype
+    mutable std::map<const Node*, AstNodeDType*> m_enumDtypes;  // Enum type definition -> dtype
     struct RecordMember final {
         std::string name;  // Element name as declared
         AstNodeDType* dtypep = nullptr;  // Element dtype
@@ -284,7 +285,8 @@ class VhdlXmlFrontend final {
         AstNodeDType* dtypep = nullptr;  // Packed vector dtype of the record
         std::vector<RecordMember> members;  // Declaration order, most significant first
     };
-    std::map<const Node*, RecordInfo> m_records;  // Record type definition -> layout
+    mutable std::map<const Node*, RecordInfo> m_records;  // Record type definition -> layout
+    mutable bool m_quietErrors = false;  // Type probes must not report diagnostics
     //! One name bound during subprogram inlining: an expression value, or an lvalue
     struct InlineBinding final {
         AstNodeExpr* exprp = nullptr;  // Bound expression
@@ -332,6 +334,7 @@ class VhdlXmlFrontend final {
         return flp;
     }
     void error(const Node* nodep, const std::string& message) const {
+        if (m_quietErrors) return;
         flpOf(nodep)->v3error(message);
     }
     void unsupported(const Node* nodep, const std::string& what) const {
@@ -384,7 +387,7 @@ class VhdlXmlFrontend final {
     // ---- Types
 
     //! Build (once) the Verilator enum dtype for an enumeration type definition
-    AstNodeDType* enumDType(const Node* typeDefp) {
+    AstNodeDType* enumDType(const Node* typeDefp) const {
         const auto found = m_enumDtypes.find(typeDefp);
         if (found != m_enumDtypes.end()) return found->second;
         FileLine* const flp = flpOf(typeDefp);
@@ -447,7 +450,7 @@ class VhdlXmlFrontend final {
     }
 
     //! Build (once) the packed-vector layout of a record type definition
-    const RecordInfo& recordInfo(const Node* typeDefp) {
+    const RecordInfo& recordInfo(const Node* typeDefp) const {
         const auto found = m_records.find(typeDefp);
         if (found != m_records.end()) return found->second;
         RecordInfo& info = m_records[typeDefp];
@@ -554,7 +557,37 @@ class VhdlXmlFrontend final {
         return 0;
     }
 
-    VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) {
+    //! Analyzed array layout of a name or expression, when its type is constrained
+    bool arraySpec(const Node* nodep, VhdlDTypeSpec& spec) const {
+        const Node* typep = nodep ? nodep->child("type") : nullptr;
+        if (!typep || !typep->has("ref")) return false;
+        const Node* defp = nodeById(typep->attr("ref"));
+        if (!defp) return false;
+        if (!defp->has("kind") && defp->has("ref")) defp = nodeById(defp->attr("ref"));
+        if (!defp) return false;
+        const std::string kind = defp->attr("kind");
+        if (kind == "array_subtype_definition") {
+            if (childEls(defp->child("index_constraint_list")).empty()) return false;
+        } else if (kind != "simple_name" && kind != "subtype_declaration"
+                   && kind != "type_declaration" && kind != "anonymous_type_declaration") {
+            return false;
+        }
+        // A probe must not repeat diagnostics the declaration already reported
+        const bool savedQuiet = m_quietErrors;
+        m_quietErrors = true;
+        const VhdlDTypeSpec parsed = parseType(defp);
+        m_quietErrors = savedQuiet;
+        if (!parsed.isVector) return false;
+        spec = parsed;
+        return true;
+    }
+
+    //! Whether a name or expression is an array of multi-bit elements
+    bool multiArraySpec(const Node* nodep, VhdlDTypeSpec& spec) const {
+        return arraySpec(nodep, spec) && spec.elemWidth > 1;
+    }
+
+    VhdlDTypeSpec parseType(const Node* subtypep, int depth = 0) const {
         VhdlDTypeSpec spec;
         if (!subtypep || depth > 16) return spec;
         if (!subtypep->has("kind") && subtypep->has("ref")) {
@@ -657,29 +690,33 @@ class VhdlXmlFrontend final {
             error(subtypep, "VHDL array type '" + mark + "' is not supported yet");
             return spec;
         }
-        // The frontend models an array as one flat vector, which only matches VHDL when
-        // every element is a single bit
+        // The array is modeled as one flat vector with elemWidth bits per element
         const Node* elemSubp = subtypep->child("element_subtype");
         if (!elemSubp) elemSubp = subtypep->child("element_subtype_indication");
-        if (elementWidth(elemSubp) > 1) {
-            unsupported(subtypep, "array of multi-bit elements");
-            // Keep lowering with the flat layout; the error aborts the run
+        const int elemWidth = elementWidth(elemSubp);
+        if (elemWidth <= 0) {
+            unsupported(subtypep, "array element type");
+            return spec;
         }
+        spec.elemWidth = elemWidth;
         spec.isVector = true;
 
         const Node* const indicesp = subtypep->child("index_constraint_list");
         if (!indicesp) {
             error(subtypep, "unconstrained VHDL array is not supported yet");
+            spec.isVector = false;  // Keep the tree buildable; the error aborts the run
             return spec;
         }
         const std::vector<const Node*> indices = childEls(indicesp);
         if (indices.size() != 1) {
             error(subtypep, "multi-dimensional VHDL arrays are not supported yet");
+            spec.isVector = false;
             return spec;
         }
         const Node* const rangep = indices.front()->child("range_constraint");
         if (!rangep) {
             error(subtypep, "VHDL array without a range constraint");
+            spec.isVector = false;
             return spec;
         }
         spec.ascending = rangep->attr("direction") == "to";
@@ -701,9 +738,15 @@ class VhdlXmlFrontend final {
         AstTypeTable* const tablep = m_rootp->typeTablep();
         if (spec.isInteger) return tablep->findBasicDType(flp, VBasicDTypeKwd::INT);
         if (!spec.isVector) return tablep->findBasicDType(flp, spec.kwd);
-        const int width = std::abs(spec.left - spec.right) + 1;
+        const int elems = std::abs(spec.left - spec.right) + 1;
+        // An array of vectors keeps only its total bit width; the VHDL index range and
+        // element width are recovered from the analyzed type where needed
+        if (spec.elemWidth > 1) {
+            const int width = elems * spec.elemWidth;
+            return tablep->findLogicBitDType(flp, spec.kwd, width, width, spec.signing);
+        }
         return tablep->findLogicBitDType(
-            flp, spec.kwd, VNumRange{spec.left, spec.right, spec.ascending}, width, spec.signing);
+            flp, spec.kwd, VNumRange{spec.left, spec.right, spec.ascending}, elems, spec.signing);
     }
 
     //! Dtype of a node's analyzed result type (its <type ref>), if any
@@ -829,33 +872,51 @@ class VhdlXmlFrontend final {
             error(nodep, "Indexing a non-vector VHDL name is not supported yet");
             return basep;
         }
+        // An array of multi-bit elements only carries its total bit width in the lowered
+        // dtype; the VHDL index range and element width come from the analyzed type
         if (kind == "indexed_name") {
             const std::vector<const Node*> indices = childEls(nodep->child("index_list"));
             if (indices.size() != 1) {
                 unsupported(nodep, "multi-dimensional index");
                 return basep;
             }
-            const int baseIndex = basicp->ascending() ? basicp->left() : basicp->right();
+            VhdlDTypeSpec layout;
+            const bool multi = multiArraySpec(nodep->child("prefix"), layout);
+            const int elemWidth = multi ? layout.elemWidth : 1;
+            const int totalWidth = basicp->width();
+            const int baseIndex = multi ? (layout.ascending ? layout.left : layout.right)
+                                        : (basicp->ascending() ? basicp->left() : basicp->right());
+            const auto setSelDType = [&](AstSel* selp) {
+                selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flp, layout.kwd, elemWidth,
+                                                                      elemWidth, layout.signing));
+            };
             if (indices.front()->attr("kind") == "integer_literal") {
                 const int index = static_cast<int>(
                     std::strtol(indices.front()->attr("value").c_str(), nullptr, 10));
-                const int offset = index - baseIndex;
-                if (offset < 0 || offset >= basicp->width()) {
+                const int offset = (index - baseIndex) * elemWidth;
+                if (offset < 0 || offset + elemWidth > totalWidth) {
                     error(nodep, "VHDL index is out of range");
                     return basep;
                 }
-                return new AstSel{flpOf(nodep), basep, offset, 1};
+                AstSel* const selp = new AstSel{flp, basep, offset, elemWidth};
+                if (multi) setSelDType(selp);
+                return selp;
             }
-            AstNodeExpr* const indexExprp = lowerExpr(indices.front(), intDType(flpOf(nodep)));
+            AstNodeExpr* const indexExprp = lowerExpr(indices.front(), intDType(flp));
             if (!indexExprp) return basep;
-            AstNodeExpr* const offsetp
-                = new AstSub{flpOf(nodep), indexExprp,
-                             makeConst(flpOf(nodep), intDType(flpOf(nodep)), baseIndex)};
-            offsetp->dtypep(intDType(flpOf(nodep)));
-            return new AstSel{flpOf(nodep), basep, offsetp, 1};
+            AstNodeExpr* offsetp
+                = new AstSub{flp, indexExprp, makeConst(flp, intDType(flp), baseIndex)};
+            offsetp->dtypep(intDType(flp));
+            if (multi) {
+                offsetp = new AstMul{flp, offsetp, makeConst(flp, intDType(flp), elemWidth)};
+                offsetp->dtypep(intDType(flp));
+            }
+            AstSel* const selp = new AstSel{flp, basep, offsetp, elemWidth};
+            if (multi) setSelDType(selp);
+            return selp;
         }
 
-        // slice_name
+        // slice_name; only one-dimensional arrays can be sliced
         const Node* const suffixp = nodep->child("suffix");
         if (!suffixp || suffixp->attr("kind") != "range_expression") {
             unsupported(nodep, "slice form");
@@ -876,21 +937,36 @@ class VhdlXmlFrontend final {
         const int left = static_cast<int>(leftValue);
         const int right = static_cast<int>(rightValue);
         const bool ascending = suffixp->attr("direction") == "to";
-        if (ascending != basicp->ascending()) {
+        // An array of multi-bit elements keeps one element width per slice element
+        VhdlDTypeSpec layout;
+        const bool multi = multiArraySpec(nodep->child("prefix"), layout);
+        const bool arrayAscending = multi ? layout.ascending : basicp->ascending();
+        if (ascending != arrayAscending) {
             error(nodep, "VHDL slice direction does not match the array");
             return basep;
         }
+        const int baseIndex = multi ? (layout.ascending ? layout.left : layout.right)
+                                    : (basicp->ascending() ? basicp->left() : basicp->right());
+        const int elemWidth = multi ? layout.elemWidth : 1;
         const int lowIndex = ascending ? left : right;
-        const int offset = ascending ? lowIndex - basicp->left() : lowIndex - basicp->right();
-        const int width = std::abs(left - right) + 1;
+        const int offset = (lowIndex - baseIndex) * elemWidth;
+        const int width = (std::abs(left - right) + 1) * elemWidth;
         if (offset < 0 || offset + width > basicp->width()) {
             error(nodep, "VHDL slice is out of range");
             return basep;
         }
-        AstNodeExpr* const selp = new AstSel{flpOf(nodep), basep, offset, width};
-        // AstSel defaults to unsigned; a slice of a signed array stays signed
-        selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flpOf(nodep), basicp->keyword(),
-                                                              width, width, basicp->numeric()));
+        AstSel* const selp = new AstSel{flp, basep, offset, width};
+        if (multi) {
+            VhdlDTypeSpec sliceSpec = layout;
+            sliceSpec.left = left;
+            sliceSpec.right = right;
+            sliceSpec.ascending = ascending;
+            selp->dtypep(dtypeOf(sliceSpec, flp));
+        } else {
+            // AstSel defaults to unsigned; a slice of a signed array stays signed
+            selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flp, basicp->keyword(), width,
+                                                                  width, basicp->numeric()));
+        }
         return selp;
     }
 
@@ -2407,7 +2483,14 @@ class VhdlXmlFrontend final {
                 AstNodeDType* const arrayDtp = typeRefDType(nodep);
                 AstNodeDType* const targetDtp = contextp ? contextp : arrayDtp;
                 if (assocp && targetDtp && targetDtp->width() > 0) {
-                    AstNodeExpr* const elemp = lowerExpr(assocp, nullptr);
+                    // An array of vectors constrains each associated element
+                    VhdlDTypeSpec layout;
+                    AstNodeDType* elemDtp = nullptr;
+                    if (multiArraySpec(nodep, layout)) {
+                        elemDtp = m_rootp->typeTablep()->findLogicBitDType(
+                            flp, layout.kwd, layout.elemWidth, layout.elemWidth, layout.signing);
+                    }
+                    AstNodeExpr* const elemp = lowerExpr(assocp, elemDtp);
                     if (!elemp) return nullptr;
                     const int elemWidth = elemp->dtypep()->width();
                     const int targetWidth = targetDtp->width();
@@ -2662,6 +2745,26 @@ class VhdlXmlFrontend final {
         if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
         AstVar* const varp = lookupVar(prefixp);
         if (!varp) return false;
+        // An array of multi-bit elements stores only its bit width in the dtype
+        VhdlDTypeSpec layout;
+        if (multiArraySpec(prefixp, layout)) {
+            const int left = layout.left;
+            const int right = layout.right;
+            if (kind == "left") {
+                value = left;
+            } else if (kind == "right") {
+                value = right;
+            } else if (kind == "high") {
+                value = std::max(left, right);
+            } else if (kind == "low") {
+                value = std::min(left, right);
+            } else if (kind == "length") {
+                value = std::abs(left - right) + 1;
+            } else {
+                value = layout.ascending ? 1 : 0;
+            }
+            return true;
+        }
         const AstBasicDType* const basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
         if (!basicp) return false;
         const int left = basicp->left();
@@ -2851,6 +2954,14 @@ class VhdlXmlFrontend final {
         if (originp && originp->attr("kind") == "range_array_attribute") {
             const Node* const prefixp = originp->child("prefix");
             if (!prefixp) return false;
+            // An array of multi-bit elements stores only its bit width in the dtype
+            VhdlDTypeSpec layout;
+            if (multiArraySpec(prefixp, layout)) {
+                left = layout.left;
+                right = layout.right;
+                ascending = layout.ascending;
+                return true;
+            }
             const auto it = m_scope.find(vhdlFold(prefixp->attr("identifier")));
             if (it == m_scope.end()) return false;
             const AstBasicDType* const basicp
