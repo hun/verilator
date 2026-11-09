@@ -4511,6 +4511,7 @@ class VhdlXmlFrontend final {
 
     //! First clock edge or event attribute in a statement tree, or nullptr
     static const Node* findClockEdge(const Node* nodep) {
+        if (!nodep) return nullptr;
         const std::string kind = nodep->attr("kind");
         if (kind == "event_attribute") return nodep;
         if (kind == "function_call") {
