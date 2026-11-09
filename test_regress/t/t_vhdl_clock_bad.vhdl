@@ -54,3 +54,29 @@ begin
     end if;
   end process;
 end;
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity shared_target is
+  port (
+    clk1 : in std_logic;
+    clk2 : in std_logic;
+    d : in std_logic;
+    q : out std_logic
+  );
+end;
+
+architecture rtl of shared_target is
+begin
+  process (clk1, clk2) is
+  begin
+    if rising_edge(clk1) then
+      q <= d;
+    end if;
+    -- Two clocks writing one signal have no defined order
+    if rising_edge(clk2) then
+      q <= not d;
+    end if;
+  end process;
+end;
