@@ -24,12 +24,16 @@ entity t is
     qe   : out std_logic;
     qm   : out std_logic;
     qr   : out std_logic;
-    qr2  : out std_logic
+    qr2  : out std_logic;
+    seen : out std_logic
   );
 end;
 
 architecture rtl of t is
+  signal q1i : std_logic;
 begin
+  q1 <= q1i;
+
   -- Two clocked statements on the same edge: the last assignment wins
   process (clk) is
   begin
@@ -41,13 +45,15 @@ begin
     end if;
   end process;
 
-  -- A clocked statement mixed with an unclocked one
-  process (clk, a) is
+  -- A clocked statement mixed with an unclocked one; the unclocked statement reads
+  -- the clocked signal, which is not a shared write
+  process (clk, a, q1i) is
   begin
     if rising_edge(clk) then
-      q1 <= d;
+      q1i <= d;
     end if;
     comb <= a;
+    seen <= q1i;
   end process;
 
   -- Two clocks with disjoint targets

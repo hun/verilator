@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
         }
     };
     struct Vals final {
-        int last, comb, q1, q2, q3, qv1, qv2, qe, qm, qr, qr2;
+        int last, comb, q1, q2, q3, qv1, qv2, qe, qm, qr, qr2, seen;
     };
     const auto checkAll = [&](const Vals& want) {
         check("last", static_cast<int>(topp->last), want.last);
@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
         check("qm", static_cast<int>(topp->qm), want.qm);
         check("qr", static_cast<int>(topp->qr), want.qr);
         check("qr2", static_cast<int>(topp->qr2), want.qr2);
+        check("seen", static_cast<int>(topp->seen), want.seen);
     };
 
     topp->clk = 0;
@@ -46,35 +47,35 @@ int main(int argc, char** argv) {
     topp->a = 0;
     topp->en = 0;
     topp->eval();
-    checkAll({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+    checkAll({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
 
     // The unclocked statement follows its own sensitivity
     topp->a = 1;
     topp->eval();
-    checkAll({0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+    checkAll({0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
 
     // The last of two same-edge assignments wins
     topp->d = 1;
     topp->en = 1;
     topp->clk = 1;
     topp->eval();
-    checkAll({1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0});
+    checkAll({1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1});
 
     // The falling edge runs the later branches of a single-clock chain
     topp->clk = 0;
     topp->eval();
-    checkAll({1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0});
+    checkAll({1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1});
 
     // The second clock drives only its own targets and variables
     topp->d = 0;
     topp->clk2 = 1;
     topp->eval();
-    checkAll({1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0});
+    checkAll({1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1});
 
     // A later rising edge on the first clock updates only its own targets
     topp->clk = 1;
     topp->eval();
-    checkAll({0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0});
+    checkAll({0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0});
 
     if (!fails) std::printf("%%Info: all checks passed\n");
     topp->final();
