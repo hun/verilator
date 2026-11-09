@@ -528,10 +528,15 @@ class VhdlXmlFrontend final {
         if (unconstrainedp) *unconstrainedp = false;
         const Node* const cur = derefNode(typep);
         if (!cur) return false;
-        const auto found = m_records.find(cur);
-        if (found != m_records.end()) {
-            info = found->second;
-            return true;
+        // Member ranges can depend on generics or generate parameters; a node-keyed cache
+        // is only valid outside any binding context
+        const bool cacheable = m_constBindings.empty() && m_typeBindings.empty();
+        if (cacheable) {
+            const auto found = m_records.find(cur);
+            if (found != m_records.end()) {
+                info = found->second;
+                return true;
+            }
         }
         std::vector<RecordMemberSpec> members;
         if (!recordMemberSpecs(cur, members, depth)) return false;
@@ -570,7 +575,7 @@ class VhdlXmlFrontend final {
         info.dtypep = m_rootp->typeTablep()->findLogicBitDType(
             flp, fourstate ? VBasicDTypeKwd::LOGIC : VBasicDTypeKwd::BIT, width, width,
             VSigning::UNSIGNED);
-        m_records[cur] = info;
+        if (cacheable) m_records[cur] = info;
         return true;
     }
 
