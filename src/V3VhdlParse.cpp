@@ -940,8 +940,9 @@ class VhdlXmlFrontend final {
             const bool multi = multiArraySpec(nodep->child("prefix"), layout);
             const int elemWidth = multi ? layout.elemWidth : 1;
             const int totalWidth = basicp->width();
-            const int baseIndex = multi ? (layout.ascending ? layout.left : layout.right)
-                                        : (basicp->ascending() ? basicp->left() : basicp->right());
+            // The rightmost element is the least significant one
+            const bool ascending = multi ? layout.ascending : basicp->ascending();
+            const int arrayRight = multi ? layout.right : basicp->right();
             const auto setSelDType = [&](AstSel* selp) {
                 selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flp, layout.kwd, elemWidth,
                                                                       elemWidth, layout.signing));
@@ -949,7 +950,8 @@ class VhdlXmlFrontend final {
             if (indices.front()->attr("kind") == "integer_literal") {
                 const int index = static_cast<int>(
                     std::strtol(indices.front()->attr("value").c_str(), nullptr, 10));
-                const int offset = (index - baseIndex) * elemWidth;
+                const int offset
+                    = (ascending ? arrayRight - index : index - arrayRight) * elemWidth;
                 if (offset < 0 || offset + elemWidth > totalWidth) {
                     error(nodep, "VHDL index is out of range");
                     return basep;
@@ -960,8 +962,12 @@ class VhdlXmlFrontend final {
             }
             AstNodeExpr* const indexExprp = lowerExpr(indices.front(), intDType(flp));
             if (!indexExprp) return basep;
-            AstNodeExpr* offsetp
-                = new AstSub{flp, indexExprp, makeConst(flp, intDType(flp), baseIndex)};
+            AstNodeExpr* offsetp = nullptr;
+            if (ascending) {
+                offsetp = new AstSub{flp, makeConst(flp, intDType(flp), arrayRight), indexExprp};
+            } else {
+                offsetp = new AstSub{flp, indexExprp, makeConst(flp, intDType(flp), arrayRight)};
+            }
             offsetp->dtypep(intDType(flp));
             if (multi) {
                 offsetp = new AstMul{flp, offsetp, makeConst(flp, intDType(flp), elemWidth)};
@@ -978,12 +984,63 @@ class VhdlXmlFrontend final {
             unsupported(nodep, "slice form");
             return basep;
         }
+        // An array of multi-bit elements keeps one element width per slice element
+        VhdlDTypeSpec layout;
+        const bool multi = multiArraySpec(nodep->child("prefix"), layout);
+        const bool ascending = suffixp->attr("direction") == "to";
+        const bool arrayAscending = multi ? layout.ascending : basicp->ascending();
+        if (ascending != arrayAscending) {
+            error(nodep, "VHDL slice direction does not match the array");
+            return basep;
+        }
+        const int arrayRight = multi ? layout.right : basicp->right();
+        const int elemWidth = multi ? layout.elemWidth : 1;
         int64_t leftValue = 0;
         int64_t rightValue = 0;
-        if (!evalConst(rangeBound(suffixp, true), leftValue)
-            || !evalConst(rangeBound(suffixp, false), rightValue)) {
-            unsupported(nodep, "non-static slice bounds");
-            return basep;
+        const bool staticBounds = evalConst(rangeBound(suffixp, true), leftValue)
+                                  && evalConst(rangeBound(suffixp, false), rightValue);
+        if (!staticBounds) {
+            // The position may vary, but the width must be known to type the result
+            AstNodeExpr* const leftExprp = lowerExpr(rangeBound(suffixp, true), intDType(flp));
+            AstNodeExpr* const rightExprp = lowerExpr(rangeBound(suffixp, false), intDType(flp));
+            if (!leftExprp || !rightExprp) return basep;
+            AstNodeExpr* const lowExprp = ascending ? leftExprp : rightExprp;
+            AstNodeExpr* const highExprp = ascending ? rightExprp : leftExprp;
+            int64_t elems = 0;
+            if (!staticRangeWidth(highExprp, lowExprp, elems)) {
+                unsupported(nodep, "non-static slice bounds");
+                return basep;
+            }
+            if (elems <= 0) {
+                unsupported(nodep, "null slice");
+                return basep;
+            }
+            if (elems > INT_MAX / elemWidth) {
+                error(nodep, "VHDL slice bound is out of range");
+                return basep;
+            }
+            // The slice's right bound is its least significant element
+            AstNodeExpr* offsetp = nullptr;
+            if (ascending) {
+                offsetp = new AstSub{flp, makeConst(flp, intDType(flp), arrayRight), rightExprp};
+            } else {
+                offsetp = new AstSub{flp, rightExprp, makeConst(flp, intDType(flp), arrayRight)};
+            }
+            offsetp->dtypep(intDType(flp));
+            if (elemWidth > 1) {
+                offsetp = new AstMul{flp, offsetp, makeConst(flp, intDType(flp), elemWidth)};
+                offsetp->dtypep(intDType(flp));
+            }
+            const int width = static_cast<int>(elems) * elemWidth;
+            AstSel* const selp = new AstSel{flp, basep, offsetp, width};
+            if (multi) {
+                selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flp, layout.kwd, width,
+                                                                      width, layout.signing));
+            } else {
+                selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(
+                    flp, basicp->keyword(), width, width, basicp->numeric()));
+            }
+            return selp;
         }
         if (leftValue < INT_MIN || leftValue > INT_MAX || rightValue < INT_MIN
             || rightValue > INT_MAX) {
@@ -992,20 +1049,7 @@ class VhdlXmlFrontend final {
         }
         const int left = static_cast<int>(leftValue);
         const int right = static_cast<int>(rightValue);
-        const bool ascending = suffixp->attr("direction") == "to";
-        // An array of multi-bit elements keeps one element width per slice element
-        VhdlDTypeSpec layout;
-        const bool multi = multiArraySpec(nodep->child("prefix"), layout);
-        const bool arrayAscending = multi ? layout.ascending : basicp->ascending();
-        if (ascending != arrayAscending) {
-            error(nodep, "VHDL slice direction does not match the array");
-            return basep;
-        }
-        const int baseIndex = multi ? (layout.ascending ? layout.left : layout.right)
-                                    : (basicp->ascending() ? basicp->left() : basicp->right());
-        const int elemWidth = multi ? layout.elemWidth : 1;
-        const int lowIndex = ascending ? left : right;
-        const int offset = (lowIndex - baseIndex) * elemWidth;
+        const int offset = (ascending ? arrayRight - right : right - arrayRight) * elemWidth;
         const int elems = rangeLength(left, right, ascending);
         if (elems <= 0) {
             unsupported(nodep, "null slice");
@@ -2093,6 +2137,98 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
+    //! A lowered integer expression split into base*scale + offset
+    struct LinearSplit final {
+        AstNodeExpr* basep = nullptr;  // Varying part, null when fully constant
+        int64_t scale = 0;  // Multiplier of basep
+        int64_t offset = 0;  // Constant part
+    };
+
+    //! Split a linear integer expression; false when two different bases are mixed
+    static bool splitLinear(AstNodeExpr* exprp, LinearSplit& out) {
+        if (AstConst* const constp = VN_CAST(exprp, Const)) {
+            out.offset = constp->num().toSInt();
+            return true;
+        }
+        if (AstAdd* const addp = VN_CAST(exprp, Add)) {
+            LinearSplit lhss;
+            LinearSplit rhss;
+            if (!splitLinear(addp->lhsp(), lhss) || !splitLinear(addp->rhsp(), rhss)) {
+                return false;
+            }
+            out.offset = lhss.offset + rhss.offset;
+            if (lhss.basep && rhss.basep) {
+                if (lhss.scale != rhss.scale || !lhss.basep->sameTree(rhss.basep)) return false;
+            }
+            out.basep = lhss.basep ? lhss.basep : rhss.basep;
+            out.scale = lhss.basep ? lhss.scale : rhss.scale;
+            return true;
+        }
+        if (AstSub* const subp = VN_CAST(exprp, Sub)) {
+            LinearSplit lhss;
+            LinearSplit rhss;
+            if (!splitLinear(subp->lhsp(), lhss) || !splitLinear(subp->rhsp(), rhss)) {
+                return false;
+            }
+            if (rhss.basep) {
+                if (!lhss.basep || lhss.scale != rhss.scale || !lhss.basep->sameTree(rhss.basep)) {
+                    return false;
+                }
+            }
+            out.basep = lhss.basep;
+            out.scale = lhss.scale;
+            out.offset = lhss.offset - rhss.offset;
+            return true;
+        }
+        if (AstMul* const mulp = VN_CAST(exprp, Mul)) {
+            LinearSplit lhss;
+            LinearSplit rhss;
+            if (!splitLinear(mulp->lhsp(), lhss) || !splitLinear(mulp->rhsp(), rhss)) {
+                return false;
+            }
+            if (!lhss.basep && !rhss.basep) {
+                out.basep = nullptr;
+                out.scale = 0;
+                out.offset = lhss.offset * rhss.offset;
+                return true;
+            }
+            if (lhss.basep && rhss.basep) return false;
+            const LinearSplit& dyn = lhss.basep ? lhss : rhss;
+            const LinearSplit& con = lhss.basep ? rhss : lhss;
+            out.basep = dyn.basep;
+            out.scale = dyn.scale * con.offset;
+            out.offset = dyn.offset * con.offset;
+            return true;
+        }
+        if (AstNegate* const negp = VN_CAST(exprp, Negate)) {
+            LinearSplit vals;
+            if (!splitLinear(negp->lhsp(), vals)) return false;
+            out.basep = vals.basep;
+            out.scale = -vals.scale;
+            out.offset = -vals.offset;
+            return true;
+        }
+        out.basep = exprp;
+        out.scale = 1;
+        out.offset = 0;
+        return true;
+    }
+
+    //! Difference of two slice bounds plus one, when the varying parts cancel
+    static bool staticRangeWidth(AstNodeExpr* highp, AstNodeExpr* lowp, int64_t& width) {
+        LinearSplit highs;
+        LinearSplit lows;
+        if (!splitLinear(highp, highs) || !splitLinear(lowp, lows)) return false;
+        if (highs.basep || lows.basep) {
+            if (!highs.basep || !lows.basep || highs.scale != lows.scale
+                || !highs.basep->sameTree(lows.basep)) {
+                return false;
+            }
+        }
+        width = highs.offset - lows.offset + 1;
+        return true;
+    }
+
     //! Lower both sides of a comparison to a common width. VHDL compares operands of
     //! different lengths by extending the shorter one, so the post-width AST needs a
     //! single operand width.
@@ -2139,7 +2275,8 @@ class VhdlXmlFrontend final {
             right = basicp->right();
             ascending = basicp->ascending();
         }
-        const int baseIndex = ascending ? left : right;
+        // The rightmost element is the least significant one
+        const int arrayRight = right;
         AstNodeDType* elemDtp = nullptr;
         if (elemWidth > 1) {
             VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
@@ -2155,8 +2292,8 @@ class VhdlXmlFrontend final {
         const std::vector<const Node*> choices
             = childEls(nodep->child("association_choices_chain"));
         if (choices.size() == 1 && choices.front()->attr("kind") == "choice_by_others") {
-            AstNodeExpr* const elemp = lowerExpr(choices.front()->child("associated_expr"),
-                                                 elemDtp);
+            AstNodeExpr* const elemp
+                = lowerExpr(choices.front()->child("associated_expr"), elemDtp);
             if (!elemp) return nullptr;
             const int width = elemp->dtypep()->width();
             if (width <= 0 || totalWidth % width != 0) return nullptr;
@@ -2166,15 +2303,15 @@ class VhdlXmlFrontend final {
             return repp;
         }
         const auto slotOf = [&](int64_t index) -> int {
-            const int64_t slot = index - baseIndex;
+            const int64_t slot = ascending ? static_cast<int64_t>(arrayRight) - index
+                                           : index - static_cast<int64_t>(arrayRight);
             if (slot < 0 || slot >= elements) return -1;
             return static_cast<int>(slot);
         };
         std::vector<AstNodeExpr*> exprs(static_cast<size_t>(elements), nullptr);
         const Node* othersp = nullptr;
         int position = 0;
-        for (const Node* const choicep
-             : childEls(nodep->child("association_choices_chain"))) {
+        for (const Node* const choicep : childEls(nodep->child("association_choices_chain"))) {
             const Node* const assocp = choicep->child("associated_expr");
             if (!assocp) return nullptr;
             const std::string choiceKind = choicep->attr("kind");
@@ -2228,8 +2365,8 @@ class VhdlXmlFrontend final {
                 error(nodep, "VHDL aggregate is missing elements");
                 return nullptr;
             }
-            resultp
-                = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, valuep, resultp}) : valuep;
+            resultp = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, valuep, resultp})
+                              : valuep;
         }
         resultp->dtypep(targetDtp);
         return resultp;
@@ -3341,8 +3478,7 @@ class VhdlXmlFrontend final {
     }
 
     //! Decompose a condition into a clock edge and the remaining level conjuncts
-    bool splitClockCondition(const Node* condp, EdgeInfo& info,
-                             std::vector<const Node*>& levelp) {
+    bool splitClockCondition(const Node* condp, EdgeInfo& info, std::vector<const Node*>& levelp) {
         levelp.clear();
         std::vector<const Node*> parts;
         flattenConjuncts(condp, parts);
@@ -3515,9 +3651,7 @@ class VhdlXmlFrontend final {
             AstNodeExpr* condp = nullptr;
             if (branch.clocked) {
                 if (!atTimeZero) condp = lowerLevelCondition(flp, branch.levels);
-                if (!condp) {
-                    condp = makeConst(flp, bitDType(flp), atTimeZero ? 0U : 1U);
-                }
+                if (!condp) { condp = makeConst(flp, bitDType(flp), atTimeZero ? 0U : 1U); }
             } else {
                 condp = lowerExpr(branch.nodep->child("condition"), bitDType(flp));
                 if (!condp) return nullptr;
@@ -3558,8 +3692,8 @@ class VhdlXmlFrontend final {
             if (levelResetEdge(condp, rstVarp, rstEdge)) {
                 if (!concurrent && !sensitivityHasVar(sensp, rstVarp)) continue;
                 AstNodeExpr* const rstRefp = new AstVarRef{flp, rstVarp, VAccess::READ};
-                AstNode::addNext<AstSenItem, AstSenItem>(
-                    itemsp, new AstSenItem{flp, rstEdge, rstRefp});
+                AstNode::addNext<AstSenItem, AstSenItem>(itemsp,
+                                                         new AstSenItem{flp, rstEdge, rstRefp});
             } else if (conditionUsesSensitivity(condp, sensp, clockVarp)) {
                 // A level condition on another sensitivity-list signal is an asynchronous
                 // reset we cannot model
