@@ -71,10 +71,13 @@ Commits today:
 - `d9f4596` Fix VHDL operator widths and wide literals
 - `227b24d` Clean up VHDL diagnostic strings
 
-The working tree is clean; this handoff file is tracked.
+Working tree: uncommitted string-generic work (`src/V3VhdlParse.cpp`,
+`t_vhdl_string_generic.*`, this file).  Earlier commits listed above are on
+`vhdl-frontend-wp0`.
 
 Build/test status at stop: `make -j4 -C src` clean; the full `t_vhdl_*` suite
-passes (43 tests); the GHDL `synth` corpus was rerun; `clang-format` clean.
+passes (44 tests); the GHDL `synth` corpus was rerun (PASS 656, UNSUPPORTED 309,
+ERROR 31, EXPECTED_FAIL 48, GHDL_ERROR 94, NO_TOP 1); `clang-format` clean.
 `make lint-py` was not rerun in this session -- the pinned dev tools are not
 installed here; the new test scripts pass `python3 -m py_compile`.
 
@@ -169,6 +172,14 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   (`'left`/`'right`/`'high`/`'low`/`'length`/`'range`) use element indices, and
   aggregates support positional, named, range and `others` choices.
   Ascending arrays use the rightmost element as the least significant.
+- String generics: the actual (or default) is a string literal, bound per
+  specialization and included in the specialization key. The value is an
+  array of 8-bit `character` enum elements indexed `1 to length`, so `'low`/
+  `'high`/`'left`/`'right`/`'length`/`'ascending` work, indexing yields the
+  character dtype, and case choices compare character enum positions.
+  Positional and named generic associations are both supported. Type
+  attributes over `subtype T is natural range arr'range` resolve through the
+  array's range as well.
 - Non-static slices are supported when the width is statically known
   (`mem(a*8+7 downto a*8)`), including writes.
 - Expressions: arithmetic/comparison/logic/shift/rotate/concat, static
@@ -213,6 +224,9 @@ Tests:
   subtype attributes.
 - `t_vhdl_array` — arrays of vectors, nested arrays, records, enums, aggregates,
   slices, attributes, `'range`.
+- `t_vhdl_string_generic` — string generics at different lengths and contents,
+  positional and named generic associations, `'low`/`'high`/`'length`, dynamic
+  indexing, and character case choices.
 - `t_vhdl_slice` — non-static slices (read and write), ascending order.
 - `t_vhdl_event` — clock idioms, level gates, `'event` forms, async reset,
   concurrent clocked assignment.
@@ -303,10 +317,15 @@ Main remaining UNSUPPORTED buckets:
 
 - generic map on units with no VHDL entity (14; the runner analyses one top
   file and cross-language binding is WP3)
-- PSL assertion/assume directives (13) — verification only, ignored by
-  synthesis but rejected rather than dropped
-- `'low`/`'high` on string generics (13)
-- string literal characters (10) and character literals (9; mostly `'Z'`)
+- PSL assertion/assume directives (21) — verification only, ignored by
+  synthesis but rejected rather than dropped.  The string-generic `issue` tops
+  now lower fully and stop only at these directives; the two standalone
+  `sequencer` tops stop at the top-level unbound-generic diagnostic, and
+  `issue1850/issue` still stops at its unsupported `process_statement`.
+- generic without a default on the selected top entity (10) — previously these
+  passed lint-only as body-less base modules; the frontend now rejects them
+  instead of silently emitting an empty top.
+- string literal characters (9) and character literals (9; mostly `'Z'`)
 - array aggregates of multi-dimensional/odd forms (9) and null arrays (8;
   intentionally zero-width designs)
 - non-static slice bounds (8) and non-static generic actuals (4)
@@ -327,7 +346,10 @@ two more surfaced now that more architectures elaborate), 4 entities without
 architectures, 4 unknown identifiers, 1 string-literal length mismatch,
 and 6 pre-existing internal faults (4 `V3DfgSynthesize` width
 mismatches; 2 `Non-ReadOnly reference` from inout-port-to-pin nets, e.g.
-`issue1387/repro2`, `issue3225/tb`).
+`issue1387/repro2`, `issue3225/tb`).  The net ERROR 30 -> 31 is unmasking, not
+new breakage: `issue3175/t` now reaches its unbound generic (previously stopped
+earlier at an array element type), and `issue1095/top` reaches its unresolved
+configuration-bound component; `issue1117/ent` moved ERROR -> PASS.
 
 ## Next steps (remaining handoff todos)
 
@@ -347,13 +369,12 @@ mismatches; 2 `Non-ReadOnly reference` from inout-port-to-pin nets, e.g.
    (V3Tristate-generated `__Vcellinpt__` chain used as an RHS); needs core work
    or a broader frontend rejection. The same limitation keeps `'Z'` literals
    and individual associations of inout ports unsupported.
-5. String generics and array attributes on them (`seq'low`, 13 cases).
-6. Remaining non-logic character/string literal contexts (`'a'`, `'Z'`,
+5. Remaining non-logic character/string literal contexts (`'a'`, `'Z'`,
    characters used as an enum type rather than as logic values), and
    matching relational operators (`?<`/`?<=`/`?>`/`?>=`).
-7. Function-local variable element assignment inside inlined functions (deep
+6. Function-local variable element assignment inside inlined functions (deep
    value rewrite; currently a clean `Unsupported`).
-8. In an environment with `help2man`, lz4 headers, `wavediff` and without a
+7. In an environment with `help2man`, lz4 headers, `wavediff` and without a
    hard virtual-memory cap, rerun `make test` for a clean full-suite result.
    Run `make cppcheck` where installed.
 
@@ -363,6 +384,14 @@ mismatches; 2 `Non-ReadOnly reference` from inout-port-to-pin nets, e.g.
 - A VHDL array is packed flat with no dtype range of its own; anything that needs
   VHDL indices or element width must recover it with `arraySpec()`/`multiArraySpec()`
   from the analyzed type. Ascending arrays put the rightmost index at the LSB.
+- An entity base module is populated only when every constant generic has a
+  default; a generic without one has no single body, so only its
+  specializations emit.  Populating a base module binds its string generic
+  defaults; integer defaults keep resolving through the declaration as before.
+- Whole string generics passed to an unconstrained-array/`string` subprogram
+  formal lose their VHDL layout: the formal is a flat 8*length logic vector, so
+  indexing inside the function selects one bit and attributes use the bit
+  width.  Only direct indexing/attributes on the generic name are supported.
 - Function locals are bound to expressions, not `AstVar`s: only simple-name
   assignments update them; constants bound via inlining are visible to
   `evalConst` through `m_inlineEnvp`.
