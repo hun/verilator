@@ -3059,9 +3059,82 @@ class VhdlXmlFrontend final {
         return targetp;
     }
 
+    //! Assign one value to the element targets of an aggregate target, left to right
+    AstNode* lowerAggregateAssignment(const Node* stmtp, const Node* targetp, const Node* valuep,
+                                      AssignMode mode) {
+        FileLine* const flp = flpOf(stmtp);
+        std::vector<AstNodeExpr*> lhsv;
+        int totalWidth = 0;
+        bool fourstate = false;
+        for (const Node* const choicep : childEls(targetp->child("association_choices_chain"))) {
+            if (choicep->attr("kind") != "choice_by_none") {
+                unsupported(choicep, "aggregate target choice form");
+                return nullptr;
+            }
+            const Node* const elementp = choicep->child("associated_expr");
+            if (!elementp) {
+                unsupported(choicep, "aggregate target without an element");
+                return nullptr;
+            }
+            AstNodeExpr* const lhsp = lowerLValue(stmtp, elementp);
+            if (!lhsp) return nullptr;
+            const int width = lhsp->dtypep()->width();
+            if (width <= 0) {
+                unsupported(elementp, "zero-width aggregate target");
+                return nullptr;
+            }
+            totalWidth += width;
+            fourstate |= lhsp->dtypep()->isFourstate();
+            lhsv.push_back(lhsp);
+        }
+        if (lhsv.empty()) {
+            unsupported(targetp, "empty aggregate target");
+            return nullptr;
+        }
+        AstNodeDType* const totalDtp = m_rootp->typeTablep()->findLogicBitDType(
+            flp, fourstate ? VBasicDTypeKwd::LOGIC : VBasicDTypeKwd::BIT, totalWidth, totalWidth,
+            VSigning::UNSIGNED);
+        AstNodeExpr* rhsp = lowerExpr(valuep, totalDtp);
+        if (!rhsp) return nullptr;
+        if (rhsp->dtypep()->width() != totalWidth) rhsp = resizeExpr(rhsp, totalDtp);
+        AstNode* headp = nullptr;
+        int offset = totalWidth;
+        for (AstNodeExpr* const lhsp : lhsv) {
+            const int width = lhsp->dtypep()->width();
+            offset -= width;
+            AstNodeExpr* const basep = headp ? rhsp->cloneTree(false) : rhsp;
+            AstSel* const selp = new AstSel{flp, basep, offset, width};
+            selp->dtypep(lhsp->dtypep());
+            AstNode* assp;
+            if (mode == AssignMode::DELAYED) {
+                assp = new AstAssignDly{flp, lhsp, selp};
+            } else if (mode == AssignMode::BLOCKING) {
+                assp = new AstAssign{flp, lhsp, selp};
+            } else {
+                assp = new AstAssignW{flp, lhsp, selp};
+            }
+            headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assp) : assp;
+        }
+        return headp;
+    }
+
     AstNode* lowerAssignment(const Node* stmtp, AssignMode mode) {
         FileLine* const flp = flpOf(stmtp);
-        AstNodeExpr* const lhsp = lowerLValue(stmtp, targetNode(stmtp));
+        const Node* const targetp = targetNode(stmtp);
+        const std::vector<const Node*> waves = childEls(stmtp->child("waveform_chain"));
+        if (waves.size() != 1) {
+            unsupported(stmtp, "multiple waveform elements");
+            return nullptr;
+        }
+        const Node* const wep = waves.front()->child("we_value");
+        if (!wep) {
+            unsupported(stmtp, "assignment without a waveform value");
+            return nullptr;
+        }
+        if (targetp && targetp->attr("kind") == "aggregate") {
+            return lowerAggregateAssignment(stmtp, targetp, wep, mode);
+        }
+        AstNodeExpr* const lhsp = lowerLValue(stmtp, targetp);
         if (!lhsp) return nullptr;
         if (mode != AssignMode::CONT) {
             // V3Tristate/V3Inst model inout ports as continuously driven; a procedural
@@ -3075,16 +3148,6 @@ class VhdlXmlFrontend final {
                 unsupported(stmtp, "procedural assignment to an inout port");
                 return nullptr;
             }
-        }
-        const std::vector<const Node*> waves = childEls(stmtp->child("waveform_chain"));
-        if (waves.size() != 1) {
-            unsupported(stmtp, "multiple waveform elements");
-            return nullptr;
-        }
-        const Node* const wep = waves.front()->child("we_value");
-        if (!wep) {
-            unsupported(stmtp, "assignment without a waveform value");
-            return nullptr;
         }
         AstNodeExpr* const rhsp = lowerExpr(wep, lhsp->dtypep());
         if (!rhsp) return nullptr;
@@ -3116,13 +3179,17 @@ class VhdlXmlFrontend final {
 
     AstNode* lowerVariableAssignment(const Node* stmtp) {
         FileLine* const flp = flpOf(stmtp);
-        AstNodeExpr* const lhsp = lowerLValue(stmtp, stmtp->child("target"));
-        if (!lhsp) return nullptr;
+        const Node* const targetp = targetNode(stmtp);
         const Node* const exprp = stmtp->child("expression");
         if (!exprp) {
             unsupported(stmtp, "variable assignment without an expression");
             return nullptr;
         }
+        if (targetp && targetp->attr("kind") == "aggregate") {
+            return lowerAggregateAssignment(stmtp, targetp, exprp, AssignMode::BLOCKING);
+        }
+        AstNodeExpr* const lhsp = lowerLValue(stmtp, targetp);
+        if (!lhsp) return nullptr;
         AstNodeExpr* const rhsp = lowerExpr(exprp, lhsp->dtypep());
         if (!rhsp) return nullptr;
         // Variable assignment is immediate, unlike signal assignment
