@@ -82,7 +82,8 @@ entity t is
     u : in unsigned(3 downto 0); st_in : in state_t;
     din_en : in std_logic; din_num : in std_logic_vector(1 downto 0);
     y : out integer; v : out unsigned(3 downto 0); w : out integer; nn : out state_t;
-    r_en : out std_logic; r_st : out state_t; r_num : out std_logic_vector(1 downto 0)
+    r_en : out std_logic; r_st : out state_t; r_num : out std_logic_vector(1 downto 0);
+    dv : in std_logic_vector(3 downto 0); mk : out std_logic_vector(3 downto 0)
   );
 end;
 
@@ -90,6 +91,13 @@ architecture rtl of t is
   function dbl(x : integer) return integer is
   begin
     return x * 2;
+  end;
+  -- Unconstrained formal, a local sized by its 'length, and an unconstrained return
+  function lowbit(x : std_logic_vector) return std_logic_vector is
+    variable r : std_logic_vector(x'length - 1 downto 0);
+  begin
+    r := (0 => x(0), others => '0');
+    return r;
   end;
   signal r : rec_t;
 begin
@@ -101,4 +109,5 @@ begin
   r_en <= r.en;
   r_st <= r.st;
   r_num <= r.num;
+  mk <= lowbit(dv);
 end;

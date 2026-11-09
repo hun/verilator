@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
                                 topp->st_in = st;
                                 topp->din_en = en;
                                 topp->din_num = num;
+                                topp->dv = u;
                                 topp->eval();
 
                                 const int pick = s == 0 ? 9 : s == 1 ? 7 : 63;
@@ -51,13 +52,14 @@ int main(int argc, char** argv) {
                                     {"r_en", static_cast<int>(topp->r_en), en},
                                     {"r_st", static_cast<int>(topp->r_st), 0},
                                     {"r_num", static_cast<int>(topp->r_num), num},
+                                    {"mk", static_cast<int>(topp->mk), u & 1},
                                 };
                                 for (const Check& check : checks) {
                                     if (check.got != check.want) {
                                         std::printf("%%Error: a=%d b=%d s=%d u=%d st=%d en=%d "
                                                     "num=%d %s=%d expected %d\n",
-                                                    a, b, s, u, st, en, num, check.name,
-                                                    check.got, check.want);
+                                                    a, b, s, u, st, en, num, check.name, check.got,
+                                                    check.want);
                                         ++fails;
                                     }
                                 }
