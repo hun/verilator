@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
         for (int b = 0; b < 256; ++b) {
             topp->a = a;
             topp->b = b;
+            topp->u4 = a;
             topp->eval();
 
             const int y = static_cast<int>(topp->y);
@@ -34,6 +35,21 @@ int main(int argc, char** argv) {
             const int ob = static_cast<int>(topp->ob);
             const int sq = static_cast<int>(topp->sq);
             const int w = static_cast<int>(topp->w);
+            const int uo = static_cast<int>(topp->uo);
+            const int eqf = static_cast<int>(topp->eqf);
+            const int eqt = static_cast<int>(topp->eqt);
+            if (topp->wide != 0x123456789aULL) {
+                std::printf("%%Error: wide=%llx\n", static_cast<unsigned long long>(topp->wide));
+                ++fails;
+            }
+            if (uo != a) {
+                std::printf("%%Error: a=%d uo=%d\n", a, uo);
+                ++fails;
+            }
+            if (eqf != 0 || eqt != 1) {
+                std::printf("%%Error: eqf=%d eqt=%d\n", eqf, eqt);
+                ++fails;
+            }
             if (y != a) {
                 std::printf("%%Error: a=%d y=%d\n", a, y);
                 ++fails;
