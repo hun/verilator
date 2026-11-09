@@ -937,12 +937,13 @@ class VhdlXmlFrontend final {
                 return basep;
             }
             VhdlDTypeSpec layout;
-            const bool multi = multiArraySpec(nodep->child("prefix"), layout);
+            const bool haveLayout = arraySpec(nodep->child("prefix"), layout);
+            const bool multi = haveLayout && layout.elemWidth > 1;
             const int elemWidth = multi ? layout.elemWidth : 1;
             const int totalWidth = basicp->width();
             // The rightmost element is the least significant one
-            const bool ascending = multi ? layout.ascending : basicp->ascending();
-            const int arrayRight = multi ? layout.right : basicp->right();
+            const bool ascending = haveLayout ? layout.ascending : basicp->ascending();
+            const int arrayRight = haveLayout ? layout.right : basicp->right();
             const auto setSelDType = [&](AstSel* selp) {
                 selp->dtypep(m_rootp->typeTablep()->findLogicBitDType(flp, layout.kwd, elemWidth,
                                                                       elemWidth, layout.signing));
@@ -986,14 +987,15 @@ class VhdlXmlFrontend final {
         }
         // An array of multi-bit elements keeps one element width per slice element
         VhdlDTypeSpec layout;
-        const bool multi = multiArraySpec(nodep->child("prefix"), layout);
+        const bool haveLayout = arraySpec(nodep->child("prefix"), layout);
+        const bool multi = haveLayout && layout.elemWidth > 1;
         const bool ascending = suffixp->attr("direction") == "to";
-        const bool arrayAscending = multi ? layout.ascending : basicp->ascending();
+        const bool arrayAscending = haveLayout ? layout.ascending : basicp->ascending();
         if (ascending != arrayAscending) {
             error(nodep, "VHDL slice direction does not match the array");
             return basep;
         }
-        const int arrayRight = multi ? layout.right : basicp->right();
+        const int arrayRight = haveLayout ? layout.right : basicp->right();
         const int elemWidth = multi ? layout.elemWidth : 1;
         int64_t leftValue = 0;
         int64_t rightValue = 0;
