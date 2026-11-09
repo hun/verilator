@@ -231,6 +231,7 @@ struct VhdlDTypeSpec final {
     int left = 0;
     int right = 0;
     bool ascending = false;
+    bool isUnconstrained = false;  // Unconstrained array (formal parameter or port)
     int elemWidth = 1;  // Bits per element; >1 for an array of builtin vectors
 };
 
@@ -601,6 +602,13 @@ class VhdlXmlFrontend final {
         return spec;
     }
 
+    //! Dtype of a subprogram formal; nullptr when the formal is unconstrained
+    AstNodeDType* formalDType(const Node* paramp) {
+        const VhdlDTypeSpec probe = probeTypeSpec(paramp->child("subtype_indication"));
+        if (probe.isUnconstrained) return nullptr;
+        return dtypeOf(parseType(paramp->child("subtype_indication")), flpOf(paramp));
+    }
+
     //! Whether a name or expression is an array of multi-bit elements
     bool multiArraySpec(const Node* nodep, VhdlDTypeSpec& spec) const {
         return arraySpec(nodep, spec) && spec.elemWidth > 1;
@@ -757,6 +765,7 @@ class VhdlXmlFrontend final {
         if (!indicesp) {
             error(subtypep, "unconstrained VHDL array is not supported yet");
             spec.isVector = false;  // Keep the tree buildable; the error aborts the run
+            spec.isUnconstrained = true;
             return spec;
         }
         const std::vector<const Node*> indices = childEls(indicesp);
@@ -1338,6 +1347,12 @@ class VhdlXmlFrontend final {
                     unsupported(stmtp, "variable assignment without a target");
                     return nullptr;
                 }
+                if (targetp->attr("kind") != "simple_name") {
+                    // Function locals are bound to values, so sub-element updates cannot
+                    // be applied without a deep value rewrite
+                    unsupported(stmtp, "assignment to a variable element in an inlined function");
+                    return nullptr;
+                }
                 AstNodeExpr* const valuep = lowerExpr(exprp, nullptr);
                 if (!valuep) return nullptr;
                 funcEnvSet(env, vhdlFold(targetp->attr("identifier")), valuep);
@@ -1676,8 +1691,7 @@ class VhdlXmlFrontend final {
                 deleteFuncEnv(env);
                 return nullptr;
             }
-            AstNodeDType* const dtp
-                = dtypeOf(parseType(paramp->child("subtype_indication")), flpOf(paramp));
+            AstNodeDType* const dtp = formalDType(paramp);  // nullptr when unconstrained
             AstNodeExpr* const valuep = lowerExpr(actualp, dtp);
             if (!valuep) {
                 deleteFuncEnv(env);
@@ -1875,8 +1889,7 @@ class VhdlXmlFrontend final {
                 return nullptr;
             }
             const std::string paramMode = paramp->attr("mode");
-            AstNodeDType* const dtp
-                = dtypeOf(parseType(paramp->child("subtype_indication")), flpOf(paramp));
+            AstNodeDType* dtp = formalDType(paramp);  // nullptr when unconstrained
             if (paramMode.empty() || paramMode == "in") {
                 AstNodeExpr* const valuep = lowerExpr(actualp, dtp);
                 if (!valuep) {
@@ -1891,11 +1904,12 @@ class VhdlXmlFrontend final {
                     return nullptr;
                 }
                 const bool isSignal = paramKind == "interface_signal_declaration";
+                AstNodeDType* const argDtp = dtp ? dtp : lhsp->dtypep();
                 if (paramMode == "out") {
                     // An out parameter starts at its subtype's default value.  Binding it
                     // directly to the actual also performs the copy-out.
                     FileLine* const pflp = flpOf(paramp);
-                    AstNodeExpr* const defp = makeConst(pflp, dtp, 0);
+                    AstNodeExpr* const defp = makeConst(pflp, argDtp, 0);
                     AstNodeExpr* const lhspInit = lhsp->cloneTree(false);
                     AstNode* initp = nullptr;
                     if (isSignal && mode == AssignMode::DELAYED) {
@@ -3040,7 +3054,16 @@ class VhdlXmlFrontend final {
         const Node* const prefixp = nodep->child("prefix");
         if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
         AstVar* const varp = lookupVar(prefixp);
-        if (!varp) return false;
+        const AstBasicDType* basicp = nullptr;
+        if (varp) {
+            basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
+        } else if (m_inlineEnvp) {
+            const auto it = m_inlineEnvp->find(vhdlFold(prefixp->attr("identifier")));
+            if (it != m_inlineEnvp->end() && it->second.exprp) {
+                basicp = VN_CAST(it->second.exprp->dtypep()->skipRefp(), BasicDType);
+            }
+        }
+        if (!varp && !basicp) return false;
         // An array of multi-bit elements stores only its bit width in the dtype
         VhdlDTypeSpec layout;
         if (multiArraySpec(prefixp, layout)) {
@@ -3061,7 +3084,6 @@ class VhdlXmlFrontend final {
             }
             return true;
         }
-        const AstBasicDType* const basicp = VN_CAST(varp->dtypep()->skipRefp(), BasicDType);
         if (!basicp) return false;
         const int left = basicp->left();
         const int right = basicp->right();
@@ -3138,6 +3160,16 @@ class VhdlXmlFrontend final {
             if (it != m_constBindings.end()) {
                 value = it->second;
                 return true;
+            }
+            // A subprogram formal bound to a constant while inlining
+            if (m_inlineEnvp) {
+                const auto bindIt = m_inlineEnvp->find(vhdlFold(nodep->attr("identifier")));
+                if (bindIt != m_inlineEnvp->end() && bindIt->second.exprp) {
+                    if (AstConst* const constp = VN_CAST(bindIt->second.exprp, Const)) {
+                        value = constp->num().toSInt();
+                        return true;
+                    }
+                }
             }
             // Constants and generic defaults resolve through the analyzed reference
             const Node* const refp = nodep->child("named_entity");
@@ -4358,16 +4390,14 @@ class VhdlXmlFrontend final {
                     } else {
                         const std::string actualKind = actualp->attr("kind");
                         if (actualKind != "simple_name" && actualKind != "indexed_name"
-                            && actualKind != "slice_name"
-                            && actualKind != "selected_element") {
+                            && actualKind != "slice_name" && actualKind != "selected_element") {
                             unsupported(actualp, "expression on a writable port connection");
                             continue;
                         }
                         actualExprp = lowerName(actualp, true);
                         if (actualExprp && access == VAccess::READWRITE) {
-                            actualExprp->foreach([](AstVarRef* refp) {
-                                refp->access(VAccess::READWRITE);
-                            });
+                            actualExprp->foreach(
+                                [](AstVarRef* refp) { refp->access(VAccess::READWRITE); });
                         }
                     }
                 }
