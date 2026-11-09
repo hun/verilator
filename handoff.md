@@ -217,9 +217,10 @@ Tests:
 - `t_vhdl_event` — clock idioms, level gates, `'event` forms, async reset,
   concurrent clocked assignment.
 - `t_vhdl_split` — two same-edge statement chains that share a target, a clocked
-  statement mixed with an unclocked one, two clocks with disjoint targets and
-  disjoint process variables, a later branch that runs on the falling edge (and
-  both edges in one chain), and a variable carried across statements.
+  statement mixed with an unclocked one that reads the clocked register
+  (`dff04` pattern), two clocks with disjoint targets and disjoint process
+  variables, a later branch that runs on the falling edge (and both edges in
+  one chain), and a variable carried across statements.
 - `t_vhdl_wait` — `wait until` on rising/falling edges and the `'event` form,
   including the loop-back execution of statements before the wait and a
   variable initialized before it.
@@ -229,7 +230,8 @@ Tests:
   wildcards in the middle and same-value matching without wildcards.
 - `t_vhdl_clock_bad` — rejected clock chains (later branch with a multi-signal
   sensitivity list, complex asynchronous reset, different clocks sharing a
-  target, a clock edge in process(all)).
+  target reached through the second statement of a merged same-edge group, a
+  clock edge in process(all)).
 - `t_vhdl_unconst_port` — unconstrained entity ports at several widths, slices,
   defaults, component binding.
 - `t_vhdl_record_sub` — constrained record subtypes, layered constraints,

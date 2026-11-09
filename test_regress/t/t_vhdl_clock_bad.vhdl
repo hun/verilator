@@ -63,7 +63,8 @@ entity shared_target is
     clk1 : in std_logic;
     clk2 : in std_logic;
     d : in std_logic;
-    q : out std_logic
+    q : out std_logic;
+    r : out std_logic
   );
 end;
 
@@ -74,9 +75,14 @@ begin
     if rising_edge(clk1) then
       q <= d;
     end if;
+    -- The second statement of the clk1 group writes r, so scanning only the first
+    -- statement of the merged chain would miss the clash with the clk2 group
+    if rising_edge(clk1) then
+      r <= d;
+    end if;
     -- Two clocks writing one signal have no defined order
     if rising_edge(clk2) then
-      q <= not d;
+      r <= not d;
     end if;
   end process;
 end;

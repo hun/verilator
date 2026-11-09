@@ -1,6 +1,6 @@
 %Error: t/t_vhdl_clock_bad.vhdl:24:1: VHDL clock edge before a later branch is not supported yet
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: t/t_vhdl_clock_bad.vhdl:50:1: VHDL asynchronous reset condition is not supported yet
-%Error: t/t_vhdl_clock_bad.vhdl:72:1: VHDL clocked statements with different edges share a target is not supported yet
-%Error: t/t_vhdl_clock_bad.vhdl:103:1: VHDL clock edge in a process(all) is not supported yet
+%Error: t/t_vhdl_clock_bad.vhdl:73:1: VHDL clocked statements with different edges share a target is not supported yet
+%Error: t/t_vhdl_clock_bad.vhdl:109:1: VHDL clock edge in a process(all) is not supported yet
 %Error: Exiting due to
