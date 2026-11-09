@@ -991,7 +991,7 @@ class VhdlXmlFrontend final {
         }
         const std::vector<const Node*> indices = childEls(indicesp);
         if (indices.size() != 1) {
-            error(subtypep, "multi-dimensional VHDL arrays are not supported yet");
+            unsupported(subtypep, "multi-dimensional array");
             spec.isVector = false;
             return spec;
         }
@@ -1002,16 +1002,15 @@ class VhdlXmlFrontend final {
             return spec;
         }
         spec.ascending = rangep->attr("direction") == "to";
-        int64_t leftValue = 0;
-        int64_t rightValue = 0;
-        if (!evalConst(rangeBound(rangep, true), leftValue)
-            || !evalConst(rangeBound(rangep, false), rightValue)) {
+        int leftValue = 0;
+        int rightValue = 0;
+        if (!discreteRange(rangep, leftValue, rightValue, spec.ascending)) {
             error(rangep, "non-static VHDL range limit is not supported yet");
             spec.isVector = false;  // Keep the tree buildable; the error aborts the run
             return spec;
         }
-        spec.left = static_cast<int>(leftValue);
-        spec.right = static_cast<int>(rightValue);
+        spec.left = leftValue;
+        spec.right = rightValue;
         if (rangeLength(spec.left, spec.right, spec.ascending) <= 0) {
             unsupported(subtypep, "null array");
             spec.isVector = false;  // Keep the tree buildable; the error aborts the run
@@ -1713,9 +1712,20 @@ class VhdlXmlFrontend final {
                     unsupported(stmtp, "assignment to a variable element in an inlined function");
                     return nullptr;
                 }
-                AstNodeExpr* const valuep = lowerExpr(exprp, nullptr);
+                // The target constrains the value, e.g. an aggregate or literal width
+                const std::string targetName = vhdlFold(targetp->attr("identifier"));
+                AstNodeDType* targetDtp = nullptr;
+                const auto targetIt = env.find(targetName);
+                if (targetIt != env.end() && targetIt->second.exprp) {
+                    targetDtp = targetIt->second.exprp->dtypep();
+                }
+                AstNodeExpr* valuep = lowerExpr(exprp, targetDtp);
                 if (!valuep) return nullptr;
-                funcEnvSet(env, vhdlFold(targetp->attr("identifier")), valuep);
+                if (targetDtp && valuep->dtypep() != targetDtp
+                    && valuep->dtypep()->width() != targetDtp->width()) {
+                    valuep = resizeExpr(valuep, targetDtp);
+                }
+                funcEnvSet(env, targetName, valuep);
                 continue;
             }
             if (kind == "null_statement" || kind == "assertion_statement"
@@ -2642,12 +2652,94 @@ class VhdlXmlFrontend final {
         rhsp = resizeExpr(rhsp, dtp);
     }
 
+    //! Derive the flat array dtype of an aggregate whose context is unconstrained
+    AstNodeDType* inferAggregateDType(const Node* nodep) {
+        const std::vector<const Node*> choices
+            = childEls(nodep->child("association_choices_chain"));
+        if (choices.empty()) return nullptr;
+        int left = 0;
+        int right = 0;
+        bool ascending = true;
+        bool haveBounds = false;
+        bool haveExpr = false;
+        bool haveRange = false;
+        int64_t exprMin = 0;
+        int64_t exprMax = 0;
+        for (const Node* const choicep : choices) {
+            const std::string kind = choicep->attr("kind");
+            if (kind == "choice_by_range") {
+                if (haveExpr) return nullptr;
+                int rangeLeft = 0;
+                int rangeRight = 0;
+                bool rangeAscending = true;
+                if (!discreteRange(choicep->child("choice_range"), rangeLeft, rangeRight,
+                                   rangeAscending)) {
+                    return nullptr;
+                }
+                if (!haveBounds) {
+                    left = rangeAscending ? rangeLeft : rangeRight;
+                    right = rangeAscending ? rangeRight : rangeLeft;
+                    ascending = rangeAscending;
+                    haveBounds = true;
+                } else {
+                    if (rangeAscending != ascending) return nullptr;
+                    if (ascending) {
+                        left = std::min(left, rangeLeft);
+                        right = std::max(right, rangeRight);
+                    } else {
+                        left = std::max(left, rangeLeft);
+                        right = std::min(right, rangeRight);
+                    }
+                }
+                haveRange = true;
+            } else if (kind == "choice_by_expression") {
+                // Positional and `others` choices need a context to know the bounds
+                if (haveRange) return nullptr;
+                int64_t index = 0;
+                if (!evalConst(choicep->child("choice_expression"), index)) return nullptr;
+                if (!haveExpr) {
+                    exprMin = index;
+                    exprMax = index;
+                    haveExpr = true;
+                } else {
+                    exprMin = std::min(exprMin, index);
+                    exprMax = std::max(exprMax, index);
+                }
+            } else {
+                return nullptr;
+            }
+        }
+        if (haveExpr) {
+            left = static_cast<int>(exprMin);
+            right = static_cast<int>(exprMax);
+            ascending = true;
+        }
+        if (!haveBounds && !haveExpr) return nullptr;
+        // The associated value of an element choice supplies the element width and kind
+        AstNodeExpr* const probe = lowerExpr(choices.front()->child("associated_expr"), nullptr);
+        if (!probe) return nullptr;
+        const AstBasicDType* const basicp = VN_CAST(probe->dtypep()->skipRefp(), BasicDType);
+        const int elemWidth = probe->dtypep()->width();
+        VL_DO_DANGLING(probe->deleteTree(), probe);
+        if (!basicp || elemWidth <= 0
+            || (basicp->keyword() != VBasicDTypeKwd::LOGIC
+                && basicp->keyword() != VBasicDTypeKwd::BIT)) {
+            return nullptr;
+        }
+        const int elems = rangeLength(left, right, ascending);
+        if (elems <= 0 || elems > INT_MAX / elemWidth) return nullptr;
+        const int width = elems * elemWidth;
+        return m_rootp->typeTablep()->findLogicBitDType(flpOf(nodep), basicp->keyword(), width,
+                                                        width, basicp->numeric());
+    }
+
     //! Lower an array aggregate: positional, named (single or range) and `others` choices
     AstNodeExpr* lowerArrayAggregate(const Node* nodep, AstNodeDType* contextp) {
         FileLine* const flp = flpOf(nodep);
         VhdlDTypeSpec layout;
         const bool haveLayout = arraySpec(nodep, layout);
-        AstNodeDType* const targetDtp = contextp ? contextp : typeRefDType(nodep);
+        AstNodeDType* targetDtp = contextp ? contextp : typeRefDType(nodep);
+        if (!targetDtp || targetDtp->width() <= 0) targetDtp = inferAggregateDType(nodep);
         if (!targetDtp || targetDtp->width() <= 0) return nullptr;
         const int elemWidth = haveLayout ? layout.elemWidth : 1;
         const int totalWidth = targetDtp->width();
@@ -2656,12 +2748,12 @@ class VhdlXmlFrontend final {
         int left = 0;
         int right = elements - 1;
         bool ascending = true;
+        const AstBasicDType* const basicp = VN_CAST(targetDtp->skipRefp(), BasicDType);
         if (haveLayout) {
             left = layout.left;
             right = layout.right;
             ascending = layout.ascending;
-        } else if (const AstBasicDType* const basicp
-                   = VN_CAST(targetDtp->skipRefp(), BasicDType)) {
+        } else if (basicp) {
             left = basicp->left();
             right = basicp->right();
             ascending = basicp->ascending();
@@ -2702,9 +2794,15 @@ class VhdlXmlFrontend final {
         std::vector<AstNodeExpr*> exprs(static_cast<size_t>(elements), nullptr);
         const Node* othersp = nullptr;
         int position = 0;
+        const Node* lastAssocp = nullptr;
         for (const Node* const choicep : childEls(nodep->child("association_choices_chain"))) {
-            const Node* const assocp = choicep->child("associated_expr");
+            const Node* assocp = choicep->child("associated_expr");
+            if (!assocp && choicep->attr("same_alternative_flag") == "true") {
+                // `0 | 1 => value` shares one associated expression across its choices
+                assocp = lastAssocp;
+            }
             if (!assocp) return nullptr;
+            lastAssocp = assocp;
             const std::string choiceKind = choicep->attr("kind");
             if (choiceKind == "choice_by_others") {
                 othersp = assocp;
@@ -2717,14 +2815,15 @@ class VhdlXmlFrontend final {
                 if (!exprs[slot]) return nullptr;
             } else if (choiceKind == "choice_by_range") {
                 const Node* const rangep = derefNode(choicep->child("choice_range"));
-                int64_t leftValue = 0;
-                int64_t rightValue = 0;
-                if (!rangep || !evalConst(rangeBound(rangep, true), leftValue)
-                    || !evalConst(rangeBound(rangep, false), rightValue)) {
+                int rangeLeft = 0;
+                int rangeRight = 0;
+                bool rangeAscending = true;
+                if (!rangep || !discreteRange(rangep, rangeLeft, rangeRight, rangeAscending)
+                    || rangeAscending != ascending) {
                     return nullptr;
                 }
-                const int64_t lowv = std::min(leftValue, rightValue);
-                const int64_t highv = std::max(leftValue, rightValue);
+                const int64_t lowv = std::min(rangeLeft, rangeRight);
+                const int64_t highv = std::max(rangeLeft, rangeRight);
                 for (int64_t index = lowv; index <= highv; ++index) {
                     const int slot = slotOf(index);
                     if (slot < 0) return nullptr;
@@ -2732,12 +2831,36 @@ class VhdlXmlFrontend final {
                     if (!exprs[slot]) return nullptr;
                 }
             } else if (choiceKind == "choice_by_none") {
-                const int index = ascending ? left + position : left - position;
-                ++position;
-                const int slot = slotOf(index);
-                if (slot < 0) return nullptr;
-                exprs[slot] = lowerExpr(assocp, elemDtp);
-                if (!exprs[slot]) return nullptr;
+                // A positional value may span several elements; its leftmost element is the
+                // first index (most significant bit in the packed representation)
+                AstNodeExpr* const valuep = lowerExpr(assocp, nullptr);
+                if (!valuep) return nullptr;
+                const int valueWidth = valuep->dtypep()->width();
+                if (valueWidth <= 0 || valueWidth % elemWidth) return nullptr;
+                const int count = valueWidth / elemWidth;
+                AstNodeDType* const pieceDtp
+                    = elemDtp ? elemDtp
+                              : (basicp ? m_rootp->typeTablep()->findLogicBitDType(
+                                              flp, basicp->keyword(), elemWidth, elemWidth,
+                                              basicp->numeric())
+                                        : nullptr);
+                for (int k = 0; k < count; ++k) {
+                    const int index = ascending ? left + position + k : left - position - k;
+                    const int slot = slotOf(index);
+                    if (slot < 0) return nullptr;
+                    if (count == 1) {
+                        exprs[slot] = k == 0 ? valuep : nullptr;
+                    } else {
+                        AstSel* const piecep
+                            = new AstSel{flp, valuep->cloneTree(false),
+                                         valueWidth - (k + 1) * elemWidth, elemWidth};
+                        piecep->dtypep(pieceDtp);
+                        exprs[slot] = piecep;
+                    }
+                    if (!exprs[slot]) return nullptr;
+                }
+                if (count > 1) VL_DO_DANGLING(valuep->deleteTree(), valuep);
+                position += count;
             } else {
                 return nullptr;
             }
@@ -3419,7 +3542,18 @@ class VhdlXmlFrontend final {
                         basicp->width(), VSigning::SIGNED);
                 }
             }
-            return lowerExpr(nodep->child("expression"), dtp);
+            const Node* const exprp = nodep->child("expression");
+            if (!exprp) return nullptr;
+            // A determined aggregate carries its own bounds; a wider context resizes the
+            // result rather than stretching the aggregate's element count
+            if (exprp->attr("kind") == "aggregate") {
+                AstNodeDType* const ownDtp = typeRefDType(exprp);
+                if (ownDtp && dtp && ownDtp->width() != dtp->width()) {
+                    AstNodeExpr* const valuep = lowerExpr(exprp, ownDtp);
+                    return valuep ? resizeExpr(valuep, dtp) : nullptr;
+                }
+            }
+            return lowerExpr(exprp, dtp);
         }
         if (kind == "type_conversion") {
             AstNodeExpr* const innerp = lowerExpr(nodep->child("expression"), contextp);
@@ -3742,39 +3876,16 @@ class VhdlXmlFrontend final {
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
     }
 
-    //! Value of a static array attribute ('left/'right/'high/'low/'length/'ascending)
-    bool attrValue(const Node* nodep, int64_t& value) const {
-        std::string kind = nodep->attr("kind");
-        const std::string suffix = "_array_attribute";
-        if (kind.size() > suffix.size()
-            && kind.compare(kind.size() - suffix.size(), suffix.size(), suffix) == 0) {
-            kind.resize(kind.size() - suffix.size());
-        }
-        if (kind != "left" && kind != "right" && kind != "high" && kind != "low"
-            && kind != "length" && kind != "ascending") {
-            return false;
-        }
-        const Node* const prefixp = nodep->child("prefix");
+    //! Left/right bounds and direction of the array behind a name prefix
+    bool arrayRangeOfPrefix(const Node* prefixp, int& left, int& right, bool& ascending) const {
         if (!prefixp || prefixp->attr("kind") != "simple_name") return false;
         // An array of multi-bit elements stores only its bit width in the dtype; a string
         // generic's analyzed type is unconstrained and its actual supplies the range
         VhdlDTypeSpec layout;
         if (stringGenericSpec(prefixp, layout) || multiArraySpec(prefixp, layout)) {
-            const int left = layout.left;
-            const int right = layout.right;
-            if (kind == "left") {
-                value = left;
-            } else if (kind == "right") {
-                value = right;
-            } else if (kind == "high") {
-                value = std::max(left, right);
-            } else if (kind == "low") {
-                value = std::min(left, right);
-            } else if (kind == "length") {
-                value = rangeLength(left, right, layout.ascending);
-            } else {
-                value = layout.ascending ? 1 : 0;
-            }
+            left = layout.left;
+            right = layout.right;
+            ascending = layout.ascending;
             return true;
         }
         AstVar* const varp = lookupVar(prefixp);
@@ -3788,8 +3899,28 @@ class VhdlXmlFrontend final {
             }
         }
         if (!basicp) return false;
-        const int left = basicp->left();
-        const int right = basicp->right();
+        left = basicp->left();
+        right = basicp->right();
+        ascending = basicp->ascending();
+        return true;
+    }
+
+    //! Value of a static array attribute ('left/'right/'high/'low/'length/'ascending)
+    bool attrValue(const Node* nodep, int64_t& value) const {
+        std::string kind = nodep->attr("kind");
+        const std::string suffix = "_array_attribute";
+        if (kind.size() > suffix.size()
+            && kind.compare(kind.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            kind.resize(kind.size() - suffix.size());
+        }
+        if (kind != "left" && kind != "right" && kind != "high" && kind != "low"
+            && kind != "length" && kind != "ascending") {
+            return false;
+        }
+        int left = 0;
+        int right = 0;
+        bool ascending = true;
+        if (!arrayRangeOfPrefix(nodep->child("prefix"), left, right, ascending)) return false;
         if (kind == "left") {
             value = left;
         } else if (kind == "right") {
@@ -3799,9 +3930,9 @@ class VhdlXmlFrontend final {
         } else if (kind == "low") {
             value = std::min(left, right);
         } else if (kind == "length") {
-            value = basicp->width();
+            value = rangeLength(left, right, ascending);
         } else {
-            value = basicp->ascending() ? 1 : 0;
+            value = ascending ? 1 : 0;
         }
         return true;
     }
@@ -3833,7 +3964,9 @@ class VhdlXmlFrontend final {
         }
         // GHDL spells the IIR kind "substraction_operator"
         if (kind == "addition_operator" || kind == "subtraction_operator"
-            || kind == "substraction_operator" || kind == "multiplication_operator") {
+            || kind == "substraction_operator" || kind == "multiplication_operator"
+            || kind == "division_operator" || kind == "modulus_operator"
+            || kind == "remainder_operator" || kind == "exponentiation_operator") {
             int64_t lhsv = 0;
             int64_t rhsv = 0;
             if (!evalConst(nodep->child("left"), lhsv, depth + 1)
@@ -3844,15 +3977,31 @@ class VhdlXmlFrontend final {
                 value = lhsv + rhsv;
             } else if (kind == "multiplication_operator") {
                 value = lhsv * rhsv;
+            } else if (kind == "division_operator") {
+                if (!rhsv) return false;
+                value = lhsv / rhsv;
+            } else if (kind == "modulus_operator") {
+                if (!rhsv) return false;
+                value = lhsv % rhsv;
+                // VHDL mod takes the sign of the divisor, unlike C++ %
+                if (value && ((value < 0) != (rhsv < 0))) value += rhsv;
+            } else if (kind == "remainder_operator") {
+                if (!rhsv) return false;
+                value = lhsv % rhsv;
+            } else if (kind == "exponentiation_operator") {
+                if (rhsv < 0) return false;
+                value = 1;
+                for (int64_t i = 0; i < rhsv; ++i) value *= lhsv;
             } else {
                 value = lhsv - rhsv;
             }
             return true;
         }
-        if (kind == "negation_operator") {
+        if (kind == "negation_operator" || kind == "absolute_operator") {
             int64_t operandv = 0;
             if (!evalConst(nodep->child("operand"), operandv, depth + 1)) return false;
-            value = -operandv;
+            value
+                = kind == "negation_operator" ? -operandv : (operandv < 0 ? -operandv : operandv);
             return true;
         }
         if (kind == "parentheses_expression") {
@@ -3997,6 +4146,21 @@ class VhdlXmlFrontend final {
             && evalConst(rangeBound(rangep, false), rightValue)) {
             left = static_cast<int>(leftValue);
             right = static_cast<int>(rightValue);
+            return true;
+        }
+        // `a'range` as a constraint or index carries the array's bounds directly
+        const std::string rangeKind = rangep->attr("kind");
+        if (rangeKind == "range_array_attribute") {
+            int leftBound = 0;
+            int rightBound = 0;
+            bool rangeAscending = true;
+            if (!arrayRangeOfPrefix(rangep->child("prefix"), leftBound, rightBound,
+                                    rangeAscending)) {
+                return false;
+            }
+            left = leftBound;
+            right = rightBound;
+            ascending = rangeAscending;
             return true;
         }
         // "for i in a'range" carries the array's range as an attribute origin
@@ -6286,7 +6450,9 @@ public:
                 && vhdlFold(name) == vhdlFold(v3Global.opt.topModule())) {
                 unsupported(entityp, "generic without a default on a top-level entity");
             }
-            if (!hasTypeGenerics(entityp) && !unconstrainedPorts) {
+            // A type-generic entity, one with unconstrained ports, or one with a generic
+            // that has no default has no single port type/body; only specializations emit
+            if (!hasTypeGenerics(entityp) && !unconstrainedPorts && !hasUnboundGeneric(entityp)) {
                 modules.emplace_back(entityp, it->second);
             }
         }

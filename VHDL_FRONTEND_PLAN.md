@@ -3,9 +3,11 @@
 
 # VHDL frontend for Verilator — implementation plan
 
-**Status:** proposal; WP0 plumbing implemented on branch `vhdl-frontend-wp0` (commits
-`729df7a`, `bed81f2`). Nothing beyond WP0 is implemented. Not user documentation; this is
-a planning document and must not be linked from `docs/`.
+**Status:** implemented on branch `vhdl-frontend-wp0`: WP0 plumbing, the active GHDL XML
+front end (WP1/WP2), elaboration (WP3), lowering (WP4) and a partial standard-package
+intrinsic set (WP5) cover a substantial synthesizable VHDL subset. In-tree parsing and
+mixed-language designs are not implemented. Not user documentation; this is a planning
+document and must not be linked from `docs/`.
 
 **Target tree:** Verilator 5.055 devel, commit `9c28d84` (2026-11-07).
 
@@ -14,7 +16,7 @@ subset is 25–45k new LOC (1.5–3 engineer-years for a solid subset, 5–10 pe
 for a demo subset). Faithful VHDL-2008 simulation semantics are not reachable without a
 new value model and are out of scope.
 
-## Implementation status (2026-11-08)
+## Implementation status (2026-11-09)
 
 | Work package | State |
 |---|---|
@@ -22,7 +24,11 @@ new value model and are out of scope.
 | WP1 front end | **GHDL XML path implemented**: entities with ports, architecture signals, concurrent assignments, clocked processes (`rising_edge`/`falling_edge`/`clk'event and clk = '1'`), synchronous and asynchronous reset processes, conditional and selected concurrent assignments, `if`/`elsif`/`else`, `case` (including range and multiple-value choices), enumeration types (literals, subtypes, enum-valued ports and case selectors, `'pos`/`'val`/`'succ`/`'pred` and type-mark `'left`/`'right`/`'high`/`'low`), process variables, indexing and slicing (including dynamic indices), static for loops, for-generate and if-generate blocks (unrolled/selected), static attributes (`'length`, `'high`, `'left`, `'ascending`), `+`/`-`/`*`/`/`/`mod`/`rem`/`**`/`abs` (unary `-`), `and`/`or`/`xor`/`nand`/`nor`/`xnor`/`not`, `=`/`/=`/`<`/`<=`/`>`/`>=`, `&`, `sll`/`srl`/`sla`/`sra`, records (packed-vector layout, member selection, nested records, positional and named aggregates), array `(others => expr)` aggregates, object aliases (including slices and constants), user-defined pure function calls (inlined: locals, if/elsif/else, case, parameter defaults, named associations, nested calls), user-defined procedure calls (inlined: in/out/inout parameters, parameter defaults and named associations, locals, if/elsif/else, case, early return, nested calls; nested subprograms capture the enclosing scope; recursion and out-signal-parameter reads unsupported), qualified expressions, hex/octal/binary bit-string literals, type conversions, `to_unsigned`/`to_signed`/`resize`/`to_integer`/`shift_left`/`shift_right`/`rotate_left`/`rotate_right`/`minimum`/`maximum`, declaration initializers, static constants and generics (defaults and generic maps, with per-binding module specialization) resolved through their analyzed references, user-defined subtypes and constrained array types, and component/direct-entity instantiation with named, positional and open port maps. Component declarations are validated against the bound entity (direction and width). Processes execute once at time zero, as VHDL requires. The in-tree lexer/parser remains reserved and is not used |
 | WP2 semantics | provided by GHDL analysis; Verilator does not repeat it on this path |
 | WP3 elaboration | entity/architecture binding, VHDL-entity instance binding, component-interface validation, for-generate unrolling and if-generate selection; generic defaults and generic maps are elaborated (constant and generic type parameters, with per-binding module specialization) |
-| WP4–WP8 | not started |
+| WP4 lowering | implemented for the supported subset: post-width AST with port `AstVar`s, `AstAssignW`/`AstAssignDly`/`AstAssign`, `AstSenTree` edge/change sensitivity, process splitting, aggregate targets, subprogram inlining, record/array packing |
+| WP5 std packages | partial intrinsic subset: `numeric_std`, `std_logic_misc`, `std_logic_arith` conversions, operator-symbol calls; no full package simulation |
+| WP6 test infrastructure | 44 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
+| WP7 hardening | ongoing: clean Unsupported/Error diagnostics, corpus triage, process-form rejection, control-file handling |
+| WP8 mixed language (M2) | not started |
 
 The active frontend runs `ghdl --file-to-xml --std=08` out of process, parses the XML into a
 minimal DOM (`V3VhdlXml`), and lowers the analyzed design units to a post-width-commit
@@ -44,8 +50,8 @@ Neither helper is installed with Verilator.
 
 | Work package | State |
 |---|---|
-| WP1 parser (in-tree) | reserved; not started |
-| WP2–WP8 | not started |
+| WP1 parser (in-tree) | reserved; not started and not reachable |
+| WP2 semantics (in-tree) | not started; delegated to GHDL |
 
 WP0 proves the seam end-to-end:
 
@@ -76,8 +82,42 @@ deferred because `V3LinkCells::autoLoad` still uses the SV parser. Build note: `
 stops at the `verilator_gantt.1` target when `help2man` is absent; both compiler binaries
 build.
 
-Next: WP1 replaces the stub with the real VHDL subset parser (architecture declarative and
-statement parts, subtype declarations, expressions, subprograms), then WP2 semantics.
+## Current coverage and remaining gaps (2026-11-09)
+
+Regression: 45 `test_regress/t/t_vhdl_*` tests pass. GHDL `synth` corpus
+(`nodist/ghdl_synth_suite.py --suite synth --jobs 8`, 1139 scripted cases):
+
+| status | count |
+|---|---|
+| PASS | 665 |
+| UNSUPPORTED | 300 |
+| ERROR | 31 |
+| EXPECTED_FAIL | 48 |
+| GHDL_ERROR | 94 |
+| NO_TOP | 1 |
+
+The `ERROR` bucket is mostly real design errors in the corpus (unresolved instances,
+missing architectures, unknown identifiers) plus six pre-existing core faults
+(`V3DfgSynthesize` width/read-only, `V3Tristate`). Remaining work, in priority order:
+
+1. WP8 cross-language binding: component-to-SystemVerilog-module lookup and
+   configurations. Mixed VHDL/SV invocations stay rejected until then.
+2. Process forms: waits that are not a top-level clock edge (`wait on`, `wait for`,
+   inside loops), clock edges inside `process(all)`, and process splitting when
+   variables/ordering cannot be proven disjoint.
+3. Inout ports and `'Z'` literals: the core tristate/DFG limitation needs core work or a
+   broader frontend rejection.
+4. Static-expression and aggregate gaps: pure function calls in locally static
+   expressions, slice widths recovered from tracked variable relations,
+   multi-dimensional arrays, null arrays, and remaining aggregate forms.
+   Integer division/modulus/remainder/exponentiation, `'range` constraints,
+   target-constrained function-local aggregates, shared alternative choices and
+   multi-element positional aggregates are supported.
+5. Non-logic character/string literal contexts and matching relational operators
+   (`?<`/`?<=`/`?>`/`?>=`).
+6. Function-local variable element assignment in inlined functions.
+7. Environment-only validation: full `make test` with `help2man`, lz4 headers and
+   `wavediff` available, plus `make cppcheck`.
 
 ## 1. Approach
 

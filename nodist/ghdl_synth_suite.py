@@ -127,9 +127,9 @@ def classify(returncode, output):
     """Categorize one Verilator run's status and the matching diagnostic."""
     if returncode == 0:
         return 'PASS', ''
-    if 'is not supported yet' in output or 'UNSUPPORTED' in output:
+    if 'not supported yet' in output or 'UNSUPPORTED' in output:
         detail = next((line.strip() for line in output.splitlines()
-                       if 'is not supported yet' in line or 'UNSUPPORTED' in line), '')
+                       if 'not supported yet' in line or 'UNSUPPORTED' in line), '')
         return 'UNSUPPORTED', detail
     if 'GHDL failed to analyze' in output:
         detail = next((line.strip() for line in output.splitlines()
