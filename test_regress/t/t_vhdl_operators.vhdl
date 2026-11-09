@@ -8,6 +8,14 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+package opkg is
+  constant k : unsigned(3 downto 0) := "1010";
+end package;
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
 entity t is
   port (
     a     : in integer;
@@ -47,7 +55,12 @@ entity t is
     slt_w_o : out std_logic;
     sadd_o : out signed(7 downto 0);
     lit_t_o : out std_logic;
-    lit_f_o : out std_logic
+    lit_f_o : out std_logic;
+    rol_o : out unsigned(3 downto 0);
+    ror_o : out unsigned(3 downto 0);
+    plus_o : out integer;
+    cond_o : out std_logic;
+    pkgconst_o : out unsigned(3 downto 0)
   );
 end;
 
@@ -65,6 +78,12 @@ begin
   le_o <= '1' when a <= b else '0';
   gt_o <= '1' when a > b else '0';
   ge_o <= '1' when a >= b else '0';
+
+  rol_o <= u rol 1;
+  ror_o <= u ror 2;
+  plus_o <= +a;
+  cond_o <= '1' when (?? u(0)) else '0';
+  pkgconst_o <= work.opkg.k;
 
   and_o <= u and (u - 1);
   nand_o <= u nand (u - 1);
