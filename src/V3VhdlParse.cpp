@@ -303,6 +303,12 @@ class VhdlXmlFrontend final {
         int64_t offset = 0;  // Constant part
     };
     std::map<AstVar*, VarRelation> m_varRelations;  // Current straight-line variable values
+    //! Loop control flow while static loops are unrolled
+    std::vector<AstNodeExpr*> m_condStack;  // Enclosing if/elsif/else path conditions
+    std::vector<AstVar*> m_loopExitFlags;  // Latched exit flag per active loop
+    std::vector<int> m_loopCaseDepths;  // Case nesting depth when each loop was entered
+    AstNodeExpr* m_stmtExitp = nullptr;  // Chain-ending condition from the last statement
+    int m_caseDepth = 0;  // Enclosing case statements during lowering
     //! A specialized port's type, and record layout when the port is a record
     struct PortInfo final {
         VhdlDTypeSpec spec;
@@ -3747,12 +3753,26 @@ class VhdlXmlFrontend final {
             FileLine* const flp = flpOf(elsep);
             AstNodeExpr* const condExprp = lowerExpr(condp, bitDType(flp));
             const std::map<AstVar*, VarRelation> savedRelations = m_varRelations;
+            m_condStack.push_back(condExprp);
             AstNode* const thensp
                 = lowerStmtChain(elsep->child("sequential_statement_chain"), mode);
+            AstNodeExpr* const thenExitp = m_stmtExitp;
+            m_stmtExitp = nullptr;
+            m_condStack.pop_back();
             m_varRelations = savedRelations;
+            AstNodeExpr* const notcondp = makeBoolNot(flp, condExprp->cloneTree(false));
+            m_condStack.push_back(notcondp);
             AstNode* const elsesp = elsep->child("else_clause")
                                         ? lowerElse(elsep->child("else_clause"), mode)
                                         : nullptr;
+            AstNodeExpr* const elseExitp = m_stmtExitp;
+            m_stmtExitp = nullptr;
+            m_condStack.pop_back();
+            VL_DO_DANGLING(notcondp->deleteTree(), notcondp);
+            m_stmtExitp = thenExitp;
+            if (elseExitp) {
+                m_stmtExitp = thenExitp ? makeBoolOr(flp, thenExitp, elseExitp) : elseExitp;
+            }
             return new AstIf{flp, condExprp, thensp, elsesp};
         }
         unsupported(elsep, "else clause form '" + kind + "'");
@@ -3907,6 +3927,7 @@ class VhdlXmlFrontend final {
         AstCaseItem* itemsp = nullptr;
         AstCaseItem* currentp = nullptr;
         const std::map<AstVar*, VarRelation> savedRelations = m_varRelations;
+        ++m_caseDepth;
         for (const Node* const choicep :
              childEls(stmtp->child("case_statement_alternative_chain"))) {
             const bool sameAlternative = choicep->attr("same_alternative_flag") == "true";
@@ -3934,6 +3955,7 @@ class VhdlXmlFrontend final {
             }
             for (AstConst* const condp : conds) currentp->addCondsp(condp);
         }
+        --m_caseDepth;
         // A branch may have changed any tracked variable
         m_varRelations.clear();
         return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
@@ -4252,6 +4274,34 @@ class VhdlXmlFrontend final {
         return false;
     }
 
+    //! Whether an exit statement targeting this loop appears below it
+    static bool containsExit(const Node* nodep) {
+        if (!nodep) return false;
+        if (nodep->attr("kind") == "exit_statement") return true;
+        // An exit inside a nested loop targets that loop, not this one
+        if (nodep->attr("kind") == "for_loop_statement") return false;
+        for (const auto& childp : nodep->children()) {
+            if (containsExit(childp.get())) return true;
+        }
+        return false;
+    }
+
+    AstNodeExpr* makeBoolAnd(FileLine* flp, AstNodeExpr* lhsp, AstNodeExpr* rhsp) const {
+        AstAnd* const andp = new AstAnd{flp, lhsp, rhsp};
+        andp->dtypep(bitDType(flp));
+        return andp;
+    }
+    AstNodeExpr* makeBoolOr(FileLine* flp, AstNodeExpr* lhsp, AstNodeExpr* rhsp) const {
+        AstOr* const orp = new AstOr{flp, lhsp, rhsp};
+        orp->dtypep(bitDType(flp));
+        return orp;
+    }
+    AstNodeExpr* makeBoolNot(FileLine* flp, AstNodeExpr* operandp) const {
+        AstNot* const notp = new AstNot{flp, operandp};
+        notp->dtypep(bitDType(flp));
+        return notp;
+    }
+
     AstNode* lowerForLoop(const Node* stmtp, AssignMode mode) {
         const Node* const specp = stmtp->child("parameter_specification");
         if (!specp || specp->attr("kind") != "iterator_declaration") {
@@ -4282,22 +4332,44 @@ class VhdlXmlFrontend final {
             }
         }
         const int step = ascending ? 1 : -1;
+        FileLine* const flp = flpOf(stmtp);
+        const bool anyExit = containsExit(stmtp->child("sequential_statement_chain"));
+        AstVar* flagp = nullptr;
         AstNode* headp = nullptr;
+        if (anyExit) {
+            flagp = new AstVar{flp, VVarType::VAR, "vhdl_loopexit_" + std::to_string(++m_varSeq),
+                               bitDType(flp)};
+            m_modp->addStmtsp(flagp);
+            headp = new AstAssign{flp, new AstVarRef{flp, flagp, VAccess::WRITE},
+                                  makeConst(flp, bitDType(flp), 0U)};
+        }
+        m_loopExitFlags.push_back(flagp);
+        m_loopCaseDepths.push_back(m_caseDepth);
         for (int value = left; ascending ? value <= right : value >= right; value += step) {
             const auto saved = m_constBindings.find(key);
             const bool hadBinding = saved != m_constBindings.end();
             const int64_t savedValue = hadBinding ? saved->second : 0;
             m_constBindings[key] = value;
-            AstNode* const bodyp
-                = lowerStmtChain(stmtp->child("sequential_statement_chain"), mode);
+            m_stmtExitp = nullptr;
+            AstNode* bodyp = lowerStmtChain(stmtp->child("sequential_statement_chain"), mode);
+            m_stmtExitp = nullptr;
             if (hadBinding) {
                 m_constBindings[key] = savedValue;
             } else {
                 m_constBindings.erase(key);
             }
-            if (!bodyp) continue;
-            headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, bodyp) : bodyp;
+            if (bodyp) {
+                // Once an iteration has exited, later iterations are dead
+                if (flagp) {
+                    AstNodeExpr* const guardp
+                        = makeBoolNot(flp, new AstVarRef{flp, flagp, VAccess::READ});
+                    bodyp = new AstIf{flp, guardp, bodyp, nullptr};
+                }
+                headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, bodyp) : bodyp;
+            }
         }
+        m_loopCaseDepths.pop_back();
+        m_loopExitFlags.pop_back();
         if (hadInlineBinding && m_inlineEnvp) (*m_inlineEnvp)[key] = savedBinding;
         // The loop may execute zero times, so nothing tracked inside it survives
         m_varRelations.clear();
@@ -4314,6 +4386,47 @@ class VhdlXmlFrontend final {
             m_varRelations.clear();
             return resultp;
         }
+        if (kind == "exit_statement" || kind == "next_statement") {
+            FileLine* const flp = flpOf(stmtp);
+            const std::string what
+                = kind == "exit_statement" ? "exit statement" : "next statement";
+            if (m_loopCaseDepths.empty()) {
+                unsupported(stmtp, what + " outside a static loop");
+                return nullptr;
+            }
+            if (m_caseDepth != m_loopCaseDepths.back()) {
+                unsupported(stmtp, what + " inside a case statement");
+                return nullptr;
+            }
+            if (stmtp->child("loop_label")) {
+                unsupported(stmtp, what + " to an outer loop");
+                return nullptr;
+            }
+            AstNodeExpr* condp = stmtp->child("condition")
+                                     ? lowerExpr(stmtp->child("condition"), bitDType(flp))
+                                     : makeConst(flp, bitDType(flp), 1U);
+            if (!condp) return nullptr;
+            // An exit/next in a branch is only taken on that branch's path
+            for (AstNodeExpr* const pathp : m_condStack) {
+                condp = makeBoolAnd(flp, pathp->cloneTree(false), condp);
+            }
+            AstNode* resultp = nullptr;
+            if (kind == "exit_statement") {
+                AstVar* const flagp = m_loopExitFlags.back();
+                if (!flagp) {
+                    unsupported(stmtp, what + " in a loop it cannot target");
+                    return nullptr;
+                }
+                // Latch the decision so later iterations are not affected by variables
+                // assigned after the exit point in this iteration
+                AstAssign* const setp
+                    = new AstAssign{flp, new AstVarRef{flp, flagp, VAccess::WRITE},
+                                    makeConst(flp, bitDType(flp), 1U)};
+                resultp = new AstIf{flp, condp->cloneTree(false), setp, nullptr};
+            }
+            m_stmtExitp = condp;
+            return resultp;
+        }
         if (kind == "case_statement") return lowerCase(stmtp, mode);
         if (kind == "for_loop_statement") return lowerForLoop(stmtp, mode);
         if (kind == "selected_waveform_assignment_statement") {
@@ -4328,14 +4441,30 @@ class VhdlXmlFrontend final {
             FileLine* const flp = flpOf(stmtp);
             AstNodeExpr* const condp = lowerExpr(stmtp->child("condition"), bitDType(flp));
             const std::map<AstVar*, VarRelation> savedRelations = m_varRelations;
+            m_condStack.push_back(condp);
             AstNode* const thensp
                 = lowerStmtChain(stmtp->child("sequential_statement_chain"), mode);
+            AstNodeExpr* const thenExitp = m_stmtExitp;
+            m_stmtExitp = nullptr;
+            m_condStack.pop_back();
             m_varRelations = savedRelations;
-            AstNode* const elsesp = stmtp->child("else_clause")
-                                        ? lowerElse(stmtp->child("else_clause"), mode)
-                                        : nullptr;
+            AstNode* elsesp = nullptr;
+            AstNodeExpr* elseExitp = nullptr;
+            if (stmtp->child("else_clause")) {
+                AstNodeExpr* const notcondp = makeBoolNot(flp, condp->cloneTree(false));
+                m_condStack.push_back(notcondp);
+                elsesp = lowerElse(stmtp->child("else_clause"), mode);
+                elseExitp = m_stmtExitp;
+                m_stmtExitp = nullptr;
+                m_condStack.pop_back();
+                VL_DO_DANGLING(notcondp->deleteTree(), notcondp);
+            }
             // A branch may have changed any tracked variable
             m_varRelations.clear();
+            m_stmtExitp = thenExitp;
+            if (elseExitp) {
+                m_stmtExitp = thenExitp ? makeBoolOr(flp, thenExitp, elseExitp) : elseExitp;
+            }
             return new AstIf{flp, condp, thensp, elsesp};
         }
         unsupported(stmtp, "statement '" + kind + "'");
@@ -4343,11 +4472,32 @@ class VhdlXmlFrontend final {
     }
 
     AstNode* lowerStmtChain(const Node* chainp, AssignMode mode) {
+        return lowerStmtChain(childEls(chainp), 0, mode);
+    }
+
+    AstNode* lowerStmtChain(const std::vector<const Node*>& stmts, size_t start, AssignMode mode) {
         AstNode* headp = nullptr;
-        for (const Node* const stmtp : childEls(chainp)) {
-            AstNode* const nodep = lowerStmt(stmtp, mode);
-            if (!nodep) continue;
-            headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+        for (size_t i = start; i < stmts.size(); ++i) {
+            AstNode* const nodep = lowerStmt(stmts[i], mode);
+            if (nodep) headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+            if (m_stmtExitp) {
+                FileLine* const flp = flpOf(stmts[i]);
+                AstNodeExpr* const exitp = m_stmtExitp;
+                m_stmtExitp = nullptr;
+                // Statements after an exit/next are only reached when it is not taken
+                AstNode* const restp = lowerStmtChain(stmts, i + 1, mode);
+                AstNodeExpr* const restExitp = m_stmtExitp;
+                m_stmtExitp = nullptr;
+                AstNodeExpr* combinedp = exitp;
+                if (restExitp) combinedp = makeBoolOr(flp, exitp->cloneTree(false), restExitp);
+                if (restp) {
+                    AstNodeExpr* const guardp = makeBoolNot(flp, exitp->cloneTree(false));
+                    AstNode* const guardedp = new AstIf{flp, guardp, restp, nullptr};
+                    headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, guardedp) : guardedp;
+                }
+                m_stmtExitp = combinedp;
+                break;
+            }
         }
         return headp;
     }
@@ -4993,6 +5143,7 @@ class VhdlXmlFrontend final {
         }
         // VHDL executes the process once at time zero, before any sensitivity event
         m_varRelations.clear();
+        m_stmtExitp = nullptr;
         AstNode* const initp = lowerStmtChain(bodyp, AssignMode::BLOCKING);
         if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
         if (!itemsp) return true;  // Reads no signal, so nothing can retrigger it
@@ -5311,6 +5462,7 @@ class VhdlXmlFrontend final {
         // VHDL executes a process once at time zero, before any sensitivity event. Blocking
         // assignments are used there: no other process observes the interim delta.
         m_varRelations.clear();
+        m_stmtExitp = nullptr;
         AstNode* const initp = lowerStmtChain(bodyp, AssignMode::BLOCKING);
         if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
         m_modp->addStmtsp(
@@ -5445,8 +5597,13 @@ class VhdlXmlFrontend final {
 
     void lowerConcurrent(const Node* stmtp) {
         const std::string kind = stmtp->attr("kind");
-        // Variable values do not flow between concurrent statements or processes
+        // Variable values and loop exits do not flow between concurrent statements
         m_varRelations.clear();
+        m_stmtExitp = nullptr;
+        m_condStack.clear();
+        m_loopExitFlags.clear();
+        m_loopCaseDepths.clear();
+        m_caseDepth = 0;
         // PSL verification directives have no synthesis meaning
         if (kind == "psl_default_clock") return;
         if (kind == "block_statement") {
