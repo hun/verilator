@@ -3411,6 +3411,11 @@ class VhdlXmlFrontend final {
             return true;
         }
         if (status != ClockChainStatus::CLOCKED) return false;
+        if (clockIndex != static_cast<int>(branches.size()) - 1) {
+            // A later branch would also run on non-clock wakeups in VHDL
+            unsupported(ifp, "clock edge before a later branch");
+            return true;
+        }
         FileLine* const flp = flpOf(ifp);
         EdgeInfo& clock = branches[clockIndex].edge;
         AstVar* const clockVarp = astVarOf(clock.sigp);
