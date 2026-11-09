@@ -2831,6 +2831,16 @@ class VhdlXmlFrontend final {
         if (kind == "character_literal") {
             const std::string id = nodep->attr("identifier");
             AstNodeDType* const dtp = contextp ? contextp : bitDType(flp);
+            if (contextp && VN_CAST(contextp->skipRefp(), EnumDType)) {
+                // In a character or user enumeration context the value is the enum position
+                const Node* const refp = nodep->child("named_entity");
+                const Node* const declp
+                    = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+                if (declp && declp->attr("kind") == "enumeration_literal") {
+                    const int64_t pos = std::strtoll(declp->attr("enum_pos").c_str(), nullptr, 10);
+                    return makeConst(flp, dtp, static_cast<uint64_t>(pos));
+                }
+            }
             char value = 0;
             if (id.size() == 3 && logicLiteralChar(id[1], value)) {
                 if (value == '0' || value == '1' || dtp->isFourstate()) {
@@ -3191,7 +3201,9 @@ class VhdlXmlFrontend final {
             AstNodeExpr* const operandp = lowerExpr(nodep->child("operand"), nullptr);
             if (!operandp) return nullptr;
             if (operandp->dtypep()->width() == 1) {
-                AstEq* const eqp = new AstEq{flp, operandp, makeConst(flp, operandp->dtypep(), 1)};
+                // Case equality: '??' is false for unknown values, not unknown itself
+                AstEqCase* const eqp
+                    = new AstEqCase{flp, operandp, makeConst(flp, operandp->dtypep(), 1)};
                 eqp->dtypep(bitDType(flp));
                 return eqp;
             }

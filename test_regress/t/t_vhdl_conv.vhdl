@@ -91,7 +91,7 @@ begin
   process(a)
     variable v0, v1 : std_logic_vector(3 downto 0);
   begin
-    (v0, v1) := a & a;
+    (v0, v1) := a & not a;
     vt0 <= v0;
     vt1 <= v1;
     if a(0) then
