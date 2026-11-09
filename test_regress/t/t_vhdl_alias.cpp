@@ -17,8 +17,10 @@ int main(int argc, char** argv) {
     VM_PREFIX* const topp = new VM_PREFIX;
 
     int fails = 0;
+    for (int din8 = 0; din8 < 256; ++din8) {
     for (int din = 0; din < 2; ++din) {
         topp->din = din;
+        topp->din8 = din8;
         topp->eval();
         if (static_cast<int>(topp->y) != 1) {
             std::printf("%%Error: din=%d y=%d expected 1\n", din, static_cast<int>(topp->y));
@@ -33,6 +35,17 @@ int main(int argc, char** argv) {
             std::printf("%%Error: n=%d expected 2\n", static_cast<int>(topp->n));
             ++fails;
         }
+        const int lo = static_cast<int>(topp->lo);
+        const int lo2 = static_cast<int>(topp->lo2);
+        if (lo != ((din8 >> 2) & 0xf)) {
+            std::printf("%%Error: din8=%d lo=%d expected %d\n", din8, lo, (din8 >> 2) & 0xf);
+            ++fails;
+        }
+        if (lo2 != (din8 & 0xf)) {
+            std::printf("%%Error: din8=%d lo2=%d expected %d\n", din8, lo2, din8 & 0xf);
+            ++fails;
+        }
+    }
     }
 
     topp->final();
