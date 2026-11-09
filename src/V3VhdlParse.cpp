@@ -2652,94 +2652,12 @@ class VhdlXmlFrontend final {
         rhsp = resizeExpr(rhsp, dtp);
     }
 
-    //! Derive the flat array dtype of an aggregate whose context is unconstrained
-    AstNodeDType* inferAggregateDType(const Node* nodep) {
-        const std::vector<const Node*> choices
-            = childEls(nodep->child("association_choices_chain"));
-        if (choices.empty()) return nullptr;
-        int left = 0;
-        int right = 0;
-        bool ascending = true;
-        bool haveBounds = false;
-        bool haveExpr = false;
-        bool haveRange = false;
-        int64_t exprMin = 0;
-        int64_t exprMax = 0;
-        for (const Node* const choicep : choices) {
-            const std::string kind = choicep->attr("kind");
-            if (kind == "choice_by_range") {
-                if (haveExpr) return nullptr;
-                int rangeLeft = 0;
-                int rangeRight = 0;
-                bool rangeAscending = true;
-                if (!discreteRange(choicep->child("choice_range"), rangeLeft, rangeRight,
-                                   rangeAscending)) {
-                    return nullptr;
-                }
-                if (!haveBounds) {
-                    left = rangeAscending ? rangeLeft : rangeRight;
-                    right = rangeAscending ? rangeRight : rangeLeft;
-                    ascending = rangeAscending;
-                    haveBounds = true;
-                } else {
-                    if (rangeAscending != ascending) return nullptr;
-                    if (ascending) {
-                        left = std::min(left, rangeLeft);
-                        right = std::max(right, rangeRight);
-                    } else {
-                        left = std::max(left, rangeLeft);
-                        right = std::min(right, rangeRight);
-                    }
-                }
-                haveRange = true;
-            } else if (kind == "choice_by_expression") {
-                // Positional and `others` choices need a context to know the bounds
-                if (haveRange) return nullptr;
-                int64_t index = 0;
-                if (!evalConst(choicep->child("choice_expression"), index)) return nullptr;
-                if (!haveExpr) {
-                    exprMin = index;
-                    exprMax = index;
-                    haveExpr = true;
-                } else {
-                    exprMin = std::min(exprMin, index);
-                    exprMax = std::max(exprMax, index);
-                }
-            } else {
-                return nullptr;
-            }
-        }
-        if (haveExpr) {
-            left = static_cast<int>(exprMin);
-            right = static_cast<int>(exprMax);
-            ascending = true;
-        }
-        if (!haveBounds && !haveExpr) return nullptr;
-        // The associated value of an element choice supplies the element width and kind
-        AstNodeExpr* const probe = lowerExpr(choices.front()->child("associated_expr"), nullptr);
-        if (!probe) return nullptr;
-        const AstBasicDType* const basicp = VN_CAST(probe->dtypep()->skipRefp(), BasicDType);
-        const int elemWidth = probe->dtypep()->width();
-        VL_DO_DANGLING(probe->deleteTree(), probe);
-        if (!basicp || elemWidth <= 0
-            || (basicp->keyword() != VBasicDTypeKwd::LOGIC
-                && basicp->keyword() != VBasicDTypeKwd::BIT)) {
-            return nullptr;
-        }
-        const int elems = rangeLength(left, right, ascending);
-        if (elems <= 0 || elems > INT_MAX / elemWidth) return nullptr;
-        const int width = elems * elemWidth;
-        return m_rootp->typeTablep()->findLogicBitDType(flpOf(nodep), basicp->keyword(), width,
-                                                        width, basicp->numeric());
-    }
-
     //! Lower an array aggregate: positional, named (single or range) and `others` choices
     AstNodeExpr* lowerArrayAggregate(const Node* nodep, AstNodeDType* contextp) {
         FileLine* const flp = flpOf(nodep);
         VhdlDTypeSpec layout;
         const bool haveLayout = arraySpec(nodep, layout);
-        AstNodeDType* targetDtp = contextp ? contextp : typeRefDType(nodep);
-        if (!targetDtp || targetDtp->width() <= 0) targetDtp = inferAggregateDType(nodep);
+        AstNodeDType* const targetDtp = contextp ? contextp : typeRefDType(nodep);
         if (!targetDtp || targetDtp->width() <= 0) return nullptr;
         const int elemWidth = haveLayout ? layout.elemWidth : 1;
         const int totalWidth = targetDtp->width();
