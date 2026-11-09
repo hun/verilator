@@ -17,6 +17,9 @@ entity t is
     cat : out std_logic_vector(23 downto 0);
     sh1 : out std_logic_vector(7 downto 0);
     sh2 : out std_logic_vector(7 downto 0);
+    nout : out std_logic_vector(7 downto 0);
+    rflag : out std_logic;
+    rdata : out std_logic;
     agg : out std_logic_vector(15 downto 0);
     d : out std_logic_vector(7 downto 0);
     sumout : out std_logic_vector(9 downto 0);
@@ -32,11 +35,20 @@ architecture rtl of t is
   type mem_t is array (0 to 3) of std_logic_vector(7 downto 0);
   type dmem_t is array (3 downto 0) of std_logic_vector(7 downto 0);
   type smem_t is array (0 to 1) of signed(7 downto 0);
+  subtype byte_t is std_logic_vector(7 downto 0);
+  type nmem_t is array (0 to 1) of byte_t;
+  type rec_t is record
+    flag : std_logic;
+    data : std_logic_vector(3 downto 0);
+  end record;
+  type rmem_t is array (0 to 1) of rec_t;
   signal mem : mem_t;
   signal dmem : dmem_t;
   signal aggsig : mem_t;
   signal smem : smem_t;
   signal sh : mem_t;
+  signal nmem : nmem_t;
+  signal rmem : rmem_t;
 begin
   mem(0) <= a;
   mem(1) <= std_logic_vector(unsigned(a) + 1);
@@ -58,6 +70,15 @@ begin
   sh(1 to 2) <= mem(2 to 3);
   sh1 <= sh(1);
   sh2 <= sh(2);
+  -- A named element subtype and an array of records
+  nmem(0) <= a;
+  nmem(1) <= std_logic_vector(unsigned(a) + 1);
+  nout <= nmem(1);
+  rmem(0).flag <= a(0);
+  rmem(0).data <= a(4 downto 1);
+  rmem(1) <= rmem(0);
+  rflag <= rmem(1).flag;
+  rdata <= rmem(1).data(0);
   z <= mem(i);
   cat <= mem(3) & mem(2) & mem(1);
   agg <= aggsig(1) & aggsig(0);
