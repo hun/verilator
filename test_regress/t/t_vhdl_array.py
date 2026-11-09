@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL array with multi-bit elements
+# DESCRIPTION: Verilator: VHDL arrays of multi-bit elements
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -12,15 +12,17 @@ import shutil
 
 import vltest_bootstrap
 
-test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_multibit_array_bad.vhdl'
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_array.vhdl'
 
 ghdl = os.environ.get('VERILATOR_GHDL', 'ghdl')
 if not shutil.which(ghdl):
     test.skip("GHDL not available")
 
-test.compile(verilator_flags2=['--language', 'vhdl'],
-             fails=True,
-             expect_filename=test.golden_filename)
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
+
+test.execute()
 
 test.passes()
