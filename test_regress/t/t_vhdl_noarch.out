@@ -1,5 +1,3 @@
-%Error-UNSUPPORTED: t/t_vhdl_noarch.vhdl:17:1: Multiple architectures for entity 'multi'; using the last one
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
 %Error: t/t_vhdl_noarch.vhdl:7:1: Entity 'lonely' has no architecture; cannot elaborate it
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to
