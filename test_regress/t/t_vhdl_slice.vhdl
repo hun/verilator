@@ -22,7 +22,10 @@ entity t is
     q : out std_logic_vector(7 downto 0);
     vy : out std_logic_vector(7 downto 0);
     fy : out std_logic_vector(7 downto 0);
-    tq : out std_logic_vector(15 downto 0)
+    tq : out std_logic_vector(15 downto 0);
+    ry : out std_logic_vector(31 downto 0);
+    ary : out std_logic_vector(0 to 31);
+    wy : out std_logic_vector(31 downto 0)
   );
 end;
 
@@ -30,6 +33,7 @@ architecture rtl of t is
   signal mem : std_logic_vector(31 downto 0);
   signal amem : std_logic_vector(0 to 31);
   signal ram : std_logic_vector(31 downto 0) := (others => '0');
+  signal wram : std_logic_vector(31 downto 0);
 
   function swap (x : std_logic_vector(15 downto 0)) return std_logic_vector is
   begin
@@ -38,6 +42,13 @@ architecture rtl of t is
 begin
   mem <= a & a;
   amem <= a & a;
+
+  -- Attribute ranges as slice bounds, reading descending and ascending arrays
+  ry <= mem(mem'range);
+  ary <= amem(amem'range);
+  -- Attribute range as an assignment target
+  wram(wram'range) <= a & a;
+  wy <= wram;
 
   -- Descending slices with a dynamic low bound
   y <= mem(i * 8 + 7 downto i * 8);

@@ -43,7 +43,7 @@ begin
       case st is
         when idle => st <= run;
         when run => st <= done;
-        when others => st <= idle;
+        when done => st <= idle;
       end case;
     end if;
   end process;

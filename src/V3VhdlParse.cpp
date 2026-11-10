@@ -242,6 +242,9 @@ class VhdlXmlFrontend final {
     const Node* const m_docp;  // Parsed GHDL XML root
     const std::vector<VhdlFile>& m_files;  // Files handed to GHDL
     std::map<std::string, const Node*> m_byId;  // XML nodes indexed by `id`
+    // Analyzed subprogram body by identifier and formal signature, including
+    // dependency-library units whose bodies are not in the XML
+    std::map<std::string, const Node*> m_subprogramBodyBySignature;
     std::vector<const Node*> m_entityNodes;  // User entity declarations
     std::vector<const Node*> m_archNodes;  // User architecture bodies
     std::map<std::string, AstVar*> m_scope;  // Current scope: folded name -> Var
@@ -382,6 +385,63 @@ class VhdlXmlFrontend final {
         const std::string& id = nodep->attr("id");
         if (!id.empty()) m_byId.emplace(id, nodep);
         for (const std::unique_ptr<Node>& childp : nodep->children()) index(childp.get());
+    }
+
+    //! Stable key for a formal's type mark. IDs are not comparable across library and
+    //! freshly analyzed copies, so use the source-level type name.
+    std::string typeMarkKey(const Node* subtypep) const {
+        const Node* const p = derefNode(subtypep);
+        if (!p) return {};
+        const std::string kind = p->attr("kind");
+        if (kind == "simple_name" || kind == "selected_name") {
+            return vhdlFold(p->attr("identifier"));
+        }
+        if (const Node* const markp = p->child("subtype_type_mark")) { return typeMarkKey(markp); }
+        if (const Node* const typep = p->child("type")) {
+            if (typep->has("ref")) {
+                const Node* const refp = nodeById(typep->attr("ref"));
+                if (refp && !refp->attr("identifier").empty()) {
+                    return vhdlFold(refp->attr("identifier"));
+                }
+            }
+            if (!typep->attr("identifier").empty()) { return vhdlFold(typep->attr("identifier")); }
+        }
+        return kind;
+    }
+
+    //! Identifier plus formal types, used to pair a library declaration with its body
+    std::string subprogramKey(const Node* declp) const {
+        if (!declp) return {};
+        std::string key = vhdlFold(declp->attr("identifier"));
+        for (const Node* const paramp : childEls(declp->child("interface_declaration_chain"))) {
+            key += "|";
+            key += vhdlFold(paramp->attr("kind"));
+            key += ":";
+            key += paramp->attr("mode");
+            key += ":";
+            key += typeMarkKey(paramp->child("subtype_indication"));
+        }
+        return key;
+    }
+
+    //! Index analyzed subprogram bodies by identifier and formal signature.
+    //! A call may reference a dependency library's declaration whose body is not in the
+    //! XML; the freshly analyzed copy of the same unit carries the body.
+    void indexSubprogramBodies() {
+        for (const auto& entry : m_byId) {
+            const Node* const declp = entry.second;
+            const std::string kind = declp->attr("kind");
+            if (kind != "function_declaration" && kind != "procedure_declaration") continue;
+            const Node* const bodyrefp = declp->child("subprogram_body");
+            if (!bodyrefp) continue;
+            const Node* const bodyp
+                = bodyrefp->has("ref") ? nodeById(bodyrefp->attr("ref")) : bodyrefp;
+            if (!bodyp) continue;
+            const std::string bodyKind = bodyp->attr("kind");
+            if (bodyKind != "function_body" && bodyKind != "procedure_body") continue;
+            const std::string key = subprogramKey(declp);
+            if (!key.empty()) m_subprogramBodyBySignature.emplace(key, bodyp);
+        }
     }
 
     bool isUserFile(const Node* nodep) const {
@@ -877,6 +937,18 @@ class VhdlXmlFrontend final {
         return dtypeOf(parseType(paramp->child("subtype_indication")), flpOf(paramp));
     }
 
+    //! Analyzed return dtype of a function declaration, or nullptr when unconstrained
+    AstNodeDType* functionReturnDType(const Node* declp) {
+        const Node* typep = declp->child("return_type_mark");
+        if (!typep) typep = declp->child("return_type");
+        if (!typep) return nullptr;
+        const VhdlDTypeSpec probe = probeTypeSpec(typep);
+        if (probe.isUnconstrained) return nullptr;
+        const VhdlDTypeSpec spec = parseType(typep);
+        if (spec.isUnconstrained) return nullptr;
+        return dtypeOf(spec, flpOf(declp));
+    }
+
     //! Whether a name or expression is an array of multi-bit elements
     bool multiArraySpec(const Node* nodep, VhdlDTypeSpec& spec) const {
         return arraySpec(nodep, spec) && spec.elemWidth > 1;
@@ -1280,7 +1352,8 @@ class VhdlXmlFrontend final {
                                 error(nodep, "VHDL constant cannot be assigned");
                                 return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
                             }
-                            if (const Node* const defp = declp->child("default_value")) {
+                            if (const Node* const defp
+                                = derefNode(declp->child("default_value"))) {
                                 return lowerExpr(defp, nullptr);
                             }
                         }
@@ -1372,12 +1445,34 @@ class VhdlXmlFrontend final {
             const Node* const rangep = subp ? subp->child("range_constraint") : nullptr;
             if (rangep) suffixp = derefNode(rangep);
         }
-        if (!suffixp || suffixp->attr("kind") != "range_expression") {
+        const std::string sliceKind = suffixp ? suffixp->attr("kind") : std::string{};
+        const bool isRangeAttribute
+            = sliceKind == "range_array_attribute" || sliceKind == "reverse_range_array_attribute";
+        if (!suffixp || (sliceKind != "range_expression" && !isRangeAttribute)) {
             unsupported(nodep, "slice form");
             return basep;
         }
         // An array of multi-bit elements keeps one element width per slice element
-        const bool ascending = suffixp->attr("direction") == "to";
+        bool ascending = false;
+        int64_t leftValue = 0;
+        int64_t rightValue = 0;
+        bool staticBounds = false;
+        if (isRangeAttribute) {
+            // `a'range`/`a'reverse_range` reuse the prefix's analyzed array bounds
+            int left = 0;
+            int right = 0;
+            if (!discreteRange(suffixp, left, right, ascending)) {
+                unsupported(nodep, "non-static slice bounds");
+                return basep;
+            }
+            leftValue = left;
+            rightValue = right;
+            staticBounds = true;
+        } else {
+            ascending = suffixp->attr("direction") == "to";
+            staticBounds = evalConst(rangeBound(suffixp, true), leftValue)
+                           && evalConst(rangeBound(suffixp, false), rightValue);
+        }
         const bool arrayAscending = haveLayout ? layout.ascending : basicp->ascending();
         if (ascending != arrayAscending) {
             error(nodep, "VHDL slice direction does not match the array");
@@ -1385,10 +1480,6 @@ class VhdlXmlFrontend final {
         }
         const int arrayRight = haveLayout ? layout.right : basicp->right();
         const int elemWidth = multi ? layout.elemWidth : 1;
-        int64_t leftValue = 0;
-        int64_t rightValue = 0;
-        const bool staticBounds = evalConst(rangeBound(suffixp, true), leftValue)
-                                  && evalConst(rangeBound(suffixp, false), rightValue);
         if (!staticBounds) {
             // The position may vary, but the width must be known to type the result
             AstNodeExpr* const leftExprp = lowerExpr(rangeBound(suffixp, true), intDType(flp));
@@ -2218,6 +2309,14 @@ class VhdlXmlFrontend final {
         if (!implp || !implp->has("ref")) return nullptr;
         const Node* const declp = nodeById(implp->attr("ref"));
         if (!declp || declp->attr("kind") != "function_declaration") return nullptr;
+        // A reference from a dependency-library unit can collide with an unrelated node;
+        // the source-level name must still match the call.
+        const Node* const prefixp = callp->child("prefix");
+        const std::string callName
+            = prefixp ? vhdlFold(prefixp->attr("identifier")) : std::string{};
+        if (!callName.empty() && vhdlFold(declp->attr("identifier")) != callName) {
+            return nullptr;
+        }
         return declp;
     }
 
@@ -2241,8 +2340,22 @@ class VhdlXmlFrontend final {
             }
         }
         if (!m_inlineBodies.insert(bodyp).second) return nullptr;  // Recursive call
-        AstNodeExpr* const resultp = inlineFunctionBody(nodep, declp, bodyp);
+        AstNodeExpr* resultp = inlineFunctionBody(nodep, declp, bodyp);
         m_inlineBodies.erase(bodyp);
+        if (!resultp) return nullptr;
+        // The return expression was lowered without the function's return type as context;
+        // normalize it so enum-backed std_ulogic values become one-bit logic.
+        AstNodeDType* const retDtp = functionReturnDType(declp);
+        if (retDtp && retDtp->width() > 0) {
+            const AstBasicDType* const retBasicp = VN_CAST(retDtp->skipRefp(), BasicDType);
+            const AstBasicDType* const resBasicp
+                = VN_CAST(resultp->dtypep()->skipRefp(), BasicDType);
+            if (retBasicp && resBasicp && retDtp->width() != resultp->width()) {
+                resultp = resizeExpr(resultp, retDtp);
+            } else if (retDtp->width() == resultp->width()) {
+                resultp->dtypep(retDtp);
+            }
+        }
         return resultp;
     }
 
@@ -2367,11 +2480,33 @@ class VhdlXmlFrontend final {
         return declp;
     }
 
+    //! Whether a body node belongs to the declaration with the same signature
+    bool bodyMatchesDeclaration(const Node* bodyp, const Node* declp) const {
+        if (!bodyp || !declp) return false;
+        const std::string bodyKind = bodyp->attr("kind");
+        if (bodyKind != "function_body" && bodyKind != "procedure_body") return false;
+        const Node* const specp = bodyp->child("subprogram_specification");
+        const Node* const specDeclp
+            = specp && specp->has("ref") ? nodeById(specp->attr("ref")) : specp;
+        if (!specDeclp) return false;
+        const std::string bodyKey = subprogramKey(specDeclp);
+        return !bodyKey.empty() && bodyKey == subprogramKey(declp);
+    }
+
     //! Find the analyzed body of a subprogram declaration, or nullptr
     const Node* subprogramBodyOf(const Node* declp) const {
         const Node* const bodyrefp = declp->child("subprogram_body");
-        if (!bodyrefp) return nullptr;
-        return bodyrefp->has("ref") ? nodeById(bodyrefp->attr("ref")) : bodyrefp;
+        if (bodyrefp) {
+            const Node* const bodyp
+                = bodyrefp->has("ref") ? nodeById(bodyrefp->attr("ref")) : bodyrefp;
+            if (bodyMatchesDeclaration(bodyp, declp)) return bodyp;
+        }
+        // A dependency library's declaration can reference a body that is not part of
+        // this XML dump. Use the analyzed body with the same source-level signature.
+        const std::string key = subprogramKey(declp);
+        if (key.empty()) return nullptr;
+        const auto it = m_subprogramBodyBySignature.find(key);
+        return it == m_subprogramBodyBySignature.end() ? nullptr : it->second;
     }
 
     //! Whether `nodep` is lexically inside `containerp` in the analyzed tree
@@ -2681,6 +2816,16 @@ class VhdlXmlFrontend final {
         return new AstIf{flp, condp, thensp, elsesp};
     }
 
+    //! Build an AstCase. VHDL case over an enumeration is exhaustive and duplicate
+    //! choices are illegal, so mark it unique to get enum-aware coverage checking.
+    AstCase* makeCase(FileLine* flp, AstNodeExpr* selectorp, AstCaseItem* itemsp) {
+        AstCase* const casep = new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+        if (VN_CAST(selectorp->dtypep()->skipRefToEnump(), EnumDType)) {
+            casep->uniquePragma(true);
+        }
+        return casep;
+    }
+
     //! Lower a case statement, appending the following statements to each alternative
     AstNode* lowerProcCase(const Node* casep, const std::vector<const Node*>& tail,
                            size_t tailIndex, AssignMode mode, bool& fallsThroughp) {
@@ -2723,7 +2868,7 @@ class VhdlXmlFrontend final {
             }
             for (AstConst* const condp : conds) currentp->addCondsp(condp);
         }
-        return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+        return makeCase(flp, selectorp, itemsp);
     }
 
     AstNodeExpr* lowerRecordAggregate(const Node* nodep, const RecordInfo& info) {
@@ -3244,7 +3389,8 @@ class VhdlXmlFrontend final {
                         const std::string declKind = declp->attr("kind");
                         if (declKind == "constant_declaration"
                             || declKind == "interface_constant_declaration") {
-                            if (const Node* const defp = declp->child("default_value")) {
+                            if (const Node* const defp
+                                = derefNode(declp->child("default_value"))) {
                                 return lowerExpr(defp, contextp);
                             }
                         }
@@ -3273,7 +3419,7 @@ class VhdlXmlFrontend final {
             if (declp
                 && (declp->attr("kind") == "constant_declaration"
                     || declp->attr("kind") == "interface_constant_declaration")) {
-                if (const Node* const defp = declp->child("default_value")) {
+                if (const Node* const defp = derefNode(declp->child("default_value"))) {
                     return lowerExpr(defp, contextp);
                 }
             }
@@ -3504,9 +3650,16 @@ class VhdlXmlFrontend final {
             if (!intOp) {
                 const int lwidth = lhsDtp->width();
                 const int rwidth = rhsp->dtypep()->width();
+                const AstBasicDType* const rbasicp
+                    = VN_CAST(rhsp->dtypep()->skipRefp(), BasicDType);
+                // numeric_std overloads such as unsigned + natural keep the vector length;
+                // an integer operand must not widen the result.
+                const bool rhsInt = rbasicp && rbasicp->keyword() == VBasicDTypeKwd::INT;
                 // numeric_std result lengths: product sums the operand lengths, division
                 // and exponentiation keep the left length, other operators take the wider
-                if (kind == "multiplication_operator") {
+                if (rhsInt && !powOp) {
+                    resultWidth = lwidth;
+                } else if (kind == "multiplication_operator") {
                     resultWidth = lwidth + rwidth;
                 } else if (kind == "division_operator" || kind == "remainder_operator"
                            || kind == "modulus_operator" || powOp) {
@@ -3517,7 +3670,7 @@ class VhdlXmlFrontend final {
                 // A post-width AST needs equally wide operands. Keep a wider divisor or
                 // remainder operand whole and extract the result width below.
                 const int opWidth
-                    = powOp ? lwidth : std::max(resultWidth, std::max(lwidth, rwidth));
+                    = powOp || rhsInt ? lwidth : std::max(resultWidth, std::max(lwidth, rwidth));
                 opDtp = m_rootp->typeTablep()->findLogicBitDType(flp, lbasicp->keyword(), opWidth,
                                                                  opWidth, lbasicp->numeric());
                 lhsp = resizeExpr(lhsp, opDtp);
@@ -4134,7 +4287,7 @@ class VhdlXmlFrontend final {
             }
             for (AstConst* const condp : conds) currentp->addCondsp(condp);
         }
-        return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+        return makeCase(flp, selectorp, itemsp);
     }
 
     AstNode* lowerCase(const Node* stmtp, AssignMode mode) {
@@ -4176,7 +4329,7 @@ class VhdlXmlFrontend final {
         --m_caseDepth;
         // A branch may have changed any tracked variable
         m_varRelations.clear();
-        return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+        return makeCase(flp, selectorp, itemsp);
     }
 
     //! Left/right bounds and direction of the array behind a name prefix
@@ -4281,6 +4434,7 @@ class VhdlXmlFrontend final {
     //! Integer environment for evaluating a pure function during static elaboration
     struct ConstFuncEnv final {
         std::map<std::string, int64_t> values;
+        std::map<std::string, int> widths;  // Vector width; absent or 0 means scalar
     };
 
     //! Evaluate a locally static integer expression from the dump
@@ -4377,7 +4531,7 @@ class VhdlXmlFrontend final {
                     const std::string declKind = declp->attr("kind");
                     if (declKind == "constant_declaration"
                         || declKind == "interface_constant_declaration") {
-                        if (const Node* const defp = declp->child("default_value")) {
+                        if (const Node* const defp = derefNode(declp->child("default_value"))) {
                             return evalConst(defp, value, depth + 1);
                         }
                     } else if (declKind == "enumeration_literal") {
@@ -4399,24 +4553,81 @@ class VhdlXmlFrontend final {
     enum ConstFlow : uint8_t { CF_NORMAL, CF_RETURN, CF_EXIT, CF_NEXT };
 
     //! Evaluate an integer/boolean expression in a static function's environment
-    bool evalConstFuncExpr(const Node* nodep, const ConstFuncEnv& env, int64_t& value,
-                           int depth) const {
+    //! `widthp` is set to the vector width of the result, or 0 for a scalar.
+    bool evalConstFuncExpr(const Node* nodep, const ConstFuncEnv& env, int64_t& value, int depth,
+                           int* widthp = nullptr) const {
         if (!nodep || depth > 32) return false;
+        if (widthp) *widthp = 0;
         const std::string kind = nodep->attr("kind");
         if (kind == "integer_literal") {
             value = std::strtoll(nodep->attr("value").c_str(), nullptr, 10);
             return true;
         }
+        if (kind == "character_literal") {
+            const std::string id = nodep->attr("identifier");
+            if (id == "'0'" || id == "'L'") {
+                value = 0;
+                return true;
+            }
+            if (id == "'1'" || id == "'H'") {
+                value = 1;
+                return true;
+            }
+            return false;
+        }
         if (kind == "simple_name" || kind == "selected_name") {
-            const auto it = env.values.find(vhdlFold(nodep->attr("identifier")));
+            const std::string name = vhdlFold(nodep->attr("identifier"));
+            const auto it = env.values.find(name);
             if (it != env.values.end()) {
                 value = it->second;
+                if (widthp) {
+                    const auto widthIt = env.widths.find(name);
+                    *widthp = widthIt == env.widths.end() ? 0 : widthIt->second;
+                }
                 return true;
             }
             return evalConst(nodep, value, depth + 1);
         }
+        if (kind == "indexed_name") {
+            // One element of a constant vector in the environment. VHDL vectors
+            // in this subset are descending, so index 0 is the least significant bit.
+            const Node* const prefixp = nodep->child("prefix");
+            const Node* const indexListp = nodep->child("index_list");
+            if (!prefixp || !indexListp) return false;
+            int64_t baseValue = 0;
+            int baseWidth = 0;
+            if (!evalConstFuncExpr(prefixp, env, baseValue, depth + 1, &baseWidth)) return false;
+            if (baseWidth <= 0 || baseWidth > 64) return false;
+            const std::vector<const Node*> indices = childEls(indexListp);
+            if (indices.size() != 1) return false;
+            int64_t indexValue = 0;
+            if (!evalConstFuncExpr(indices.front(), env, indexValue, depth + 1)) return false;
+            if (indexValue < 0 || indexValue >= baseWidth) return false;
+            value = (static_cast<uint64_t>(baseValue) >> indexValue) & 1U;
+            return true;
+        }
+        if (kind == "high_array_attribute" || kind == "low_array_attribute"
+            || kind == "left_array_attribute" || kind == "right_array_attribute"
+            || kind == "length_array_attribute") {
+            const Node* const prefixp = nodep->child("prefix");
+            if (prefixp && prefixp->attr("kind") == "simple_name") {
+                const auto widthIt = env.widths.find(vhdlFold(prefixp->attr("identifier")));
+                if (widthIt != env.widths.end() && widthIt->second > 0) {
+                    const int width = widthIt->second;
+                    if (kind == "length_array_attribute") {
+                        value = width;
+                    } else if (kind == "high_array_attribute" || kind == "left_array_attribute") {
+                        value = width - 1;
+                    } else {
+                        value = 0;
+                    }
+                    return true;
+                }
+            }
+            return evalConst(nodep, value, depth + 1);
+        }
         if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
-            return evalConstFuncExpr(nodep->child("expression"), env, value, depth + 1);
+            return evalConstFuncExpr(nodep->child("expression"), env, value, depth + 1, widthp);
         }
         if (kind == "implicit_condition_operator" || kind == "condition_operator") {
             int64_t operandv = 0;
@@ -4426,7 +4637,9 @@ class VhdlXmlFrontend final {
             value = operandv != 0;
             return true;
         }
-        if (kind == "function_call") { return evalConstCall(nodep, env, value, depth + 1); }
+        if (kind == "function_call") {
+            return evalConstCall(nodep, env, value, depth + 1, widthp);
+        }
         if (kind == "addition_operator" || kind == "subtraction_operator"
             || kind == "substraction_operator" || kind == "multiplication_operator"
             || kind == "division_operator" || kind == "modulus_operator"
@@ -4529,8 +4742,11 @@ class VhdlXmlFrontend final {
                 const Node* const exprp = stmtp->child("expression");
                 if (!targetp || !exprp || targetp->attr("kind") != "simple_name") return false;
                 int64_t value = 0;
-                if (!evalConstFuncExpr(exprp, env, value, depth + 1)) return false;
-                env.values[vhdlFold(targetp->attr("identifier"))] = value;
+                int width = 0;
+                if (!evalConstFuncExpr(exprp, env, value, depth + 1, &width)) return false;
+                const std::string name = vhdlFold(targetp->attr("identifier"));
+                env.values[name] = value;
+                env.widths[name] = width;
                 continue;
             }
             if (kind == "null_statement" || kind == "assertion_statement"
@@ -4693,9 +4909,39 @@ class VhdlXmlFrontend final {
     }
 
     //! Evaluate a call to a pure function with integer/boolean parameters
-    bool evalConstCall(const Node* callp, const ConstFuncEnv& callerEnv, int64_t& value,
-                       int depth) const {
+    //! `widthp` is set to the vector width of the result, or 0 for a scalar.
+    bool evalConstCall(const Node* callp, const ConstFuncEnv& callerEnv, int64_t& value, int depth,
+                       int* widthp = nullptr) const {
         if (depth > 32) return false;
+        if (widthp) *widthp = 0;
+        // Numeric_std conversions are the only vector-valued functions needed to size
+        // ranges in the supported subset. Evaluate them directly instead of inlining
+        // the package body's vector loops.
+        const Node* const prefixp = callp->child("prefix");
+        const std::string fn = prefixp ? vhdlFold(prefixp->attr("identifier")) : std::string{};
+        if (fn == "to_unsigned" || fn == "to_signed") {
+            std::vector<const Node*> actuals;
+            for (const Node* const assocp :
+                 childEls(callp->child("parameter_association_chain"))) {
+                const Node* const actualp = assocp->child("actual");
+                if (actualp) actuals.push_back(actualp);
+            }
+            if (actuals.size() != 2) return false;
+            int64_t argValue = 0;
+            int64_t sizeValue = 0;
+            if (!evalConstFuncExpr(actuals[0], callerEnv, argValue, depth + 1)) return false;
+            if (!evalConstFuncExpr(actuals[1], callerEnv, sizeValue, depth + 1)) return false;
+            if (sizeValue <= 0 || sizeValue > 64) return false;
+            const uint64_t mask
+                = sizeValue == 64 ? ~uint64_t{0} : ((uint64_t{1} << sizeValue) - 1);
+            uint64_t bits = static_cast<uint64_t>(argValue) & mask;
+            if (fn == "to_signed" && sizeValue < 64 && (bits & (uint64_t{1} << (sizeValue - 1)))) {
+                bits |= ~mask;
+            }
+            value = static_cast<int64_t>(bits);
+            if (widthp) *widthp = static_cast<int>(sizeValue);
+            return true;
+        }
         const Node* const declp = functionDeclOf(callp);
         if (!declp) return false;
         const Node* const bodyp = subprogramBodyOf(declp);
@@ -4732,17 +4978,24 @@ class VhdlXmlFrontend final {
             if (!actualp) actualp = paramp->child("default_value");
             if (!actualp) return false;
             int64_t paramValue = 0;
-            if (!evalConstFuncExpr(actualp, callerEnv, paramValue, depth + 1)) return false;
+            int paramWidth = 0;
+            if (!evalConstFuncExpr(actualp, callerEnv, paramValue, depth + 1, &paramWidth)) {
+                return false;
+            }
             env.values[name] = paramValue;
+            env.widths[name] = paramWidth;
         }
         for (const Node* const declp2 : childEls(bodyp->child("declaration_chain"))) {
             const std::string kind = declp2->attr("kind");
             if (kind != "variable_declaration" && kind != "constant_declaration") continue;
             int64_t initValue = 0;
-            if (const Node* const defp = declp2->child("default_value")) {
-                if (!evalConstFuncExpr(defp, env, initValue, depth + 1)) return false;
+            int initWidth = 0;
+            if (const Node* const defp = derefNode(declp2->child("default_value"))) {
+                if (!evalConstFuncExpr(defp, env, initValue, depth + 1, &initWidth)) return false;
             }
-            env.values[vhdlFold(declp2->attr("identifier"))] = initValue;
+            const std::string name = vhdlFold(declp2->attr("identifier"));
+            env.values[name] = initValue;
+            env.widths[name] = initWidth;
         }
         int64_t result = 0;
         ConstFlow flow = CF_NORMAL;
@@ -6091,7 +6344,7 @@ class VhdlXmlFrontend final {
                 = new AstVar{dflp, VVarType::VAR, mangled, dtypeOf(parseType(subtypep), dflp)};
             m_modp->addStmtsp(varp);
             m_scope[vhdlFold(name)] = varp;
-            if (const Node* const defp = declp->child("default_value")) {
+            if (const Node* const defp = derefNode(declp->child("default_value"))) {
                 AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
                 if (rhsp) {
                     AstVarRef* const lhsp = new AstVarRef{dflp, varp, VAccess::WRITE};
@@ -6248,7 +6501,7 @@ class VhdlXmlFrontend final {
         m_modp->addStmtsp(varp);
         m_sharedVars.insert(varp);
         m_scope[vhdlFold(declp->attr("identifier"))] = varp;
-        if (const Node* const defp = declp->child("default_value")) {
+        if (const Node* const defp = derefNode(declp->child("default_value"))) {
             varp->noCReset(true);
             AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
             if (rhsp) {
@@ -6288,7 +6541,7 @@ class VhdlXmlFrontend final {
                 = new AstVar{dflp, VVarType::VAR, mangled, dtypeOf(parseType(subtypep), dflp)};
             m_modp->addStmtsp(varp);
             m_scope[vhdlFold(name)] = varp;
-            if (const Node* const defp = declp->child("default_value")) {
+            if (const Node* const defp = derefNode(declp->child("default_value"))) {
                 varp->noCReset(true);
                 AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
                 if (rhsp) {
@@ -6494,7 +6747,7 @@ class VhdlXmlFrontend final {
                 m_modp->addStmtsp(varp);
                 m_scope[vhdlFold(name)] = varp;
 
-                if (const Node* const defp = declp->child("default_value")) {
+                if (const Node* const defp = derefNode(declp->child("default_value"))) {
                     varp->noCReset(true);
                     AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
                     if (rhsp) {
@@ -7369,6 +7622,7 @@ public:
 
     void emit() {
         index(m_docp);
+        indexSubprogramBodies();
         collect(m_docp);
 
         // Bind each entity to one architecture; last analyzed wins until configurations exist

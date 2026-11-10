@@ -92,6 +92,14 @@ architecture rtl of t is
   begin
     return x * 2;
   end;
+  -- Return type is a std_ulogic enum; the inlined result must be one bit
+  function to_sl(value : boolean) return std_ulogic is
+  begin
+    if value then
+      return '1';
+    end if;
+    return '0';
+  end;
   -- Unconstrained formal, a local sized by its 'length, and an unconstrained return
   function lowbit(x : std_logic_vector) return std_logic_vector is
     variable r : std_logic_vector(x'length - 1 downto 0);
@@ -106,7 +114,7 @@ begin
   w <= pick(b => 3, a => 4, sel => 1) + maxi(add1(a), b);
   nn <= next_state(st_in);
   r <= mk_rec(din_en, din_num);
-  r_en <= r.en;
+  r_en <= to_sl(din_en = '1');
   r_st <= r.st;
   r_num <= r.num;
   mk <= lowbit(dv);

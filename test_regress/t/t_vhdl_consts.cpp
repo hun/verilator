@@ -40,6 +40,18 @@ int main(int argc, char** argv) {
         std::printf("%%Error: ar0=%d\n", static_cast<int>(topp->ar0));
         ++fails;
     }
+    if (static_cast<int>(topp->s1o) != 5) {
+        std::printf("%%Error: s1o=%d\n", static_cast<int>(topp->s1o));
+        ++fails;
+    }
+    if (static_cast<int>(topp->s2o) != 5) {
+        std::printf("%%Error: s2o=%d\n", static_cast<int>(topp->s2o));
+        ++fails;
+    }
+    if (static_cast<int>(topp->io) != 6) {
+        std::printf("%%Error: io=%d\n", static_cast<int>(topp->io));
+        ++fails;
+    }
 
     topp->final();
     delete topp;
