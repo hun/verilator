@@ -263,6 +263,7 @@ class Lowering final {
     AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
                          int hi, int lo);
 
+    AstNode* lowerCase(const Stmt& stmt);
     AstNodeExpr* lowerCond(const Expr& expr);
     bool containsEdgeCall(const Expr& expr) const;
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
@@ -279,7 +280,7 @@ class Lowering final {
     AstNode* lowerStmt(const Stmt& stmt);
     AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
     AstNode* lowerIf(const Stmt& stmt);
-    AstNode* lowerAssign(const Stmt& stmt, bool concurrent);
+    AstNode* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
     void lowerProcess(const Process& process);
 
 public:
@@ -300,9 +301,71 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     case Expr::INT_LIT: value = expr.intValue; return true;
     case Expr::NAME: {
         const auto it = m_consts.find(expr.text);
-        if (it == m_consts.end()) return false;
-        value = it->second;
-        return true;
+        if (it != m_consts.end()) {
+            value = it->second;
+            return true;
+        }
+        const auto enumIt = m_enumConsts.find(expr.text);
+        if (enumIt != m_enumConsts.end()) {
+            value = static_cast<int64_t>(enumIt->second->num().toUInt());
+            return true;
+        }
+        return false;
+    }
+    case Expr::ATTR: {
+        // Attributes of a type mark or name whose value is known statically
+        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        const VType* typep = typeOfName(*expr.a);
+        if (!typep) {
+            const auto typeIt = m_types.find(expr.a->text);
+            if (typeIt == m_types.end()) return false;
+            typep = &typeIt->second;
+        }
+        const std::string& attribute = expr.text;
+        if (attribute == "length") {
+            value = typep->length();
+            return true;
+        }
+        if (attribute == "left") {
+            value = typep->left;
+            return true;
+        }
+        if (attribute == "right") {
+            value = typep->right;
+            return true;
+        }
+        if (attribute == "low") {
+            value = typep->kind == VType::ENUM ? 0 : std::min(typep->left, typep->right);
+            return true;
+        }
+        if (attribute == "high") {
+            value = typep->kind == VType::ENUM
+                        ? static_cast<int64_t>(typep->literals.size()) - 1
+                        : std::max(typep->left, typep->right);
+            return true;
+        }
+        if (expr.args.size() != 1) return false;
+        int64_t position = 0;
+        if (!evalInt(*expr.args[0], position)) return false;
+        if (attribute == "pos") {
+            value = position;
+            return true;
+        }
+        if (attribute == "val") {
+            value = position;
+            return true;
+        }
+        if (typep->kind != VType::ENUM) return false;
+        const int64_t count = static_cast<int64_t>(typep->literals.size());
+        if (attribute == "succ") {
+            value = (position + 1) % count;
+            return true;
+        }
+        if (attribute == "pred") {
+            value = (position - 1 + count) % count;
+            return true;
+        }
+        return false;
     }
     case Expr::PAREN: return evalInt(*expr.a, value);
     case Expr::UNARY: {
@@ -1226,32 +1289,107 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         unsupportedError(flp, "attribute of a non-name prefix");
         return nullptr;
     }
-    const VType* const typep = typeOfName(*expr.a);
     const std::string& attribute = expr.text;
     if (attribute == "event" || attribute == "stable" || attribute == "active"
         || attribute == "last_event" || attribute == "last_active") {
         unsupportedError(flp, "signal attribute '" + attribute + "'");
         return nullptr;
     }
-    if (attribute != "ascending" && !typep) {
+    // The prefix is either a declared name or a type mark
+    const VType* typep = typeOfName(*expr.a);
+    bool typeMark = false;
+    if (!typep) {
+        const auto typeIt = m_types.find(expr.a->text);
+        if (typeIt != m_types.end()) {
+            typep = &typeIt->second;
+            typeMark = true;
+        }
+    }
+    if (!typep) {
         unsupportedError(flp, "attribute '" + attribute + "' of an unresolved name");
+        return nullptr;
+    }
+    if (typep->kind == VType::ENUM) {
+        const int count = static_cast<int>(typep->literals.size());
+        AstNodeDType* const enumDtp = typep->dtp;
+        auto enumConst = [&](int position) -> AstNodeExpr* {
+            AstConst* const constp
+                = new AstConst{flp, V3Number{flp, typep->width,
+                                             static_cast<uint32_t>(position)}};
+            constp->dtypep(enumDtp);
+            return constp;
+        };
+        if (attribute == "left" || attribute == "low") return enumConst(0);
+        if (attribute == "right" || attribute == "high") return enumConst(count - 1);
+        if (attribute == "length") return makeIntConst(flp, count);
+        // The remaining enumeration attributes are functions of one value
+        if (expr.args.size() != 1) {
+            unsupportedError(flp, "enumeration attribute '" + attribute + "' without one argument");
+            return nullptr;
+        }
+        AstNodeExpr* argp = lowerExpr(*expr.args[0], nullptr);
+        if (!argp) return nullptr;
+        argp = resizeExpr(argp, *typep, flp);
+        // A static argument gives a constant result, which constants may use
+        const AstConst* const argConstp = VN_CAST(argp, Const);
+        const int position = argConstp ? static_cast<int>(argConstp->num().toUInt()) : 0;
+        if (attribute == "pos" || attribute == "to_integer") {
+            if (argConstp) {
+                argp->deleteTree();
+                return makeIntConst(flp, position);
+            }
+            return resizeExpr(argp, intType(flp), flp);
+        }
+        if (attribute == "val") {
+            if (argConstp) {
+                argp->deleteTree();
+                return enumConst(position);
+            }
+            return resizeExpr(argp, *typep, flp);
+        }
+        if ((attribute == "succ" || attribute == "pred") && argConstp) {
+            argp->deleteTree();
+            const int stepped
+                = attribute == "succ" ? (position + 1) % count : (position - 1 + count) % count;
+            return enumConst(stepped);
+        }
+        if (attribute == "succ" || attribute == "pred") {
+            // succ/pred step to the neighbouring literal and wrap at the ends
+            const bool succ = attribute == "succ";
+            AstNodeExpr* const atLimitp
+                = new AstEq{flp, argp->cloneTree(false), enumConst(succ ? count - 1 : 0)};
+            atLimitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            AstNodeExpr* const steppedp
+                = succ ? static_cast<AstNodeExpr*>(new AstAdd{flp, argp, enumConst(1)})
+                       : static_cast<AstNodeExpr*>(new AstSub{flp, argp, enumConst(1)});
+            steppedp->dtypep(enumDtp);
+            AstCond* const resultp
+                = new AstCond{flp, atLimitp, enumConst(succ ? 0 : count - 1), steppedp};
+            resultp->dtypep(enumDtp);
+            return resultp;
+        }
+        unsupportedError(flp, "enumeration attribute '" + attribute + "'");
+        return nullptr;
+    }
+    if (!expr.args.empty()) {
+        unsupportedError(flp, "attribute '" + attribute + "' with arguments");
         return nullptr;
     }
     int64_t value = 0;
     if (attribute == "low") {
-        value = typep ? std::min(typep->left, typep->right) : 0;
+        value = std::min(typep->left, typep->right);
     } else if (attribute == "high") {
-        value = typep ? std::max(typep->left, typep->right) : 0;
+        value = std::max(typep->left, typep->right);
     } else if (attribute == "left") {
-        value = typep ? typep->left : 0;
+        value = typep->left;
     } else if (attribute == "right") {
-        value = typep ? typep->right : 0;
+        value = typep->right;
     } else if (attribute == "length") {
-        value = typep ? typep->length() : 0;
+        value = typep->length();
     } else if (attribute == "ascending") {
-        const bool ascending = typep && typep->ascending;
-        return bitConst(flp, ascending ? '1' : '0');
+        return bitConst(flp, typep->ascending ? '1' : '0');
     } else {
+        (void)typeMark;
         unsupportedError(flp, "attribute '" + attribute + "'");
         return nullptr;
     }
@@ -1686,15 +1824,10 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
 }
 
-AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent) {
+AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
     AstNodeExpr* lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return nullptr;
-    if (!concurrent && !VN_IS(lhsp, VarRef)) {
-        unsupportedError(stmt.flp, "assignment to a slice or element from a process");
-        lhsp->deleteTree();
-        return nullptr;
-    }
-    if (!concurrent) {
+    if (!concurrent && !variable) {
         // V3Tristate/V3Inst model inout ports as continuously driven; a procedural
         // assignment would reach DFG as a non-read reference
         bool inoutPort = false;
@@ -1715,7 +1848,8 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent) {
     }
     rhsp = resizeExpr(rhsp, ltype, stmt.flp);
     if (concurrent) return new AstAssignW{stmt.flp, lhsp, rhsp};
-    if (m_initial) return new AstAssign{stmt.flp, lhsp, rhsp};
+    // A variable assignment updates its target immediately
+    if (variable || m_initial) return new AstAssign{stmt.flp, lhsp, rhsp};
     return new AstAssignDly{stmt.flp, lhsp, rhsp};
 }
 
@@ -1756,8 +1890,50 @@ AstNode* Lowering::lowerIf(const Stmt& stmt) {
 
 AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::ASSIGN) return lowerAssign(stmt, false);
+    if (stmt.kind == Stmt::VAR_ASSIGN) return lowerAssign(stmt, false, true);
     if (stmt.kind == Stmt::IF) return lowerIf(stmt);
+    if (stmt.kind == Stmt::CASE) return lowerCase(stmt);
     return nullptr;
+}
+
+AstNode* Lowering::lowerCase(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
+    if (!selectorp) return nullptr;
+    AstNodeDType* const selDtp = selectorp->dtypep();
+    AstCaseItem* itemsp = nullptr;
+    AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen
+    for (const auto& item : stmt.caseItems) {
+        AstNode* const bodyp = lowerStmtList(item.second);
+        std::vector<AstConst*> cops;
+        if (!lowerChoiceConsts(item.first, selDtp, cops)) {
+            for (AstConst* const cop : cops) cop->deleteTree();
+            if (bodyp) bodyp->deleteTree();
+            if (itemsp) itemsp->deleteTree();
+            selectorp->deleteTree();
+            return nullptr;
+        }
+        if (cops.empty() && currentp) {
+            // A second "others" alternative can never be selected
+            if (bodyp) bodyp->deleteTree();
+            continue;
+        }
+        AstCaseItem* const caseItemp
+            = cops.empty() ? new AstCaseItem{flp, nullptr, bodyp}
+                           : new AstCaseItem{flp, cops.front(), bodyp};
+        for (size_t i = 1; i < cops.size(); ++i) caseItemp->addCondsp(cops[i]);
+        if (cops.empty()) currentp = caseItemp;
+        itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, caseItemp)
+                        : caseItemp;
+    }
+    if (!itemsp) {
+        selectorp->deleteTree();
+        return nullptr;
+    }
+    AstCase* const casep = new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+    // A case over an enumeration is exhaustive; unlisted bit patterns are illegal
+    if (VN_CAST(selectorp->dtypep()->skipRefToEnump(), EnumDType)) casep->uniquePragma(true);
+    return casep;
 }
 
 AstNode* Lowering::lowerStmtList(const std::vector<StmtP>& stmts) {
@@ -1773,6 +1949,39 @@ void Lowering::lowerProcess(const Process& process) {
     if (!process.hasSensitivity) {
         unsupportedError(process.flp, "process without a sensitivity list (wait-based processes)");
         return;
+    }
+    // The process declarative part declares variables that hide module-level names
+    const std::map<std::string, VarInfo> savedScope = m_scope;
+    const std::map<std::string, int64_t> savedConsts = m_consts;
+    const std::map<std::string, VType> savedTypes = m_types;
+    const std::map<std::string, AstConst*> savedConstValues = m_constValues;
+    const std::map<std::string, VType> savedConstTypes = m_constTypes;
+    const std::map<std::string, AstConst*> savedEnumConsts = m_enumConsts;
+    int varSeq = 0;
+    for (const TypeDecl& typeDecl : process.types) registerType(typeDecl);
+    for (const Decl& decl : process.decls) {
+        if (decl.kind == Decl::CONSTANT) {
+            emitConstant(decl, false);
+            continue;
+        }
+        VType type;
+        if (!resolveType(decl.type, type)) continue;
+        for (const auto& name : decl.names) {
+            // Mangle so the same variable name in two processes stays distinct
+            const std::string mangled = "vhdlvar_" + std::to_string(++varSeq) + "__" + name.second;
+            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+            m_modp->addStmtsp(varp);
+            m_scope[name.first] = VarInfo{varp, type};
+            if (!decl.init) continue;
+            AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
+            AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
+            if (!rhsp) {
+                lhsp->deleteTree();
+                continue;
+            }
+            rhsp = resizeExpr(rhsp, type, decl.flp);
+            m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
+        }
     }
     std::vector<AstVar*> sensVars;
     for (const std::string& name : process.sensitivity) {
@@ -1825,6 +2034,12 @@ void Lowering::lowerProcess(const Process& process) {
     // VHDL executes a process once at time zero, before any sensitivity event, and the
     // initial combination is visible to the testbench after the first eval
     if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
+    m_scope = savedScope;
+    m_consts = savedConsts;
+    m_types = savedTypes;
+    m_constValues = savedConstValues;
+    m_constTypes = savedConstTypes;
+    m_enumConsts = savedEnumConsts;
 }
 
 //! Register a declared name; a local declaration hides a name from a used package

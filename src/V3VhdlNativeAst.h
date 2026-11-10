@@ -154,12 +154,15 @@ struct Stmt;
 using StmtP = std::unique_ptr<Stmt>;
 
 struct Stmt final {
-    enum Kind : uint8_t { ASSIGN, IF } kind;
+    enum Kind : uint8_t { ASSIGN, VAR_ASSIGN, IF, CASE } kind;
     FileLine* flp = nullptr;
-    ExprP target;  // ASSIGN
-    ExprP value;  // ASSIGN
+    ExprP target;  // ASSIGN/VAR_ASSIGN
+    ExprP value;  // ASSIGN/VAR_ASSIGN
     // IF: (condition, body); a null condition marks the final else
     std::vector<std::pair<ExprP, std::vector<StmtP>>> branches;
+    ExprP selector;  // CASE: the case expression
+    // CASE: (choices, body); an empty choice list marks "others"
+    std::vector<std::pair<std::vector<ExprP>, std::vector<StmtP>>> caseItems;
 
     explicit Stmt(Kind kind_)
         : kind{kind_} {}
@@ -182,20 +185,13 @@ struct PortDecl final {
 };
 
 struct Decl final {
-    enum Kind : uint8_t { SIGNAL, CONSTANT } kind;
+    enum Kind : uint8_t { SIGNAL, CONSTANT, VARIABLE } kind;
     FileLine* flp = nullptr;
     std::vector<std::pair<std::string, std::string>> names;
     TypeSpec type;
     ExprP init;
     explicit Decl(Kind kind_)
         : kind{kind_} {}
-};
-
-struct Process final {
-    FileLine* flp = nullptr;
-    bool hasSensitivity = false;
-    std::vector<std::string> sensitivity;  // Folded names
-    std::vector<StmtP> body;
 };
 
 //! A type, subtype or alias declaration
@@ -215,6 +211,15 @@ struct TypeDecl final {
 
     explicit TypeDecl(Kind kind_)
         : kind{kind_} {}
+};
+
+struct Process final {
+    FileLine* flp = nullptr;
+    bool hasSensitivity = false;
+    std::vector<std::string> sensitivity;  // Folded names
+    std::vector<Decl> decls;  // Variables of the process declarative part
+    std::vector<TypeDecl> types;  // Types declared by the process
+    std::vector<StmtP> body;
 };
 
 struct Concurrent final {

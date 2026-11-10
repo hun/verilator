@@ -146,6 +146,7 @@ class Parser final {
     std::vector<StmtP> parseStmtList(bool stopAtElse);
     StmtP parseSequentialStatement();
     StmtP parseIf(FileLine* flp);
+    StmtP parseCase(FileLine* flp);
 
 public:
     Parser(std::string filename, std::string text, std::string libname, bool inLibrary)
@@ -377,8 +378,13 @@ ExprP Parser::parseDesignator() {
             attr->flp = node->flp;
             attr->text = attrTok.text;
             attr->a = std::move(node);
-            if (acceptSym("(")) {  // e.g. t'image(1); not needed until it is lowered
-                while (!m_failed && !isSym(")")) advance();
+            if (acceptSym("(")) {  // Attribute parameter, e.g. t'pos(x)
+                for (;;) {
+                    ExprP arg = parseExpr();
+                    if (!arg) return nullptr;
+                    attr->args.push_back(std::move(arg));
+                    if (!acceptSym(",")) break;
+                }
                 expectSym(")");
             }
             node = std::move(attr);
@@ -935,6 +941,32 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
             skipContextClause();
             continue;
         }
+        if (isId("variable")) {
+            advance();
+            parseDeclInto(process.decls, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("shared")) {
+            advance();
+            if (!expectId("variable")) return;
+            parseDeclInto(process.decls, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("subtype")) {
+            advance();
+            parseSubtypeInto(process.types);
+            continue;
+        }
+        if (isId("type")) {
+            advance();
+            parseTypeDeclInto(process.types);
+            continue;
+        }
+        if (isId("constant")) {
+            advance();
+            parseDeclInto(process.decls, Decl::CONSTANT);
+            continue;
+        }
         unsupported("process declarative item '" + m_cur.text + "'");
         return;
     }
@@ -962,6 +994,7 @@ std::vector<StmtP> Parser::parseStmtList(bool stopAtElse) {
         if (m_cur.kind == Token::END) break;
         if (isId("end")) break;
         if (stopAtElse && (isId("elsif") || isId("else"))) break;
+        if (isId("when")) break;  // Start of the next case alternative
         StmtP stmt = parseSequentialStatement();
         if (stmt) {
             body.push_back(std::move(stmt));
@@ -979,8 +1012,12 @@ StmtP Parser::parseSequentialStatement() {
         advance();
         return parseIf(flp);
     }
-    if (isId("case") || isId("for") || isId("while") || isId("loop") || isId("wait")
-        || isId("return") || isId("report") || isId("assert") || isId("next") || isId("exit")) {
+    if (isId("case")) {
+        advance();
+        return parseCase(flp);
+    }
+    if (isId("for") || isId("while") || isId("loop") || isId("wait") || isId("return")
+        || isId("report") || isId("assert") || isId("next") || isId("exit")) {
         unsupported("sequential statement '" + m_cur.text + "'");
         return nullptr;
     }
@@ -995,9 +1032,18 @@ StmtP Parser::parseSequentialStatement() {
     }
     ExprP target = parseDesignator();
     if (!target) return nullptr;
-    if (isSym(":=")) {
-        unsupported("variable assignment");
-        return nullptr;
+    if (acceptSym(":=")) {
+        auto stmt = std::make_unique<Stmt>(Stmt::VAR_ASSIGN);
+        stmt->flp = flp;
+        stmt->target = std::move(target);
+        stmt->value = parseExpr();
+        if (!stmt->value) return nullptr;
+        if (isId("when") || isId("after")) {
+            unsupported("conditional or delayed variable assignment");
+            return nullptr;
+        }
+        expectSym(";");
+        return stmt;
     }
     if (!acceptSym("<=")) {
         error("expected '<=' in a sequential signal assignment, got '" + m_cur.text + "'");
@@ -1124,6 +1170,35 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
         return;
     }
     m_packages.push_back(std::move(pkg));
+}
+
+StmtP Parser::parseCase(FileLine* flp) {
+    auto stmt = std::make_unique<Stmt>(Stmt::CASE);
+    stmt->flp = flp;
+    stmt->selector = parseExpr();
+    if (!stmt->selector) return nullptr;
+    if (!expectId("is")) return nullptr;
+    while (!m_failed && !isId("end")) {
+        if (m_cur.kind == Token::END) {
+            error("unexpected end of file in a case statement");
+            return nullptr;
+        }
+        if (!expectId("when")) return nullptr;
+        std::vector<ExprP> choices;
+        if (!parseChoices(choices)) return nullptr;
+        expectSym("=>");
+        std::vector<StmtP> body = parseStmtList(true);
+        if (m_failed) return nullptr;
+        stmt->caseItems.emplace_back(std::move(choices), std::move(body));
+    }
+    if (!expectId("end")) return nullptr;
+    if (!expectId("case")) return nullptr;
+    if (m_cur.kind == Token::ID) advance();  // Optional end label
+    if (!acceptSym(";")) {
+        error("expected ';' after 'end case'");
+        return nullptr;
+    }
+    return stmt;
 }
 
 void Parser::parseDesignFile() {
