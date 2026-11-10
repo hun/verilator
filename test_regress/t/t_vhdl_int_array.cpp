@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
     VM_PREFIX* const topp = new VM_PREFIX;
 
     int fails = 0;
+    static const int table[] = {1, 10, 20, 4};
     for (int i = 0; i < 4; ++i) {
         topp->i = i;
         topp->eval();
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
             {"q", static_cast<int>(topp->q), i + 1},
             {"r", static_cast<int>(topp->r), 40 - 10 * i},
             {"len", static_cast<int>(topp->len), 4},
+            {"tq", static_cast<int>(topp->tq), table[i]},
         };
         for (const Check& check : checks) {
             if (check.got != check.want) {

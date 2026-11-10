@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -232,6 +233,12 @@ struct VhdlDTypeSpec final {
     AstNodeDType* elemDtp = nullptr;  // Element dtype for arrays of enums
 };
 
+//! Value and declared layout of a static vector generic
+struct VectorBinding final {
+    std::string bits;  // Leftmost element first; each character '0' or '1'
+    VhdlDTypeSpec spec;
+};
+
 //! How a lowered signal assignment is emitted
 enum class AssignMode : uint8_t { CONT, DELAYED, BLOCKING };
 
@@ -252,6 +259,7 @@ class VhdlXmlFrontend final {
     std::set<AstVar*> m_sharedVars;  // Module-level shared variables in scope
     std::map<std::string, int64_t> m_constBindings;  // Loop parameters during unrolling
     std::map<std::string, std::string> m_stringBindings;  // String generic values
+    std::map<std::string, VectorBinding> m_vectorBindings;  // Bit-vector generic values
     std::map<std::string, const Node*> m_typeBindings;  // Generic type name -> actual type mark
     std::map<std::string, const Node*> m_components;  // Current module: folded name -> component
     AstModule* m_modp = nullptr;  // Module being emitted
@@ -271,7 +279,9 @@ class VhdlXmlFrontend final {
     struct GenericDecl final {
         std::string name;
         const Node* defaultp = nullptr;
+        const Node* subtypep = nullptr;
         bool isString = false;  // Generic of type string; its value is a literal
+        bool isVector = false;  // Generic of a bit-vector type; its value is a literal
     };
     std::map<std::string, const Node*> m_entityByName;  // Folded name -> entity
     std::map<std::string, const Node*> m_archByEntityNodes;  // Folded name -> architecture
@@ -930,6 +940,193 @@ class VhdlXmlFrontend final {
         return constp;
     }
 
+    //! Whether a generic's subtype is a constrained bit-vector type
+    bool vectorTypeMark(const Node* subtypep, int depth = 0) const {
+        if (!subtypep || depth > 16) return false;
+        if (!subtypep->has("kind") && subtypep->has("ref")) {
+            return vectorTypeMark(nodeById(subtypep->attr("ref")), depth + 1);
+        }
+        const std::string kind = subtypep->attr("kind");
+        if (kind == "array_subtype_definition" || kind == "array_type_definition") {
+            const Node* const markp = subtypep->child("subtype_type_mark");
+            const std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
+            if (mark == "std_ulogic_vector" || mark == "std_logic_vector" || mark == "unsigned"
+                || mark == "signed" || mark == "bit_vector") {
+                return true;
+            }
+            // Anonymous array type: a bit-like element type
+            const Node* elemp = subtypep->child("element_subtype");
+            if (!elemp) elemp = subtypep->child("element_subtype_indication");
+            if (elemp && !elemp->has("kind") && elemp->has("ref")) {
+                elemp = nodeById(elemp->attr("ref"));
+            }
+            if (elemp) {
+                const Node* const emarkp = elemp->child("subtype_type_mark");
+                const std::string emark = emarkp ? vhdlFold(emarkp->attr("identifier"))
+                                                 : vhdlFold(elemp->attr("identifier"));
+                if (emark == "std_ulogic" || emark == "std_logic" || emark == "bit") {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (kind != "simple_name" && kind != "selected_name") return false;
+        const std::string id = vhdlFold(subtypep->attr("identifier"));
+        if (id == "std_ulogic_vector" || id == "std_logic_vector" || id == "unsigned"
+            || id == "signed" || id == "bit_vector") {
+            return true;
+        }
+        const Node* const refp = subtypep->child("named_entity");
+        const Node* const declp = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+        if (!declp) return false;
+        const std::string declKind = declp->attr("kind");
+        if (declKind == "subtype_declaration") {
+            return vectorTypeMark(declp->child("subtype_indication"), depth + 1);
+        }
+        if (declKind == "type_declaration" || declKind == "anonymous_type_declaration") {
+            const Node* defp = declp->child("type_definition");
+            if (!defp) defp = declp->child("subtype_definition");
+            return defp && vectorTypeMark(defp, depth + 1);
+        }
+        return false;
+    }
+
+    //! Declared layout of a vector generic, falling back to the literal's width
+    VhdlDTypeSpec vectorSpecFor(const Node* subtypep, int width) const {
+        const VhdlDTypeSpec probe = probeTypeSpec(subtypep);
+        if (probe.isVector && !probe.isUnconstrained
+            && rangeLength(probe.left, probe.right, probe.ascending) == width) {
+            return probe;
+        }
+        VhdlDTypeSpec spec;
+        spec.kwd = VBasicDTypeKwd::LOGIC;
+        spec.signing = VSigning::UNSIGNED;
+        spec.isVector = true;
+        spec.left = width;
+        spec.right = 1;
+        spec.ascending = false;
+        spec.elemWidth = 1;
+        return spec;
+    }
+
+    //! A vector generic's analyzed type comes from its binding, not the declaration
+    bool vectorGenericSpec(const Node* namep, VhdlDTypeSpec& spec) const {
+        if (!namep || namep->attr("kind") != "simple_name") return false;
+        const auto it = m_vectorBindings.find(vhdlFold(namep->attr("identifier")));
+        if (it == m_vectorBindings.end()) return false;
+        spec = it->second.spec;
+        return true;
+    }
+
+    //! Packed constant for a vector generic value; the leftmost element is the MSB
+    AstConst* vectorConst(FileLine* flp, const VectorBinding& binding) const {
+        const int width
+            = rangeLength(binding.spec.left, binding.spec.right, binding.spec.ascending);
+        V3Number num{flp, width, 0};
+        for (int i = 0; i < width; ++i) {
+            if (binding.bits[i] == '1') num.setBit(width - 1 - i, 1);
+        }
+        AstConst* const constp = new AstConst{flp, num};
+        constp->dtypep(dtypeOf(binding.spec, flp));
+        return constp;
+    }
+
+    //! One '0'/'1' element of a vector aggregate
+    bool vectorElement(const Node* exprp, char& bit) const {
+        if (!exprp) return false;
+        const std::string kind = exprp->attr("kind");
+        if (kind == "character_literal") {
+            const std::string id = exprp->attr("identifier");
+            if (id.size() < 3) return false;
+            const char value = id[1];
+            if (value == '0' || value == '1') {
+                bit = value;
+                return true;
+            }
+            if (value == 'L') {
+                bit = '0';
+                return true;
+            }
+            if (value == 'H') {
+                bit = '1';
+                return true;
+            }
+            return false;
+        }
+        std::string content;
+        if (stringLiteral(exprp, content) && content.size() == 1) {
+            if (content[0] == '0' || content[0] == '1') {
+                bit = content[0];
+                return true;
+            }
+        }
+        return false;
+    }
+
+    //! Static bit string of a vector generic actual or default
+    bool vectorValue(const Node* exprp, int width, std::string& bits) const {
+        if (!exprp) return false;
+        std::string content;
+        if (stringLiteral(exprp, content)) {
+            if (static_cast<int>(content.size()) != width) return false;
+            bits.clear();
+            for (const char value : content) {
+                if (value == '0' || value == '1') {
+                    bits.push_back(value);
+                } else if (value == 'L') {
+                    bits.push_back('0');
+                } else if (value == 'H') {
+                    bits.push_back('1');
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        }
+        const std::string kind = exprp->attr("kind");
+        if (kind == "aggregate") {
+            const Node* const choicesp = exprp->child("association_choices_chain");
+            const Node* const elp = choicesp ? choicesp->child("el") : nullptr;
+            if (elp && elp->attr("kind") == "choice_by_others") {
+                char bit = '0';
+                if (!vectorElement(elp->child("associated_expr"), bit)) return false;
+                bits.assign(static_cast<size_t>(width), bit);
+                return true;
+            }
+            return false;
+        }
+        if (kind == "simple_name" || kind == "selected_name") {
+            const auto it = m_vectorBindings.find(vhdlFold(exprp->attr("identifier")));
+            if (it != m_vectorBindings.end()
+                && static_cast<int>(it->second.bits.size()) == width) {
+                bits = it->second.bits;
+                return true;
+            }
+            const Node* const refp = exprp->child("named_entity");
+            const Node* const declp
+                = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+            if (declp
+                && (declp->attr("kind") == "constant_declaration"
+                    || declp->attr("kind") == "interface_constant_declaration")) {
+                return vectorValue(derefNode(declp->child("default_value")), width, bits);
+            }
+        }
+        return false;
+    }
+
+    //! Binding for a vector generic from its declaration's default value
+    bool vectorDefaultBinding(const GenericDecl& decl, VectorBinding& binding) const {
+        if (!decl.defaultp) return false;
+        const VhdlDTypeSpec probe = probeTypeSpec(decl.subtypep);
+        if (!probe.isVector || probe.isUnconstrained) return false;
+        const int width = rangeLength(probe.left, probe.right, probe.ascending);
+        std::string bits;
+        if (!vectorValue(decl.defaultp, width, bits)) return false;
+        binding.bits = bits;
+        binding.spec = probe;
+        return true;
+    }
+
     //! Dtype of a subprogram formal; nullptr when the formal is unconstrained
     AstNodeDType* formalDType(const Node* paramp) {
         const VhdlDTypeSpec probe = probeTypeSpec(paramp->child("subtype_indication"));
@@ -1145,17 +1342,19 @@ class VhdlXmlFrontend final {
             return spec;
         }
         const Node* const rangep = derefNode(indices.front()->child("range_constraint"));
-        if (!rangep) {
-            error(subtypep, "VHDL array without a range constraint");
-            spec.isVector = false;
-            return spec;
-        }
-        spec.ascending = rangep->attr("direction") == "to";
         int leftValue = 0;
         int rightValue = 0;
-        if (!discreteRange(rangep, leftValue, rightValue, spec.ascending)) {
-            unsupported(rangep, "non-static range limit");
-            spec.isVector = false;  // Keep the tree buildable; the error aborts the run
+        if (rangep) {
+            spec.ascending = rangep->attr("direction") == "to";
+            if (!discreteRange(rangep, leftValue, rightValue, spec.ascending)) {
+                unsupported(rangep, "non-static range limit");
+                spec.isVector = false;  // Keep the tree buildable; the error aborts the run
+                return spec;
+            }
+        } else if (!integerRangeOfPrefix(indices.front(), leftValue, rightValue, spec.ascending)) {
+            // An index constraint may name an integer subtype instead of a range
+            error(subtypep, "VHDL array without a range constraint");
+            spec.isVector = false;
             return spec;
         }
         spec.left = leftValue;
@@ -1328,6 +1527,14 @@ class VhdlXmlFrontend final {
                 return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
             }
             return stringConst(flpOf(nodep), stringIt->second);
+        }
+        const auto vectorIt = m_vectorBindings.find(vhdlFold(namep->attr("identifier")));
+        if (vectorIt != m_vectorBindings.end()) {
+            if (write) {
+                error(nodep, "VHDL generic constant cannot be assigned");
+                return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
+            }
+            return vectorConst(flpOf(nodep), vectorIt->second);
         }
         const auto bindIt = m_constBindings.find(vhdlFold(namep->attr("identifier")));
         if (bindIt != m_constBindings.end()) {
@@ -3208,11 +3415,39 @@ class VhdlXmlFrontend final {
                 }
                 const int64_t lowv = std::min(rangeLeft, rangeRight);
                 const int64_t highv = std::max(rangeLeft, rangeRight);
-                for (int64_t index = lowv; index <= highv; ++index) {
-                    const int slot = slotOf(index);
-                    if (slot < 0) return nullptr;
-                    exprs[slot] = lowerExpr(assocp, elemDtp);
-                    if (!exprs[slot]) return nullptr;
+                const int64_t count = highv - lowv + 1;
+                // The associated value may be one element or an array spanning the choice
+                AstNodeExpr* const valuep = lowerExpr(assocp, count == 1 ? elemDtp : nullptr);
+                if (!valuep) return nullptr;
+                const int valueWidth = valuep->dtypep()->width();
+                if (valueWidth <= 0) return nullptr;
+                AstNodeDType* const pieceDtp
+                    = elemDtp ? elemDtp
+                              : (basicp ? m_rootp->typeTablep()->findLogicBitDType(
+                                              flp, basicp->keyword(), elemWidth, elemWidth,
+                                              basicp->numeric())
+                                        : nullptr);
+                if (valueWidth == elemWidth) {
+                    for (int64_t index = lowv; index <= highv; ++index) {
+                        const int slot = slotOf(index);
+                        if (slot < 0) return nullptr;
+                        exprs[slot] = index == lowv ? valuep : valuep->cloneTree(false);
+                    }
+                } else if (valueWidth == count * elemWidth) {
+                    for (int64_t index = lowv; index <= highv; ++index) {
+                        const int slot = slotOf(index);
+                        if (slot < 0) return nullptr;
+                        const int k = static_cast<int>(index - lowv);
+                        AstSel* const piecep
+                            = new AstSel{flp, valuep->cloneTree(false),
+                                         valueWidth - (k + 1) * elemWidth, elemWidth};
+                        piecep->dtypep(pieceDtp);
+                        exprs[slot] = piecep;
+                    }
+                    VL_DO_DANGLING(valuep->deleteTree(), valuep);
+                } else {
+                    VL_DO_DANGLING(valuep->deleteTree(), valuep);
+                    return nullptr;
                 }
             } else if (choiceKind == "choice_by_none") {
                 // A positional value may span several elements; its leftmost element is the
@@ -3373,6 +3608,8 @@ class VhdlXmlFrontend final {
                 return makeConst(flp, contextp ? contextp : intDType(flp),
                                  static_cast<uint64_t>(value));
             }
+            const auto vectorIt = m_vectorBindings.find(vhdlFold(nodep->attr("identifier")));
+            if (vectorIt != m_vectorBindings.end()) { return vectorConst(flp, vectorIt->second); }
             if (const Node* const refp = nodep->child("named_entity")) {
                 if (refp->has("ref")) {
                     const Node* const declp = nodeById(refp->attr("ref"));
@@ -4338,7 +4575,8 @@ class VhdlXmlFrontend final {
         // An array of multi-bit elements stores only its bit width in the dtype; a string
         // generic's analyzed type is unconstrained and its actual supplies the range
         VhdlDTypeSpec layout;
-        if (stringGenericSpec(prefixp, layout) || multiArraySpec(prefixp, layout)) {
+        if (stringGenericSpec(prefixp, layout) || vectorGenericSpec(prefixp, layout)
+            || arraySpec(prefixp, layout)) {
             left = layout.left;
             right = layout.right;
             ascending = layout.ascending;
@@ -4547,7 +4785,153 @@ class VhdlXmlFrontend final {
         if (kind == "function_call") {
             return evalConstCall(nodep, ConstFuncEnv{}, value, depth + 1);
         }
+        if (kind == "type_conversion") {
+            const Node* const markp = nodep->child("type_mark");
+            const std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
+            if (mark == "integer" || mark == "natural" || mark == "positive") {
+                double realv = 0.0;
+                if (!evalConstReal(nodep->child("expression"), ConstFuncEnv{}, realv, depth + 1)) {
+                    return false;
+                }
+                value = static_cast<int64_t>(realv);
+                return true;
+            }
+            return false;
+        }
         return attrValue(nodep, value);
+    }
+
+    //! Evaluate a locally static real expression (math_real width helpers)
+    bool evalConstReal(const Node* nodep, const ConstFuncEnv& env, double& value,
+                       int depth = 0) const {
+        if (!nodep || depth > 32) return false;
+        const std::string kind = nodep->attr("kind");
+        if (kind == "floating_point_literal") {
+            value = std::strtod(nodep->attr("fp_value").c_str(), nullptr);
+            return true;
+        }
+        if (kind == "integer_literal") {
+            value = static_cast<double>(std::strtoll(nodep->attr("value").c_str(), nullptr, 10));
+            return true;
+        }
+        if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
+            return evalConstReal(nodep->child("expression"), env, value, depth + 1);
+        }
+        if (kind == "type_conversion") {
+            const Node* const markp = nodep->child("type_mark");
+            const std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
+            if (mark == "real") {
+                return evalConstReal(nodep->child("expression"), env, value, depth + 1);
+            }
+            if (mark == "integer" || mark == "natural" || mark == "positive") {
+                int64_t intv = 0;
+                if (!evalConstFuncExpr(nodep->child("expression"), env, intv, depth + 1)) {
+                    return false;
+                }
+                value = static_cast<double>(intv);
+                return true;
+            }
+            return false;
+        }
+        if (kind == "simple_name" || kind == "selected_name") {
+            const std::string name = vhdlFold(nodep->attr("identifier"));
+            const auto it = env.values.find(name);
+            if (it != env.values.end()) {
+                value = static_cast<double>(it->second);
+                return true;
+            }
+            int64_t intv = 0;
+            if (evalConst(nodep, intv, depth + 1)) {
+                value = static_cast<double>(intv);
+                return true;
+            }
+            const Node* const refp = nodep->child("named_entity");
+            const Node* const declp
+                = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+            if (declp
+                && (declp->attr("kind") == "constant_declaration"
+                    || declp->attr("kind") == "interface_constant_declaration")) {
+                if (const Node* const defp = derefNode(declp->child("default_value"))) {
+                    return evalConstReal(defp, env, value, depth + 1);
+                }
+            }
+            return false;
+        }
+        if (kind == "function_call") {
+            const Node* const prefixp = nodep->child("prefix");
+            const std::string fn = prefixp ? vhdlFold(prefixp->attr("identifier")) : std::string{};
+            const bool known = fn == "ceil" || fn == "floor" || fn == "round" || fn == "trunc"
+                               || fn == "log2" || fn == "log10" || fn == "exp" || fn == "sqrt"
+                               || fn == "sin" || fn == "cos" || fn == "tan" || fn == "arctan"
+                               || fn == "abs";
+            if (!known) return false;
+            const Node* actualp = nullptr;
+            for (const Node* const assocp :
+                 childEls(nodep->child("parameter_association_chain"))) {
+                actualp = assocp->child("actual");
+                if (actualp) break;
+            }
+            double arg = 0.0;
+            if (!actualp || !evalConstReal(actualp, env, arg, depth + 1)) return false;
+            if (fn == "ceil") {
+                value = std::ceil(arg);
+            } else if (fn == "floor") {
+                value = std::floor(arg);
+            } else if (fn == "round") {
+                value = std::round(arg);
+            } else if (fn == "trunc") {
+                value = std::trunc(arg);
+            } else if (fn == "log2") {
+                value = std::log2(arg);
+            } else if (fn == "log10") {
+                value = std::log10(arg);
+            } else if (fn == "exp") {
+                value = std::exp(arg);
+            } else if (fn == "sqrt") {
+                value = std::sqrt(arg);
+            } else if (fn == "sin") {
+                value = std::sin(arg);
+            } else if (fn == "cos") {
+                value = std::cos(arg);
+            } else if (fn == "tan") {
+                value = std::tan(arg);
+            } else if (fn == "arctan") {
+                value = std::atan(arg);
+            } else {
+                value = std::fabs(arg);
+            }
+            return true;
+        }
+        if (kind == "addition_operator" || kind == "subtraction_operator"
+            || kind == "substraction_operator" || kind == "multiplication_operator"
+            || kind == "division_operator" || kind == "exponentiation_operator") {
+            double lhsv = 0.0;
+            double rhsv = 0.0;
+            if (!evalConstReal(nodep->child("left"), env, lhsv, depth + 1)
+                || !evalConstReal(nodep->child("right"), env, rhsv, depth + 1)) {
+                return false;
+            }
+            if (kind == "addition_operator") {
+                value = lhsv + rhsv;
+            } else if (kind == "multiplication_operator") {
+                value = lhsv * rhsv;
+            } else if (kind == "division_operator") {
+                if (rhsv == 0.0) return false;
+                value = lhsv / rhsv;
+            } else if (kind == "exponentiation_operator") {
+                value = std::pow(lhsv, rhsv);
+            } else {
+                value = lhsv - rhsv;
+            }
+            return true;
+        }
+        if (kind == "negation_operator" || kind == "absolute_operator") {
+            double operandv = 0.0;
+            if (!evalConstReal(nodep->child("operand"), env, operandv, depth + 1)) return false;
+            value = kind == "negation_operator" ? -operandv : std::fabs(operandv);
+            return true;
+        }
+        return false;
     }
 
     enum ConstFlow : uint8_t { CF_NORMAL, CF_RETURN, CF_EXIT, CF_NEXT };
@@ -4639,6 +5023,19 @@ class VhdlXmlFrontend final {
         }
         if (kind == "function_call") {
             return evalConstCall(nodep, env, value, depth + 1, widthp);
+        }
+        if (kind == "type_conversion") {
+            const Node* const markp = nodep->child("type_mark");
+            const std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
+            if (mark == "integer" || mark == "natural" || mark == "positive") {
+                double realv = 0.0;
+                if (!evalConstReal(nodep->child("expression"), env, realv, depth + 1)) {
+                    return false;
+                }
+                value = static_cast<int64_t>(realv);
+                return true;
+            }
+            return false;
         }
         if (kind == "addition_operator" || kind == "subtraction_operator"
             || kind == "substraction_operator" || kind == "multiplication_operator"
@@ -5070,6 +5467,13 @@ class VhdlXmlFrontend final {
         }
         if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
             return evalBool(nodep->child("expression"), value);
+        }
+        if (kind == "function_call") {
+            // A pure function returning a constant boolean, e.g. common_pkg.in_simulation
+            int64_t result = 0;
+            if (!evalConstCall(nodep, ConstFuncEnv{}, result, 0)) return false;
+            value = result != 0;
+            return true;
         }
         if (kind == "and_operator" || kind == "or_operator" || kind == "xor_operator") {
             bool lhsv = false;
@@ -5978,28 +6382,8 @@ class VhdlXmlFrontend final {
             }
         }
         if (waitIndex == stmts.size()) return false;
-        for (size_t i = 0; i < stmts.size(); ++i) {
-            if (i == waitIndex || stmts[i]->attr("kind") == "suspend_state_statement") continue;
-            if (nodeHasWait(stmts[i])) {
-                unsupported(stmts[i], "wait statement after the clock wait");
-                return true;
-            }
-        }
         const Node* const waitp = stmts[waitIndex];
-        EdgeInfo edge;
-        std::vector<const Node*> levels;
         const Node* const condp = waitp->child("condition_clause");
-        if (!condp || !splitClockCondition(condp, edge, levels) || !levels.empty()
-            || !astVarOf(edge.sigp)) {
-            unsupported(waitp, "wait statement without a simple clock edge");
-            return true;
-        }
-        for (size_t i = waitIndex + 1; i < stmts.size(); ++i) {
-            if (nodeHasWait(stmts[i])) {
-                unsupported(stmts[i], "wait statement after the clock wait");
-                return true;
-            }
-        }
 
         VL_RESTORER_COPY(m_scope);
         emitProcessVariables(processp);
@@ -6014,6 +6398,63 @@ class VhdlXmlFrontend final {
             }
             return headp;
         };
+        // A bare `wait;` suspends the process forever, so the statements before it run
+        // once at time zero and nothing after it is reachable
+        if (!condp) {
+            if (AstNode* const initp = lowerRange(0, waitIndex, AssignMode::BLOCKING)) {
+                m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+            }
+            return true;
+        }
+
+        EdgeInfo edge;
+        std::vector<const Node*> levels;
+        if (!splitClockCondition(condp, edge, levels) || !astVarOf(edge.sigp)) {
+            unsupported(waitp, "wait statement without a simple clock edge");
+            return true;
+        }
+        // Level conjuncts of the wait condition gate the body
+        AstNodeExpr* condExprp = nullptr;
+        for (const Node* const levelp : levels) {
+            AstNodeExpr* const levelExprp = lowerExpr(levelp, bitDType(flp));
+            if (!levelExprp) continue;
+            condExprp = condExprp ? makeBoolAnd(flp, condExprp, levelExprp) : levelExprp;
+        }
+        // A later wait means the process does not loop. Only a trailing bare wait is
+        // handled: the body runs once on the first matching edge, then suspends forever.
+        size_t trailingWait = stmts.size();
+        for (size_t i = waitIndex + 1; i < stmts.size(); ++i) {
+            if (stmts[i]->attr("kind") == "wait_statement") {
+                trailingWait = i;
+                break;
+            }
+        }
+        if (trailingWait != stmts.size()) {
+            if (stmts[trailingWait]->child("condition_clause")) {
+                unsupported(stmts[trailingWait], "second wait after the clock wait");
+                return true;
+            }
+            AstVar* const firedp = new AstVar{
+                flp, VVarType::VAR, "vhdlwait_" + std::to_string(++m_varSeq), bitDType(flp)};
+            m_modp->addStmtsp(firedp);
+            m_modp->addStmtsp(new AstInitialStatic{
+                flp, new AstAssign{flp, new AstVarRef{flp, firedp, VAccess::WRITE},
+                                   makeConst(flp, bitDType(flp), 0)}});
+            AstNode* bodyp = lowerRange(waitIndex + 1, trailingWait, AssignMode::DELAYED);
+            AstNode* const setp = new AstAssign{flp, new AstVarRef{flp, firedp, VAccess::WRITE},
+                                                makeConst(flp, bitDType(flp), 1)};
+            bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, setp) : setp;
+            AstNode* const guardedp = condExprp ? new AstIf{flp, condExprp, bodyp} : bodyp;
+            AstNode* const once = new AstIf{
+                flp, makeBoolNot(flp, new AstVarRef{flp, firedp, VAccess::READ}), guardedp};
+            AstSenItem* const itemsp = new AstSenItem{flp, edge.edgeType, edge.sigp};
+            m_modp->addStmtsp(
+                new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, once});
+            if (AstNode* const initp = lowerRange(0, waitIndex, AssignMode::BLOCKING)) {
+                m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+            }
+            return true;
+        }
         // The process runs from the start once, at time zero
         if (AstNode* const initp = lowerRange(0, waitIndex, AssignMode::BLOCKING)) {
             m_modp->addStmtsp(new AstInitialStatic{flp, initp});
@@ -6023,6 +6464,7 @@ class VhdlXmlFrontend final {
         if (AstNode* const loopp = lowerRange(0, waitIndex, AssignMode::DELAYED)) {
             stmtsp = stmtsp ? AstNode::addNext<AstNode, AstNode>(stmtsp, loopp) : loopp;
         }
+        if (condExprp && stmtsp) stmtsp = new AstIf{flp, condExprp, stmtsp};
         if (!stmtsp) return true;
         AstSenItem* const itemsp = new AstSenItem{flp, edge.edgeType, edge.sigp};
         m_modp->addStmtsp(
@@ -6686,19 +7128,43 @@ class VhdlXmlFrontend final {
 
     void populateModule(const Node* entityp, const Node* archp) {
         // A base module stands for the generic defaults.  Integer defaults already resolve
-        // lazily through the declaration, but a string value has no node to fall back to.
+        // lazily through the declaration, but a string or vector value has no node to fall
+        // back to.
         VL_RESTORER_COPY(m_stringBindings);
+        VL_RESTORER_COPY(m_vectorBindings);
         const auto genIt = m_entityGenerics.find(vhdlFold(entityp->attr("identifier")));
         if (genIt != m_entityGenerics.end()) {
             for (const GenericDecl& decl : genIt->second) {
-                if (!decl.isString || !decl.defaultp) continue;
-                std::string content;
-                if (stringLiteral(decl.defaultp, content) && !content.empty()) {
-                    m_stringBindings[vhdlFold(decl.name)] = content;
+                if (decl.isString && decl.defaultp) {
+                    std::string content;
+                    if (stringLiteral(decl.defaultp, content) && !content.empty()) {
+                        m_stringBindings[vhdlFold(decl.name)] = content;
+                    }
+                } else if (decl.isVector) {
+                    VectorBinding binding;
+                    if (vectorDefaultBinding(decl, binding)) {
+                        m_vectorBindings[vhdlFold(decl.name)] = binding;
+                    }
                 }
             }
         }
         populateModuleFor(entityp, archp, m_modules[vhdlFold(entityp->attr("identifier"))]);
+    }
+
+    //! Create and populate a base (default-generic) module on demand
+    void ensureBaseModule(const std::string& foldedName) {
+        if (m_modules.count(foldedName)) return;
+        const auto entityIt = m_entityByName.find(foldedName);
+        const auto archIt = m_archByEntityNodes.find(foldedName);
+        if (entityIt == m_entityByName.end() || archIt == m_archByEntityNodes.end()) return;
+        const Node* const entityp = entityIt->second;
+        // These entities have no single port type or body; only specializations emit
+        if (hasTypeGenerics(entityp) || hasUnconstrainedPorts(entityp)
+            || hasUnboundGeneric(entityp)) {
+            return;
+        }
+        createModule(entityp);
+        populateModule(entityp, archIt->second);
     }
 
     void populateModuleFor(const Node* entityp, const Node* archp, ModuleInfo& info) {
@@ -6859,7 +7325,9 @@ class VhdlXmlFrontend final {
             decl.name = declp->attr("identifier");
             decl.defaultp = declp->child("default_value");
             const Node* const subtypep = declp->child("subtype_indication");
+            decl.subtypep = subtypep;
             decl.isString = subtypep && vhdlFold(subtypep->attr("identifier")) == "string";
+            decl.isVector = !decl.isString && vectorTypeMark(subtypep);
             result.push_back(decl);
         }
         return result;
@@ -6869,6 +7337,7 @@ class VhdlXmlFrontend final {
     ModuleInfo* specializeModule(const Node* entityp,
                                  const std::map<std::string, int64_t>& bindings,
                                  const std::map<std::string, std::string>& stringBindings,
+                                 const std::map<std::string, VectorBinding>& vectorBindings,
                                  const std::map<std::string, const Node*>& typeBindings,
                                  const std::map<std::string, PortInfo>& portInfos = {}) {
         const std::string entityKey = vhdlFold(entityp->attr("identifier"));
@@ -6879,6 +7348,9 @@ class VhdlXmlFrontend final {
         for (const auto& binding : stringBindings) {
             key += "|S" + binding.first + "=" + std::to_string(binding.second.size()) + ":"
                    + binding.second;
+        }
+        for (const auto& binding : vectorBindings) {
+            key += "|V" + binding.first + "=" + binding.second.bits;
         }
         for (const auto& binding : typeBindings) {
             key += "|" + binding.first + "@" + binding.second->attr("id");
@@ -6910,10 +7382,14 @@ class VhdlXmlFrontend final {
 
         VL_RESTORER_COPY(m_constBindings);
         VL_RESTORER_COPY(m_stringBindings);
+        VL_RESTORER_COPY(m_vectorBindings);
         VL_RESTORER_COPY(m_typeBindings);
         for (const auto& binding : bindings) m_constBindings[binding.first] = binding.second;
         for (const auto& binding : stringBindings) {
             m_stringBindings[binding.first] = binding.second;
+        }
+        for (const auto& binding : vectorBindings) {
+            m_vectorBindings[binding.first] = binding.second;
         }
         for (const auto& binding : typeBindings) m_typeBindings[binding.first] = binding.second;
 
@@ -7212,6 +7688,10 @@ class VhdlXmlFrontend final {
             unsupported(unitp, "instantiated unit form '" + unitp->attr("kind") + "'");
             return;
         }
+        // An instance without a generic map uses the base module. Create it on demand so
+        // that base modules which are only reached through specializations are never
+        // elaborated (their default generics may not be representable, e.g. null arrays).
+        if (!stmtp->child("generic_map_aspect_chain")) ensureBaseModule(vhdlFold(unitName));
         const auto targetIt = m_modules.find(vhdlFold(unitName));
         ModuleInfo* targetp = targetIt == m_modules.end() ? nullptr : &targetIt->second;
         const auto entityIt = m_entityByName.find(vhdlFold(unitName));
@@ -7227,6 +7707,7 @@ class VhdlXmlFrontend final {
 
         std::map<std::string, int64_t> bindings;
         std::map<std::string, std::string> stringBindings;
+        std::map<std::string, VectorBinding> vectorBindings;
         std::map<std::string, const Node*> typeBindings;
         std::map<std::string, PortInfo> portInfos;
         if (entityp && hasUnconstrainedPorts(entityp)
@@ -7325,6 +7806,38 @@ class VhdlXmlFrontend final {
                     stringBindings[formalName] = content;
                     continue;
                 }
+                if (declIt->isVector) {
+                    int width = 0;
+                    std::string content;
+                    if (stringLiteral(actualp, content)) {
+                        width = static_cast<int>(content.size());
+                    } else if (actualp->attr("kind") == "simple_name"
+                               || actualp->attr("kind") == "selected_name") {
+                        const auto it
+                            = m_vectorBindings.find(vhdlFold(actualp->attr("identifier")));
+                        if (it != m_vectorBindings.end()) {
+                            width = static_cast<int>(it->second.bits.size());
+                        }
+                    }
+                    std::string bits;
+                    if (width <= 0 || !vectorValue(actualp, width, bits)) {
+                        unsupported(assocp, "non-static vector generic actual");
+                        bad = true;
+                        continue;
+                    }
+                    VectorBinding binding;
+                    binding.bits = bits;
+                    {
+                        // The declared range may depend on earlier generics of this entity
+                        VL_RESTORER_COPY(m_constBindings);
+                        for (const auto& item : bindings) {
+                            m_constBindings[item.first] = item.second;
+                        }
+                        binding.spec = vectorSpecFor(declIt->subtypep, width);
+                    }
+                    vectorBindings[formalName] = binding;
+                    continue;
+                }
                 int64_t value = 0;
                 if (!evalConst(actualp, value)) {
                     unsupported(assocp, "non-static generic actual");
@@ -7338,6 +7851,7 @@ class VhdlXmlFrontend final {
                 const std::string formalName = vhdlFold(decl.name);
                 if (bindings.find(formalName) != bindings.end()) continue;
                 if (stringBindings.find(formalName) != stringBindings.end()) continue;
+                if (vectorBindings.find(formalName) != vectorBindings.end()) continue;
                 if (decl.isString) {
                     std::string content;
                     if (!decl.defaultp || !stringLiteral(decl.defaultp, content)) {
@@ -7350,6 +7864,20 @@ class VhdlXmlFrontend final {
                         return;
                     }
                     stringBindings[formalName] = content;
+                    continue;
+                }
+                if (decl.isVector) {
+                    VectorBinding binding;
+                    VL_RESTORER_COPY(m_constBindings);
+                    for (const auto& item : bindings) {
+                        m_constBindings[item.first] = item.second;
+                    }
+                    if (!vectorDefaultBinding(decl, binding)) {
+                        error(stmtp, "Generic '" + decl.name
+                                         + "' has no static default and is not mapped");
+                        return;
+                    }
+                    vectorBindings[formalName] = binding;
                     continue;
                 }
                 int64_t value = 0;
@@ -7366,8 +7894,8 @@ class VhdlXmlFrontend final {
             return;
         }
         if (entityp && (haveGenericMap || !portInfos.empty())) {
-            ModuleInfo* const spec
-                = specializeModule(entityp, bindings, stringBindings, typeBindings, portInfos);
+            ModuleInfo* const spec = specializeModule(entityp, bindings, stringBindings,
+                                                      vectorBindings, typeBindings, portInfos);
             if (!spec) return;
             targetp = spec;
         }
@@ -7379,12 +7907,16 @@ class VhdlXmlFrontend final {
                 // use its own generics, which specializeModule has since restored
                 VL_RESTORER_COPY(m_constBindings);
                 VL_RESTORER_COPY(m_stringBindings);
+                VL_RESTORER_COPY(m_vectorBindings);
                 VL_RESTORER_COPY(m_typeBindings);
                 for (const auto& binding : bindings) {
                     m_constBindings[binding.first] = binding.second;
                 }
                 for (const auto& binding : stringBindings) {
                     m_stringBindings[binding.first] = binding.second;
+                }
+                for (const auto& binding : vectorBindings) {
+                    m_vectorBindings[binding.first] = binding.second;
                 }
                 for (const auto& binding : typeBindings) {
                     m_typeBindings[binding.first] = binding.second;
@@ -7678,12 +8210,25 @@ public:
             }
         }
 
-        // Create all modules first so instances can bind to ports emitted later in the walk
-        for (const auto& module : modules) createModule(module.first);
-        // A base module with a generic that has no default has no single body; only its
-        // specializations are emitted
-        for (const auto& module : modules) {
-            if (!hasUnboundGeneric(module.first)) populateModule(module.first, module.second);
+        // With a VHDL top, only base modules that are actually reached are elaborated:
+        // create and populate the top, then let instances pull in the base modules they
+        // use. This avoids elaborating default-generic bodies that are only reachable
+        // through specializations. Without a VHDL top (or without --top-module), keep the
+        // eager behavior so every entity is available as a root.
+        const std::string topName = vhdlFold(v3Global.opt.topModule());
+        if (!topName.empty() && m_entityByName.count(topName)) {
+            ensureBaseModule(topName);
+        } else {
+            // Create all modules first so instances can bind to ports emitted later in the
+            // walk
+            for (const auto& module : modules) createModule(module.first);
+            // A base module with a generic that has no default has no single body; only
+            // its specializations are emitted
+            for (const auto& module : modules) {
+                if (!hasUnboundGeneric(module.first)) {
+                    populateModule(module.first, module.second);
+                }
+            }
         }
 
         // A generic entity's base module (default bindings) is instantiable but must not

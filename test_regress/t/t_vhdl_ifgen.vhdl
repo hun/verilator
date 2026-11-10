@@ -19,11 +19,20 @@ entity t is
     y : out std_logic;
     z : out std_logic;
     w : out std_logic;
-    v : out std_logic
+    v : out std_logic;
+    u : out std_logic
   );
 end;
 
 architecture rtl of t is
+
+  -- A pure function returning a constant boolean, as used by simulation-only
+  -- generate branches
+  function use_alt return boolean is
+  begin
+    return false;
+  end function;
+
 begin
   -- True branch
   g1 : if true generate
@@ -61,5 +70,13 @@ begin
   else generate
   begin
     v <= b;
+  end generate;
+
+  g5 : if use_alt generate
+  begin
+    u <= a;
+  else generate
+  begin
+    u <= b;
   end generate;
 end;
