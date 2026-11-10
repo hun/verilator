@@ -77,6 +77,27 @@ end architecture rtl;
 
 library ieee;
 use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+-- u_unsigned is a vector subtype from numeric_std-2008
+entity uv_unit is
+  generic (
+    g : u_unsigned(3 downto 0) := (others => '1')
+  );
+  port (
+    q : out u_unsigned(3 downto 0)
+  );
+end entity uv_unit;
+
+architecture rtl of uv_unit is
+begin
+  q <= g;
+end architecture rtl;
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
 
 entity t is
   port (
@@ -92,7 +113,9 @@ entity t is
     len0  : out integer;
     lo2   : out integer;
     hi2   : out integer;
-    len2  : out integer
+    len2  : out integer;
+    w3    : out u_unsigned(3 downto 0);
+    w4    : out u_unsigned(3 downto 0)
   );
 end entity t;
 
@@ -134,5 +157,13 @@ begin
       len_o  => len2,
       word_o => w2
     );
+
+  -- u_unsigned generic with an aggregate default and with a literal map
+  u3 : entity work.uv_unit
+    port map (q => w3);
+
+  u4 : entity work.uv_unit
+    generic map (g => "1010")
+    port map (q => w4);
 
 end architecture rtl;

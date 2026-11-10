@@ -961,7 +961,8 @@ class VhdlXmlFrontend final {
             const Node* const markp = subtypep->child("subtype_type_mark");
             const std::string mark = markp ? vhdlFold(markp->attr("identifier")) : std::string{};
             if (mark == "std_ulogic_vector" || mark == "std_logic_vector" || mark == "unsigned"
-                || mark == "signed" || mark == "bit_vector") {
+                || mark == "signed" || mark == "u_unsigned" || mark == "u_signed"
+                || mark == "bit_vector") {
                 return true;
             }
             // Anonymous array type: a bit-like element type
@@ -983,7 +984,7 @@ class VhdlXmlFrontend final {
         if (kind != "simple_name" && kind != "selected_name") return false;
         const std::string id = vhdlFold(subtypep->attr("identifier"));
         if (id == "std_ulogic_vector" || id == "std_logic_vector" || id == "unsigned"
-            || id == "signed" || id == "bit_vector") {
+            || id == "signed" || id == "u_unsigned" || id == "u_signed" || id == "bit_vector") {
             return true;
         }
         const Node* const refp = subtypep->child("named_entity");

@@ -42,6 +42,8 @@ int main(int argc, char** argv) {
         check(idx, "lo2", static_cast<int>(topp->lo2), 0);
         check(idx, "hi2", static_cast<int>(topp->hi2), 7);
         check(idx, "len2", static_cast<int>(topp->len2), 8);
+        check(idx, "w3", static_cast<int>(topp->w3), 0xF);
+        check(idx, "w4", static_cast<int>(topp->w4), 0xA);
     }
 
     topp->final();
