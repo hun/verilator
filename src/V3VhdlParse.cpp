@@ -2027,6 +2027,10 @@ class VhdlXmlFrontend final {
             resultp->dtypep(dtp);
             return resultp;
         }
+        // The model is 2-state, so no value can be a metavalue
+        if (fn == "is_x" || fn == "is_x01" || fn == "is_x01z" || fn == "is_ux01") {
+            return makeConst(flp, contextp ? contextp : bitDType(flp), 0);
+        }
         if (functionDeclOf(nodep)) {
             if (AstNodeExpr* const inlinedp = inlineFunction(nodep)) return inlinedp;
         }
