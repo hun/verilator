@@ -250,6 +250,7 @@ class VhdlXmlFrontend final {
     std::vector<const Node*> m_archNodes;  // User architecture bodies
     std::map<std::string, AstVar*> m_scope;  // Current scope: folded name -> Var
     std::map<std::string, AstVar*> m_moduleScope;  // Module declarative part: folded name -> Var
+    std::set<AstVar*> m_sharedVars;  // Module-level shared variables in scope
     std::map<std::string, int64_t> m_constBindings;  // Loop parameters during unrolling
     std::map<std::string, std::string> m_stringBindings;  // String generic values
     std::map<std::string, const Node*> m_typeBindings;  // Generic type name -> actual type mark
@@ -5101,9 +5102,10 @@ class VhdlXmlFrontend final {
         return true;
     }
 
-    //! Process variables declared by a process, in the current scope
+    //! Variables visible in a process that are not signals: process-local variables and
+    //! module-level shared variables
     std::set<AstVar*> processVariables(const Node* processp) const {
-        std::set<AstVar*> vars;
+        std::set<AstVar*> vars{m_sharedVars.begin(), m_sharedVars.end()};
         for (const Node* const declp : childEls(processp->child("declaration_chain"))) {
             if (declp->attr("kind") != "variable_declaration") continue;
             const auto it = m_scope.find(vhdlFold(declp->attr("identifier")));
@@ -5289,13 +5291,10 @@ class VhdlXmlFrontend final {
         // Variable assignment is immediate, so a variable used by more than one top-level
         // statement keeps the statements order-dependent and cannot be split
         const std::set<AstVar*> processVars = processVariables(processp);
-        for (const Node* const declp : childEls(processp->child("declaration_chain"))) {
-            if (declp->attr("kind") != "variable_declaration") continue;
-            const auto it = m_scope.find(vhdlFold(declp->attr("identifier")));
-            if (it == m_scope.end()) continue;
+        for (AstVar* const varp : processVars) {
             int referencedBy = 0;
             for (const ProcessPart& part : parts) {
-                if (nodeReferencesVar(part.nodep, it->second) && ++referencedBy > 1) {
+                if (nodeReferencesVar(part.nodep, varp) && ++referencedBy > 1) {
                     unsupported(processp,
                                 "process variable shared by clocked and unclocked statements");
                     return true;
@@ -5471,6 +5470,7 @@ class VhdlXmlFrontend final {
 
     void emitGenerateBody(const Node* bodyp, const std::string& suffix) {
         VL_RESTORER_COPY(m_scope);
+        VL_RESTORER_COPY(m_sharedVars);
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = suffix;
         emitGenerateDeclarations(bodyp);
@@ -5560,6 +5560,36 @@ class VhdlXmlFrontend final {
         }
     }
 
+    //! Whether a declaration is a shared variable (GHDL keeps the kind and sets a flag)
+    static bool isSharedVariable(const Node* declp) {
+        return declp->attr("kind") == "variable_declaration"
+               && declp->attr("shared_flag") == "true";
+    }
+
+    //! Emit a shared variable as a module-level variable; assignment is immediate
+    AstVar* emitSharedVariable(const Node* declp, const std::string& name) {
+        const Node* const subtypep = declp->child("subtype_indication");
+        if (!subtypep) {
+            error(declp, "VHDL shared variable without a subtype");
+            return nullptr;
+        }
+        FileLine* const flp = flpOf(declp);
+        AstVar* const varp
+            = new AstVar{flp, VVarType::VAR, name, dtypeOf(parseType(subtypep), flp)};
+        m_modp->addStmtsp(varp);
+        m_sharedVars.insert(varp);
+        m_scope[vhdlFold(declp->attr("identifier"))] = varp;
+        if (const Node* const defp = declp->child("default_value")) {
+            varp->noCReset(true);
+            AstNodeExpr* const rhsp = lowerExpr(defp, varp->dtypep());
+            if (rhsp) {
+                AstVarRef* const lhsp = new AstVarRef{flp, varp, VAccess::WRITE};
+                m_modp->addStmtsp(new AstInitialStatic{flp, new AstAssign{flp, lhsp, rhsp}});
+            }
+        }
+        return varp;
+    }
+
     //! Declarations inside one generate iteration; they are flattened with unique names
     void emitGenerateDeclarations(const Node* bodyp) {
         const Node* const declsp = bodyp->child("declaration_chain");
@@ -5568,6 +5598,11 @@ class VhdlXmlFrontend final {
             const std::string kind = declp->attr("kind");
             if (kind == "component_declaration") continue;
             if (ignorableDeclaration(kind)) continue;
+            if (isSharedVariable(declp)) {
+                emitSharedVariable(declp, "vhdlgen_" + std::to_string(++m_varSeq) + "__"
+                                              + declp->attr("identifier"));
+                continue;
+            }
             if (kind != "signal_declaration") {
                 unsupported(declp, "generate declaration '" + kind + "'");
                 continue;
@@ -5614,6 +5649,7 @@ class VhdlXmlFrontend final {
             }
             // A block is a flat scope with uniquely named local signals
             VL_RESTORER_COPY(m_scope);
+            VL_RESTORER_COPY(m_sharedVars);
             const std::string savedSuffix = m_genSuffix;
             m_genSuffix += "__blk" + std::to_string(++m_varSeq);
             emitGenerateDeclarations(stmtp);
@@ -5743,10 +5779,22 @@ class VhdlXmlFrontend final {
         VL_RESTORER_COPY(m_scope);
         VL_RESTORER_COPY(m_moduleScope);
         VL_RESTORER_COPY(m_components);
+        VL_RESTORER_COPY(m_sharedVars);
         m_modp = info.modp;
         m_scope = info.ports;
         m_moduleScope.clear();
         m_components.clear();
+        m_sharedVars.clear();
+
+        // Entity declarative items are visible in every architecture; only shared
+        // variables need a declaration here (constants and types resolve at their uses)
+        if (const Node* const declsp = entityp->child("declaration_chain")) {
+            for (const Node* const declp : childEls(declsp)) {
+                if (isSharedVariable(declp)) {
+                    emitSharedVariable(declp, declp->attr("identifier"));
+                }
+            }
+        }
 
         if (const Node* const declsp = archp->child("declaration_chain")) {
             for (const Node* const declp : childEls(declsp)) {
@@ -5757,6 +5805,10 @@ class VhdlXmlFrontend final {
                     continue;
                 }
                 if (ignorableDeclaration(kind)) continue;
+                if (isSharedVariable(declp)) {
+                    emitSharedVariable(declp, declp->attr("identifier"));
+                    continue;
+                }
                 if (kind != "signal_declaration") {
                     unsupported(declp, "declaration '" + kind + "'");
                     continue;
@@ -6752,7 +6804,9 @@ void V3VhdlParseImp::finishXml() {
     const auto quotePath = [](const std::string& path) { return "\"" + path + "\""; };
 
     std::string command = quotePath(ghdl);
-    command += " --file-to-xml --std=08";
+    // Relaxed rules allow non-protected shared variables, which the synthesis subset
+    // models as variables (GHDL reports a warning, not an error)
+    command += " --file-to-xml --std=08 -frelaxed";
     if (!ghdlFlags.empty()) command += " " + ghdlFlags;
     command += " --workdir=" + quotePath(makeDir);
     for (const VhdlFile& vfile : m_files) command += " " + quotePath(vfile.filename);
