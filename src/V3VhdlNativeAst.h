@@ -254,8 +254,25 @@ struct Process final {
     std::vector<StmtP> body;
 };
 
+//! One `formal => actual` of a port map; an `open` actual has no expression
+struct PortAssoc final {
+    FileLine* flp = nullptr;
+    std::string formal;  // Folded
+    std::string formalSpelling;
+    ExprP actual;  // Null for `open`
+};
+
 struct Concurrent final {
-    enum Kind : uint8_t { ASSIGN, COND_ASSIGN, SEL_ASSIGN, PROCESS, GEN_FOR, GEN_IF, BLOCK } kind;
+    enum Kind : uint8_t {
+        ASSIGN,
+        COND_ASSIGN,
+        SEL_ASSIGN,
+        PROCESS,
+        GEN_FOR,
+        GEN_IF,
+        BLOCK,
+        INSTANCE,
+    } kind;
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/COND_ASSIGN/SEL_ASSIGN
     ExprP value;  // ASSIGN/SEL_ASSIGN
@@ -270,6 +287,10 @@ struct Concurrent final {
     bool rangeAscending = true;
     ExprP lo, hi;
     ExprP cond;
+    // INSTANCE: the instantiated entity and its port associations
+    std::string instanceLabel;
+    std::string instanceName;  // Folded entity or component name
+    std::vector<PortAssoc> associations;
     std::vector<Decl> decls;  // BLOCK: declarative items
     std::vector<TypeDecl> types;  // BLOCK
     std::vector<std::unique_ptr<Concurrent>> body;  // GEN_*/BLOCK: statements
@@ -303,6 +324,7 @@ struct Architecture final {
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
     std::vector<AliasDecl> aliases;
+    std::vector<std::string> components;  // Declared component names, folded
     std::vector<std::unique_ptr<Concurrent>> stmts;
     std::vector<std::pair<std::string, std::string>> uses;
 };

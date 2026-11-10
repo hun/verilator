@@ -145,7 +145,12 @@ class Parser final {
     void parseArchitecture(FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
     bool parseChoices(std::vector<ExprP>& choices);
-    void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out);
+    void parseInstance(Architecture& arch, FileLine* flp, const std::string& label, bool direct);
+    void parsePortMap(Concurrent& inst);
+    void parseComponentDecl(Architecture& arch);
+    void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
+                             std::vector<Decl>* decls = nullptr,
+                             std::vector<TypeDecl>* types = nullptr);
     bool parseGenerateEnd();
     void parseProcess(Architecture& arch, FileLine* flp);
     std::vector<StmtP> parseStmtList(bool stopAtElse);
@@ -826,6 +831,122 @@ void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
     aliases.push_back(std::move(alias));
 }
 
+//! `component name [is] [generic (...);] [port (...);] end component [name];`
+void Parser::parseComponentDecl(Architecture& arch) {
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    (void)acceptId("is");
+    for (;;) {
+        if (m_failed) return;
+        if (isId("end")) break;
+        if (isId("generic") || isId("port")) {
+            // The interface list only shapes the association checks; skip it
+            advance();
+            int depth = 0;
+            while (!m_failed && m_cur.kind != Token::END) {
+                if (isSym("(")) ++depth;
+                if (isSym(")")) --depth;
+                const bool done = depth == 0 && isSym(";");
+                advance();
+                if (done) break;
+            }
+            continue;
+        }
+        unsupported("component declaration item '" + m_cur.text + "'");
+        return;
+    }
+    if (!expectId("end")) return;
+    if (!expectId("component")) return;
+    if (m_cur.kind == Token::ID) advance();  // Optional end name
+    if (!acceptSym(";")) error("expected ';' after 'end component'");
+    arch.components.push_back(nameTok.text);
+}
+
+//! `[entity] name [generic map (...)] [port map (...)];`
+void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string& label,
+                           bool direct) {
+    auto inst = std::make_unique<Concurrent>(Concurrent::INSTANCE);
+    inst->flp = flp;
+    inst->instanceLabel = label.empty() ? "inst" : label;
+    // The entity may be library qualified: `work.child`
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    std::string name = nameTok.text;
+    while (acceptSym(".")) {
+        Token partTok;
+        if (!takeId(partTok)) return;
+        name = partTok.text;  // The library is not modelled
+    }
+    inst->instanceName = name;
+    (void)direct;
+    for (;;) {
+        if (isId("generic")) {
+            advance();
+            if (!expectId("map")) return;
+            unsupported("generic map on an instance");
+            return;
+        }
+        if (isId("port")) {
+            advance();
+            if (!expectId("map")) return;
+            parsePortMap(*inst);
+            if (m_failed) return;
+            continue;
+        }
+        break;
+    }
+    if (!acceptSym(";")) {
+        error("expected ';' after an instantiation");
+        return;
+    }
+    arch.stmts.push_back(std::move(inst));
+}
+
+//! `(formal => actual, ...)` associations of a port map
+void Parser::parsePortMap(Concurrent& inst) {
+    if (!acceptSym("(")) {
+        error("expected '(' after 'port map'");
+        return;
+    }
+    for (;;) {
+        if (m_failed) return;
+        PortAssoc assoc;
+        assoc.flp = m_cur.flp;
+        if (m_cur.kind == Token::ID) {
+            const auto saved = m_lexer.state();
+            const Token ahead = m_lexer.next();
+            m_lexer.restore(saved);
+            if (ahead.kind == Token::SYM && ahead.text == "=>") {
+                Token formalTok;
+                if (!takeId(formalTok)) return;
+                assoc.formal = formalTok.text;
+                assoc.formalSpelling = formalTok.spelling;
+                advance();  // '=>'
+                if (isId("open")) {
+                    advance();
+                    inst.associations.push_back(std::move(assoc));
+                    if (!acceptSym(",")) break;
+                    continue;
+                }
+                assoc.actual = parseExpr();
+                if (!assoc.actual) return;
+                inst.associations.push_back(std::move(assoc));
+                if (!acceptSym(",")) break;
+                continue;
+            }
+            // Positional association: the actual maps to the next port in order
+            assoc.actual = parseExpr();
+            if (!assoc.actual) return;
+            inst.associations.push_back(std::move(assoc));
+            if (!acceptSym(",")) break;
+            continue;
+        }
+        unsupported("port map association that is not an expression");
+        return;
+    }
+    expectSym(")");
+}
+
 void Parser::parseArchitecture(FileLine* flp) {
     Token nameTok;
     if (!takeId(nameTok)) return;
@@ -888,8 +1009,12 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseAliasInto(arch.aliases);
             continue;
         }
-        if (isId("component") || isId("attribute") || isId("function") || isId("procedure")
-            || isId("package")) {
+        if (isId("component")) {
+            advance();
+            parseComponentDecl(arch);
+            continue;
+        }
+        if (isId("attribute") || isId("function") || isId("procedure") || isId("package")) {
             unsupported("architecture declarative item '" + m_cur.text + "'");
             return;
         }
@@ -945,15 +1070,37 @@ bool Parser::parseChoices(std::vector<ExprP>& choices) {
 void Parser::parseConcurrentStatement(Architecture& arch) {
     if (m_failed) return;
     FileLine* const flp = m_cur.flp;
-    // Optional statement label: consume `label :`
+    // Optional statement label: `label : statement`
+    std::string label;
     if (m_cur.kind == Token::ID) {
         const auto saved = m_lexer.state();
         const Token ahead = m_lexer.next();
         m_lexer.restore(saved);
         if (ahead.kind == Token::SYM && ahead.text == ":") {
+            label = m_cur.text;
             advance();
             advance();
         }
+    }
+    if (isId("entity")) {
+        advance();
+        parseInstance(arch, flp, label, true);
+        return;
+    }
+    if (m_cur.kind == Token::ID) {
+        // `label : child port map (...)`: a component or entity instantiation
+        const auto saved = m_lexer.state();
+        const Token ahead = m_lexer.next();
+        m_lexer.restore(saved);
+        if (ahead.kind == Token::ID && (ahead.text == "port" || ahead.text == "generic")
+            && m_cur.text != "process") {
+            parseInstance(arch, flp, label, false);
+            return;
+        }
+    }
+    if (!label.empty()
+        && (isId("block") || isId("process") || isId("for") || isId("if") || isId("with"))) {
+        // The label belongs to the statement itself; fall through to its parser
     }
     if (isId("process")) {
         advance();
@@ -1006,7 +1153,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             return;
         }
         if (!expectId("generate")) return;
-        parseConcurrentList(gen->body);
+        parseConcurrentList(gen->body, &gen->decls, &gen->types);
         if (m_failed) return;
         if (!parseGenerateEnd()) return;
         arch.stmts.push_back(std::move(gen));
@@ -1019,11 +1166,11 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         gen->cond = parseExpr();
         if (!gen->cond) return;
         if (!expectId("generate")) return;
-        parseConcurrentList(gen->body);
+        parseConcurrentList(gen->body, &gen->decls, &gen->types);
         if (m_failed) return;
         if (acceptId("else")) {
             if (!expectId("generate")) return;
-            parseConcurrentList(gen->elseBody);
+            parseConcurrentList(gen->elseBody, &gen->decls, &gen->types);
             if (m_failed) return;
         }
         if (!parseGenerateEnd()) return;
@@ -1138,10 +1285,53 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
 }
 
 //! Parse concurrent statements up to `end [generate|block]`, without the terminator
-void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out) {
+void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
+                                 std::vector<Decl>* decls, std::vector<TypeDecl>* types) {
     Architecture scratch;  // The statements of a generate body
     while (!m_failed && !isId("end") && !isId("elsif") && !isId("else")
            && m_cur.kind != Token::END) {
+        // A generate body separates its declarative part from its statements
+        if (isId("begin")) {
+            advance();
+            continue;
+        }
+        // A generate body may carry declarative items before its statements
+        if (decls && isId("signal")) {
+            advance();
+            parseDeclInto(*decls, Decl::SIGNAL);
+            continue;
+        }
+        if (decls && isId("shared")) {
+            advance();
+            if (!expectId("variable")) return;
+            parseDeclInto(*decls, Decl::VARIABLE);
+            continue;
+        }
+        if (decls && isId("variable")) {
+            advance();
+            parseDeclInto(*decls, Decl::VARIABLE);
+            continue;
+        }
+        if (decls && isId("constant")) {
+            advance();
+            parseDeclInto(*decls, Decl::CONSTANT);
+            continue;
+        }
+        if (types && isId("type")) {
+            advance();
+            parseTypeDeclInto(*types);
+            continue;
+        }
+        if (types && isId("subtype")) {
+            advance();
+            parseSubtypeInto(*types);
+            continue;
+        }
+        if (decls && isId("alias")) {
+            advance();
+            parseAliasInto(scratch.aliases);
+            continue;
+        }
         parseConcurrentStatement(scratch);
     }
     out = std::move(scratch.stmts);

@@ -134,6 +134,9 @@ class Lowering final {
     };
     std::vector<LoopFrame> m_loops;
     int m_loopSeq = 0;  // Disambiguates the loop flag variables
+    int m_genSeq = 0;  // Disambiguates sibling generate bodies
+    std::string m_genSuffix;  // Suffix for names created inside a generate
+    const ModuleMap* m_modulesp = nullptr;  // Modules of the instantiated entities
     PackageTable::Impl* m_publishp = nullptr;  // Package table to publish into
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
@@ -368,6 +371,8 @@ class Lowering final {
     bool concHasEdge(const Concurrent& conc) const;
     AstNode* lowerSelected(const Concurrent& conc);
     void emitConcurrent(const Concurrent& conc);
+    void emitLocalDecls(const std::vector<Decl>& decls, const std::vector<TypeDecl>& types,
+                        const char* prefix);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
                            std::vector<AstConst*>& cops);
     AstNode* lowerStmt(const Stmt& stmt);
@@ -378,12 +383,15 @@ class Lowering final {
     void lowerProcess(const Process& process);
 
 public:
-    explicit Lowering(AstNetlist* rootp, const PackageTable::Impl* packagesp = nullptr)
+    explicit Lowering(AstNetlist* rootp, const PackageTable::Impl* packagesp = nullptr,
+                      const ModuleMap* modulesp = nullptr)
         : m_rootp{rootp}
-        , m_packagesp{packagesp} {}
+        , m_packagesp{packagesp}
+        , m_modulesp{modulesp} {}
     ~Lowering() = default;
 
-    void emit(const EntityUnit& entity, const Architecture& arch);
+    void emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp);
+    AstNode* lowerInstance(const Concurrent& conc);
     void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table);
 };
 
@@ -3262,9 +3270,8 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
 }
 
-void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
-    m_modp = new AstModule{entity.flp, entity.spelling, entity.libname};
-    m_modp->inLibrary(entity.inLibrary || arch.inLibrary);
+void Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp) {
+    m_modp = modp;
 
     for (const auto& use : entity.uses) importPackage(use.second);
     for (const auto& use : arch.uses) importPackage(use.second);
@@ -3354,7 +3361,6 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
 
     for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
 
-    m_rootp->addModulesp(m_modp);
     m_modp = nullptr;
     m_scope.clear();
     m_consts.clear();
@@ -3364,6 +3370,122 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
     m_ownedConsts.clear();
     m_types.clear();
     return;
+}
+
+//! An instantiation becomes an AstCell bound to the instantiated entity's module
+AstNode* Lowering::lowerInstance(const Concurrent& conc) {
+    FileLine* const flp = conc.flp;
+    if (!m_modulesp) {
+        unsupportedError(flp, "instantiation without an elaborated design");
+        return nullptr;
+    }
+    const auto modIt = m_modulesp->find(conc.instanceName);
+    if (modIt == m_modulesp->end()) {
+        // Same wording as the GHDL path, so one golden serves both frontends
+        flp->v3error("Cannot find VHDL entity or module '" + conc.instanceName + "' for instance '"
+                     + conc.instanceLabel + "'");
+        return nullptr;
+    }
+    AstModule* const modp = modIt->second;
+    // Every port needs a pin, in the entity's port order; an unassociated port is open
+    std::vector<AstVar*> ports;
+    for (AstNode* const itemp : modp->stmtspList()) {
+        AstVar* const varp = VN_CAST(itemp, Var);
+        if (varp && varp->isIO()) ports.push_back(varp);
+    }
+    std::sort(ports.begin(), ports.end(),
+              [](const AstVar* l, const AstVar* r) { return l->pinNum() < r->pinNum(); });
+    // The cell names its module; V3LinkCells binds it and the pins follow the port list.
+    // An association without a formal name is positional: it maps to the next port
+    const bool positional
+        = std::any_of(conc.associations.begin(), conc.associations.end(),
+                      [](const PortAssoc& assoc) { return assoc.formal.empty(); });
+    std::size_t positionalIndex = 0;
+    AstPin* pinsp = nullptr;
+    for (AstVar* const portp : ports) {
+        const PortAssoc* assocp = nullptr;
+        if (positional) {
+            if (positionalIndex < conc.associations.size()) {
+                assocp = &conc.associations[positionalIndex];
+                ++positionalIndex;
+            }
+        } else {
+            for (const PortAssoc& assoc : conc.associations) {
+                if (assoc.formalSpelling == portp->name()) {
+                    assocp = &assoc;
+                    break;
+                }
+            }
+        }
+        AstNodeExpr* actualp = nullptr;
+        if (assocp && assocp->actual) {
+            const VType target = typeOfDType(portp->dtypep());
+            // An output or inout actual is driven by the instance, so it must be an lvalue
+            const bool driven = portp->direction().isOutput() || portp->direction().isInout();
+            AstNodeExpr* valuep = nullptr;
+            if (driven) {
+                valuep = lowerDesignator(*assocp->actual, true);
+            } else {
+                valuep = lowerExpr(*assocp->actual, &target);
+            }
+            if (!valuep) continue;
+            actualp = resizeExpr(valuep, target, flp);
+        }
+        AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), actualp};
+        pinp->modVarp(portp);
+        pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
+    }
+    AstCell* const cellp = new AstCell{
+        flp, flp, conc.instanceLabel + m_genSuffix, modp->name(), pinsp, nullptr, nullptr};
+    if (positional && conc.associations.size() > ports.size()) {
+        flp->v3error("VHDL: instance of '" + conc.instanceName
+                     + "' associates more ports than "
+                       "the entity has");
+    }
+    if (!positional) {
+        for (const PortAssoc& assoc : conc.associations) {
+            const bool known = std::any_of(ports.begin(), ports.end(), [&](const AstVar* portp) {
+                return portp->name() == assoc.formalSpelling;
+            });
+            if (!known) {
+                flp->v3error("VHDL: entity '" + conc.instanceName + "' has no port '"
+                             + assoc.formalSpelling + "'");
+            }
+        }
+    }
+    return cellp;
+}
+
+//! Declare a block or generate body's own signals, variables, constants and types
+void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<TypeDecl>& types,
+                              const char* prefix) {
+    for (const TypeDecl& typeDecl : types) registerType(typeDecl);
+    for (const Decl& decl : decls) {
+        if (decl.kind == Decl::CONSTANT) {
+            emitConstant(decl, false);
+            continue;
+        }
+        VType type;
+        if (!resolveType(decl.type, type)) continue;
+        for (const auto& name : decl.names) {
+            if (!reserveName(name.first, name.second, decl.flp)) continue;
+            const std::string mangled
+                = std::string{prefix} + std::to_string(++m_loopSeq) + "__" + name.second;
+            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+            m_modp->addStmtsp(varp);
+            m_scope[name.first] = VarInfo{varp, type};
+            if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
+            if (!decl.init) continue;
+            AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
+            AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
+            if (!rhsp) {
+                lhsp->deleteTree();
+                continue;
+            }
+            rhsp = resizeExpr(rhsp, type, decl.flp);
+            m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
+        }
+    }
 }
 
 void Lowering::emitConcurrent(const Concurrent& conc) {
@@ -3386,10 +3508,17 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         const bool hadConst = saved != m_consts.end();
         const int64_t savedValue = hadConst ? saved->second : 0;
         for (int64_t value = left;; value += up ? 1 : -1) {
+            const ScopeSave saved = saveScope();
+            const std::string savedSuffix = m_genSuffix;
+            m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
             m_consts[stmt.loopVar] = value;
+            emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
             for (const auto& bodyConcp : stmt.body) {
                 if (bodyConcp) emitConcurrent(*bodyConcp);
             }
+            m_genSuffix = savedSuffix;
+            restoreScope(saved);
+            m_consts[stmt.loopVar] = value;
             if (value == right) break;
         }
         if (hadConst) {
@@ -3407,46 +3536,29 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         }
         const std::vector<std::unique_ptr<Concurrent>>& taken
             = value != 0 ? stmt.body : stmt.elseBody;
+        const ScopeSave saved = saveScope();
+        const std::string savedSuffix = m_genSuffix;
+        m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
+        emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
         for (const auto& bodyConcp : taken) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
+        m_genSuffix = savedSuffix;
+        restoreScope(saved);
         return;
     }
     if (stmt.kind == Concurrent::BLOCK) {
         // A block's declarative items are visible to its statements only
         const ScopeSave saved = saveScope();
-        for (const TypeDecl& typeDecl : stmt.types) registerType(typeDecl);
-        for (const Decl& decl : stmt.decls) {
-            if (decl.kind == Decl::CONSTANT) {
-                emitConstant(decl, false);
-                continue;
-            }
-            VType type;
-            if (!resolveType(decl.type, type)) continue;
-            for (const auto& name : decl.names) {
-                if (!reserveName(name.first, name.second, decl.flp)) continue;
-                const std::string mangled
-                    = "vhdlblk_" + std::to_string(++m_loopSeq) + "__" + name.second;
-                AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
-                m_modp->addStmtsp(varp);
-                m_scope[name.first] = VarInfo{varp, type};
-                m_variables.insert(name.first);
-                if (!decl.init) continue;
-                AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
-                AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
-                if (!rhsp) {
-                    lhsp->deleteTree();
-                    continue;
-                }
-                rhsp = resizeExpr(rhsp, type, decl.flp);
-                m_modp->addStmtsp(
-                    new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
-            }
-        }
+        emitLocalDecls(stmt.decls, stmt.types, "vhdlblk_");
         for (const auto& bodyConcp : stmt.body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
         restoreScope(saved);
+        return;
+    }
+    if (stmt.kind == Concurrent::INSTANCE) {
+        if (AstNode* const cellp = lowerInstance(stmt)) m_modp->addStmtsp(cellp);
         return;
     }
     if (stmt.kind == Concurrent::PROCESS) {
@@ -3534,10 +3646,27 @@ void lowerPackages(const std::vector<PackageUnit>& packages, AstNetlist* rootp,
     }
 }
 
-void lower(const EntityUnit& entity, const Architecture& arch, AstNetlist* rootp,
-           const PackageTable& table) {
-    Lowering lowering{rootp, &table.impl()};
-    lowering.emit(entity, arch);
+//! The netlist the modules belong to, for the dtype table
+static AstNetlist* rootpFromModules(const ModuleMap& modules) {
+    (void)modules;
+    return v3Global.rootp();
+}
+
+void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
+                   ModuleMap& modules) {
+    for (const EntityUnit& entity : entities) {
+        if (modules.count(entity.name)) continue;
+        AstModule* const modp = new AstModule{entity.flp, entity.spelling, entity.libname};
+        modp->inLibrary(entity.inLibrary);
+        rootp->addModulesp(modp);
+        modules[entity.name] = modp;
+    }
+}
+
+void lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
+           const PackageTable& table, const ModuleMap& modules) {
+    Lowering lowering{rootpFromModules(modules), &table.impl(), &modules};
+    lowering.emit(entity, arch, modp);
 }
 
 }  // namespace vhdlnative

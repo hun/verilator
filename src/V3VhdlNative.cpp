@@ -84,6 +84,10 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     vhdlnative::PackageTable packages;
     vhdlnative::lowerPackages(library.packages, rootp, packages);
 
+    // Create the module of every entity first, so instances can bind to any of them
+    vhdlnative::ModuleMap modules;
+    vhdlnative::createModules(library.entities, rootp, modules);
+
     std::set<std::string> entityNames;
     for (const vhdlnative::EntityUnit& entity : library.entities) {
         if (!entityNames.insert(entity.name).second) {
@@ -96,7 +100,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
                                 + "' has no architecture; cannot elaborate it");
             continue;
         }
-        vhdlnative::lower(entity, *it->second, rootp, packages);
+        vhdlnative::lower(entity, *it->second, modules[entity.name], packages, modules);
     }
     for (const vhdlnative::Architecture& arch : library.archs) {
         if (!entityNames.count(arch.entityName)) {
