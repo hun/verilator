@@ -158,11 +158,6 @@ public:
         std::map<std::string, const VhdlArchitecture*> archByEntity;
         for (const VhdlArchitecture& arch : m_architectures) {
             const std::string key = designUnitKey(arch.libname, arch.entityName);
-            if (archByEntity.find(key) != archByEntity.end()) {
-                arch.flp->v3warn(E_UNSUPPORTED, "Multiple architectures for entity '"
-                                                    << arch.entityName
-                                                    << "'; using the last analyzed one");
-            }
             archByEntity[key] = &arch;
         }
 
@@ -6706,10 +6701,7 @@ public:
                 continue;
             }
             const std::string key = vhdlFold(entityName);
-            if (archByEntity.find(key) != archByEntity.end()) {
-                flpOf(archp)->v3warn(E_UNSUPPORTED, "Multiple architectures for entity '"
-                                                        << entityName << "'; using the last one");
-            }
+            // Multiple architectures are supported: the last analyzed one is the default
             archByEntity[key] = archp;
             m_archByEntityNodes[key] = archp;
         }
