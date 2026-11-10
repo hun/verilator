@@ -727,6 +727,14 @@ class VhdlXmlFrontend final {
                 = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
             if (!declp) return 0;
             const std::string declKind = declp->attr("kind");
+            if (declKind == "interface_type_declaration") {
+                // A generic type parameter resolves through this instance's binding
+                const auto binding = m_typeBindings.find(vhdlFold(declp->attr("identifier")));
+                if (binding != m_typeBindings.end()) {
+                    return elementWidth(binding->second, depth + 1);
+                }
+                return 0;
+            }
             if (declKind == "subtype_declaration") {
                 return elementWidth(declp->child("subtype_indication"), depth + 1);
             }
@@ -735,6 +743,20 @@ class VhdlXmlFrontend final {
                     return elementWidth(defp, depth + 1);
                 }
                 return elementWidth(declp->child("subtype_definition"), depth + 1);
+            }
+            return 0;
+        }
+        if (kind == "interface_type_declaration") {
+            const auto binding = m_typeBindings.find(vhdlFold(elemp->attr("identifier")));
+            if (binding != m_typeBindings.end()) {
+                return elementWidth(binding->second, depth + 1);
+            }
+            return 0;
+        }
+        if (kind == "interface_type_definition") {
+            const Node* const declaratorp = elemp->child("type_declarator");
+            if (declaratorp && declaratorp->has("ref")) {
+                return elementWidth(nodeById(declaratorp->attr("ref")), depth + 1);
             }
             return 0;
         }
@@ -925,6 +947,22 @@ class VhdlXmlFrontend final {
             }
             return spec;
         }
+        if (kind == "interface_type_declaration" || kind == "interface_type_definition") {
+            // A generic type parameter resolves through this instance's binding
+            const Node* declaratorp = subtypep;
+            if (kind == "interface_type_definition") {
+                declaratorp = subtypep->child("type_declarator");
+                if (declaratorp && declaratorp->has("ref")) {
+                    declaratorp = nodeById(declaratorp->attr("ref"));
+                }
+            }
+            const auto binding
+                = declaratorp ? m_typeBindings.find(vhdlFold(declaratorp->attr("identifier")))
+                              : m_typeBindings.end();
+            if (binding != m_typeBindings.end()) return parseType(binding->second, depth + 1);
+            unsupported(subtypep, "generic type parameter");
+            return spec;
+        }
         if (kind == "record_type_definition" || kind == "record_subtype_definition") {
             RecordInfo info;
             bool unconstrained = false;
@@ -971,6 +1009,9 @@ class VhdlXmlFrontend final {
             elemWidth = elemSpec.dtp->width();  // Enum/record element width
         } else if (elemSpec.isVector) {
             elemWidth = dtypeOf(elemSpec, flpOf(subtypep))->width();  // Nested array bits
+        } else if (elemSpec.isInteger) {
+            // VHDL integer elements are 32-bit signed values
+            elemWidth = dtypeOf(elemSpec, flpOf(subtypep))->width();
         }
         if (elemWidth <= 0) elemWidth = elementWidth(elemSubp);
         if (elemWidth <= 0) {
@@ -996,13 +1037,14 @@ class VhdlXmlFrontend final {
             } else if (elemBasicp) {
                 spec.kwd = elemBasicp->keyword();
                 spec.signing = elemBasicp->numeric();
-            } else if (!elemSpec.isInteger) {
+            } else if (elemSpec.isInteger) {
+                // Integer elements are modeled as 32-bit signed values
+                spec.kwd = VBasicDTypeKwd::LOGIC;
+                spec.signing = VSigning::SIGNED;
+            } else {
                 // A named scalar subtype of bit or std_logic
                 spec.kwd = elemSpec.kwd;
                 spec.signing = elemSpec.signing;
-            } else {
-                unsupported(subtypep, "array type '" + mark + "'");
-                return spec;
             }
         }
         spec.elemWidth = elemWidth;
@@ -6346,7 +6388,15 @@ class VhdlXmlFrontend final {
                         bad = true;
                         continue;
                     }
-                    typeBindings[formalName] = actualp;
+                    // A generic type passed through another generic resolves through
+                    // the enclosing instance's binding
+                    const Node* resolvedp = actualp;
+                    if (actualp->attr("kind") == "simple_name") {
+                        const auto outer
+                            = m_typeBindings.find(vhdlFold(actualp->attr("identifier")));
+                        if (outer != m_typeBindings.end()) resolvedp = outer->second;
+                    }
+                    typeBindings[formalName] = resolvedp;
                     continue;
                 }
                 if (kind != "association_element_by_expression"
