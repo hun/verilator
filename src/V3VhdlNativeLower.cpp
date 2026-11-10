@@ -116,6 +116,15 @@ class Lowering final {
     };
     std::vector<Edge> m_edges;  // Clock edges collected while lowering a process
     bool m_initial = false;  // Emitting the time-zero evaluation
+    //! Active loop, with the flags its exit/next conditions latch
+    struct LoopFrame final {
+        AstVar* exitp = nullptr;  // Set when an exit condition fired
+        AstVar* nextp = nullptr;  // Set when a next condition fired
+        std::string label;
+        bool guard = false;  // The body uses exit/next, so statements need guarding
+    };
+    std::vector<LoopFrame> m_loops;
+    int m_loopSeq = 0;  // Disambiguates the loop flag variables
     PackageTable::Impl* m_publishp = nullptr;  // Package table to publish into
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
@@ -264,6 +273,14 @@ class Lowering final {
                          int hi, int lo);
 
     AstNode* lowerCase(const Stmt& stmt);
+    AstNode* lowerFor(const Stmt& stmt);
+    static bool usesExitNext(const std::vector<StmtP>& stmts);
+    AstNodeExpr* loopGuard(FileLine* flp) const;
+    AstNode* lowerWhile(const Stmt& stmt);
+    AstVar* newLoopFlag(FileLine* flp, const char* what);
+    LoopFrame* findLoop(const std::string& label);
+    AstNode* clearLoopFlag(FileLine* flp, AstVar* flagp);
+    AstNode* setLoopFlag(FileLine* flp, AstVar* flagp, AstNodeExpr* condp);
     AstNodeExpr* lowerCond(const Expr& expr);
     bool containsEdgeCall(const Expr& expr) const;
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
@@ -272,6 +289,7 @@ class Lowering final {
     AstConst* foldToConst(AstNodeExpr* exprp);
     AstNodeExpr* lowerSelectedExpr(const Expr& expr);
     const VType* typeOfName(const Expr& expr) const;
+    bool typeOfDesignator(const Expr& expr, VType& out) const;
     VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
     AstNode* lowerSelected(const Concurrent& conc);
@@ -339,9 +357,8 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
             return true;
         }
         if (attribute == "high") {
-            value = typep->kind == VType::ENUM
-                        ? static_cast<int64_t>(typep->literals.size()) - 1
-                        : std::max(typep->left, typep->right);
+            value = typep->kind == VType::ENUM ? static_cast<int64_t>(typep->literals.size()) - 1
+                                               : std::max(typep->left, typep->right);
             return true;
         }
         if (expr.args.size() != 1) return false;
@@ -724,8 +741,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         }
         if (expr.text == "+") return operandp;
         if (expr.text == "-") {
-            if (!type.isInt()) {
-                unsupportedError(flp, "unary '-' on a non-integer value");
+            // numeric_std defines unary minus for signed vectors and integers
+            if (!type.isInt() && !(type.isVector() && type.isSigned())) {
+                unsupportedError(flp, "unary '-' on a non-signed value");
                 operandp->deleteTree();
                 return nullptr;
             }
@@ -756,15 +774,35 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         } else if (expr.a->kind == Expr::BITS_LIT && expr.a->bits.size() == 1) {
             bit = expr.a->bits[0];
         }
-        if (bit == 0) {
-            unsupportedError(flp, "aggregate value");
+        if (bit != 0) {
+            if (bit == 'z') {
+                unsupportedError(flp, "'Z' literal");
+                return nullptr;
+            }
+            return makeRepeatedConst(flp, *context, bit);
+        }
+        // An arbitrary value is replicated across every element
+        if (!context->isVector()) {
+            unsupportedError(flp, "aggregate value for a non-array type");
             return nullptr;
         }
-        if (bit == 'z') {
-            unsupportedError(flp, "'Z' literal");
-            return nullptr;
+        VType elemType;
+        if (context->kind == VType::ARRAY && context->elemp) {
+            elemType = *context->elemp;
+        } else {
+            elemType.kind = context->kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+            elemType.dtp = findBasic(flp, context->kwd);
         }
-        return makeRepeatedConst(flp, *context, bit);
+        AstNodeExpr* valuep = lowerExpr(*expr.a, &elemType);
+        if (!valuep) return nullptr;
+        valuep = resizeExpr(valuep, elemType, flp);
+        const int count = context->length();
+        AstNodeExpr* resultp = valuep;
+        for (int i = 1; i < count; ++i) {
+            resultp = new AstConcat{flp, resultp, valuep->cloneTree(false)};
+        }
+        resultp->dtypep(context->dtp);
+        return resultp;
     }
     }
     return nullptr;
@@ -828,10 +866,26 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             return new AstGteS{flp, lp, rp};
         }
         if (lt.isInt() != rt.isInt()) {
-            unsupportedError(flp, "comparison between an integer and a vector");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
+            // numeric_std compares a vector with an integer of the same value
+            const Expr& intExpr = lt.isInt() ? *expr.a : *expr.b;
+            int64_t value = 0;
+            if (!evalInt(intExpr, value)) {
+                unsupportedError(flp, "comparison between an integer expression and a vector");
+                lp->deleteTree();
+                rp->deleteTree();
+                return nullptr;
+            }
+            const VType& vectorT = lt.isInt() ? rt : lt;
+            AstNodeExpr* const constp = makeVectorConst(flp, vectorT, value);
+            if (lt.isInt()) {
+                lp->deleteTree();
+                lp = constp;
+                lt = vectorT;
+            } else {
+                rp->deleteTree();
+                rp = constp;
+                rt = vectorT;
+            }
         }
         if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
             unsupportedError(flp, "comparison between signed and unsigned operands");
@@ -1109,7 +1163,7 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
     if (expr.kind == Expr::INDEX || expr.kind == Expr::SLICE) {
         if (!expr.a
             || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::INDEX
-                && expr.a->kind != Expr::SLICE)) {
+                && expr.a->kind != Expr::SLICE && expr.a->kind != Expr::SELECTED)) {
             unsupportedError(flp, "selection of a non-name expression");
             return nullptr;
         }
@@ -1117,9 +1171,26 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         if (!basep) return nullptr;
         // Prefer the declared type: it keeps the element width of an array type
         VType baseType;
-        const VType* declTypep = expr.a->kind == Expr::NAME ? typeOfName(*expr.a) : nullptr;
-        baseType = declTypep ? *declTypep : typeOfDType(basep->dtypep());
+        if (!typeOfDesignator(*expr.a, baseType)) baseType = typeOfDType(basep->dtypep());
         return lowerSel(expr, basep, baseType, write);
+    }
+    if (expr.kind == Expr::SELECTED) {
+        VType prefixType;
+        if (!expr.a || !typeOfDesignator(*expr.a, prefixType)
+            || prefixType.kind != VType::RECORD) {
+            unsupportedError(flp, "record element as an assignment target");
+            return nullptr;
+        }
+        for (const VField& field : prefixType.fields) {
+            if (field.name != expr.text) continue;
+            AstNodeExpr* const basep = lowerDesignator(*expr.a, write);
+            if (!basep) return nullptr;
+            AstSel* const selp = new AstSel{flp, basep, field.offset, field.width};
+            selp->dtypep(field.type->dtp);
+            return selp;
+        }
+        flp->v3error("VHDL: record has no element '" + expr.spelling + "'");
+        return nullptr;
     }
     unsupportedError(flp, "expression as an assignment target");
     return nullptr;
@@ -1259,22 +1330,66 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
 }
 
 //! Type of a prefix name, or null when the name is not a signal or constant
+//! Type of a designator (name, selected name, index or slice) when it is known
+bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
+    switch (expr.kind) {
+    case Expr::NAME: {
+        const VType* const typep = typeOfName(expr);
+        if (!typep) return false;
+        out = *typep;
+        return true;
+    }
+    case Expr::SELECTED: {
+        VType prefixType;
+        if (!expr.a || !typeOfDesignator(*expr.a, prefixType)) return false;
+        if (prefixType.kind != VType::RECORD) return false;
+        for (const VField& field : prefixType.fields) {
+            if (field.name != expr.text) continue;
+            out = *field.type;
+            return true;
+        }
+        return false;
+    }
+    case Expr::INDEX:
+    case Expr::SLICE: {
+        VType prefixType;
+        if (!expr.a || !typeOfDesignator(*expr.a, prefixType)) return false;
+        if (!prefixType.isVector()) return false;
+        if (expr.kind == Expr::INDEX) {
+            if (prefixType.kind == VType::ARRAY && prefixType.elemp) {
+                out = *prefixType.elemp;
+            } else {
+                out = VType{};
+                out.kind = prefixType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+                out.dtp = findBasic(expr.flp, prefixType.kwd);
+            }
+            return true;
+        }
+        // A slice keeps the element type over the sliced index range
+        if (!expr.b || !expr.c) return false;
+        int64_t left = 0;
+        int64_t right = 0;
+        if (!staticInt(expr.b, left) || !staticInt(expr.c, right)) return false;
+        out = prefixType;
+        out.left = static_cast<int>(left);
+        out.right = static_cast<int>(right);
+        out.ascending = expr.text == "to";
+        out.width = out.elemWidth * (std::abs(out.left - out.right) + 1);
+        out.dtp = findVectorWidth(expr.flp, out.kwd, out.signing, out.width);
+        return true;
+    }
+    default: return false;
+    }
+}
+
 //! Type of an assignment target: the declared type keeps record and array structure
 VType Lowering::typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const {
-    const VType* const typep = target.kind == Expr::NAME ? typeOfName(target) : nullptr;
-    return typep ? *typep : typeOfDType(lhsp->dtypep());
+    VType type;
+    if (typeOfDesignator(target, type)) return type;
+    return typeOfDType(lhsp->dtypep());
 }
 
 const VType* Lowering::typeOfName(const Expr& expr) const {
-    if (expr.kind == Expr::SELECTED) {
-        // A nested selected name: the element's type within the prefix record
-        const VType* const prefixTypep = expr.a ? typeOfName(*expr.a) : nullptr;
-        if (!prefixTypep || prefixTypep->kind != VType::RECORD) return nullptr;
-        for (const VField& field : prefixTypep->fields) {
-            if (field.name == expr.text) return field.type.get();
-        }
-        return nullptr;
-    }
     if (expr.kind != Expr::NAME) return nullptr;
     const auto it = m_scope.find(expr.text);
     if (it != m_scope.end()) return &it->second.type;
@@ -1314,8 +1429,7 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         AstNodeDType* const enumDtp = typep->dtp;
         auto enumConst = [&](int position) -> AstNodeExpr* {
             AstConst* const constp
-                = new AstConst{flp, V3Number{flp, typep->width,
-                                             static_cast<uint32_t>(position)}};
+                = new AstConst{flp, V3Number{flp, typep->width, static_cast<uint32_t>(position)}};
             constp->dtypep(enumDtp);
             return constp;
         };
@@ -1324,7 +1438,8 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         if (attribute == "length") return makeIntConst(flp, count);
         // The remaining enumeration attributes are functions of one value
         if (expr.args.size() != 1) {
-            unsupportedError(flp, "enumeration attribute '" + attribute + "' without one argument");
+            unsupportedError(flp,
+                             "enumeration attribute '" + attribute + "' without one argument");
             return nullptr;
         }
         AstNodeExpr* argp = lowerExpr(*expr.args[0], nullptr);
@@ -1429,16 +1544,16 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
 
 AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
     FileLine* const flp = expr.flp;
-    if (!expr.a || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::SELECTED)) {
-        unsupportedError(flp, "selected name of a non-record prefix");
+    if (!expr.a) {
+        unsupportedError(flp, "selected name without a prefix");
         return nullptr;
     }
-    const VType* const typep = typeOfName(*expr.a);
-    if (!typep || typep->kind != VType::RECORD) {
+    VType prefixType;
+    if (!typeOfDesignator(*expr.a, prefixType) || prefixType.kind != VType::RECORD) {
         unsupportedError(flp, "selected name '" + expr.spelling + "'");
         return nullptr;
     }
-    for (const VField& field : typep->fields) {
+    for (const VField& field : prefixType.fields) {
         if (field.name != expr.text) continue;
         AstNodeExpr* const basep = lowerExpr(*expr.a, nullptr);
         if (!basep) return nullptr;
@@ -1486,6 +1601,7 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
         const Expr* exprp = nullptr;
     };
     std::vector<Segment> segments;
+    const Expr* othersValuep = nullptr;  // Value of an `others` association
     if (type.kind == VType::RECORD) {
         if (expr.kind == Expr::AGG_POSITIONAL) {
             // Positional association fills record elements in declaration order
@@ -1528,6 +1644,11 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
         const int elemWidth = type.elemWidth;
         for (size_t i = 0; i < expr.args.size(); ++i) {
             const std::vector<ExprP>& choiceList = expr.choices[i];
+            if (choiceList.size() == 1 && choiceList.front()->kind == Expr::NAME
+                && choiceList.front()->text == "others") {
+                othersValuep = expr.args[i].get();
+                continue;
+            }
             auto addIndex = [&](int64_t index, const Expr* valuep) {
                 Segment segment;
                 segment.offset = type.indexOffset(static_cast<int>(index)) * elemWidth;
@@ -1566,6 +1687,26 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
                 }
                 addIndex(index, expr.args[i].get());
             }
+        }
+    }
+    // Fill the elements no association names, in element-sized pieces
+    const int elemSpan = type.kind == VType::RECORD ? 1 : std::max(1, type.elemWidth);
+    const int elementCount = elemSpan > 0 ? type.width / elemSpan : 0;
+    if (type.kind != VType::RECORD && !othersValuep) {
+        // No `others`: every element must be covered by an association
+    } else if (othersValuep) {
+        for (int element = 0; element < elementCount; ++element) {
+            const int offset = element * elemSpan;
+            const bool covered
+                = std::any_of(segments.begin(), segments.end(), [&](const Segment& segment) {
+                      return offset >= segment.offset && offset < segment.offset + segment.width;
+                  });
+            if (covered) continue;
+            Segment segment;
+            segment.offset = offset;
+            segment.width = elemSpan;
+            segment.exprp = othersValuep;
+            segments.push_back(segment);
         }
     }
     // The association must cover the whole type exactly once
@@ -1857,11 +1998,7 @@ AstNode* Lowering::lowerIf(const Stmt& stmt) {
     AstNode* elsesp = nullptr;
     for (std::size_t i = stmt.branches.size(); i-- > 0;) {
         const auto& branch = stmt.branches[i];
-        AstNode* bodyp = nullptr;
-        for (const StmtP& stmtp : branch.second) {
-            AstNode* const nodep = lowerStmt(*stmtp);
-            if (nodep) bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, nodep) : nodep;
-        }
+        AstNode* bodyp = lowerStmtList(branch.second);
         if (!branch.first) {
             elsesp = bodyp;
             continue;
@@ -1893,6 +2030,9 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::VAR_ASSIGN) return lowerAssign(stmt, false, true);
     if (stmt.kind == Stmt::IF) return lowerIf(stmt);
     if (stmt.kind == Stmt::CASE) return lowerCase(stmt);
+    if (stmt.kind == Stmt::FOR) return lowerFor(stmt);
+    if (stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) return lowerWhile(stmt);
+    // exit/next are handled by lowerStmtList, which owns their flags
     return nullptr;
 }
 
@@ -1918,13 +2058,12 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
             if (bodyp) bodyp->deleteTree();
             continue;
         }
-        AstCaseItem* const caseItemp
-            = cops.empty() ? new AstCaseItem{flp, nullptr, bodyp}
-                           : new AstCaseItem{flp, cops.front(), bodyp};
+        AstCaseItem* const caseItemp = cops.empty() ? new AstCaseItem{flp, nullptr, bodyp}
+                                                    : new AstCaseItem{flp, cops.front(), bodyp};
         for (size_t i = 1; i < cops.size(); ++i) caseItemp->addCondsp(cops[i]);
         if (cops.empty()) currentp = caseItemp;
-        itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, caseItemp)
-                        : caseItemp;
+        itemsp
+            = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, caseItemp) : caseItemp;
     }
     if (!itemsp) {
         selectorp->deleteTree();
@@ -1938,11 +2077,197 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
 
 AstNode* Lowering::lowerStmtList(const std::vector<StmtP>& stmts) {
     AstNode* headp = nullptr;
+    // Conditions that must hold for the following statements to run, set by exit/next
+    AstNodeExpr* runCondp = nullptr;
     for (const StmtP& stmtp : stmts) {
-        AstNode* const nodep = lowerStmt(*stmtp);
-        if (nodep) headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+        if (stmtp->kind == Stmt::EXIT || stmtp->kind == Stmt::NEXT) {
+            const bool isExit = stmtp->kind == Stmt::EXIT;
+            LoopFrame* const framep = findLoop(stmtp->loopLabel);
+            if (!framep) {
+                unsupportedError(stmtp->flp,
+                                 isExit ? "exit outside a loop" : "next outside a loop");
+                continue;
+            }
+            AstVar* const flagp = isExit ? framep->exitp : framep->nextp;
+            AstNodeExpr* condp = nullptr;
+            if (stmtp->value) {
+                condp = lowerCond(*stmtp->value);
+                if (!condp) continue;
+            }
+            AstNode* const setp = setLoopFlag(stmtp->flp, flagp, condp);
+            if (setp) headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, setp) : setp;
+            if (!condp) break;  // Unconditional: the rest of this body is unreachable
+            AstNodeExpr* const clearp
+                = new AstNot{stmtp->flp, new AstVarRef{stmtp->flp, flagp, VAccess::READ}};
+            clearp->dtypep(findBasic(stmtp->flp, VBasicDTypeKwd::LOGIC));
+            if (runCondp) {
+                AstNodeExpr* const andp = new AstAnd{stmtp->flp, runCondp, clearp};
+                andp->dtypep(clearp->dtypep());
+                runCondp = andp;
+            } else {
+                runCondp = clearp;
+            }
+            continue;
+        }
+        AstNode* nodep = lowerStmt(*stmtp);
+        if (!nodep) continue;
+        // Statements after a conditional exit/next only run when it was not taken
+        if (runCondp) nodep = new AstIf{stmtp->flp, runCondp->cloneTree(false), nodep, nullptr};
+        if (AstNodeExpr* const guardp = loopGuard(stmtp->flp)) {
+            nodep = new AstIf{stmtp->flp, guardp, nodep, nullptr};
+        }
+        headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
     }
+    if (runCondp) runCondp->deleteTree();
     return headp;
+}
+
+//! Innermost active loop, or the one with the given label
+Lowering::LoopFrame* Lowering::findLoop(const std::string& label) {
+    for (size_t i = m_loops.size(); i-- > 0;) {
+        if (label.empty() || m_loops[i].label == label) return &m_loops[i];
+    }
+    return nullptr;
+}
+
+AstVar* Lowering::newLoopFlag(FileLine* flp, const char* what) {
+    const std::string name = std::string{"vhdlloop_"} + std::to_string(++m_loopSeq) + "__" + what;
+    AstVar* const varp
+        = new AstVar{flp, VVarType::VAR, name, findBasic(flp, VBasicDTypeKwd::LOGIC)};
+    m_modp->addStmtsp(varp);
+    return varp;
+}
+
+//! `if (cond) flag = 1`, or `flag = 1` when there is no condition
+AstNode* Lowering::setLoopFlag(FileLine* flp, AstVar* flagp, AstNodeExpr* condp) {
+    AstNodeExpr* const lhsp = new AstVarRef{flp, flagp, VAccess::WRITE};
+    AstNodeExpr* const rhsp = bitConst(flp, '1');
+    AstAssign* const assignp = new AstAssign{flp, lhsp, rhsp};
+    if (!condp) return assignp;
+    return new AstIf{flp, condp, assignp, nullptr};
+}
+
+//! Clear a loop flag before it is tested again
+AstNode* Lowering::clearLoopFlag(FileLine* flp, AstVar* flagp) {
+    AstNodeExpr* const lhsp = new AstVarRef{flp, flagp, VAccess::WRITE};
+    AstNodeExpr* const rhsp = bitConst(flp, '0');
+    return new AstAssign{flp, lhsp, rhsp};
+}
+
+//! Whether a statement list (recursively) contains an exit or next
+bool Lowering::usesExitNext(const std::vector<StmtP>& stmts) {
+    for (const StmtP& stmtp : stmts) {
+        if (!stmtp) continue;
+        if (stmtp->kind == Stmt::EXIT || stmtp->kind == Stmt::NEXT) return true;
+        for (const auto& branch : stmtp->branches) {
+            if (usesExitNext(branch.second)) return true;
+        }
+        for (const auto& item : stmtp->caseItems) {
+            if (usesExitNext(item.second)) return true;
+        }
+        if (usesExitNext(stmtp->body)) return true;
+    }
+    return false;
+}
+
+//! Condition under which the rest of the enclosing loops may still run
+AstNodeExpr* Lowering::loopGuard(FileLine* flp) const {
+    AstNodeExpr* guardp = nullptr;
+    for (const LoopFrame& frame : m_loops) {
+        if (!frame.guard) continue;
+        for (AstVar* const flagp : {frame.exitp, frame.nextp}) {
+            AstNodeExpr* const notp = new AstNot{flp, new AstVarRef{flp, flagp, VAccess::READ}};
+            notp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            if (!guardp) {
+                guardp = notp;
+                continue;
+            }
+            AstNodeExpr* const andp = new AstAnd{flp, guardp, notp};
+            andp->dtypep(notp->dtypep());
+            guardp = andp;
+        }
+    }
+    return guardp;
+}
+
+AstNode* Lowering::lowerFor(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    int64_t left = 0;
+    int64_t right = 0;
+    bool up = stmt.rangeAscending;
+    if (!stmt.c) {
+        // `for i in name'range loop`: the bounds come from the prefix's type
+        if (!stmt.b || stmt.b->kind != Expr::ATTR || stmt.b->text != "range" || !stmt.b->a
+            || stmt.b->a->kind != Expr::NAME) {
+            unsupportedError(flp, "loop range without 'to' or 'downto'");
+            return nullptr;
+        }
+        const VType* const typep = typeOfName(*stmt.b->a);
+        if (!typep) {
+            unsupportedError(flp, "loop range of an unresolved name");
+            return nullptr;
+        }
+        left = typep->left;
+        right = typep->right;
+        up = typep->ascending;
+    } else if (!staticInt(stmt.b, left) || !staticInt(stmt.c, right)) {
+        unsupportedError(flp, "loop range that is not static");
+        return nullptr;
+    }
+    if (up ? right < left : right > left) {
+        // An empty range: the loop body never runs
+        return nullptr;
+    }
+    if (std::llabs(right - left) > 4096) {
+        unsupportedError(flp, "loop range with more than 4096 iterations");
+        return nullptr;
+    }
+    LoopFrame frame;
+    frame.label = stmt.loopLabel;
+    frame.exitp = newLoopFlag(flp, "exit");
+    frame.nextp = newLoopFlag(flp, "next");
+    frame.guard = usesExitNext(stmt.body);
+    m_loops.push_back(frame);
+    AstNode* headp = clearLoopFlag(flp, frame.exitp);
+    AstNode* const initp = clearLoopFlag(flp, frame.nextp);
+    headp = AstNode::addNext<AstNode, AstNode>(headp, initp);
+
+    // The loop variable is a static constant, so each iteration can be unrolled
+    const auto savedConst = m_consts.find(stmt.loopVar);
+    const bool hadConst = savedConst != m_consts.end();
+    const int64_t savedValue = hadConst ? savedConst->second : 0;
+    AstNodeExpr* const exitNotp = [&]() -> AstNodeExpr* {
+        AstNodeExpr* const notp = new AstNot{flp, new AstVarRef{flp, frame.exitp, VAccess::READ}};
+        notp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        return notp;
+    }();
+    for (int64_t value = left;; value += up ? 1 : -1) {
+        m_consts[stmt.loopVar] = value;
+        // An exit ends every later iteration; a next only resets per iteration
+        if (frame.guard) {
+            AstNode* const clearNextp = clearLoopFlag(flp, frame.nextp);
+            headp = AstNode::addNext<AstNode, AstNode>(headp, clearNextp);
+        }
+        AstNode* const bodyp = lowerStmtList(stmt.body);
+        if (bodyp) {
+            AstNode* const guardp = new AstIf{flp, exitNotp->cloneTree(false), bodyp, nullptr};
+            headp = AstNode::addNext<AstNode, AstNode>(headp, guardp);
+        }
+        if (value == right) break;
+    }
+    exitNotp->deleteTree();
+    if (hadConst) {
+        m_consts[stmt.loopVar] = savedValue;
+    } else {
+        m_consts.erase(stmt.loopVar);
+    }
+    m_loops.pop_back();
+    return headp;
+}
+
+AstNode* Lowering::lowerWhile(const Stmt& stmt) {
+    unsupportedError(stmt.flp, stmt.kind == Stmt::WHILE ? "while loop" : "bare loop");
+    return nullptr;
 }
 
 void Lowering::lowerProcess(const Process& process) {

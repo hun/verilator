@@ -147,6 +147,8 @@ class Parser final {
     StmtP parseSequentialStatement();
     StmtP parseIf(FileLine* flp);
     StmtP parseCase(FileLine* flp);
+    StmtP parseFor(FileLine* flp);
+    bool parseLoopEnd(const char* what);
 
 public:
     Parser(std::string filename, std::string text, std::string libname, bool inLibrary)
@@ -1008,6 +1010,18 @@ std::vector<StmtP> Parser::parseStmtList(bool stopAtElse) {
 StmtP Parser::parseSequentialStatement() {
     if (m_failed) return nullptr;
     FileLine* const flp = m_cur.flp;
+    // Optional statement label: `label : statement`
+    std::string label;
+    if (m_cur.kind == Token::ID) {
+        const auto saved = m_lexer.state();
+        const Token ahead = m_lexer.next();
+        m_lexer.restore(saved);
+        if (ahead.kind == Token::SYM && ahead.text == ":") {
+            label = m_cur.text;
+            advance();
+            advance();
+        }
+    }
     if (isId("if")) {
         advance();
         return parseIf(flp);
@@ -1016,8 +1030,53 @@ StmtP Parser::parseSequentialStatement() {
         advance();
         return parseCase(flp);
     }
-    if (isId("for") || isId("while") || isId("loop") || isId("wait") || isId("return")
-        || isId("report") || isId("assert") || isId("next") || isId("exit")) {
+    if (isId("for")) {
+        advance();
+        StmtP stmt = parseFor(flp);
+        if (stmt) stmt->loopLabel = label;
+        return stmt;
+    }
+    if (isId("while")) {
+        advance();
+        auto stmt = std::make_unique<Stmt>(Stmt::WHILE);
+        stmt->flp = flp;
+        stmt->loopLabel = label;
+        stmt->value = parseExpr();  // Loop condition
+        if (!stmt->value) return nullptr;
+        if (!expectId("loop")) return nullptr;
+        stmt->body = parseStmtList(false);
+        if (m_failed) return nullptr;
+        if (!parseLoopEnd("while")) return nullptr;
+        return stmt;
+    }
+    if (isId("loop")) {
+        advance();
+        auto stmt = std::make_unique<Stmt>(Stmt::LOOP);
+        stmt->flp = flp;
+        stmt->loopLabel = label;
+        stmt->body = parseStmtList(false);
+        if (m_failed) return nullptr;
+        if (!parseLoopEnd("loop")) return nullptr;
+        return stmt;
+    }
+    if (isId("exit") || isId("next")) {
+        const bool isExit = isId("exit");
+        advance();
+        auto stmt = std::make_unique<Stmt>(isExit ? Stmt::EXIT : Stmt::NEXT);
+        stmt->flp = flp;
+        if (m_cur.kind == Token::ID && !isId("when")) {
+            Token labelTok;
+            if (!takeId(labelTok)) return nullptr;
+            stmt->loopLabel = labelTok.text;
+        }
+        if (acceptId("when")) {
+            stmt->value = parseExpr();
+            if (!stmt->value) return nullptr;
+        }
+        expectSym(";");
+        return stmt;
+    }
+    if (isId("wait") || isId("return") || isId("report") || isId("assert")) {
         unsupported("sequential statement '" + m_cur.text + "'");
         return nullptr;
     }
@@ -1199,6 +1258,47 @@ StmtP Parser::parseCase(FileLine* flp) {
         return nullptr;
     }
     return stmt;
+}
+
+StmtP Parser::parseFor(FileLine* flp) {
+    Token varTok;
+    if (!takeId(varTok)) return nullptr;
+    auto stmt = std::make_unique<Stmt>(Stmt::FOR);
+    stmt->flp = flp;
+    stmt->loopVar = varTok.text;
+    if (!expectId("in")) return nullptr;
+    stmt->b = parseExpr();
+    if (!stmt->b) return nullptr;
+    if (isId("to") || isId("downto")) {
+        stmt->rangeAscending = isId("to");
+        advance();
+        stmt->c = parseExpr();
+        if (!stmt->c) return nullptr;
+    } else if (!isId("loop")) {
+        // Only `for i in <range attribute> loop` may omit the direction
+        error("expected 'to' or 'downto' in a loop range");
+        return nullptr;
+    }
+    if (!expectId("loop")) return nullptr;
+    stmt->body = parseStmtList(false);
+    if (m_failed) return nullptr;
+    if (!parseLoopEnd("for")) return nullptr;
+    return stmt;
+}
+
+//! Consume `end loop [label];`
+bool Parser::parseLoopEnd(const char* what) {
+    if (!expectId("end")) return false;
+    if (!expectId("loop")) {
+        error(std::string{"expected 'end loop' to close the "} + what + " statement");
+        return false;
+    }
+    if (m_cur.kind == Token::ID) advance();  // Optional end label
+    if (!acceptSym(";")) {
+        error("expected ';' after 'end loop'");
+        return false;
+    }
+    return true;
 }
 
 void Parser::parseDesignFile() {
