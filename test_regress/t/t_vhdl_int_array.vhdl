@@ -12,7 +12,8 @@ entity t is
     i   : in  integer;
     q   : out integer;
     r   : out integer;
-    len : out integer
+    len : out integer;
+    tq  : out integer
   );
 end;
 
@@ -20,6 +21,10 @@ architecture rtl of t is
   subtype small_t is integer range 0 to 15;
   type amem_t is array (0 to 3) of small_t;
   type dmem_t is array (3 downto 0) of natural range 0 to 63;
+  type vec_t is array (integer range <>) of integer range 0 to 255;
+  constant row_c : vec_t(0 to 1) := (10, 20);
+  -- A range choice may be associated with a whole array value
+  constant table_c : vec_t(0 to 3) := (0 => 1, 1 to 2 => row_c, 3 => 4);
   signal amem : amem_t;
   signal dmem : dmem_t;
 begin
@@ -34,4 +39,6 @@ begin
   q <= amem(i);
   r <= dmem(i);
   len <= amem'length;
+  -- Index through a signal: GHDL 7.0.0-dev crashes on a literal index here
+  tq <= table_c(i);
 end;
