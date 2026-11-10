@@ -38,8 +38,20 @@
 
 namespace vhdlnative {
 
+struct VType;
+using VTypeP = std::shared_ptr<VType>;
+
+//! One record element: its bit offset from the least significant bit of the record
+struct VField final {
+    std::string name;  // Folded
+    int offset = 0;
+    int width = 1;
+    VTypeP type;
+};
+
+//! VHDL type as it survives into the committed AST
 struct VType final {
-    enum Kind : uint8_t { LOGIC, BIT, INT, VECTOR } kind = LOGIC;
+    enum Kind : uint8_t { LOGIC, BIT, BOOLEAN, INT, VECTOR, ARRAY, RECORD, ENUM } kind = LOGIC;
     AstNodeDType* dtp = nullptr;
     int width = 1;
     VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
@@ -47,12 +59,22 @@ struct VType final {
     int left = 0;
     int right = 0;
     bool ascending = false;
+    int intLow = 0;  // INTEGER subtype bounds
+    int intHigh = 0;
+    VTypeP elemp;  // ARRAY: element type
+    int elemWidth = 1;  // ARRAY: width of one element
+    std::vector<VField> fields;  // RECORD: most significant element first
+    std::vector<std::string> literals;  // ENUM: literal names in declaration order
 
-    bool isVector() const { return kind == VECTOR; }
+    bool isVector() const { return kind == VECTOR || kind == ARRAY; }
     bool isInt() const { return kind == INT; }
     bool isSigned() const { return signing == VSigning::SIGNED; }
+    //! Number of elements of an array, or 1 for a scalar
+    int length() const { return isVector() ? std::abs(left - right) + 1 : 1; }
     //! Index of the least significant packed element
     int lowIndex() const { return ascending ? left : right; }
+    //! Bit offset of a declared array index from the least significant element
+    int indexOffset(int index) const { return index - lowIndex(); }
 };
 
 class Lowering final {
@@ -64,6 +86,11 @@ class Lowering final {
     };
     std::map<std::string, VarInfo> m_scope;  // Signals and ports by folded name
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
+    std::map<std::string, VType> m_types;  // Declared types by folded name
+    std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
+    std::map<std::string, VType> m_constTypes;  // Type of each typed constant
+    std::map<std::string, AstConst*> m_enumConsts;  // Enumeration literals by folded name
+    std::vector<std::unique_ptr<AstConst>> m_ownedConsts;  // Owns constants in the tables
     std::vector<std::pair<std::string, std::string>> m_pendingNames;  // Duplicate detection
     struct Edge final {
         AstVar* varp = nullptr;
@@ -185,6 +212,9 @@ class Lowering final {
     }
 
     bool resolveType(const TypeSpec& spec, VType& out);
+    void registerType(const TypeDecl& decl);
+    AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
+    bool applyRange(const TypeSpec& spec, VType& type);
     bool evalInt(const Expr& expr, int64_t& value) const;
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);
@@ -205,10 +235,17 @@ class Lowering final {
     AstNodeExpr* lowerConversion(const Expr& expr);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
+    AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
+                         int hi, int lo);
 
     AstNodeExpr* lowerCond(const Expr& expr);
     bool containsEdgeCall(const Expr& expr) const;
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
+    AstNodeExpr* lowerAttr(const Expr& expr);
+    AstNodeExpr* lowerAggregate(const Expr& expr, const VType& type);
+    AstConst* foldToConst(AstNodeExpr* exprp);
+    AstNodeExpr* lowerSelectedExpr(const Expr& expr);
+    const VType* typeOfName(const Expr& expr) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
     AstNode* lowerSelected(const Concurrent& conc);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
@@ -287,10 +324,189 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     }
 }
 
+AstNodeDType* Lowering::enumDType(FileLine* flp, const TypeDecl& decl, int width) {
+    AstBasicDType* const basep = m_rootp->typeTablep()->findLogicBitDType(
+        flp, VBasicDTypeKwd::LOGIC, width, width, VSigning::UNSIGNED);
+    AstEnumItem* itemsp = nullptr;
+    for (size_t i = 0; i < decl.literals.size(); ++i) {
+        AstEnumItem* const itemp
+            = new AstEnumItem{flp, decl.literals[i].second, nullptr,
+                              new AstConst{flp, V3Number{flp, width, static_cast<uint32_t>(i)}}};
+        itemsp = itemsp ? AstNode::addNext<AstEnumItem, AstEnumItem>(itemsp, itemp) : itemp;
+    }
+    // The constructor takes the basis type as a child (op1), which is only legal for
+    // parser dtypes not yet in the type table. Give it a throw-away basis, then
+    // reference the shared basic dtype and drop the child to reach the post-width shape.
+    AstBasicDType* const basisp
+        = new AstBasicDType{flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width, width};
+    AstEnumDType* const enump = new AstEnumDType{flp, VFlagChildDType{}, basisp, itemsp};
+    enump->refDTypep(basep);
+    basisp->unlinkFrBack();
+    VL_DO_DANGLING(basisp->deleteTree(), basisp);
+    enump->dtypep(enump);
+    for (AstEnumItem* const itemp : enump->itemspList()) itemp->dtypep(enump);
+    m_rootp->typeTablep()->addTypesp(enump);
+    return enump;
+}
+
+void Lowering::registerType(const TypeDecl& decl) {
+    FileLine* const flp = decl.flp;
+    VType type;
+    switch (decl.kind) {
+    case TypeDecl::SUBTYPE:
+        if (!resolveType(decl.base, type)) return;
+        break;
+    case TypeDecl::ENUM: {
+        int width = 1;
+        while ((1 << width) < static_cast<int>(decl.literals.size())) ++width;
+        type.kind = VType::ENUM;
+        type.width = width;
+        type.dtp = enumDType(flp, decl, width);
+        for (const auto& literal : decl.literals) type.literals.push_back(literal.first);
+        for (size_t i = 0; i < decl.literals.size(); ++i) {
+            AstConst* const constp
+                = new AstConst{flp, V3Number{flp, width, static_cast<uint32_t>(i)}};
+            constp->dtypep(type.dtp);
+            m_enumConsts[decl.literals[i].first] = constp;
+        }
+        break;
+    }
+    case TypeDecl::ARRAY: {
+        VType elem;
+        if (!resolveType(decl.base, elem)) return;
+        if (!decl.index.hasRange) {
+            unsupportedError(flp, "array type without an index constraint");
+            return;
+        }
+        type.kind = VType::ARRAY;
+        type.elemp = std::make_shared<VType>(elem);
+        type.elemWidth = elem.width;
+        type.kwd = elem.kwd;
+        type.signing = VSigning::UNSIGNED;
+        int64_t left = 0;
+        int64_t right = 0;
+        if (!staticInt(decl.index.left, left) || !staticInt(decl.index.right, right)) {
+            // An unconstrained array type: every use must supply the index constraint
+            type.left = 0;
+            type.right = 0;
+            type.width = 0;
+            break;
+        }
+        type.left = static_cast<int>(left);
+        type.right = static_cast<int>(right);
+        type.ascending = decl.index.ascending;
+        type.width = elem.width * type.length();
+        type.dtp = findVectorWidth(flp, elem.kwd, VSigning::UNSIGNED, type.width);
+        break;
+    }
+    case TypeDecl::RECORD: {
+        int total = 0;
+        VBasicDTypeKwd kwd = VBasicDTypeKwd::BIT;
+        std::vector<VField> fields;
+        for (const TypeDecl::Member& member : decl.members) {
+            VType memberType;
+            if (!resolveType(member.type, memberType)) return;
+            if (memberType.kwd == VBasicDTypeKwd::LOGIC) kwd = VBasicDTypeKwd::LOGIC;
+            VField field;
+            field.name = member.names.front().first;
+            field.width = memberType.width;
+            field.type = std::make_shared<VType>(memberType);
+            fields.push_back(std::move(field));
+            total += memberType.width;
+        }
+        // Declaration order is most significant first
+        int offset = total;
+        for (VField& field : fields) {
+            offset -= field.width;
+            field.offset = offset;
+        }
+        type.kind = VType::RECORD;
+        type.width = total;
+        type.kwd = kwd;
+        type.fields = std::move(fields);
+        type.dtp = findVectorWidth(flp, kwd, VSigning::UNSIGNED, total);
+        break;
+    }
+    }
+    m_types[decl.name] = type;
+}
+
+bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
+    FileLine* const flp = spec.flp;
+    if (spec.hasRange) {
+        int64_t left = 0;
+        int64_t right = 0;
+        if (!staticInt(spec.left, left) || !staticInt(spec.right, right)) {
+            unsupportedError(flp, "non-static range constraint");
+            return false;
+        }
+        type.left = static_cast<int>(left);
+        type.right = static_cast<int>(right);
+        type.ascending = spec.ascending;
+        if (type.kind == VType::INT) {
+            type.intLow = static_cast<int>(std::min(left, right));
+            type.intHigh = static_cast<int>(std::max(left, right));
+            return true;
+        }
+        if (type.isVector()) {
+            type.width = type.elemWidth * type.length();
+            type.dtp = type.kind == VType::ARRAY
+                           ? findVectorWidth(flp, type.kwd, type.signing, type.width)
+                           : findVector(flp, type.kwd, type.signing, type.left, type.right, false);
+        } else {
+            unsupportedError(flp, "range constraint on a type that is not an array");
+            return false;
+        }
+        return true;
+    }
+    if (!spec.constraintMark.empty()) {
+        const auto it = m_types.find(spec.constraintMark);
+        if (it == m_types.end()) {
+            flp->v3error("VHDL: unknown subtype '" + spec.constraintMark + "'");
+            return false;
+        }
+        if (it->second.kind == VType::INT) {
+            type.left = it->second.left;
+            type.right = it->second.right;
+            type.ascending = it->second.ascending;
+            type.intLow = it->second.intLow;
+            type.intHigh = it->second.intHigh;
+            return true;
+        }
+        if (type.isVector()) {
+            type.left = it->second.left;
+            type.right = it->second.right;
+            type.ascending = it->second.ascending;
+            type.width = type.elemWidth * type.length();
+            type.dtp = type.kind == VType::ARRAY
+                           ? findVectorWidth(flp, type.kwd, type.signing, type.width)
+                           : findVector(flp, type.kwd, type.signing, type.left, type.right, false);
+            return true;
+        }
+        return true;
+    }
+    return true;
+}
+
 bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     if (!flp) return false;
     const std::string& mark = spec.mark;
+    const auto declared = m_types.find(mark);
+    if (declared != m_types.end()) {
+        out = declared->second;
+        return applyRange(spec, out);
+    }
+    if (mark == "u_unsigned" || mark == "u_signed") {
+        // An unconstrained numeric_std vector type; the use site supplies the index range
+        if (!spec.hasRange && spec.constraintMark.empty()) {
+            unsupportedError(flp, "unconstrained array type mark without an index constraint");
+            return false;
+        }
+        out = vectorType(flp, VBasicDTypeKwd::LOGIC,
+                         mark == "u_signed" ? VSigning::SIGNED : VSigning::UNSIGNED, 1);
+        return applyRange(spec, out);
+    }
     if (mark == "std_logic" || mark == "std_ulogic" || mark == "bit" || mark == "boolean") {
         if (spec.hasRange) {
             flp->v3error("VHDL: range constraint on scalar type '" + mark + "'");
@@ -302,15 +518,9 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     }
     if (mark == "integer" || mark == "natural" || mark == "positive") {
         out = intType(flp);
-        if (spec.hasRange) {
-            int64_t left = 0;
-            int64_t right = 0;
-            if (!staticInt(spec.left, left) || !staticInt(spec.right, right)) {
-                unsupportedError(flp, "non-static integer subtype range");
-                return false;
-            }
-        }
-        return true;
+        out.intLow = mark == "positive" ? 1 : 0;
+        out.intHigh = mark == "integer" ? 0x7fffffff : 0x7fffffff;
+        return applyRange(spec, out);
     }
     const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
                             || mark == "bit_vector" || mark == "unsigned" || mark == "signed";
@@ -385,6 +595,10 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     case Expr::NAME: {
         const auto constIt = m_consts.find(expr.text);
         if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
+        const auto valueIt = m_constValues.find(expr.text);
+        if (valueIt != m_constValues.end()) return valueIt->second->cloneTree(false);
+        const auto enumIt = m_enumConsts.find(expr.text);
+        if (enumIt != m_enumConsts.end()) return enumIt->second->cloneTree(false);
         const auto it = m_scope.find(expr.text);
         if (it == m_scope.end()) {
             flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'");
@@ -392,6 +606,16 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         }
         return new AstVarRef{flp, it->second.varp, VAccess::READ};
     }
+    case Expr::AGG_POSITIONAL:
+    case Expr::AGG_NAMED: {
+        if (!context) {
+            unsupportedError(flp, "aggregate without a known target type");
+            return nullptr;
+        }
+        return lowerAggregate(expr, *context);
+    }
+    case Expr::ATTR: return lowerAttr(expr);
+    case Expr::SELECTED: return lowerSelectedExpr(expr);
     case Expr::PAREN: return lowerExpr(*expr.a, context);
     case Expr::UNARY: {
         AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
@@ -763,6 +987,17 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
             }
             return makeIntConst(flp, constIt->second);
         }
+        const auto valueIt = m_constValues.find(expr.text);
+        if (valueIt != m_constValues.end() || m_enumConsts.count(expr.text)) {
+            if (write) {
+                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'");
+                return nullptr;
+            }
+            AstConst* const constp = valueIt != m_constValues.end()
+                                         ? valueIt->second
+                                         : m_enumConsts.find(expr.text)->second;
+            return constp->cloneTree(false);
+        }
         const auto it = m_scope.find(expr.text);
         if (it == m_scope.end()) {
             flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'");
@@ -784,7 +1019,11 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         }
         AstNodeExpr* const basep = lowerDesignator(*expr.a, write);
         if (!basep) return nullptr;
-        return lowerSel(expr, basep, typeOfDType(basep->dtypep()), write);
+        // Prefer the declared type: it keeps the element width of an array type
+        VType baseType;
+        const VType* declTypep = expr.a->kind == Expr::NAME ? typeOfName(*expr.a) : nullptr;
+        baseType = declTypep ? *declTypep : typeOfDType(basep->dtypep());
+        return lowerSel(expr, basep, baseType, write);
     }
     unsupportedError(flp, "expression as an assignment target");
     return nullptr;
@@ -799,10 +1038,40 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         basep->deleteTree();
         return nullptr;
     }
+    // A VECTOR is an array of a scalar element type; an ARRAY names its element type
     VType elemType;
-    elemType.kind = baseType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
-    elemType.dtp = findBasic(flp, baseType.kwd);
-    const int lowIndex = baseType.lowIndex();
+    if (baseType.kind == VType::ARRAY && baseType.elemp) {
+        elemType = *baseType.elemp;
+    } else {
+        elemType.kind = baseType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+        elemType.dtp = findBasic(flp, baseType.kwd);
+    }
+    const int elemWidth = baseType.elemWidth;
+    // An index expression that is an attribute ('range) names the prefix's own bounds
+    const Expr* rangep = nullptr;
+    if (expr.kind == Expr::INDEX && expr.args.size() == 1 && expr.args[0]->kind == Expr::ATTR) {
+        rangep = expr.args[0].get();
+    } else if (expr.kind == Expr::SLICE && expr.b && expr.b->kind == Expr::ATTR) {
+        rangep = expr.b.get();
+    }
+    if (rangep) {
+        if (rangep->text != "range" || !rangep->a || rangep->a->kind != Expr::NAME) {
+            unsupportedError(flp, "attribute '" + rangep->text + "' as an index");
+            basep->deleteTree();
+            return nullptr;
+        }
+        // The bounds come from the prefix name's type, not from the sliced array
+        const VType* const prefixTypep = typeOfName(*rangep->a);
+        if (!prefixTypep) {
+            flp->v3error("VHDL: unknown name '" + rangep->a->spelling + "' in 'range");
+            basep->deleteTree();
+            return nullptr;
+        }
+        int hi = prefixTypep->ascending ? prefixTypep->right : prefixTypep->left;
+        int lo = prefixTypep->ascending ? prefixTypep->left : prefixTypep->right;
+        if (hi < lo) std::swap(hi, lo);
+        return sliceOf(flp, basep, baseType, elemWidth, hi, lo);
+    }
     if (expr.kind == Expr::INDEX) {
         if (expr.args.size() != 1) {
             unsupportedError(flp, "index with multiple arguments");
@@ -820,10 +1089,17 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
             basep->deleteTree();
             return nullptr;
         }
+        const int lowIndex = baseType.lowIndex();
+        // The least significant element is the lowest index, in either direction
         AstNodeExpr* offsetp = indexp;
         if (lowIndex != 0) { offsetp = new AstSub{flp, indexp, makeIntConst(flp, lowIndex)}; }
         offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
-        AstSel* const selp = new AstSel{flp, basep, offsetp, 1};
+        if (elemWidth != 1) {
+            AstNodeExpr* const scaledp = new AstMul{flp, offsetp, makeIntConst(flp, elemWidth)};
+            scaledp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+            offsetp = scaledp;
+        }
+        AstSel* const selp = new AstSel{flp, basep, offsetp, elemWidth};
         selp->dtypep(elemType.dtp);
         return selp;
     }
@@ -848,17 +1124,7 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         basep->deleteTree();
         return nullptr;
     }
-    const int width = hi - lo + 1;
-    const int offset = lo - lowIndex;
-    if (offset < 0 || offset + width > baseType.width) {
-        flp->v3error("VHDL: slice is out of range of the array");
-        basep->deleteTree();
-        return nullptr;
-    }
-    AstSel* const selp = new AstSel{flp, basep, offset, width};
-    const VType sliceType = vectorType(flp, baseType.kwd, baseType.signing, width);
-    selp->dtypep(sliceType.dtp);
-    return selp;
+    return sliceOf(flp, basep, baseType, elemWidth, hi, lo);
 }
 
 AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
@@ -894,6 +1160,265 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
         return nullptr;
     }
     return condp;
+}
+
+//! Type of a prefix name, or null when the name is not a signal or constant
+const VType* Lowering::typeOfName(const Expr& expr) const {
+    const auto it = m_scope.find(expr.text);
+    if (it != m_scope.end()) return &it->second.type;
+    const auto constIt = m_constTypes.find(expr.text);
+    if (constIt != m_constTypes.end()) return &constIt->second;
+    return nullptr;
+}
+
+AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    if (!expr.a || expr.a->kind != Expr::NAME) {
+        unsupportedError(flp, "attribute of a non-name prefix");
+        return nullptr;
+    }
+    const VType* const typep = typeOfName(*expr.a);
+    const std::string& attribute = expr.text;
+    if (attribute == "event" || attribute == "stable" || attribute == "active"
+        || attribute == "last_event" || attribute == "last_active") {
+        unsupportedError(flp, "signal attribute '" + attribute + "'");
+        return nullptr;
+    }
+    int64_t value = 0;
+    if (attribute == "low") {
+        value = typep ? std::min(typep->left, typep->right) : 0;
+    } else if (attribute == "high") {
+        value = typep ? std::max(typep->left, typep->right) : 0;
+    } else if (attribute == "left") {
+        value = typep ? typep->left : 0;
+    } else if (attribute == "right") {
+        value = typep ? typep->right : 0;
+    } else if (attribute == "length") {
+        value = typep ? typep->length() : 0;
+    } else if (attribute == "ascending") {
+        const bool ascending = typep && typep->ascending;
+        return bitConst(flp, ascending ? '1' : '0');
+    } else {
+        unsupportedError(flp, "attribute '" + attribute + "'");
+        return nullptr;
+    }
+    return makeIntConst(flp, value);
+}
+
+//! Slice elements hi..lo (inclusive, hi >= lo) out of an array-typed value
+AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType,
+                               int elemWidth, int hi, int lo) {
+    // Element offsets from the least significant end; the higher index is not
+    // necessarily the more significant element for an ascending array
+    const int offsetHi = baseType.indexOffset(hi);
+    const int offsetLo = baseType.indexOffset(lo);
+    const int offset = std::min(offsetHi, offsetLo) * elemWidth;
+    const int count = hi - lo + 1;
+    const int width = count * elemWidth;
+    if (offset < 0 || offset + width > baseType.width) {
+        flp->v3error("VHDL: slice is out of range of the array");
+        basep->deleteTree();
+        return nullptr;
+    }
+    AstSel* const selp = new AstSel{flp, basep, offset, width};
+    VType sliceType;
+    if (baseType.kind == VType::ARRAY) {
+        sliceType = baseType;
+        sliceType.left = hi;
+        sliceType.right = lo;
+        sliceType.ascending = false;
+        sliceType.width = width;
+        sliceType.dtp = findVectorWidth(flp, baseType.kwd, baseType.signing, width);
+    } else {
+        sliceType = vectorType(flp, baseType.kwd, baseType.signing, width);
+    }
+    selp->dtypep(sliceType.dtp);
+    return selp;
+}
+
+AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    if (!expr.a || expr.a->kind != Expr::NAME) {
+        unsupportedError(flp, "selected name of a non-name prefix");
+        return nullptr;
+    }
+    const VType* const typep = typeOfName(*expr.a);
+    if (!typep || typep->kind != VType::RECORD) {
+        unsupportedError(flp, "selected name '" + expr.spelling + "'");
+        return nullptr;
+    }
+    for (const VField& field : typep->fields) {
+        if (field.name != expr.text) continue;
+        AstNodeExpr* const basep = lowerExpr(*expr.a, nullptr);
+        if (!basep) return nullptr;
+        AstSel* const selp = new AstSel{flp, basep, field.offset, field.width};
+        selp->dtypep(field.type->dtp);
+        return selp;
+    }
+    flp->v3error("VHDL: record has no element '" + expr.spelling + "'");
+    return nullptr;
+}
+
+//! Fold an expression built only from constants into one AstConst, or return null
+AstConst* Lowering::foldToConst(AstNodeExpr* exprp) {
+    if (!exprp) return nullptr;
+    if (AstConst* const constp = VN_CAST(exprp, Const)) return constp;
+    AstConcat* const concatp = VN_CAST(exprp, Concat);
+    if (!concatp) return nullptr;
+    AstConst* const lhp = foldToConst(concatp->lhsp()->unlinkFrBack());
+    AstConst* const rhp = foldToConst(concatp->rhsp()->unlinkFrBack());
+    if (!lhp || !rhp) {
+        if (lhp) lhp->deleteTree();
+        if (rhp) rhp->deleteTree();
+        return nullptr;
+    }
+    V3Number num{exprp->fileline(), lhp->num().width() + rhp->num().width(), 0u};
+    num.opConcat(lhp->num(), rhp->num());
+    AstConst* const constp = new AstConst{exprp->fileline(), num};
+    constp->dtypep(exprp->dtypep());
+    lhp->deleteTree();
+    rhp->deleteTree();
+    VL_DO_DANGLING(exprp->deleteTree(), exprp);
+    return constp;
+}
+
+AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
+    FileLine* const flp = expr.flp;
+    if (!type.isVector() && type.kind != VType::RECORD) {
+        unsupportedError(flp, "aggregate for a non-composite type");
+        return nullptr;
+    }
+    //! One run of elements covered by one associated value
+    struct Segment final {
+        int offset = 0;
+        int width = 1;
+        const Expr* exprp = nullptr;
+    };
+    std::vector<Segment> segments;
+    if (type.kind == VType::RECORD) {
+        // Positional association fills record elements in declaration order
+        if (expr.kind != Expr::AGG_POSITIONAL || expr.args.size() != type.fields.size()) {
+            unsupportedError(flp, "record aggregate that is not a full positional list");
+            return nullptr;
+        }
+        for (size_t i = 0; i < expr.args.size(); ++i) {
+            Segment segment;
+            segment.offset = type.fields[i].offset;
+            segment.width = type.fields[i].width;
+            segment.exprp = expr.args[i].get();
+            segments.push_back(segment);
+        }
+    } else {
+        const int elemWidth = type.elemWidth;
+        for (size_t i = 0; i < expr.args.size(); ++i) {
+            const std::vector<ExprP>& choiceList = expr.choices[i];
+            auto addIndex = [&](int64_t index, const Expr* valuep) {
+                Segment segment;
+                segment.offset = type.indexOffset(static_cast<int>(index)) * elemWidth;
+                segment.width = elemWidth;
+                segment.exprp = valuep;
+                segments.push_back(segment);
+            };
+            if (choiceList.empty()) {
+                // Positional: the next element in declaration order
+                const int64_t index = type.ascending ? type.left + static_cast<int64_t>(i)
+                                                     : type.left - static_cast<int64_t>(i);
+                addIndex(index, expr.args[i].get());
+                continue;
+            }
+            for (const ExprP& choicep : choiceList) {
+                if (choicep->kind == Expr::SLICE) {
+                    int64_t left = 0;
+                    int64_t right = 0;
+                    if (!staticInt(choicep->b, left) || !staticInt(choicep->c, right)) {
+                        unsupportedError(flp, "non-static aggregate choice range");
+                        return nullptr;
+                    }
+                    const int offsetLeft = type.indexOffset(static_cast<int>(left));
+                    const int offsetRight = type.indexOffset(static_cast<int>(right));
+                    Segment segment;
+                    segment.offset = std::min(offsetLeft, offsetRight) * elemWidth;
+                    segment.width = (std::abs(offsetLeft - offsetRight) + 1) * elemWidth;
+                    segment.exprp = expr.args[i].get();
+                    segments.push_back(segment);
+                    continue;
+                }
+                int64_t index = 0;
+                if (!staticInt(choicep, index)) {
+                    unsupportedError(flp, "non-static aggregate choice");
+                    return nullptr;
+                }
+                addIndex(index, expr.args[i].get());
+            }
+        }
+    }
+    // The association must cover the whole type exactly once
+    std::sort(segments.begin(), segments.end(),
+              [](const Segment& l, const Segment& r) { return l.offset < r.offset; });
+    int covered = 0;
+    for (const Segment& segment : segments) {
+        if (segment.offset != covered) {
+            unsupportedError(flp, "aggregate that does not cover every element");
+            return nullptr;
+        }
+        covered += segment.width;
+    }
+    if (covered != type.width) {
+        unsupportedError(flp, "aggregate that does not cover every element");
+        return nullptr;
+    }
+    // Assemble from the least significant segment up
+    AstNodeExpr* resultp = nullptr;
+    V3Number constValue{flp, type.width, 0u};  // Valid when every segment is constant
+    bool allConst = true;
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        const Segment& segment = segments[i];
+        VType segType;
+        if (segment.width == type.elemWidth && type.kind == VType::ARRAY && type.elemp) {
+            segType = *type.elemp;
+        } else if (type.kind == VType::RECORD) {
+            const auto fieldIt
+                = std::find_if(type.fields.begin(), type.fields.end(), [&](const VField& field) {
+                      return field.offset == segment.offset;
+                  });
+            if (fieldIt != type.fields.end()) segType = *fieldIt->type;
+        }
+        if (segType.dtp == nullptr) {
+            segType = type.kind == VType::RECORD
+                          ? vectorType(flp, type.kwd, VSigning::UNSIGNED, segment.width)
+                          : vectorType(flp, type.kwd, type.signing, segment.width);
+        }
+        AstNodeExpr* valuep = lowerExpr(*segment.exprp, &segType);
+        if (!valuep) {
+            if (resultp) resultp->deleteTree();
+            return nullptr;
+        }
+        valuep = resizeExpr(valuep, segType, flp);
+        if (AstConst* const constp = VN_CAST(valuep, Const)) {
+            for (int bit = 0; bit < segment.width; ++bit) {
+                char value = '0';
+                if (constp->num().bitIs1(bit)) {
+                    value = '1';
+                } else if (constp->num().bitIsXZ(bit)) {
+                    value = 'x';
+                }
+                constValue.setBit(segment.offset + bit, value);
+            }
+            VL_DO_DANGLING(valuep->deleteTree(), valuep);
+            continue;
+        }
+        // A non-static segment: build the value with concatenations instead
+        allConst = false;
+        resultp
+            = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, valuep, resultp}) : valuep;
+    }
+    if (allConst) {
+        AstConst* const constp = new AstConst{flp, constValue};
+        constp->dtypep(type.dtp);
+        return constp;
+    }
+    resultp->dtypep(type.dtp);
+    return resultp;
 }
 
 AstNodeExpr* Lowering::lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp) {
@@ -1228,6 +1753,9 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
     m_modp = new AstModule{entity.flp, entity.spelling, entity.libname};
     m_modp->inLibrary(entity.inLibrary || arch.inLibrary);
 
+    // Types are visible to the whole declarative part, and must be registered first
+    for (const TypeDecl& typeDecl : arch.types) registerType(typeDecl);
+
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
         VType type;
@@ -1255,18 +1783,50 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
                 decl.flp->v3error("VHDL: constant without a value");
                 continue;
             }
-            int64_t value = 0;
-            if (!evalInt(*decl.init, value)) {
-                unsupportedError(decl.flp,
-                                 "constant value that is not a static integer expression");
+            VType constType;
+            bool intConstant = true;
+            if (decl.type.flp && resolveType(decl.type, constType)) {
+                intConstant = constType.isInt();
+            }
+            if (intConstant) {
+                int64_t value = 0;
+                if (!evalInt(*decl.init, value)) {
+                    unsupportedError(decl.flp,
+                                     "constant value that is not a static integer expression");
+                    continue;
+                }
+                for (const auto& name : decl.names) {
+                    if (m_scope.count(name.first) || m_consts.count(name.first)
+                        || m_constValues.count(name.first)) {
+                        decl.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
+                        continue;
+                    }
+                    m_consts[name.first] = value;
+                }
                 continue;
             }
-            for (const auto& name : decl.names) {
-                if (m_scope.count(name.first) || m_consts.count(name.first)) {
+            AstNodeExpr* valuep = lowerExpr(*decl.init, &constType);
+            if (!valuep) continue;
+            if (AstConst* const foldedp = foldToConst(valuep)) { valuep = foldedp; }
+            AstConst* const constp = VN_CAST(valuep, Const);
+            if (!constp) {
+                unsupportedError(decl.flp, "constant value that is not static");
+                valuep->deleteTree();
+                continue;
+            }
+            constp->dtypep(constType.dtp);
+            for (size_t i = 0; i < decl.names.size(); ++i) {
+                const auto& name = decl.names[i];
+                if (m_scope.count(name.first) || m_consts.count(name.first)
+                    || m_constValues.count(name.first)) {
                     decl.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
                     continue;
                 }
-                m_consts[name.first] = value;
+                const bool last = i + 1 == decl.names.size();
+                m_ownedConsts.push_back(
+                    std::unique_ptr<AstConst>(last ? constp : constp->cloneTree(false)));
+                m_constValues[name.first] = m_ownedConsts.back().get();
+                m_constTypes[name.first] = constType;
             }
             continue;
         }
@@ -1327,6 +1887,11 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
     m_modp = nullptr;
     m_scope.clear();
     m_consts.clear();
+    m_constValues.clear();
+    m_constTypes.clear();
+    m_enumConsts.clear();
+    m_ownedConsts.clear();
+    m_types.clear();
 }
 
 //######################################################################

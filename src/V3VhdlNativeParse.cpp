@@ -126,6 +126,10 @@ class Parser final {
     void parseEntity(FileLine* flp);
     void parseNameList(std::vector<std::pair<std::string, std::string>>& names);
     void parseDecl(Architecture& arch, Decl::Kind kind);
+    void parseTypeDecl(Architecture& arch);
+    void parseSubtypeDecl(Architecture& arch);
+    void parseRecordBody(TypeDecl& decl);
+    void parseIndexConstraint(TypeSpec& type);
     void parseArchitecture(FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
     bool parseChoices(std::vector<ExprP>& choices);
@@ -287,17 +291,54 @@ ExprP Parser::parsePrimary() {
             expectSym(")");
             return node;
         }
-        ExprP inner = parseExpr();
-        if (!inner) return nullptr;
-        if (isSym(",")) {
-            unsupported("positional aggregate");
-            return nullptr;
+        FileLine* const aggFlp = m_cur.flp;
+        ExprP agg = std::make_unique<Expr>(Expr::AGG_POSITIONAL);
+        agg->flp = aggFlp;
+        for (;;) {
+            ExprP item = parseExpr();
+            if (!item) return nullptr;
+            if (isId("to") || isId("downto")) {  // Range choice, e.g. 1 to 2
+                ExprP range = std::make_unique<Expr>(Expr::SLICE);
+                range->flp = item->flp;
+                range->text = m_cur.text;
+                advance();
+                range->b = std::move(item);
+                range->c = parseExpr();
+                if (!range->c) return nullptr;
+                item = std::move(range);
+            }
+            if (agg->kind == Expr::AGG_NAMED || isSym("=>") || isSym("|")) {
+                // Named association: one or more choices, then the associated value
+                agg->kind = Expr::AGG_NAMED;
+                std::vector<ExprP> choiceList;
+                choiceList.push_back(std::move(item));
+                while (acceptSym("|")) {
+                    ExprP more = parseExpr();
+                    if (!more) return nullptr;
+                    choiceList.push_back(std::move(more));
+                }
+                if (!acceptSym("=>")) {
+                    error("expected '=>' in a named association");
+                    return nullptr;
+                }
+                ExprP value = parseExpr();
+                if (!value) return nullptr;
+                agg->choices.push_back(std::move(choiceList));
+                agg->args.push_back(std::move(value));
+            } else {
+                agg->choices.emplace_back();
+                agg->args.push_back(std::move(item));
+            }
+            if (!acceptSym(",")) break;
         }
         expectSym(")");
-        ExprP node = std::make_unique<Expr>(Expr::PAREN);
-        node->flp = inner->flp;
-        node->a = std::move(inner);
-        return node;
+        if (agg->kind == Expr::AGG_POSITIONAL && agg->args.size() == 1) {
+            ExprP node = std::make_unique<Expr>(Expr::PAREN);
+            node->flp = aggFlp;
+            node->a = std::move(agg->args.front());
+            return node;
+        }
+        return agg;
     }
     if (isId("true") || isId("false")) {
         ExprP node = std::make_unique<Expr>(isId("true") ? Expr::TRUE_LIT : Expr::FALSE_LIT);
@@ -319,12 +360,31 @@ ExprP Parser::parseDesignator() {
     node->spelling = nameTok.spelling;
     for (;;) {
         if (isSym("'")) {
-            unsupported("attribute");
-            return nullptr;
+            advance();
+            Token attrTok;
+            if (!takeId(attrTok)) return nullptr;
+            ExprP attr = std::make_unique<Expr>(Expr::ATTR);
+            attr->flp = node->flp;
+            attr->text = attrTok.text;
+            attr->a = std::move(node);
+            if (acceptSym("(")) {  // e.g. t'image(1); not needed until it is lowered
+                while (!m_failed && !isSym(")")) advance();
+                expectSym(")");
+            }
+            node = std::move(attr);
+            continue;
         }
         if (isSym(".")) {
-            unsupported("selected name (record member or package-qualified name)");
-            return nullptr;
+            advance();
+            Token memberTok;
+            if (!takeId(memberTok)) return nullptr;
+            ExprP sel = std::make_unique<Expr>(Expr::SELECTED);
+            sel->flp = node->flp;
+            sel->text = memberTok.text;
+            sel->spelling = memberTok.spelling;
+            sel->a = std::move(node);
+            node = std::move(sel);
+            continue;
         }
         if (!isSym("(")) break;
         advance();
@@ -389,6 +449,19 @@ void Parser::parseTypeSpec(TypeSpec& type) {
         parseRange(type);
     } else if (isSym("(")) {
         advance();
+        if (m_cur.kind == Token::ID) {
+            // The constraint may name a subtype instead of giving a range
+            const auto saved = m_lexer.state();
+            const Token ahead = m_lexer.next();
+            m_lexer.restore(saved);
+            if (ahead.kind == Token::SYM && ahead.text == ")") {
+                Token markTok2;
+                if (!takeId(markTok2)) return;
+                type.constraintMark = markTok2.text;
+                expectSym(")");
+                return;
+            }
+        }
         if (!parseRange(type)) return;
         expectSym(")");
     }
@@ -514,6 +587,118 @@ void Parser::parseDecl(Architecture& arch, Decl::Kind kind) {
     arch.decls.push_back(std::move(decl));
 }
 
+//! Parse the index constraint of an array type definition
+void Parser::parseIndexConstraint(TypeSpec& type) {
+    if (m_cur.kind == Token::ID && !isId("to") && !isId("downto")) {
+        Token markTok;
+        if (!takeId(markTok)) return;
+        type.mark = markTok.text;
+        type.flp = markTok.flp;
+        if (acceptId("range")) {
+            if (acceptSym("<>")) {  // Unconstrained index
+                type.hasRange = true;
+                return;
+            }
+            parseRange(type);
+            return;
+        }
+        if (isSym("(")) {  // Index constrained by a subtype indication
+            advance();
+            parseRange(type);
+            expectSym(")");
+        }
+        return;
+    }
+    parseRange(type);
+}
+
+void Parser::parseRecordBody(TypeDecl& decl) {
+    for (;;) {
+        if (m_failed) return;
+        if (isId("end")) break;
+        TypeDecl::Member member;
+        parseNameList(member.names);
+        if (m_failed) return;
+        parseTypeSpec(member.type);
+        if (m_failed) return;
+        if (!acceptSym(";")) {
+            error("expected ';' after a record element declaration");
+            return;
+        }
+        decl.members.push_back(std::move(member));
+    }
+    if (!expectId("end")) return;
+    if (!expectId("record")) return;
+    if (m_cur.kind == Token::ID) advance();  // Optional end name
+    if (!acceptSym(";")) error("expected ';' after 'end record'");
+}
+
+void Parser::parseTypeDecl(Architecture& arch) {
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    TypeDecl decl{TypeDecl::ARRAY};
+    decl.flp = nameTok.flp;
+    decl.name = nameTok.text;
+    decl.spelling = nameTok.spelling;
+    if (!expectId("is")) return;
+    if (isSym("(")) {  // Enumeration
+        decl.kind = TypeDecl::ENUM;
+        advance();
+        for (;;) {
+            Token literalTok;
+            if (!takeId(literalTok)) return;
+            addName(decl.literals, literalTok);
+            if (!acceptSym(",")) break;
+        }
+        expectSym(")");
+    } else if (isId("record")) {
+        decl.kind = TypeDecl::RECORD;
+        advance();
+        parseRecordBody(decl);
+        if (m_failed) return;
+        arch.types.push_back(std::move(decl));
+        return;
+    } else if (isId("array")) {
+        decl.kind = TypeDecl::ARRAY;
+        advance();
+        if (!acceptSym("(")) {
+            error("expected '(' after 'array'");
+            return;
+        }
+        parseIndexConstraint(decl.index);
+        if (m_failed) return;
+        expectSym(")");
+        if (!expectId("of")) return;
+        parseTypeSpec(decl.base);
+        if (m_failed) return;
+    } else {
+        unsupported("type definition '" + m_cur.text + "'");
+        return;
+    }
+    if (!acceptSym(";")) {
+        error("expected ';' after a type declaration");
+        return;
+    }
+    arch.types.push_back(std::move(decl));
+}
+
+void Parser::parseSubtypeDecl(Architecture& arch) {
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    TypeDecl decl{TypeDecl::SUBTYPE};
+    decl.flp = nameTok.flp;
+    decl.name = nameTok.text;
+    decl.spelling = nameTok.spelling;
+    if (!expectId("is")) return;
+    parseTypeSpec(decl.base);
+    if (m_failed) return;
+    if (!acceptSym(";")) {
+        error("expected ';' after a subtype declaration");
+        return;
+    }
+    arch.types.push_back(std::move(decl));
+}
+
 void Parser::parseArchitecture(FileLine* flp) {
     Token nameTok;
     if (!takeId(nameTok)) return;
@@ -544,12 +729,22 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseDecl(arch, Decl::CONSTANT);
             continue;
         }
+        if (isId("type")) {
+            advance();
+            parseTypeDecl(arch);
+            continue;
+        }
+        if (isId("subtype")) {
+            advance();
+            parseSubtypeDecl(arch);
+            continue;
+        }
         if (isId("variable") || isId("shared")) {
             unsupported("variable declaration at architecture level");
             return;
         }
-        if (isId("type") || isId("subtype") || isId("alias") || isId("component")
-            || isId("attribute") || isId("function") || isId("procedure") || isId("package")) {
+        if (isId("alias") || isId("component") || isId("attribute") || isId("function")
+            || isId("procedure") || isId("package")) {
             unsupported("architecture declarative item '" + m_cur.text + "'");
             return;
         }

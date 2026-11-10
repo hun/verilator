@@ -128,7 +128,11 @@ struct Expr final {
         BINARY,  // text=operator, a, b
         INDEX,  // a=prefix, args
         SLICE,  // a=prefix, b=left, c=right, text="downto"/"to"
+        ATTR,  // a=prefix, text=attribute name, args=optional attribute parameter
+        SELECTED,  // a=prefix, text=selected name (record element or package member)
         AGG_OTHERS,  // a=value
+        AGG_POSITIONAL,  // args=element values, leftmost index first
+        AGG_NAMED,  // args=values, choices=one choice list per value
     } kind;
     FileLine* flp = nullptr;
     std::string text;  // Name/operator, folded
@@ -138,6 +142,9 @@ struct Expr final {
     std::string bits;
     ExprP a, b, c;
     std::vector<ExprP> args;
+    // AGG_NAMED: the choices associated with each element value; an empty list marks a
+    // positional association
+    std::vector<std::vector<ExprP>> choices;
 
     explicit Expr(Kind kind_)
         : kind{kind_} {}
@@ -163,6 +170,7 @@ struct TypeSpec final {
     FileLine* flp = nullptr;
     bool hasRange = false;
     bool ascending = false;  // "to", else "downto"
+    std::string constraintMark;  // Index constraint that names a subtype, e.g. mark(constraint)
     ExprP left, right;
 };
 
@@ -188,6 +196,25 @@ struct Process final {
     bool hasSensitivity = false;
     std::vector<std::string> sensitivity;  // Folded names
     std::vector<StmtP> body;
+};
+
+//! A type, subtype or alias declaration
+struct TypeDecl final {
+    enum Kind : uint8_t { ENUM, ARRAY, RECORD, SUBTYPE } kind;
+    FileLine* flp = nullptr;
+    std::string name;  // Folded
+    std::string spelling;
+    std::vector<std::pair<std::string, std::string>> literals;  // ENUM: (folded, spelling)
+    TypeSpec base;  // SUBTYPE: base mark and optional constraint; ARRAY: element type
+    TypeSpec index;  // ARRAY: index constraint
+    struct Member final {
+        std::vector<std::pair<std::string, std::string>> names;
+        TypeSpec type;
+    };
+    std::vector<Member> members;  // RECORD
+
+    explicit TypeDecl(Kind kind_)
+        : kind{kind_} {}
 };
 
 struct Concurrent final {
@@ -221,6 +248,7 @@ struct Architecture final {
     bool inLibrary = false;
     FileLine* flp = nullptr;
     std::vector<Decl> decls;
+    std::vector<TypeDecl> types;
     std::vector<std::unique_ptr<Concurrent>> stmts;
 };
 
