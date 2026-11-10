@@ -1078,8 +1078,55 @@ StmtP Parser::parseSequentialStatement() {
         expectSym(";");
         return stmt;
     }
-    if (isId("wait") || isId("return") || isId("report") || isId("assert")) {
-        unsupported("sequential statement '" + m_cur.text + "'");
+    if (isId("wait")) {
+        advance();
+        auto stmt = std::make_unique<Stmt>(Stmt::WAIT);
+        stmt->flp = flp;
+        if (acceptId("until")) {
+            stmt->value = parseExpr();
+            if (!stmt->value) return nullptr;
+        } else if (acceptId("on")) {
+            for (;;) {
+                Token nameTok;
+                if (!takeId(nameTok)) return nullptr;
+                stmt->waitNames.push_back(nameTok.text);
+                if (!acceptSym(",")) break;
+            }
+        } else if (isId("for")) {
+            unsupported("wait for a delay");
+            return nullptr;
+        } else {
+            stmt->waitForever = true;
+        }
+        expectSym(";");
+        return stmt;
+    }
+    if (isId("report")) {
+        advance();
+        auto stmt = std::make_unique<Stmt>(Stmt::REPORT);
+        stmt->flp = flp;
+        stmt->value = parseExpr();  // The report message; only its syntax matters
+        if (!stmt->value) return nullptr;
+        if (acceptId("severity")) { advance(); }
+        expectSym(";");
+        return stmt;
+    }
+    if (isId("assert")) {
+        advance();
+        auto stmt = std::make_unique<Stmt>(Stmt::REPORT);
+        stmt->flp = flp;
+        stmt->value = parseExpr();
+        if (!stmt->value) return nullptr;
+        if (acceptId("report")) {
+            ExprP message = parseExpr();
+            if (!message) return nullptr;
+        }
+        if (acceptId("severity")) advance();
+        expectSym(";");
+        return stmt;
+    }
+    if (isId("return")) {
+        unsupported("sequential statement 'return'");
         return nullptr;
     }
     if (isId("null")) {

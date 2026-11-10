@@ -285,6 +285,7 @@ class Lowering final {
         return false;
     }
     AstNodeExpr* lowerIntrinsic(const Expr& expr);
+    AstNodeExpr* lowerEdgeCall(const Expr& expr);
     AstNodeExpr* makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp, bool left);
     bool isConversion(const std::string& name) const {
         return name == "std_logic_vector" || name == "std_ulogic_vector" || name == "bit_vector"
@@ -301,6 +302,19 @@ class Lowering final {
                          int hi, int lo);
 
     AstNode* lowerCase(const Stmt& stmt);
+    void lowerWaitProcess(const Process& process);
+    //! Module-level declarations a process hides, restored when it ends
+    struct ScopeSave final {
+        std::map<std::string, VarInfo> scope;
+        std::map<std::string, int64_t> consts;
+        std::map<std::string, VType> types;
+        std::map<std::string, AstConst*> constValues;
+        std::map<std::string, VType> constTypes;
+        std::map<std::string, AstConst*> enumConsts;
+    };
+    ScopeSave saveScope() const;
+    void restoreScope(const ScopeSave& saved);
+    void emitProcessDecls(const Process& process, std::set<std::string>& varNames);
     AstNode* lowerFor(const Stmt& stmt);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
@@ -328,6 +342,7 @@ class Lowering final {
                            std::vector<AstConst*>& cops);
     AstNode* lowerStmt(const Stmt& stmt);
     AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
+    AstNode* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin, std::size_t end);
     AstNode* lowerIf(const Stmt& stmt);
     AstNode* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
     void lowerProcess(const Process& process);
@@ -790,6 +805,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     case Expr::BINARY: return lowerBinary(expr, context);
     case Expr::INDEX:
         if (expr.a && expr.a->kind == Expr::NAME) {
+            if (expr.a->text == "rising_edge" || expr.a->text == "falling_edge") {
+                return lowerEdgeCall(expr);
+            }
             if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
             if (isConversion(expr.a->text)) return lowerConversion(expr);
         }
@@ -1094,6 +1112,26 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     }
     resultp->dtypep(resultType.dtp);
     return resultp;
+}
+
+//! rising_edge/falling_edge register a clock edge and are true only when it fires
+AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    if (expr.args.size() != 1 || expr.args[0]->kind != Expr::NAME) {
+        unsupportedError(flp, "edge function argument");
+        return nullptr;
+    }
+    AstVar* const varp = lookupVar(*expr.args[0]);
+    if (!varp) {
+        flp->v3error("VHDL: unknown signal '" + expr.args[0]->spelling + "' in an edge function");
+        return nullptr;
+    }
+    Edge edge;
+    edge.varp = varp;
+    edge.type = expr.a->text == "rising_edge" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+    m_edges.push_back(edge);
+    // The sensitivity item supplies the edge; at time zero no signal has had an event
+    return bitConst(flp, m_initial ? '0' : '1');
 }
 
 //! One rotation of a vector: the low `count mod width` bits move to the other end
@@ -1481,28 +1519,53 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
 
 AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
     FileLine* const flp = expr.flp;
+    // The classic `clk'event and clk = '1'` idiom is a clock edge
+    if (expr.kind == Expr::BINARY && expr.text == "and" && expr.a && expr.b) {
+        for (int side = 0; side < 2; ++side) {
+            const Expr& attrExpr = side == 0 ? *expr.a : *expr.b;
+            const Expr& levelExpr = side == 0 ? *expr.b : *expr.a;
+            if (attrExpr.kind != Expr::ATTR || attrExpr.text != "event" || !attrExpr.a
+                || attrExpr.a->kind != Expr::NAME) {
+                continue;
+            }
+            if (levelExpr.kind != Expr::BINARY || levelExpr.text != "=" || !levelExpr.a
+                || !levelExpr.b || levelExpr.a->kind != Expr::NAME
+                || levelExpr.a->text != attrExpr.a->text) {
+                continue;
+            }
+            char level = 0;
+            if (levelExpr.b->kind == Expr::CHAR_LIT) {
+                level = vhdlLogicBit(levelExpr.b->charValue);
+            } else if (levelExpr.b->kind == Expr::BITS_LIT && levelExpr.b->bits.size() == 1) {
+                level = levelExpr.b->bits[0];
+            }
+            if (level != '1' && level != '0') continue;
+            AstVar* const varp = lookupVar(*attrExpr.a);
+            if (!varp) {
+                flp->v3error("VHDL: unknown signal '" + attrExpr.a->spelling + "' in 'event");
+                return nullptr;
+            }
+            Edge edge;
+            edge.varp = varp;
+            edge.type = level == '1' ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+            m_edges.push_back(edge);
+            return bitConst(flp, m_initial ? '0' : '1');
+        }
+    }
     if (expr.kind == Expr::INDEX && expr.a && expr.a->kind == Expr::NAME
         && (expr.a->text == "rising_edge" || expr.a->text == "falling_edge")) {
-        if (expr.args.size() != 1 || expr.args[0]->kind != Expr::NAME) {
-            unsupportedError(flp, "edge function argument");
-            return nullptr;
-        }
-        AstVar* const varp = lookupVar(*expr.args[0]);
-        if (!varp) {
-            flp->v3error("VHDL: unknown signal '" + expr.args[0]->spelling
-                         + "' in an edge function");
-            return nullptr;
-        }
-        Edge edge;
-        edge.varp = varp;
-        edge.type = expr.a->text == "rising_edge" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
-        m_edges.push_back(edge);
-        // The sensitivity item supplies the edge; at time zero no signal has had an event
-        return bitConst(flp, m_initial ? '0' : '1');
+        return lowerEdgeCall(expr);
     }
     if (containsEdgeCall(expr)) {
-        unsupportedError(flp, "clock edge in a compound condition");
-        return nullptr;
+        // A compound wait condition may test a level and one clock edge together
+        AstNodeExpr* const compoundp = lowerExpr(expr, nullptr);
+        if (!compoundp) return nullptr;
+        if (compoundp->width() != 1) {
+            flp->v3error("VHDL: condition is not a 1-bit value");
+            compoundp->deleteTree();
+            return nullptr;
+        }
+        return compoundp;
     }
     AstNodeExpr* condp = lowerExpr(expr, nullptr);
     if (!condp) return nullptr;
@@ -2215,6 +2278,7 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::VAR_ASSIGN) return lowerAssign(stmt, false, true);
     if (stmt.kind == Stmt::IF) return lowerIf(stmt);
     if (stmt.kind == Stmt::CASE) return lowerCase(stmt);
+    if (stmt.kind == Stmt::REPORT) return nullptr;  // Only its syntax matters
     if (stmt.kind == Stmt::FOR) return lowerFor(stmt);
     if (stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) return lowerWhile(stmt);
     // exit/next are handled by lowerStmtList, which owns their flags
@@ -2261,10 +2325,16 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
 }
 
 AstNode* Lowering::lowerStmtList(const std::vector<StmtP>& stmts) {
+    return lowerStmtRange(stmts, 0, stmts.size());
+}
+
+AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin,
+                                  std::size_t end) {
     AstNode* headp = nullptr;
     // Conditions that must hold for the following statements to run, set by exit/next
     AstNodeExpr* runCondp = nullptr;
-    for (const StmtP& stmtp : stmts) {
+    for (std::size_t index = begin; index < end; ++index) {
+        const StmtP& stmtp = stmts[index];
         if (stmtp->kind == Stmt::EXIT || stmtp->kind == Stmt::NEXT) {
             const bool isExit = stmtp->kind == Stmt::EXIT;
             LoopFrame* const framep = findLoop(stmtp->loopLabel);
@@ -2435,6 +2505,127 @@ AstNodeExpr* Lowering::loopGuard(FileLine* flp) const {
     return guardp;
 }
 
+//! Lower a process that suspends on a wait statement instead of a sensitivity list
+void Lowering::lowerWaitProcess(const Process& process) {
+    FileLine* const flp = process.flp;
+    const ScopeSave saved = saveScope();
+    std::set<std::string> varNames;
+    emitProcessDecls(process, varNames);
+    // Find the first wait; statements around it run at time zero and per activation
+    std::size_t waitIndex = process.body.size();
+    const Stmt* waitp = nullptr;
+    for (std::size_t i = 0; i < process.body.size(); ++i) {
+        if (process.body[i] && process.body[i]->kind == Stmt::WAIT) {
+            waitIndex = i;
+            waitp = process.body[i].get();
+            break;
+        }
+    }
+    if (!waitp) {
+        unsupportedError(flp, "process without a sensitivity list or wait statement");
+        return;
+    }
+    // A trailing bare wait makes the process single-shot: it suspends forever after
+    // the first activation
+    std::size_t stopIndex = process.body.size();
+    bool singleShot = false;
+    for (std::size_t i = waitIndex + 1; i < process.body.size(); ++i) {
+        if (!process.body[i] || process.body[i]->kind != Stmt::WAIT) continue;
+        const Stmt* const laterp = process.body[i].get();
+        const bool last = i + 1 == process.body.size();
+        if (!last || !laterp->waitForever) {
+            unsupportedError(flp, "process with more than one wait statement");
+            return;
+        }
+        singleShot = true;
+        stopIndex = i;
+        break;
+    }
+    const std::vector<StmtP>& bodyStmts = process.body;
+    // The statements before the wait run once at time zero
+    m_initial = true;
+    AstNode* const preInitp = lowerStmtRange(bodyStmts, 0, waitIndex);
+    m_initial = false;
+    if (preInitp) m_modp->addStmtsp(new AstInitialStatic{flp, preInitp});
+    if (waitp->waitForever) {
+        // A bare wait suspends the process forever
+        restoreScope(saved);
+        return;
+    }
+    if (!waitp->value) {
+        unsupportedError(flp, "wait on a sensitivity list");
+        return;
+    }
+    m_edges.clear();
+    AstNodeExpr* const condp = lowerCond(*waitp->value);
+    if (!condp) return;
+    const std::vector<Edge> edges = m_edges;
+    m_edges.clear();
+    // Sensitivity: the clock edges the condition names, plus the levels it tests
+    AstSenItem* itemsp = nullptr;
+    for (const Edge& edge : edges) {
+        AstSenItem* const itemp
+            = new AstSenItem{flp, edge.type, new AstVarRef{flp, edge.varp, VAccess::READ}};
+        itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+    }
+    std::set<std::string> levelNames;
+    collectExprNames(*waitp->value, levelNames);
+    for (const std::string& name : levelNames) {
+        const auto it = m_scope.find(name);
+        if (it == m_scope.end()) continue;
+        if (std::any_of(edges.begin(), edges.end(),
+                        [&](const Edge& edge) { return edge.varp == it->second.varp; })) {
+            continue;  // Already an edge item
+        }
+        AstSenItem* const itemp = new AstSenItem{
+            flp, VEdgeType::ET_CHANGED, new AstVarRef{flp, it->second.varp, VAccess::READ}};
+        itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+    }
+    if (!itemsp) {
+        unsupportedError(flp, "wait statement without a sensitivity item");
+        condp->deleteTree();
+        return;
+    }
+    // Each activation runs the statements after the wait, then those before it
+    m_initial = false;
+    AstNode* const afterp = lowerStmtRange(bodyStmts, waitIndex + 1, stopIndex);
+    AstNode* const preActp = singleShot ? nullptr : lowerStmtRange(bodyStmts, 0, waitIndex);
+    AstNode* bodyp = afterp;
+    if (preActp) { bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, preActp) : preActp; }
+    if (singleShot) {
+        // Latch that the single activation has happened
+        const std::string name = "vhdlloop_" + std::to_string(++m_loopSeq) + "__once";
+        AstVar* const oncep
+            = new AstVar{flp, VVarType::VAR, name, findBasic(flp, VBasicDTypeKwd::LOGIC)};
+        m_modp->addStmtsp(oncep);
+        AstNodeExpr* const onceReadp = new AstVarRef{flp, oncep, VAccess::READ};
+        AstNodeExpr* const notOncep = new AstNot{flp, onceReadp};
+        notOncep->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        AstNode* innerp = nullptr;
+        if (bodyp) {
+            AstNode* const setp = new AstAssign{flp, new AstVarRef{flp, oncep, VAccess::WRITE},
+                                                bitConst(flp, '1')};
+            innerp = AstNode::addNext<AstNode, AstNode>(setp, bodyp);
+        } else {
+            innerp = new AstAssign{flp, new AstVarRef{flp, oncep, VAccess::WRITE},
+                                   bitConst(flp, '1')};
+        }
+        AstNode* const gatedp = new AstIf{flp, condp, innerp, nullptr};
+        bodyp = new AstIf{flp, notOncep, gatedp, nullptr};
+    } else if (bodyp) {
+        bodyp = new AstIf{flp, condp, bodyp, nullptr};
+    } else {
+        condp->deleteTree();
+    }
+    if (bodyp) {
+        m_modp->addStmtsp(
+            new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, bodyp});
+    } else {
+        itemsp->deleteTree();
+    }
+    restoreScope(saved);
+}
+
 AstNode* Lowering::lowerFor(const Stmt& stmt) {
     FileLine* const flp = stmt.flp;
     int64_t left = 0;
@@ -2517,44 +2708,13 @@ AstNode* Lowering::lowerWhile(const Stmt& stmt) {
 
 void Lowering::lowerProcess(const Process& process) {
     if (!process.hasSensitivity) {
-        unsupportedError(process.flp, "process without a sensitivity list (wait-based processes)");
+        lowerWaitProcess(process);
         return;
     }
     // The process declarative part declares variables that hide module-level names
-    const std::map<std::string, VarInfo> savedScope = m_scope;
-    const std::map<std::string, int64_t> savedConsts = m_consts;
-    const std::map<std::string, VType> savedTypes = m_types;
-    const std::map<std::string, AstConst*> savedConstValues = m_constValues;
-    const std::map<std::string, VType> savedConstTypes = m_constTypes;
-    const std::map<std::string, AstConst*> savedEnumConsts = m_enumConsts;
-    int varSeq = 0;
+    const ScopeSave saved = saveScope();
     std::set<std::string> varNames;
-    for (const TypeDecl& typeDecl : process.types) registerType(typeDecl);
-    for (const Decl& decl : process.decls) {
-        if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl, false);
-            continue;
-        }
-        VType type;
-        if (!resolveType(decl.type, type)) continue;
-        for (const auto& name : decl.names) {
-            // Mangle so the same variable name in two processes stays distinct
-            const std::string mangled = "vhdlvar_" + std::to_string(++varSeq) + "__" + name.second;
-            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
-            m_modp->addStmtsp(varp);
-            m_scope[name.first] = VarInfo{varp, type};
-            varNames.insert(name.first);
-            if (!decl.init) continue;
-            AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
-            AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
-            if (!rhsp) {
-                lhsp->deleteTree();
-                continue;
-            }
-            rhsp = resizeExpr(rhsp, type, decl.flp);
-            m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
-        }
-    }
+    emitProcessDecls(process, varNames);
     std::vector<AstVar*> sensVars;
     std::vector<std::string> sensNames = process.sensitivity;
     if (process.sensitivityAll) {
@@ -2619,12 +2779,58 @@ void Lowering::lowerProcess(const Process& process) {
     // VHDL executes a process once at time zero, before any sensitivity event, and the
     // initial combination is visible to the testbench after the first eval
     if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
-    m_scope = savedScope;
-    m_consts = savedConsts;
-    m_types = savedTypes;
-    m_constValues = savedConstValues;
-    m_constTypes = savedConstTypes;
-    m_enumConsts = savedEnumConsts;
+    restoreScope(saved);
+}
+
+Lowering::ScopeSave Lowering::saveScope() const {
+    ScopeSave saved;
+    saved.scope = m_scope;
+    saved.consts = m_consts;
+    saved.types = m_types;
+    saved.constValues = m_constValues;
+    saved.constTypes = m_constTypes;
+    saved.enumConsts = m_enumConsts;
+    return saved;
+}
+
+void Lowering::restoreScope(const ScopeSave& saved) {
+    m_scope = saved.scope;
+    m_consts = saved.consts;
+    m_types = saved.types;
+    m_constValues = saved.constValues;
+    m_constTypes = saved.constTypes;
+    m_enumConsts = saved.enumConsts;
+}
+
+//! Declare the types, constants and variables of a process declarative part
+void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& varNames) {
+    int varSeq = 0;
+    for (const TypeDecl& typeDecl : process.types) registerType(typeDecl);
+    for (const Decl& decl : process.decls) {
+        if (decl.kind == Decl::CONSTANT) {
+            emitConstant(decl, false);
+            continue;
+        }
+        VType type;
+        if (!resolveType(decl.type, type)) continue;
+        for (const auto& name : decl.names) {
+            // Mangle so the same variable name in two processes stays distinct
+            const std::string mangled = "vhdlvar_" + std::to_string(++varSeq) + "__" + name.second;
+            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+            m_modp->addStmtsp(varp);
+            m_scope[name.first] = VarInfo{varp, type};
+            varNames.insert(name.first);
+            if (!decl.init) continue;
+            AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
+            AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
+            if (!rhsp) {
+                lhsp->deleteTree();
+                continue;
+            }
+            rhsp = resizeExpr(rhsp, type, decl.flp);
+            m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
+        }
+    }
 }
 
 //! Register a declared name; a local declaration hides a name from a used package

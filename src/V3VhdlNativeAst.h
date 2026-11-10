@@ -154,7 +154,19 @@ struct Stmt;
 using StmtP = std::unique_ptr<Stmt>;
 
 struct Stmt final {
-    enum Kind : uint8_t { ASSIGN, VAR_ASSIGN, IF, CASE, FOR, WHILE, LOOP, EXIT, NEXT } kind;
+    enum Kind : uint8_t {
+        ASSIGN,
+        VAR_ASSIGN,
+        IF,
+        CASE,
+        FOR,
+        WHILE,
+        LOOP,
+        EXIT,
+        NEXT,
+        WAIT,
+        REPORT,
+    } kind;
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/VAR_ASSIGN
     ExprP value;  // ASSIGN/VAR_ASSIGN
@@ -163,6 +175,9 @@ struct Stmt final {
     ExprP selector;  // CASE: the case expression
     // CASE: (choices, body); an empty choice list marks "others"
     std::vector<std::pair<std::vector<ExprP>, std::vector<StmtP>>> caseItems;
+    // WAIT: value holds the `until` condition; an empty one suspends forever
+    std::vector<std::string> waitNames;  // WAIT: `on` sensitivity names
+    bool waitForever = false;  // WAIT without `until` or `on`
     // FOR: loop variable over b..c, ascending when rangeAscending
     std::string loopVar;
     bool rangeAscending = true;
