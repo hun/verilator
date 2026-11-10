@@ -222,6 +222,7 @@ struct TypeDecl final {
 struct Process final {
     FileLine* flp = nullptr;
     bool hasSensitivity = false;
+    bool sensitivityAll = false;  // process(all): every signal the body reads
     std::vector<std::string> sensitivity;  // Folded names
     std::vector<Decl> decls;  // Variables of the process declarative part
     std::vector<TypeDecl> types;  // Types declared by the process

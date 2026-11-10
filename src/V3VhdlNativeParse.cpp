@@ -922,16 +922,18 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
     if (acceptSym("(")) {
         process.hasSensitivity = true;
         if (isId("all")) {
-            unsupported("process(all) sensitivity list");
-            return;
+            advance();
+            process.sensitivityAll = true;
+            expectSym(")");
+        } else {
+            for (;;) {
+                Token nameTok;
+                if (!takeId(nameTok)) return;
+                process.sensitivity.push_back(nameTok.text);
+                if (!acceptSym(",")) break;
+            }
+            expectSym(")");
         }
-        for (;;) {
-            Token nameTok;
-            if (!takeId(nameTok)) return;
-            process.sensitivity.push_back(nameTok.text);
-            if (!acceptSym(",")) break;
-        }
-        expectSym(")");
     }
     (void)acceptId("is");
     while (!m_failed && !isId("begin")) {

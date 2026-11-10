@@ -258,6 +258,34 @@ class Lowering final {
         const auto it = m_scope.find(nameExpr.text);
         return it == m_scope.end() ? nullptr : it->second.varp;
     }
+    bool isIntrinsic(const std::string& name) const {
+        static const char* const names[] = {"is_x",
+                                            "is_x01",
+                                            "is_x01z",
+                                            "is_ux01",
+                                            "resize",
+                                            "shift_left",
+                                            "shift_right",
+                                            "rotate_left",
+                                            "rotate_right",
+                                            "minimum",
+                                            "maximum",
+                                            "conv_integer",
+                                            "conv_std_logic_vector",
+                                            "conv_unsigned",
+                                            "conv_signed",
+                                            "to_stdlogicvector",
+                                            "to_stdulogicvector",
+                                            "to_bitvector",
+                                            "to_stdulogic",
+                                            "to_bit"};
+        for (const char* const candidate : names) {
+            if (name == candidate) return true;
+        }
+        return false;
+    }
+    AstNodeExpr* lowerIntrinsic(const Expr& expr);
+    AstNodeExpr* makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp, bool left);
     bool isConversion(const std::string& name) const {
         return name == "std_logic_vector" || name == "std_ulogic_vector" || name == "bit_vector"
                || name == "unsigned" || name == "signed" || name == "to_integer"
@@ -274,6 +302,9 @@ class Lowering final {
 
     AstNode* lowerCase(const Stmt& stmt);
     AstNode* lowerFor(const Stmt& stmt);
+    static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
+    bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
+    static void collectExprNames(const Expr& expr, std::set<std::string>& names);
     static bool usesExitNext(const std::vector<StmtP>& stmts);
     AstNodeExpr* loopGuard(FileLine* flp) const;
     AstNode* lowerWhile(const Stmt& stmt);
@@ -758,8 +789,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     case Expr::STRING_LIT: unsupportedError(flp, "string value in an expression"); return nullptr;
     case Expr::BINARY: return lowerBinary(expr, context);
     case Expr::INDEX:
-        if (expr.a && expr.a->kind == Expr::NAME && isConversion(expr.a->text)) {
-            return lowerConversion(expr);
+        if (expr.a && expr.a->kind == Expr::NAME) {
+            if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
+            if (isConversion(expr.a->text)) return lowerConversion(expr);
         }
         return lowerDesignator(expr, false);
     case Expr::SLICE: return lowerDesignator(expr, false);
@@ -1062,6 +1094,159 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     }
     resultp->dtypep(resultType.dtp);
     return resultp;
+}
+
+//! One rotation of a vector: the low `count mod width` bits move to the other end
+AstNodeExpr* Lowering::makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp,
+                                  bool left) {
+    AstNodeDType* const dtp = valuep->dtypep();
+    const int width = dtp->width();
+    const VType intT = intType(flp);
+    AstNodeExpr* const nmodp = new AstModDiv{flp, amountp, makeIntConst(flp, width)};
+    nmodp->dtypep(intT.dtp);
+    AstNodeExpr* const restp = new AstSub{flp, makeIntConst(flp, width), nmodp->cloneTree(false)};
+    restp->dtypep(intT.dtp);
+    AstNodeExpr* const innerp
+        = left ? static_cast<AstNodeExpr*>(
+                     new AstShiftL{flp, valuep, nmodp->cloneTree(false), width})
+               : static_cast<AstNodeExpr*>(
+                     new AstShiftR{flp, valuep, nmodp->cloneTree(false), width});
+    AstNodeExpr* const outerp
+        = left ? static_cast<AstNodeExpr*>(
+                     new AstShiftR{flp, valuep->cloneTree(false), restp, width})
+               : static_cast<AstNodeExpr*>(
+                     new AstShiftL{flp, valuep->cloneTree(false), restp, width});
+    innerp->dtypep(dtp);
+    outerp->dtypep(dtp);
+    AstNodeExpr* const resultp = new AstOr{flp, innerp, outerp};
+    resultp->dtypep(dtp);
+    return resultp;
+}
+
+//! Standard-package functions that lower to an AST idiom, keyed by folded name
+AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    const std::string& fn = expr.a->text;
+    const std::vector<ExprP>& argsp = expr.args;
+    // The model is 2-state, so no value can be a metavalue
+    if (fn == "is_x" || fn == "is_x01" || fn == "is_x01z" || fn == "is_ux01") {
+        return bitConst(flp, '0');
+    }
+    if (argsp.empty()) {
+        unsupportedError(flp, "function '" + fn + "' without an argument");
+        return nullptr;
+    }
+    if ((fn == "resize" || fn == "conv_std_logic_vector" || fn == "conv_unsigned"
+         || fn == "conv_signed")
+        && argsp.size() == 2) {
+        AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
+        if (!valuep) return nullptr;
+        int64_t width = 0;
+        if (!staticInt(argsp[1], width) || width <= 0 || width > 4096) {
+            unsupportedError(flp, "non-static width in '" + fn + "'");
+            valuep->deleteTree();
+            return nullptr;
+        }
+        const VType valueType = typeOfDType(valuep->dtypep());
+        VBasicDTypeKwd kwd = valueType.kwd;
+        VSigning signing = valueType.signing;
+        if (fn != "resize") {
+            kwd = VBasicDTypeKwd::LOGIC;
+            signing = fn == "conv_signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+        }
+        const VType target = vectorType(flp, kwd, signing, static_cast<int>(width));
+        return resizeExpr(valuep, target, flp);
+    }
+    if (fn == "shift_left" || fn == "shift_right") {
+        if (argsp.size() != 2) {
+            unsupportedError(flp, "function '" + fn + "' without two arguments");
+            return nullptr;
+        }
+        AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
+        AstNodeExpr* amountp = valuep ? lowerExpr(*argsp[1], nullptr) : nullptr;
+        if (!valuep || !amountp) {
+            if (valuep) valuep->deleteTree();
+            if (amountp) amountp->deleteTree();
+            return nullptr;
+        }
+        AstNodeDType* const dtp = valuep->dtypep();
+        AstNodeExpr* resultp = nullptr;
+        // shift_right sign-extends a signed operand; shift_left does not
+        if (fn == "shift_left") {
+            resultp = new AstShiftL{flp, valuep, amountp, dtp->width()};
+        } else if (dtp->isSigned()) {
+            resultp = new AstShiftRS{flp, valuep, amountp, dtp->width()};
+        } else {
+            resultp = new AstShiftR{flp, valuep, amountp, dtp->width()};
+        }
+        resultp->dtypep(dtp);
+        return resultp;
+    }
+    if (fn == "rotate_left" || fn == "rotate_right") {
+        if (argsp.size() != 2) {
+            unsupportedError(flp, "function '" + fn + "' without two arguments");
+            return nullptr;
+        }
+        AstNodeExpr* const valuep = lowerExpr(*argsp[0], nullptr);
+        AstNodeExpr* const amountp = valuep ? lowerExpr(*argsp[1], nullptr) : nullptr;
+        if (!valuep || !amountp) {
+            if (valuep) valuep->deleteTree();
+            if (amountp) amountp->deleteTree();
+            return nullptr;
+        }
+        return makeRotate(flp, valuep, amountp, fn == "rotate_left");
+    }
+    if (fn == "minimum" || fn == "maximum") {
+        if (argsp.size() != 2) {
+            unsupportedError(flp, "function '" + fn + "' without two arguments");
+            return nullptr;
+        }
+        AstNodeExpr* const lhsp = lowerExpr(*argsp[0], nullptr);
+        if (!lhsp) return nullptr;
+        const VType lhsType = typeOfDType(lhsp->dtypep());
+        AstNodeExpr* const rhsp = lowerExpr(*argsp[1], &lhsType);
+        if (!rhsp) {
+            lhsp->deleteTree();
+            return nullptr;
+        }
+        AstNodeDType* const dtp = lhsp->dtypep();
+        const bool sign = dtp->isSigned();
+        AstNodeExpr* cmpp = nullptr;
+        if (fn == "minimum") {
+            cmpp = sign ? static_cast<AstNodeExpr*>(new AstLtS{flp, lhsp, rhsp})
+                        : static_cast<AstNodeExpr*>(new AstLt{flp, lhsp, rhsp});
+        } else {
+            cmpp = sign ? static_cast<AstNodeExpr*>(new AstGtS{flp, lhsp, rhsp})
+                        : static_cast<AstNodeExpr*>(new AstGt{flp, lhsp, rhsp});
+        }
+        cmpp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        AstCond* const resultp
+            = new AstCond{flp, cmpp, lhsp->cloneTree(false), rhsp->cloneTree(false)};
+        resultp->dtypep(dtp);
+        return resultp;
+    }
+    if (fn == "conv_integer" || fn == "to_stdulogic" || fn == "to_bit") {
+        AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
+        if (!valuep) return nullptr;
+        if (fn == "conv_integer") return resizeExpr(valuep, intType(flp), flp);
+        // A scalar cast keeps the value and only changes the element type
+        const VType valueType = typeOfDType(valuep->dtypep());
+        const VType target
+            = vectorType(flp, fn == "to_bit" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC,
+                         VSigning::UNSIGNED, valueType.width);
+        return resizeExpr(valuep, target, flp);
+    }
+    if (fn == "to_stdlogicvector" || fn == "to_stdulogicvector" || fn == "to_bitvector") {
+        AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
+        if (!valuep) return nullptr;
+        const VType valueType = typeOfDType(valuep->dtypep());
+        const VType target
+            = vectorType(flp, fn == "to_bitvector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC,
+                         VSigning::UNSIGNED, valueType.width);
+        return resizeExpr(valuep, target, flp);
+    }
+    unsupportedError(flp, "function '" + fn + "'");
+    return nullptr;
 }
 
 AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
@@ -2154,6 +2339,66 @@ AstNode* Lowering::clearLoopFlag(FileLine* flp, AstVar* flagp) {
     return new AstAssign{flp, lhsp, rhsp};
 }
 
+//! Whether any expression in a statement list calls rising_edge or falling_edge
+bool Lowering::stmtsContainEdge(const std::vector<StmtP>& stmts) const {
+    for (const StmtP& stmtp : stmts) {
+        if (!stmtp) continue;
+        for (const ExprP* const exprp :
+             {&stmtp->target, &stmtp->value, &stmtp->selector, &stmtp->b, &stmtp->c}) {
+            if (*exprp && containsEdgeCall(**exprp)) return true;
+        }
+        for (const auto& branch : stmtp->branches) {
+            if (branch.first && containsEdgeCall(*branch.first)) return true;
+            if (stmtsContainEdge(branch.second)) return true;
+        }
+        for (const auto& item : stmtp->caseItems) {
+            if (stmtsContainEdge(item.second)) return true;
+        }
+        if (stmtsContainEdge(stmtp->body)) return true;
+    }
+    return false;
+}
+
+//! Collect the names a statement list reads; assignment targets are written, not read
+void Lowering::collectExprNames(const Expr& expr, std::set<std::string>& names) {
+    if (expr.kind == Expr::NAME) {
+        names.insert(expr.text);
+        return;
+    }
+    for (const ExprP& childp : expr.args) {
+        if (childp) collectExprNames(*childp, names);
+    }
+    if (expr.a) collectExprNames(*expr.a, names);
+    if (expr.b) collectExprNames(*expr.b, names);
+    if (expr.c) collectExprNames(*expr.c, names);
+    for (const std::vector<ExprP>& choiceList : expr.choices) {
+        for (const ExprP& choicep : choiceList) {
+            if (choicep) collectExprNames(*choicep, names);
+        }
+    }
+}
+
+void Lowering::collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names) {
+    for (const StmtP& stmtp : stmts) {
+        if (!stmtp) continue;
+        if (stmtp->value) collectExprNames(*stmtp->value, names);
+        if (stmtp->selector) collectExprNames(*stmtp->selector, names);
+        if (stmtp->b) collectExprNames(*stmtp->b, names);
+        if (stmtp->c) collectExprNames(*stmtp->c, names);
+        for (const auto& branch : stmtp->branches) {
+            if (branch.first) collectExprNames(*branch.first, names);
+            collectReadNames(branch.second, names);
+        }
+        for (const auto& item : stmtp->caseItems) {
+            for (const ExprP& choicep : item.first) {
+                if (choicep) collectExprNames(*choicep, names);
+            }
+            collectReadNames(item.second, names);
+        }
+        collectReadNames(stmtp->body, names);
+    }
+}
+
 //! Whether a statement list (recursively) contains an exit or next
 bool Lowering::usesExitNext(const std::vector<StmtP>& stmts) {
     for (const StmtP& stmtp : stmts) {
@@ -2283,6 +2528,7 @@ void Lowering::lowerProcess(const Process& process) {
     const std::map<std::string, VType> savedConstTypes = m_constTypes;
     const std::map<std::string, AstConst*> savedEnumConsts = m_enumConsts;
     int varSeq = 0;
+    std::set<std::string> varNames;
     for (const TypeDecl& typeDecl : process.types) registerType(typeDecl);
     for (const Decl& decl : process.decls) {
         if (decl.kind == Decl::CONSTANT) {
@@ -2297,6 +2543,7 @@ void Lowering::lowerProcess(const Process& process) {
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
+            varNames.insert(name.first);
             if (!decl.init) continue;
             AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
             AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
@@ -2309,7 +2556,20 @@ void Lowering::lowerProcess(const Process& process) {
         }
     }
     std::vector<AstVar*> sensVars;
-    for (const std::string& name : process.sensitivity) {
+    std::vector<std::string> sensNames = process.sensitivity;
+    if (process.sensitivityAll) {
+        // process(all) is sensitive to every signal it reads, including any clock, so
+        // a clock edge in the body cannot become an edge-triggered always block
+        if (stmtsContainEdge(process.body)) {
+            unsupportedError(process.flp, "clock edge in a process(all)");
+            return;
+        }
+        std::set<std::string> readNames;
+        collectReadNames(process.body, readNames);
+        sensNames.assign(readNames.begin(), readNames.end());
+    }
+    for (const std::string& name : sensNames) {
+        if (varNames.count(name)) continue;  // A variable is not a sensitivity item
         const auto it = m_scope.find(name);
         if (it == m_scope.end()) {
             process.flp->v3error("VHDL: unknown signal '" + name + "' in a sensitivity list");
