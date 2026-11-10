@@ -749,6 +749,16 @@ class VhdlXmlFrontend final {
         return nodep;
     }
 
+    //! Default value of a constant, following a deferred declaration to its completion
+    const Node* constantDefault(const Node* declp) const {
+        if (!declp) return nullptr;
+        if (const Node* const defp = derefNode(declp->child("default_value"))) return defp;
+        const Node* const deferredp = declp->child("deferred_declaration");
+        if (!deferredp || !deferredp->has("ref")) return nullptr;
+        const Node* const completionp = nodeById(deferredp->attr("ref"));
+        return completionp ? derefNode(completionp->child("default_value")) : nullptr;
+    }
+
     //! Number of indices in a VHDL range; 0 for a null range
     static int rangeLength(int left, int right, bool ascending) {
         const int length = ascending ? right - left + 1 : left - right + 1;
@@ -1108,7 +1118,7 @@ class VhdlXmlFrontend final {
             if (declp
                 && (declp->attr("kind") == "constant_declaration"
                     || declp->attr("kind") == "interface_constant_declaration")) {
-                return vectorValue(derefNode(declp->child("default_value")), width, bits);
+                return vectorValue(constantDefault(declp), width, bits);
             }
         }
         return false;
@@ -1559,8 +1569,7 @@ class VhdlXmlFrontend final {
                                 error(nodep, "VHDL constant cannot be assigned");
                                 return makeConst(flpOf(nodep), bitDType(flpOf(nodep)), 0);
                             }
-                            if (const Node* const defp
-                                = derefNode(declp->child("default_value"))) {
+                            if (const Node* const defp = constantDefault(declp)) {
                                 return lowerExpr(defp, nullptr);
                             }
                         }
@@ -3626,8 +3635,7 @@ class VhdlXmlFrontend final {
                         const std::string declKind = declp->attr("kind");
                         if (declKind == "constant_declaration"
                             || declKind == "interface_constant_declaration") {
-                            if (const Node* const defp
-                                = derefNode(declp->child("default_value"))) {
+                            if (const Node* const defp = constantDefault(declp)) {
                                 return lowerExpr(defp, contextp);
                             }
                         }
@@ -3656,7 +3664,7 @@ class VhdlXmlFrontend final {
             if (declp
                 && (declp->attr("kind") == "constant_declaration"
                     || declp->attr("kind") == "interface_constant_declaration")) {
-                if (const Node* const defp = derefNode(declp->child("default_value"))) {
+                if (const Node* const defp = constantDefault(declp)) {
                     return lowerExpr(defp, contextp);
                 }
             }
@@ -4769,7 +4777,7 @@ class VhdlXmlFrontend final {
                     const std::string declKind = declp->attr("kind");
                     if (declKind == "constant_declaration"
                         || declKind == "interface_constant_declaration") {
-                        if (const Node* const defp = derefNode(declp->child("default_value"))) {
+                        if (const Node* const defp = constantDefault(declp)) {
                             return evalConst(defp, value, depth + 1);
                         }
                     } else if (declKind == "enumeration_literal") {
@@ -4851,7 +4859,7 @@ class VhdlXmlFrontend final {
             if (declp
                 && (declp->attr("kind") == "constant_declaration"
                     || declp->attr("kind") == "interface_constant_declaration")) {
-                if (const Node* const defp = derefNode(declp->child("default_value"))) {
+                if (const Node* const defp = constantDefault(declp)) {
                     return evalConstReal(defp, env, value, depth + 1);
                 }
             }
@@ -5423,8 +5431,8 @@ class VhdlXmlFrontend final {
                 const std::string declKind = declp->attr("kind");
                 if ((declKind == "constant_declaration"
                      || declKind == "interface_constant_declaration")
-                    && declp->child("default_value")) {
-                    return stringValue(declp->child("default_value"), value);
+                    && constantDefault(declp)) {
+                    return stringValue(constantDefault(declp), value);
                 }
             }
         }
@@ -5460,8 +5468,8 @@ class VhdlXmlFrontend final {
             if (declKind == "enumeration_literal") return evalBool(declp, value);
             if ((declKind == "constant_declaration"
                  || declKind == "interface_constant_declaration")
-                && declp->child("default_value")) {
-                return evalBool(declp->child("default_value"), value);
+                && constantDefault(declp)) {
+                return evalBool(constantDefault(declp), value);
             }
             return false;
         }
@@ -5945,8 +5953,8 @@ class VhdlXmlFrontend final {
         const std::string declKind = declp->attr("kind");
         if (declKind == "enumeration_literal") return staticLogic(declp, depth + 1);
         if ((declKind == "constant_declaration" || declKind == "interface_constant_declaration")
-            && declp->child("default_value")) {
-            return staticLogic(declp->child("default_value"), depth + 1);
+            && constantDefault(declp)) {
+            return staticLogic(constantDefault(declp), depth + 1);
         }
         return 0;
     }
