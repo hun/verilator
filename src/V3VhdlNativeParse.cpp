@@ -136,6 +136,7 @@ class Parser final {
     void parseTypeDeclInto(std::vector<TypeDecl>& types);
     void parseSubtypeDecl(Architecture& arch);
     void parseSubtypeInto(std::vector<TypeDecl>& types);
+    void parseAliasInto(std::vector<AliasDecl>& aliases);
     void parsePackage(FileLine* flp, bool isBody);
     void parseUseClause();
     void skipLibraryClause();
@@ -806,6 +807,25 @@ void Parser::parseSubtypeInto(std::vector<TypeDecl>& types) {
     types.push_back(std::move(decl));
 }
 
+//! Parse `alias name [: mark] is designator;`
+void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    AliasDecl alias;
+    alias.flp = nameTok.flp;
+    alias.name = nameTok.text;
+    alias.spelling = nameTok.spelling;
+    if (acceptSym(":")) parseTypeSpec(alias.mark);  // Mark with its index constraint
+    if (!expectId("is")) return;
+    alias.designator = parseDesignator();
+    if (!alias.designator) return;
+    if (!acceptSym(";")) {
+        error("expected ';' after an alias declaration");
+        return;
+    }
+    aliases.push_back(std::move(alias));
+}
+
 void Parser::parseArchitecture(FileLine* flp) {
     Token nameTok;
     if (!takeId(nameTok)) return;
@@ -863,8 +883,13 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseDecl(arch, Decl::VARIABLE);
             continue;
         }
-        if (isId("alias") || isId("component") || isId("attribute") || isId("function")
-            || isId("procedure") || isId("package")) {
+        if (isId("alias")) {
+            advance();
+            parseAliasInto(arch.aliases);
+            continue;
+        }
+        if (isId("component") || isId("attribute") || isId("function") || isId("procedure")
+            || isId("package")) {
             unsupported("architecture declarative item '" + m_cur.text + "'");
             return;
         }
@@ -1470,9 +1495,14 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             parseSubtypeInto(pkg.types);
             continue;
         }
+        if (isId("alias")) {
+            advance();
+            parseAliasInto(pkg.aliases);
+            continue;
+        }
         if (isId("function") || isId("procedure") || isId("component") || isId("attribute")
-            || isId("signal") || isId("shared") || isId("variable") || isId("alias")
-            || isId("file") || isId("disconnect") || isId("group")) {
+            || isId("signal") || isId("shared") || isId("variable") || isId("file")
+            || isId("disconnect") || isId("group")) {
             unsupported("package declarative item '" + m_cur.text + "'");
             return;
         }

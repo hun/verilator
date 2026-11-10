@@ -79,7 +79,15 @@ struct VType final {
 };
 
 //! Elaborated contents of one package, publishable to the units that use it
+//! An alias: the designator it renames, and the type its mark declares
+struct AliasInfo final {
+    const Expr* designatorp = nullptr;
+    VType type;
+    bool hasType = false;
+};
+
 struct PackageInfo final {
+    std::map<std::string, AliasInfo> aliases;
     std::map<std::string, VType> types;
     std::map<std::string, int64_t> consts;
     std::map<std::string, AstConst*> constValues;
@@ -130,6 +138,8 @@ class Lowering final {
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
+    std::map<std::string, AliasInfo> m_aliases;
+    mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
 
     AstNodeDType* findBasic(FileLine* flp, VBasicDTypeKwd kwd) const {
         return m_rootp->typeTablep()->findBasicDType(flp, kwd);
@@ -348,6 +358,8 @@ class Lowering final {
     const VType* typeOfName(const Expr& expr) const;
     bool typeOfDesignator(const Expr& expr, VType& out) const;
     bool packageNameOf(const Expr& prefix, std::string& name) const;
+    AstNodeExpr* lowerAlias(const Expr& nameExpr, bool write);
+    void registerAlias(const AliasDecl& alias);
     AstNodeExpr* lowerPackageMember(const Expr& expr, const std::string& pkgName);
     VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
@@ -778,6 +790,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         if (enumIt != m_enumConsts.end()) return enumIt->second->cloneTree(false);
         const auto it = m_scope.find(expr.text);
         if (it == m_scope.end()) {
+            if (AstNodeExpr* const aliasp = lowerAlias(expr, false)) return aliasp;
             flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'");
             return nullptr;
         }
@@ -1510,6 +1523,7 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         }
         const auto it = m_scope.find(expr.text);
         if (it == m_scope.end()) {
+            if (AstNodeExpr* const aliasp = lowerAlias(expr, write)) return aliasp;
             flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'");
             return nullptr;
         }
@@ -1729,9 +1743,21 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
     switch (expr.kind) {
     case Expr::NAME: {
         const VType* const typep = typeOfName(expr);
-        if (!typep) return false;
-        out = *typep;
-        return true;
+        if (typep) {
+            out = *typep;
+            return true;
+        }
+        // An alias has the bounds of its mark, else the type of its designator
+        const auto aliasIt = m_aliases.find(expr.text);
+        if (aliasIt == m_aliases.end()) return false;
+        if (aliasIt->second.hasType) {
+            out = aliasIt->second.type;
+            return true;
+        }
+        if (!m_aliasBusy.insert(expr.text).second) return false;
+        const bool ok = typeOfDesignator(*aliasIt->second.designatorp, out);
+        m_aliasBusy.erase(expr.text);
+        return ok;
     }
     case Expr::SELECTED: {
         VType prefixType;
@@ -1934,6 +1960,31 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
     }
     selp->dtypep(sliceType.dtp);
     return selp;
+}
+
+//! An alias takes the index bounds its mark declares; the bits come from the designator
+void Lowering::registerAlias(const AliasDecl& alias) {
+    if (!alias.designator) return;
+    AliasInfo info;
+    info.designatorp = alias.designator.get();
+    if (alias.mark.flp && resolveType(alias.mark, info.type)) info.hasType = true;
+    m_aliases[alias.name] = info;
+}
+
+//! Lower a use of an alias by lowering the designator it renames
+AstNodeExpr* Lowering::lowerAlias(const Expr& nameExpr, bool write) {
+    const auto it = m_aliases.find(nameExpr.text);
+    if (it == m_aliases.end()) return nullptr;
+    if (!m_aliasBusy.insert(nameExpr.text).second) {
+        nameExpr.flp->v3error("VHDL: alias '" + nameExpr.spelling + "' refers to itself");
+        return nullptr;
+    }
+    AstNodeExpr* resultp = lowerDesignator(*it->second.designatorp, write);
+    m_aliasBusy.erase(nameExpr.text);
+    if (resultp && it->second.hasType && it->second.type.dtp) {
+        resultp->dtypep(it->second.type.dtp);
+    }
+    return resultp;
 }
 
 //! Package name when a prefix denotes one, e.g. `pkg` or `work.pkg`
@@ -3131,6 +3182,11 @@ void Lowering::importPackage(const std::string& name) {
     const auto pkgIt = m_packagesp->packages.find(name);
     if (pkgIt == m_packagesp->packages.end()) return;  // Standard package: intrinsics
     const PackageInfo& info = pkgIt->second;
+    for (const auto& alias : info.aliases) {
+        if (m_aliases.count(alias.first)) continue;
+        m_aliases[alias.first] = alias.second;
+    }
+
     for (const auto& type : info.types) {
         if (m_types.count(type.first)) continue;
         m_types[type.first] = type.second;
@@ -3169,10 +3225,13 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     m_ownedConsts.clear();
     m_imported.clear();
     m_scope.clear();
+    m_aliases.clear();
     for (const TypeDecl& typeDecl : pkg.types) registerType(typeDecl);
+    for (const AliasDecl& alias : pkg.aliases) registerAlias(alias);
     for (const Decl& decl : pkg.decls) emitConstant(decl, !pkg.isBody);
 
     PackageInfo info;
+    info.aliases = m_aliases;
     info.types = std::move(m_types);
     info.consts = std::move(m_consts);
     info.constValues = std::move(m_constValues);
@@ -3185,6 +3244,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     m_constTypes.clear();
     m_enumConsts.clear();
     m_ownedConsts.clear();
+    m_aliases.clear();
 
     const auto existing = table.packages.find(pkg.name);
     if (existing == table.packages.end()) {
@@ -3193,6 +3253,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     }
     // A package body (or a repeated declaration) adds to what is already published
     PackageInfo& dest = existing->second;
+    for (const auto& alias : info.aliases) dest.aliases[alias.first] = alias.second;
     for (const auto& type : info.types) dest.types[type.first] = type.second;
     for (const auto& constant : info.consts) dest.consts[constant.first] = constant.second;
     for (const auto& value : info.constValues) dest.constValues[value.first] = value.second;
@@ -3211,6 +3272,8 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
     // Types are visible to the whole declarative part, and must be registered first
     for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
     for (const TypeDecl& typeDecl : arch.types) registerType(typeDecl);
+
+    for (const AliasDecl& alias : arch.aliases) registerAlias(alias);
 
     // Entity declarative items are visible to every architecture of the entity
     int entityVarSeq = 0;

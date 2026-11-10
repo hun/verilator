@@ -216,6 +216,15 @@ struct Decl final {
         : kind{kind_} {}
 };
 
+//! `alias name [: subtype_mark] is designator;` renames an existing object
+struct AliasDecl final {
+    FileLine* flp = nullptr;
+    std::string name;  // Folded
+    std::string spelling;
+    TypeSpec mark;  // Optional subtype indication, which fixes the alias's index bounds
+    ExprP designator;  // The aliased object or slice
+};
+
 //! A type, subtype or alias declaration
 struct TypeDecl final {
     enum Kind : uint8_t { ENUM, ARRAY, RECORD, SUBTYPE } kind;
@@ -293,6 +302,7 @@ struct Architecture final {
     FileLine* flp = nullptr;
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
+    std::vector<AliasDecl> aliases;
     std::vector<std::unique_ptr<Concurrent>> stmts;
     std::vector<std::pair<std::string, std::string>> uses;
 };
@@ -307,6 +317,7 @@ struct PackageUnit final {
     FileLine* flp = nullptr;
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
+    std::vector<AliasDecl> aliases;
 };
 
 //! Design units parsed from all source files, in source order
