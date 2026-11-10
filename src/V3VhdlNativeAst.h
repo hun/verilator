@@ -259,6 +259,10 @@ struct PortAssoc final {
     FileLine* flp = nullptr;
     std::string formal;  // Folded
     std::string formalSpelling;
+    // A formal that names part of a port: `a(7 downto 4) => ...`
+    bool hasFormalRange = false;
+    bool formalAscending = true;  // "to", else "downto"
+    ExprP formalLeft, formalRight;
     ExprP actual;  // Null for `open`
 };
 

@@ -902,7 +902,7 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
     arch.stmts.push_back(std::move(inst));
 }
 
-//! `(formal => actual, ...)` associations of a port map
+//! `(formal [range] => actual, ...)` associations of a port map
 void Parser::parsePortMap(Concurrent& inst) {
     if (!acceptSym("(")) {
         error("expected '(' after 'port map'");
@@ -912,37 +912,61 @@ void Parser::parsePortMap(Concurrent& inst) {
         if (m_failed) return;
         PortAssoc assoc;
         assoc.flp = m_cur.flp;
-        if (m_cur.kind == Token::ID) {
-            const auto saved = m_lexer.state();
-            const Token ahead = m_lexer.next();
-            m_lexer.restore(saved);
-            if (ahead.kind == Token::SYM && ahead.text == "=>") {
-                Token formalTok;
-                if (!takeId(formalTok)) return;
-                assoc.formal = formalTok.text;
-                assoc.formalSpelling = formalTok.spelling;
-                advance();  // '=>'
-                if (isId("open")) {
-                    advance();
-                    inst.associations.push_back(std::move(assoc));
-                    if (!acceptSym(",")) break;
-                    continue;
+        // Look ahead for `formal [range] =>`: a positional actual may look similar
+        bool named = false;
+        {
+            const Token savedTok = m_cur;
+            const auto savedState = m_lexer.state();
+            if (m_cur.kind == Token::ID) {
+                advance();
+                if (isSym("(")) {
+                    int depth = 0;
+                    do {
+                        if (isSym("(")) ++depth;
+                        if (isSym(")")) --depth;
+                        advance();
+                    } while (!m_failed && depth > 0 && m_cur.kind != Token::END);
                 }
+                named = isSym("=>");
+            }
+            m_cur = savedTok;
+            m_lexer.restore(savedState);
+        }
+        if (named) {
+            Token formalTok;
+            if (!takeId(formalTok)) return;
+            assoc.formal = formalTok.text;
+            assoc.formalSpelling = formalTok.spelling;
+            if (isSym("(")) {  // The association targets part of the port
+                advance();
+                assoc.formalLeft = parseExpr();
+                if (!assoc.formalLeft) return;
+                if (isId("to") || isId("downto")) {
+                    assoc.formalAscending = isId("to");
+                    advance();
+                    assoc.formalRight = parseExpr();
+                    if (!assoc.formalRight) return;
+                }
+                expectSym(")");
+                assoc.hasFormalRange = true;
+            }
+            if (!acceptSym("=>")) {
+                error("expected '=>' in a port association");
+                return;
+            }
+            if (isId("open")) {
+                advance();
+            } else {
                 assoc.actual = parseExpr();
                 if (!assoc.actual) return;
-                inst.associations.push_back(std::move(assoc));
-                if (!acceptSym(",")) break;
-                continue;
             }
+        } else {
             // Positional association: the actual maps to the next port in order
             assoc.actual = parseExpr();
             if (!assoc.actual) return;
-            inst.associations.push_back(std::move(assoc));
-            if (!acceptSym(",")) break;
-            continue;
         }
-        unsupported("port map association that is not an expression");
-        return;
+        inst.associations.push_back(std::move(assoc));
+        if (!acceptSym(",")) break;
     }
     expectSym(")");
 }

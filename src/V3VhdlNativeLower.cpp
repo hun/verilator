@@ -3399,7 +3399,6 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         return nullptr;
     }
     AstModule* const modp = modIt->second;
-    // Every port needs a pin, in the entity's port order; an unassociated port is open
     std::vector<AstVar*> ports;
     for (AstNode* const itemp : modp->stmtspList()) {
         AstVar* const varp = VN_CAST(itemp, Var);
@@ -3407,52 +3406,158 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     }
     std::sort(ports.begin(), ports.end(),
               [](const AstVar* l, const AstVar* r) { return l->pinNum() < r->pinNum(); });
-    // The cell names its module; V3LinkCells binds it and the pins follow the port list.
-    // An association without a formal name is positional: it maps to the next port
+    // Associations without a formal name are positional: they map to the next port
     const bool positional
         = std::any_of(conc.associations.begin(), conc.associations.end(),
                       [](const PortAssoc& assoc) { return assoc.formal.empty(); });
-    std::size_t positionalIndex = 0;
-    AstPin* pinsp = nullptr;
-    for (AstVar* const portp : ports) {
-        const PortAssoc* assocp = nullptr;
-        if (positional) {
-            if (positionalIndex < conc.associations.size()) {
-                assocp = &conc.associations[positionalIndex];
-                ++positionalIndex;
-            }
-        } else {
-            for (const PortAssoc& assoc : conc.associations) {
-                if (assoc.formalSpelling == portp->name()) {
-                    assocp = &assoc;
-                    break;
-                }
-            }
-        }
-        AstNodeExpr* actualp = nullptr;
-        if (assocp && assocp->actual) {
-            const VType target = typeOfDType(portp->dtypep());
-            // An output or inout actual is driven by the instance, so it must be an lvalue
-            const bool driven = portp->direction().isOutput() || portp->direction().isInout();
-            AstNodeExpr* valuep = nullptr;
-            if (driven) {
-                valuep = lowerDesignator(*assocp->actual, true);
-            } else {
-                valuep = lowerExpr(*assocp->actual, &target);
-            }
-            if (!valuep) continue;
-            actualp = resizeExpr(valuep, target, flp);
-        }
-        AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), actualp};
-        pinp->modVarp(portp);
-        pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
-    }
-    AstCell* const cellp = new AstCell{
-        flp, flp, conc.instanceLabel + m_genSuffix, modp->name(), pinsp, nullptr, nullptr};
     if (positional && conc.associations.size() > ports.size()) {
         flp->v3error("VHDL: instance of '" + conc.instanceName
                      + "' associates more ports than "
                        "the entity has");
+        return nullptr;
+    }
+    //! One association of a port, resolved to the bit range it connects
+    struct Connection final {
+        int lsb = 0;
+        int width = 1;
+        const PortAssoc* assocp = nullptr;
+    };
+    AstPin* pinsp = nullptr;
+    for (size_t portIndex = 0; portIndex < ports.size(); ++portIndex) {
+        AstVar* const portp = ports[portIndex];
+        std::vector<const PortAssoc*> assocs;
+        if (positional) {
+            if (portIndex < conc.associations.size())
+                assocs.push_back(&conc.associations[portIndex]);
+        } else {
+            for (const PortAssoc& assoc : conc.associations) {
+                if (assoc.formalSpelling == portp->name()) assocs.push_back(&assoc);
+            }
+        }
+        if (assocs.empty()) {
+            // Unassociated port: an open pin
+            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), nullptr};
+            pinp->modVarp(portp);
+            pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
+            continue;
+        }
+        const bool partial
+            = std::any_of(assocs.begin(), assocs.end(),
+                          [](const PortAssoc* assocp) { return assocp->hasFormalRange; });
+        const VType portType = typeOfDType(portp->dtypep());
+        AstNodeExpr* actualp = nullptr;
+        if (!partial) {
+            // The whole port connects to one actual
+            const PortAssoc& assoc = *assocs.front();
+            if (assoc.actual) {
+                const bool driven = portp->direction().isOutput() || portp->direction().isInout();
+                AstNodeExpr* valuep = driven ? lowerDesignator(*assoc.actual, true)
+                                             : lowerExpr(*assoc.actual, &portType);
+                if (!valuep) return nullptr;
+                actualp = resizeExpr(valuep, portType, flp);
+            }
+        } else if (!portType.isVector() || portType.elemWidth != 1) {
+            unsupportedError(flp, "part of a port that is not a bit vector");
+            return nullptr;
+        } else if (portp->direction().isInout()) {
+            unsupportedError(flp, "part of an inout port");
+            return nullptr;
+        } else {
+            // Collect the bit range each association connects
+            const int lowIndex = portType.lowIndex();
+            std::vector<Connection> connections;
+            bool bad = false;
+            for (const PortAssoc* const assocp : assocs) {
+                int64_t left = 0;
+                int64_t right = 0;
+                if (!assocp->hasFormalRange) {
+                    unsupportedError(assocp->flp, "mixing whole-port and part-port associations");
+                    bad = true;
+                    break;
+                }
+                const bool haveRight = assocp->formalRight != nullptr;
+                if (!staticInt(assocp->formalLeft, left)
+                    || (haveRight && !staticInt(assocp->formalRight, right))) {
+                    unsupportedError(assocp->flp, "non-static port association range");
+                    bad = true;
+                    break;
+                }
+                if (!haveRight) right = left;
+                Connection connection;
+                const int offsetLeft = static_cast<int>(left) - lowIndex;
+                const int offsetRight = static_cast<int>(right) - lowIndex;
+                connection.lsb = std::min(offsetLeft, offsetRight);
+                connection.width = std::abs(offsetLeft - offsetRight) + 1;
+                if (connection.lsb < 0 || connection.lsb + connection.width > portType.width) {
+                    assocp->flp->v3error("VHDL: association is out of range of port '"
+                                         + portp->name() + "'");
+                    bad = true;
+                    break;
+                }
+                connection.assocp = assocp;
+                connections.push_back(connection);
+            }
+            if (bad) return nullptr;
+            if (portp->direction().isInput()) {
+                // Concatenate from the most significant connected range down
+                std::sort(connections.begin(), connections.end(),
+                          [](const Connection& lhs, const Connection& rhs) {
+                              return lhs.lsb > rhs.lsb;
+                          });
+                for (const Connection& connection : connections) {
+                    AstNodeExpr* valuep = nullptr;
+                    if (connection.assocp->actual) {
+                        const VType elementType
+                            = vectorType(flp, portType.kwd, VSigning::UNSIGNED, connection.width);
+                        valuep = lowerExpr(*connection.assocp->actual, &elementType);
+                        if (!valuep) return nullptr;
+                        valuep = resizeExpr(valuep, elementType, flp);
+                    } else {
+                        // An open input element contributes unknown bits
+                        valuep = makeRepeatedConst(
+                            flp,
+                            vectorType(flp, portType.kwd, VSigning::UNSIGNED, connection.width),
+                            'x');
+                    }
+                    actualp = actualp
+                                  ? static_cast<AstNodeExpr*>(new AstConcat{flp, actualp, valuep})
+                                  : valuep;
+                }
+                actualp->dtypep(portp->dtypep());
+            } else {
+                // Outputs: each element actual is driven from its slice of a temp
+                AstVar* const tempVarp
+                    = new AstVar{flp, VVarType::VAR,
+                                 "vhdlind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
+                                 portp->dtypep()};
+                m_modp->addStmtsp(tempVarp);
+                AstNode* headp = nullptr;
+                for (const Connection& connection : connections) {
+                    if (!connection.assocp->actual) continue;
+                    AstNodeExpr* const lhsp = lowerDesignator(*connection.assocp->actual, true);
+                    if (!lhsp) {
+                        if (headp) headp->deleteTree();
+                        return nullptr;
+                    }
+                    const VType elementType
+                        = vectorType(flp, portType.kwd, VSigning::UNSIGNED, connection.width);
+                    AstSel* const rhsp
+                        = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
+                                     connection.lsb, connection.width};
+                    rhsp->dtypep(elementType.dtp);
+                    AstNode* const assp
+                        = new AstAssign{flp, resizeExpr(lhsp, elementType, flp), rhsp};
+                    headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assp) : assp;
+                }
+                if (headp) {
+                    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
+                }
+                actualp = new AstVarRef{flp, tempVarp, VAccess::WRITE};
+            }
+        }
+        AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), actualp};
+        pinp->modVarp(portp);
+        pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
     }
     if (!positional) {
         for (const PortAssoc& assoc : conc.associations) {
@@ -3465,10 +3570,12 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             }
         }
     }
+    AstCell* const cellp = new AstCell{
+        flp, flp, conc.instanceLabel + m_genSuffix, modp->name(), pinsp, nullptr, nullptr};
     return cellp;
 }
 
-//! Declare a block or generate body's own signals, variables, constants and types
+//! Declare the own signals, variables, constants and types of a block or generate
 void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<TypeDecl>& types,
                               const char* prefix) {
     for (const TypeDecl& typeDecl : types) registerType(typeDecl);
