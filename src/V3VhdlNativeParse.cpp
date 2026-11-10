@@ -144,6 +144,8 @@ class Parser final {
     void parseArchitecture(FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
     bool parseChoices(std::vector<ExprP>& choices);
+    void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out);
+    bool parseGenerateEnd();
     void parseProcess(Architecture& arch, FileLine* flp);
     std::vector<StmtP> parseStmtList(bool stopAtElse);
     StmtP parseSequentialStatement();
@@ -959,8 +961,110 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         arch.stmts.push_back(std::move(conc));
         return;
     }
-    if (isId("entity") || isId("component") || isId("for") || isId("if") || isId("case")
-        || isId("assert") || isId("block")) {
+    if (isId("for")) {
+        advance();
+        Token varTok;
+        if (!takeId(varTok)) return;
+        auto gen = std::make_unique<Concurrent>(Concurrent::GEN_FOR);
+        gen->flp = flp;
+        gen->loopVar = varTok.text;
+        if (!expectId("in")) return;
+        gen->lo = parseExpr();
+        if (!gen->lo) return;
+        if (isId("to") || isId("downto")) {
+            gen->rangeAscending = isId("to");
+            advance();
+            gen->hi = parseExpr();
+            if (!gen->hi) return;
+        } else if (!isId("generate")) {
+            error("expected 'to' or 'downto' in a generate range");
+            return;
+        }
+        if (!expectId("generate")) return;
+        parseConcurrentList(gen->body);
+        if (m_failed) return;
+        if (!parseGenerateEnd()) return;
+        arch.stmts.push_back(std::move(gen));
+        return;
+    }
+    if (isId("if")) {
+        advance();
+        auto gen = std::make_unique<Concurrent>(Concurrent::GEN_IF);
+        gen->flp = flp;
+        gen->cond = parseExpr();
+        if (!gen->cond) return;
+        if (!expectId("generate")) return;
+        parseConcurrentList(gen->body);
+        if (m_failed) return;
+        if (acceptId("else")) {
+            if (!expectId("generate")) return;
+            parseConcurrentList(gen->elseBody);
+            if (m_failed) return;
+        }
+        if (!parseGenerateEnd()) return;
+        arch.stmts.push_back(std::move(gen));
+        return;
+    }
+    if (isId("block")) {
+        advance();
+        auto block = std::make_unique<Concurrent>(Concurrent::BLOCK);
+        block->flp = flp;
+        if (isSym("(")) {  // Guarded block: the guard only names a condition
+            unsupported("guarded block statement");
+            return;
+        }
+        (void)acceptId("is");
+        while (!m_failed && !isId("begin") && !isId("end")) {
+            if (isId("signal")) {
+                advance();
+                parseDeclInto(block->decls, Decl::SIGNAL);
+                continue;
+            }
+            if (isId("shared")) {
+                advance();
+                if (!expectId("variable")) return;
+                parseDeclInto(block->decls, Decl::VARIABLE);
+                continue;
+            }
+            if (isId("variable")) {
+                advance();
+                parseDeclInto(block->decls, Decl::VARIABLE);
+                continue;
+            }
+            if (isId("constant")) {
+                advance();
+                parseDeclInto(block->decls, Decl::CONSTANT);
+                continue;
+            }
+            if (isId("type")) {
+                advance();
+                parseTypeDeclInto(block->types);
+                continue;
+            }
+            if (isId("subtype")) {
+                advance();
+                parseSubtypeInto(block->types);
+                continue;
+            }
+            if (isId("use")) {
+                skipContextClause();
+                continue;
+            }
+            unsupported("block declarative item '" + m_cur.text + "'");
+            return;
+        }
+        if (acceptId("begin")) {
+            parseConcurrentList(block->body);
+            if (m_failed) return;
+        }
+        if (!expectId("end")) return;
+        (void)acceptId("block");
+        if (m_cur.kind == Token::ID) advance();  // Optional end label
+        if (!acceptSym(";")) error("expected ';' after 'end block'");
+        arch.stmts.push_back(std::move(block));
+        return;
+    }
+    if (isId("entity") || isId("component") || isId("case") || isId("assert")) {
         unsupported("concurrent statement '" + m_cur.text + "'");
         return;
     }
@@ -1006,6 +1110,28 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         return;
     }
     unsupported("component or direct entity instantiation");
+}
+
+//! Parse concurrent statements up to `end [generate|block]`, without the terminator
+void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out) {
+    Architecture scratch;  // The statements of a generate body
+    while (!m_failed && !isId("end") && !isId("elsif") && !isId("else")
+           && m_cur.kind != Token::END) {
+        parseConcurrentStatement(scratch);
+    }
+    out = std::move(scratch.stmts);
+}
+
+//! Consume `end [generate] [label];`
+bool Parser::parseGenerateEnd() {
+    if (!expectId("end")) return false;
+    (void)acceptId("generate");
+    if (m_cur.kind == Token::ID) advance();  // Optional end label
+    if (!acceptSym(";")) {
+        error("expected ';' after 'end generate'");
+        return false;
+    }
+    return true;
 }
 
 void Parser::parseProcess(Architecture& arch, FileLine* flp) {

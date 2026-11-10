@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -128,6 +129,7 @@ class Lowering final {
     PackageTable::Impl* m_publishp = nullptr;  // Package table to publish into
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
+    std::set<std::string> m_variables;  // Module-level variables, which are not signals
 
     AstNodeDType* findBasic(FileLine* flp, VBasicDTypeKwd kwd) const {
         return m_rootp->typeTablep()->findBasicDType(flp, kwd);
@@ -306,6 +308,12 @@ class Lowering final {
                          int hi, int lo);
 
     AstNode* lowerCase(const Stmt& stmt);
+    //! Build an AstCase; a case over an enumeration is exhaustive
+    AstCase* makeCase(FileLine* flp, AstNodeExpr* selectorp, AstCaseItem* itemsp) const {
+        AstCase* const casep = new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+        if (VN_CAST(selectorp->dtypep()->skipRefToEnump(), EnumDType)) casep->uniquePragma(true);
+        return casep;
+    }
     void lowerWaitProcess(const Process& process);
     //! Module-level declarations a process hides, restored when it ends
     struct ScopeSave final {
@@ -347,6 +355,7 @@ class Lowering final {
                                       AstNodeExpr* lhsp);
     bool concHasEdge(const Concurrent& conc) const;
     AstNode* lowerSelected(const Concurrent& conc);
+    void emitConcurrent(const Concurrent& conc);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
                            std::vector<AstConst*>& cops);
     AstNode* lowerStmt(const Stmt& stmt);
@@ -2435,7 +2444,7 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
         selectorp->deleteTree();
         return nullptr;
     }
-    return new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
+    return makeCase(flp, selectorp, itemsp);
 }
 
 AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
@@ -2543,10 +2552,7 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
         selectorp->deleteTree();
         return nullptr;
     }
-    AstCase* const casep = new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
-    // A case over an enumeration is exhaustive; unlisted bit patterns are illegal
-    if (VN_CAST(selectorp->dtypep()->skipRefToEnump(), EnumDType)) casep->uniquePragma(true);
-    return casep;
+    return makeCase(flp, selectorp, itemsp);
 }
 
 AstNode* Lowering::lowerStmtList(const std::vector<StmtP>& stmts) {
@@ -2954,7 +2960,8 @@ void Lowering::lowerProcess(const Process& process) {
         sensNames.assign(readNames.begin(), readNames.end());
     }
     for (const std::string& name : sensNames) {
-        if (varNames.count(name)) continue;  // A variable is not a sensitivity item
+        // A variable is not a signal, so it never becomes a sensitivity item
+        if (varNames.count(name) || m_variables.count(name)) continue;
         const auto it = m_scope.find(name);
         if (it == m_scope.end()) {
             process.flp->v3error("VHDL: unknown signal '" + name + "' in a sensitivity list");
@@ -3045,6 +3052,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             varNames.insert(name.first);
+            m_variables.insert(name.first);
             if (!decl.init) continue;
             AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
             AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
@@ -3220,6 +3228,7 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
+            m_variables.insert(name.first);
             if (!decl.init) continue;
             AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
             AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
@@ -3265,6 +3274,7 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.second, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
+            if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
             if (decl.init) {
                 AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
                 AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
@@ -3279,80 +3289,7 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
         }
     }
 
-    for (const auto& stmtp : arch.stmts) {
-        if (stmtp->kind == Concurrent::PROCESS) {
-            lowerProcess(*stmtp->process);
-            continue;
-        }
-        if (stmtp->kind == Concurrent::SEL_ASSIGN) {
-            AstNode* const casep = lowerSelected(*stmtp);
-            if (!casep) continue;
-            m_modp->addStmtsp(new AstAlways{stmtp->flp, VAlwaysKwd::CONT_ASSIGN, nullptr, casep});
-            continue;
-        }
-        AstNodeExpr* const lhsp = lowerDesignator(*stmtp->target, true);
-        if (!lhsp) continue;
-        const VType ltype = typeOfTarget(*stmtp->target, lhsp);
-        AstNodeExpr* rhsp = nullptr;
-        if (stmtp->kind == Concurrent::COND_ASSIGN) {
-            if (concHasEdge(*stmtp)) {
-                // Register clocked by the edge the condition names
-                m_edges.clear();
-                m_initial = false;
-                // Names tested before the clocked branch, e.g. an asynchronous reset
-                std::set<std::string> levelNames;
-                for (const auto& alt : stmtp->alternatives) {
-                    if (alt.second && containsEdgeCall(*alt.second)) break;
-                    if (alt.second) collectExprNames(*alt.second, levelNames);
-                }
-                AstNode* const bodyp = lowerClockedAlternatives(*stmtp, ltype, lhsp);
-                const std::vector<Edge> edges = m_edges;
-                m_edges.clear();
-                AstSenItem* itemsp = nullptr;
-                for (const Edge& edge : edges) {
-                    AstSenItem* const itemp
-                        = new AstSenItem{stmtp->flp, edge.type,
-                                         new AstVarRef{stmtp->flp, edge.varp, VAccess::READ}};
-                    itemsp
-                        = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
-                }
-                for (const std::string& name : levelNames) {
-                    const auto it = m_scope.find(name);
-                    if (it == m_scope.end()) continue;
-                    if (std::any_of(edges.begin(), edges.end(), [&](const Edge& edge) {
-                            return edge.varp == it->second.varp;
-                        })) {
-                        continue;
-                    }
-                    AstSenItem* const itemp = new AstSenItem{
-                        stmtp->flp, VEdgeType::ET_CHANGED,
-                        new AstVarRef{stmtp->flp, it->second.varp, VAccess::READ}};
-                    itemsp
-                        = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
-                }
-                if (!bodyp || !itemsp) {
-                    if (bodyp) bodyp->deleteTree();
-                    if (itemsp) itemsp->deleteTree();
-                    lhsp->deleteTree();
-                    continue;
-                }
-                m_modp->addStmtsp(new AstAlways{stmtp->flp, VAlwaysKwd::ALWAYS,
-                                                new AstSenTree{stmtp->flp, itemsp}, bodyp});
-                lhsp->deleteTree();
-                continue;
-            }
-            rhsp = lowerAlternatives(*stmtp, ltype);
-        } else {
-            rhsp = lowerExpr(*stmtp->value, &ltype);
-            if (rhsp) rhsp = resizeExpr(rhsp, ltype, stmtp->flp);
-        }
-        if (!rhsp) {
-            lhsp->deleteTree();
-            continue;
-        }
-        m_modp->addStmtsp(new AstAlways{stmtp->flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
-                                        new AstAssignW{stmtp->flp, lhsp, rhsp}});
-    }
+    for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
 
     m_rootp->addModulesp(m_modp);
     m_modp = nullptr;
@@ -3363,6 +3300,160 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
     m_enumConsts.clear();
     m_ownedConsts.clear();
     m_types.clear();
+    return;
+}
+
+void Lowering::emitConcurrent(const Concurrent& conc) {
+    const Concurrent& stmt = conc;
+    if (stmt.kind == Concurrent::GEN_FOR) {
+        // A generate loop is unrolled with its parameter bound as a constant
+        int64_t left = 0;
+        int64_t right = 0;
+        if (!staticInt(stmt.lo, left) || !staticInt(stmt.hi, right)) {
+            unsupportedError(stmt.flp, "generate range that is not static");
+            return;
+        }
+        const bool up = stmt.rangeAscending;
+        if (up ? right < left : right > left) return;  // Empty range
+        if (std::llabs(right - left) > 4096) {
+            unsupportedError(stmt.flp, "generate range with more than 4096 iterations");
+            return;
+        }
+        const auto saved = m_consts.find(stmt.loopVar);
+        const bool hadConst = saved != m_consts.end();
+        const int64_t savedValue = hadConst ? saved->second : 0;
+        for (int64_t value = left;; value += up ? 1 : -1) {
+            m_consts[stmt.loopVar] = value;
+            for (const auto& bodyConcp : stmt.body) {
+                if (bodyConcp) emitConcurrent(*bodyConcp);
+            }
+            if (value == right) break;
+        }
+        if (hadConst) {
+            m_consts[stmt.loopVar] = savedValue;
+        } else {
+            m_consts.erase(stmt.loopVar);
+        }
+        return;
+    }
+    if (stmt.kind == Concurrent::GEN_IF) {
+        int64_t value = 0;
+        if (!stmt.cond || !evalInt(*stmt.cond, value)) {
+            unsupportedError(stmt.flp, "generate condition that is not static");
+            return;
+        }
+        const std::vector<std::unique_ptr<Concurrent>>& taken
+            = value != 0 ? stmt.body : stmt.elseBody;
+        for (const auto& bodyConcp : taken) {
+            if (bodyConcp) emitConcurrent(*bodyConcp);
+        }
+        return;
+    }
+    if (stmt.kind == Concurrent::BLOCK) {
+        // A block's declarative items are visible to its statements only
+        const ScopeSave saved = saveScope();
+        for (const TypeDecl& typeDecl : stmt.types) registerType(typeDecl);
+        for (const Decl& decl : stmt.decls) {
+            if (decl.kind == Decl::CONSTANT) {
+                emitConstant(decl, false);
+                continue;
+            }
+            VType type;
+            if (!resolveType(decl.type, type)) continue;
+            for (const auto& name : decl.names) {
+                if (!reserveName(name.first, name.second, decl.flp)) continue;
+                const std::string mangled
+                    = "vhdlblk_" + std::to_string(++m_loopSeq) + "__" + name.second;
+                AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+                m_modp->addStmtsp(varp);
+                m_scope[name.first] = VarInfo{varp, type};
+                m_variables.insert(name.first);
+                if (!decl.init) continue;
+                AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
+                AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
+                if (!rhsp) {
+                    lhsp->deleteTree();
+                    continue;
+                }
+                rhsp = resizeExpr(rhsp, type, decl.flp);
+                m_modp->addStmtsp(
+                    new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
+            }
+        }
+        for (const auto& bodyConcp : stmt.body) {
+            if (bodyConcp) emitConcurrent(*bodyConcp);
+        }
+        restoreScope(saved);
+        return;
+    }
+    if (stmt.kind == Concurrent::PROCESS) {
+        lowerProcess(*stmt.process);
+        return;
+    }
+    if (stmt.kind == Concurrent::SEL_ASSIGN) {
+        AstNode* const casep = lowerSelected(stmt);
+        if (!casep) return;
+        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, casep});
+        return;
+    }
+    AstNodeExpr* const lhsp = lowerDesignator(*stmt.target, true);
+    if (!lhsp) return;
+    const VType ltype = typeOfTarget(*stmt.target, lhsp);
+    if (stmt.kind == Concurrent::COND_ASSIGN && concHasEdge(stmt)) {
+        // Register clocked by the edge the condition names
+        m_edges.clear();
+        m_initial = false;
+        // Names tested before the clocked branch, e.g. an asynchronous reset
+        std::set<std::string> levelNames;
+        for (const auto& alt : stmt.alternatives) {
+            if (alt.second && containsEdgeCall(*alt.second)) break;
+            if (alt.second) collectExprNames(*alt.second, levelNames);
+        }
+        AstNode* const bodyp = lowerClockedAlternatives(stmt, ltype, lhsp);
+        const std::vector<Edge> edges = m_edges;
+        m_edges.clear();
+        AstSenItem* itemsp = nullptr;
+        for (const Edge& edge : edges) {
+            AstSenItem* const itemp = new AstSenItem{
+                stmt.flp, edge.type, new AstVarRef{stmt.flp, edge.varp, VAccess::READ}};
+            itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+        }
+        for (const std::string& name : levelNames) {
+            const auto it = m_scope.find(name);
+            if (it == m_scope.end()) continue;
+            if (std::any_of(edges.begin(), edges.end(),
+                            [&](const Edge& edge) { return edge.varp == it->second.varp; })) {
+                continue;
+            }
+            AstSenItem* const itemp
+                = new AstSenItem{stmt.flp, VEdgeType::ET_CHANGED,
+                                 new AstVarRef{stmt.flp, it->second.varp, VAccess::READ}};
+            itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+        }
+        if (!bodyp || !itemsp) {
+            if (bodyp) bodyp->deleteTree();
+            if (itemsp) itemsp->deleteTree();
+            lhsp->deleteTree();
+            return;
+        }
+        m_modp->addStmtsp(
+            new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, new AstSenTree{stmt.flp, itemsp}, bodyp});
+        lhsp->deleteTree();
+        return;
+    }
+    AstNodeExpr* rhsp = nullptr;
+    if (stmt.kind == Concurrent::COND_ASSIGN) {
+        rhsp = lowerAlternatives(stmt, ltype);
+    } else {
+        rhsp = lowerExpr(*stmt.value, &ltype);
+        if (rhsp) rhsp = resizeExpr(rhsp, ltype, stmt.flp);
+    }
+    if (!rhsp) {
+        lhsp->deleteTree();
+        return;
+    }
+    m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
+                                    new AstAssignW{stmt.flp, lhsp, rhsp}});
 }
 
 //######################################################################

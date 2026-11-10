@@ -246,7 +246,7 @@ struct Process final {
 };
 
 struct Concurrent final {
-    enum Kind : uint8_t { ASSIGN, COND_ASSIGN, SEL_ASSIGN, PROCESS } kind;
+    enum Kind : uint8_t { ASSIGN, COND_ASSIGN, SEL_ASSIGN, PROCESS, GEN_FOR, GEN_IF, BLOCK } kind;
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/COND_ASSIGN/SEL_ASSIGN
     ExprP value;  // ASSIGN/SEL_ASSIGN
@@ -256,8 +256,19 @@ struct Concurrent final {
     // SEL_ASSIGN: (choices, value); an empty choice list marks "others"
     std::vector<std::pair<std::vector<ExprP>, ExprP>> choices;
     std::unique_ptr<Process> process;  // PROCESS
+    // GEN_FOR: loop variable over lo..hi; GEN_IF: cond; BLOCK: plain statement list
+    std::string loopVar;
+    bool rangeAscending = true;
+    ExprP lo, hi;
+    ExprP cond;
+    std::vector<Decl> decls;  // BLOCK: declarative items
+    std::vector<TypeDecl> types;  // BLOCK
+    std::vector<std::unique_ptr<Concurrent>> body;  // GEN_*/BLOCK: statements
+    std::vector<std::unique_ptr<Concurrent>> elseBody;  // GEN_IF: else part
     explicit Concurrent(Kind kind_)
         : kind{kind_} {}
+    Concurrent(const Concurrent&) = delete;
+    Concurrent& operator=(const Concurrent&) = delete;
 };
 
 struct EntityUnit final {
