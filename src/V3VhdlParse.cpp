@@ -4699,6 +4699,18 @@ class VhdlXmlFrontend final {
             value = std::strtoll(nodep->attr("enum_pos").c_str(), nullptr, 10);
             return true;
         }
+        if (kind == "character_literal") {
+            const std::string id = nodep->attr("identifier");
+            if (id == "'0'" || id == "'L'") {
+                value = 0;
+                return true;
+            }
+            if (id == "'1'" || id == "'H'") {
+                value = 1;
+                return true;
+            }
+            return false;
+        }
         if (kind == "pos_attribute" || kind == "succ_attribute" || kind == "pred_attribute"
             || kind == "val_attribute") {
             int64_t operandv = 0;
