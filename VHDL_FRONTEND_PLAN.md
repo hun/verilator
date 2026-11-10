@@ -24,9 +24,9 @@ new value model and are out of scope.
 | WP1 front end | **GHDL XML path implemented**: entities with ports, architecture signals, concurrent assignments, clocked processes (`rising_edge`/`falling_edge`/`clk'event and clk = '1'`), synchronous and asynchronous reset processes, conditional and selected concurrent assignments, `if`/`elsif`/`else`, `case` (including range and multiple-value choices), enumeration types (literals, subtypes, enum-valued ports and case selectors, `'pos`/`'val`/`'succ`/`'pred` and type-mark `'left`/`'right`/`'high`/`'low`), process variables, indexing and slicing (including dynamic indices), static for loops, for-generate and if-generate blocks (unrolled/selected), static attributes (`'length`, `'high`, `'left`, `'ascending`), `+`/`-`/`*`/`/`/`mod`/`rem`/`**`/`abs` (unary `-`), `and`/`or`/`xor`/`nand`/`nor`/`xnor`/`not`, `=`/`/=`/`<`/`<=`/`>`/`>=`, `&`, `sll`/`srl`/`sla`/`sra`, records (packed-vector layout, member selection, nested records, positional and named aggregates), array `(others => expr)` aggregates, object aliases (including slices and constants), user-defined pure function calls (inlined: locals, if/elsif/else, case, parameter defaults, named associations, nested calls), user-defined procedure calls (inlined: in/out/inout parameters, parameter defaults and named associations, locals, if/elsif/else, case, early return, nested calls; nested subprograms capture the enclosing scope; recursion and out-signal-parameter reads unsupported), qualified expressions, hex/octal/binary bit-string literals, type conversions, `to_unsigned`/`to_signed`/`resize`/`to_integer`/`shift_left`/`shift_right`/`rotate_left`/`rotate_right`/`minimum`/`maximum`, declaration initializers, static constants and generics (defaults and generic maps, with per-binding module specialization) resolved through their analyzed references, user-defined subtypes and constrained array types, and component/direct-entity instantiation with named, positional and open port maps. Component declarations are validated against the bound entity (direction and width). Processes execute once at time zero, as VHDL requires. The in-tree lexer/parser remains reserved and is not used |
 | WP2 semantics | provided by GHDL analysis; Verilator does not repeat it on this path |
 | WP3 elaboration | entity/architecture binding, VHDL-entity instance binding, component-interface validation, for-generate unrolling and if-generate selection; generic defaults and generic maps are elaborated (constant and generic type parameters, with per-binding module specialization) |
-| WP4 lowering | implemented for the supported subset: post-width AST with port `AstVar`s, `AstAssignW`/`AstAssignDly`/`AstAssign`, `AstSenTree` edge/change sensitivity, process splitting, aggregate targets, subprogram inlining, record/array packing |
+| WP4 lowering | implemented for the supported subset: post-width AST with port `AstVar`s, `AstAssignW`/`AstAssignDly`/`AstAssign`, `AstSenTree` edge/change sensitivity, process splitting, aggregate targets, subprogram inlining with static loops/labeled exits and local element updates, static function evaluation, record/array packing |
 | WP5 std packages | partial intrinsic subset: `numeric_std`, `std_logic_misc`, `std_logic_arith` conversions, operator-symbol calls; no full package simulation |
-| WP6 test infrastructure | 45 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
+| WP6 test infrastructure | 52 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
 | WP7 hardening | ongoing: clean Unsupported/Error diagnostics, corpus triage, process-form rejection, control-file handling |
 | WP8 mixed language (M2) | not started |
 
@@ -82,18 +82,18 @@ deferred because `V3LinkCells::autoLoad` still uses the SV parser. Build note: `
 stops at the `verilator_gantt.1` target when `help2man` is absent; both compiler binaries
 build.
 
-## Current coverage and remaining gaps (2026-11-09)
+## Current coverage and remaining gaps (2026-11-10)
 
-Regression: 45 `test_regress/t/t_vhdl_*` tests pass. GHDL `synth` corpus
+Regression: 52 `test_regress/t/t_vhdl_*` tests pass. GHDL `synth` corpus
 (`nodist/ghdl_synth_suite.py --suite synth --jobs 8`, 1139 scripted cases):
 
 | status | count |
 |---|---|
-| PASS | 665 |
-| UNSUPPORTED | 300 |
+| PASS | 741 |
+| UNSUPPORTED | 232 |
 | ERROR | 31 |
 | EXPECTED_FAIL | 48 |
-| GHDL_ERROR | 94 |
+| GHDL_ERROR | 86 |
 | NO_TOP | 1 |
 
 The `ERROR` bucket is mostly real design errors in the corpus (unresolved instances,
@@ -107,16 +107,25 @@ missing architectures, unknown identifiers) plus six pre-existing core faults
    variables/ordering cannot be proven disjoint.
 3. Inout ports and `'Z'` literals: the core tristate/DFG limitation needs core work or a
    broader frontend rejection.
-4. Static-expression and aggregate gaps: pure function calls in locally static
-   expressions, slice widths recovered from tracked variable relations,
-   multi-dimensional arrays, null arrays, and remaining aggregate forms.
-   Integer division/modulus/remainder/exponentiation, `'range` constraints,
-   target-constrained function-local aggregates, shared alternative choices and
-   multi-element positional aggregates are supported.
+4. Static-expression and aggregate gaps: real/`math_real` functions and
+   record-valued functions in locally static expressions, multi-dimensional
+   arrays (deferred by the synthesis subset), null arrays, and remaining
+   aggregate forms. Pure integer/boolean functions with static `if`/`case`/
+   `for`/`while`/`loop` bodies, integer-subtype attributes, subtype marks as
+   slice bounds, constant concatenation case choices, integer division/
+   modulus/remainder/exponentiation, `'range` constraints, target-constrained
+   function-local aggregates, shared alternative choices, multi-element
+   positional aggregates, one-element array indexing, dynamic slice positions
+   and slice widths recovered from tracked variable relations are supported.
 5. Non-logic character/string literal contexts and matching relational operators
    (`?<`/`?<=`/`?>`/`?>=`).
-6. Function-local variable element assignment in inlined functions.
-7. Environment-only validation: full `make test` with `help2man`, lz4 headers and
+6. Process static-loop `next`/`exit`: inside a `case` alternative and targeting
+   an outer loop are clean `Unsupported`. Function-local static loops support
+   both, including labeled exits to outer loops.
+7. Inlined-function gaps: record-valued static functions and interface element
+   associations into a record formal. Function-local element/slice assignments
+   are supported by rebuilding the whole local value.
+8. Environment-only validation: full `make test` with `help2man`, lz4 headers and
    `wavediff` available, plus `make cppcheck`.
 
 ## 1. Approach
