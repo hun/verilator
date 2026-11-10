@@ -267,6 +267,9 @@ struct EntityUnit final {
     bool inLibrary = false;
     FileLine* flp = nullptr;
     std::vector<PortDecl> ports;
+    // Entity declarative items, visible in every architecture of the entity
+    std::vector<Decl> decls;
+    std::vector<TypeDecl> types;
     // Packages named by the enclosing context clause: (library, package)
     std::vector<std::pair<std::string, std::string>> uses;
 };

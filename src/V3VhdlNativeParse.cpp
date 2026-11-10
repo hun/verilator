@@ -603,6 +603,37 @@ void Parser::parseEntity(FileLine* flp) {
             parsePortClause(entity);
             continue;
         }
+        if (isId("shared")) {
+            advance();
+            if (!expectId("variable")) return;
+            parseDeclInto(entity.decls, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("variable")) {
+            advance();
+            parseDeclInto(entity.decls, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("signal")) {
+            advance();
+            parseDeclInto(entity.decls, Decl::SIGNAL);
+            continue;
+        }
+        if (isId("constant")) {
+            advance();
+            parseDeclInto(entity.decls, Decl::CONSTANT);
+            continue;
+        }
+        if (isId("type")) {
+            advance();
+            parseTypeDeclInto(entity.types);
+            continue;
+        }
+        if (isId("subtype")) {
+            advance();
+            parseSubtypeInto(entity.types);
+            continue;
+        }
         if (isId("generic")) {
             unsupported("generic clause");
             return;
@@ -794,6 +825,11 @@ void Parser::parseArchitecture(FileLine* flp) {
             skipContextClause();
             continue;
         }
+        if (isId("default") || isId("attribute") || isId("disconnect")) {
+            // Verification directives and attribute specifications have no synthesis meaning
+            skipContextClause();
+            continue;
+        }
         if (isId("signal")) {
             advance();
             parseDecl(arch, Decl::SIGNAL);
@@ -814,9 +850,16 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseSubtypeDecl(arch);
             continue;
         }
-        if (isId("variable") || isId("shared")) {
-            unsupported("variable declaration at architecture level");
-            return;
+        if (isId("variable")) {
+            advance();
+            parseDecl(arch, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("shared")) {
+            advance();
+            if (!expectId("variable")) return;
+            parseDecl(arch, Decl::VARIABLE);
+            continue;
         }
         if (isId("alias") || isId("component") || isId("attribute") || isId("function")
             || isId("procedure") || isId("package")) {

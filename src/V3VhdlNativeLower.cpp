@@ -343,6 +343,9 @@ class Lowering final {
     AstNodeExpr* lowerPackageMember(const Expr& expr, const std::string& pkgName);
     VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
+    AstNode* lowerClockedAlternatives(const Concurrent& conc, const VType& type,
+                                      AstNodeExpr* lhsp);
+    bool concHasEdge(const Concurrent& conc) const;
     AstNode* lowerSelected(const Concurrent& conc);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
                            std::vector<AstConst*>& cops);
@@ -1653,18 +1656,27 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
                 || attrExpr.a->kind != Expr::NAME) {
                 continue;
             }
-            if (levelExpr.kind != Expr::BINARY || levelExpr.text != "=" || !levelExpr.a
-                || !levelExpr.b || levelExpr.a->kind != Expr::NAME
+            if (levelExpr.kind != Expr::BINARY || (levelExpr.text != "=" && levelExpr.text != "/=")
+                || !levelExpr.a || !levelExpr.b || levelExpr.a->kind != Expr::NAME
                 || levelExpr.a->text != attrExpr.a->text) {
                 continue;
             }
+            // The level operand must be statically '0' or '1'
+            const VType bitT = logicType(flp);
+            AstNodeExpr* const levelConstp = lowerExpr(*levelExpr.b, &bitT);
+            if (!levelConstp) continue;
+            const AstConst* const constp = VN_CAST(levelConstp, Const);
             char level = 0;
-            if (levelExpr.b->kind == Expr::CHAR_LIT) {
-                level = vhdlLogicBit(levelExpr.b->charValue);
-            } else if (levelExpr.b->kind == Expr::BITS_LIT && levelExpr.b->bits.size() == 1) {
-                level = levelExpr.b->bits[0];
+            if (constp && constp->num().width() == 1) {
+                if (constp->num().bitIs1(0))
+                    level = '1';
+                else if (constp->num().bitIs0(0))
+                    level = '0';
             }
-            if (level != '1' && level != '0') continue;
+            const char opChar = levelExpr.text == "=" ? '=' : '/';
+            levelConstp->deleteTree();
+            if (level == 0 || opChar == 0) continue;
+            if (opChar == '/') level = level == '1' ? '0' : '1';  // x /= v with a static v
             AstVar* const varp = lookupVar(*attrExpr.a);
             if (!varp) {
                 flp->v3error("VHDL: unknown signal '" + attrExpr.a->spelling + "' in 'event");
@@ -2236,6 +2248,58 @@ AstNodeExpr* Lowering::lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeE
     }
     matchp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     return matchp;
+}
+
+//! Whether a conditional assignment is gated by a clock edge
+bool Lowering::concHasEdge(const Concurrent& conc) const {
+    for (const auto& alt : conc.alternatives) {
+        if (alt.second && containsEdgeCall(*alt.second)) return true;
+    }
+    return false;
+}
+
+//! A conditional assignment gated by a clock edge is a register: if/elsif with
+//! non-blocking assignments under the edge sensitivity
+AstNode* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType& type,
+                                            AstNodeExpr* lhsp) {
+    FileLine* const flp = conc.flp;
+    // Alternatives before the clocked one are level branches, e.g. an asynchronous
+    // reset; they assign immediately, the clocked branches wait for the edge
+    std::size_t firstEdged = conc.alternatives.size();
+    for (std::size_t i = 0; i < conc.alternatives.size(); ++i) {
+        const auto& alt = conc.alternatives[i];
+        if (alt.second && containsEdgeCall(*alt.second)) {
+            firstEdged = i;
+            break;
+        }
+    }
+    AstNode* restp = nullptr;
+    for (std::size_t i = conc.alternatives.size(); i-- > 0;) {
+        const auto& alt = conc.alternatives[i];
+        AstNodeExpr* valuep = lowerExpr(*alt.first, &type);
+        if (!valuep) {
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        valuep = resizeExpr(valuep, type, flp);
+        const bool level = i < firstEdged;
+        AstNode* const assignp
+            = level ? static_cast<AstNode*>(new AstAssign{flp, lhsp->cloneTree(false), valuep})
+                    : static_cast<AstNode*>(new AstAssignDly{flp, lhsp->cloneTree(false), valuep});
+        if (!alt.second) {  // The final else
+            if (restp) restp->deleteTree();
+            restp = assignp;
+            continue;
+        }
+        AstNodeExpr* const condp = lowerCond(*alt.second);
+        if (!condp) {
+            assignp->deleteTree();
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        restp = new AstIf{flp, condp, assignp, restp};
+    }
+    return restp;
 }
 
 AstNodeExpr* Lowering::lowerAlternatives(const Concurrent& conc, const VType& type) {
@@ -3137,7 +3201,36 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
     for (const auto& use : arch.uses) importPackage(use.second);
 
     // Types are visible to the whole declarative part, and must be registered first
+    for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
     for (const TypeDecl& typeDecl : arch.types) registerType(typeDecl);
+
+    // Entity declarative items are visible to every architecture of the entity
+    int entityVarSeq = 0;
+    for (const Decl& decl : entity.decls) {
+        if (decl.kind == Decl::CONSTANT) {
+            emitConstant(decl, false);
+            continue;
+        }
+        VType type;
+        if (!resolveType(decl.type, type)) continue;
+        for (const auto& name : decl.names) {
+            if (!reserveName(name.first, name.second, decl.flp)) continue;
+            const std::string mangled
+                = "vhdlext_" + std::to_string(++entityVarSeq) + "__" + name.second;
+            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+            m_modp->addStmtsp(varp);
+            m_scope[name.first] = VarInfo{varp, type};
+            if (!decl.init) continue;
+            AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
+            AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
+            if (!rhsp) {
+                lhsp->deleteTree();
+                continue;
+            }
+            rhsp = resizeExpr(rhsp, type, decl.flp);
+            m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
+        }
+    }
 
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
@@ -3202,6 +3295,52 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
         const VType ltype = typeOfTarget(*stmtp->target, lhsp);
         AstNodeExpr* rhsp = nullptr;
         if (stmtp->kind == Concurrent::COND_ASSIGN) {
+            if (concHasEdge(*stmtp)) {
+                // Register clocked by the edge the condition names
+                m_edges.clear();
+                m_initial = false;
+                // Names tested before the clocked branch, e.g. an asynchronous reset
+                std::set<std::string> levelNames;
+                for (const auto& alt : stmtp->alternatives) {
+                    if (alt.second && containsEdgeCall(*alt.second)) break;
+                    if (alt.second) collectExprNames(*alt.second, levelNames);
+                }
+                AstNode* const bodyp = lowerClockedAlternatives(*stmtp, ltype, lhsp);
+                const std::vector<Edge> edges = m_edges;
+                m_edges.clear();
+                AstSenItem* itemsp = nullptr;
+                for (const Edge& edge : edges) {
+                    AstSenItem* const itemp
+                        = new AstSenItem{stmtp->flp, edge.type,
+                                         new AstVarRef{stmtp->flp, edge.varp, VAccess::READ}};
+                    itemsp
+                        = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+                }
+                for (const std::string& name : levelNames) {
+                    const auto it = m_scope.find(name);
+                    if (it == m_scope.end()) continue;
+                    if (std::any_of(edges.begin(), edges.end(), [&](const Edge& edge) {
+                            return edge.varp == it->second.varp;
+                        })) {
+                        continue;
+                    }
+                    AstSenItem* const itemp = new AstSenItem{
+                        stmtp->flp, VEdgeType::ET_CHANGED,
+                        new AstVarRef{stmtp->flp, it->second.varp, VAccess::READ}};
+                    itemsp
+                        = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+                }
+                if (!bodyp || !itemsp) {
+                    if (bodyp) bodyp->deleteTree();
+                    if (itemsp) itemsp->deleteTree();
+                    lhsp->deleteTree();
+                    continue;
+                }
+                m_modp->addStmtsp(new AstAlways{stmtp->flp, VAlwaysKwd::ALWAYS,
+                                                new AstSenTree{stmtp->flp, itemsp}, bodyp});
+                lhsp->deleteTree();
+                continue;
+            }
             rhsp = lowerAlternatives(*stmtp, ltype);
         } else {
             rhsp = lowerExpr(*stmtp->value, &ltype);
