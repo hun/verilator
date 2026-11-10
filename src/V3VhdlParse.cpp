@@ -4725,6 +4725,9 @@ class VhdlXmlFrontend final {
     bool levelResetEdge(const Node* condp, AstVar*& varp, VEdgeType& edgeType) const {
         if (!condp) return false;
         const std::string kind = condp->attr("kind");
+        if (kind == "implicit_condition_operator" || kind == "condition_operator") {
+            return levelResetEdge(condp->child("operand"), varp, edgeType);
+        }
         const Node* namep = nullptr;
         if (kind == "simple_name") {
             namep = condp;

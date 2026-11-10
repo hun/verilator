@@ -20,7 +20,7 @@ architecture rtl of t is
 begin
   process (clk, rst) is
   begin
-    if rst = '1' then
+    if rst then
       q <= '1';
     elsif rising_edge(clk) then
       q <= d;
