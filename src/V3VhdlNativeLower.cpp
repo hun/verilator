@@ -104,6 +104,13 @@ PackageTable::PackageTable()
     : m_implp{new Impl} {}
 PackageTable::~PackageTable() = default;
 
+//! Statically bound value of one generic actual
+struct GenericBinding final {
+    bool isInt = false;
+    int64_t intValue = 0;
+    AstConst* valuep = nullptr;  // Typed constant; cloned when registered, else owned here
+};
+using GenericBindings = std::map<std::string, GenericBinding>;
 class Lowering final {
     AstNetlist* const m_rootp;  // Netlist to emit into
     AstModule* m_modp = nullptr;  // Module being emitted
@@ -143,6 +150,7 @@ class Lowering final {
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
     std::map<std::string, AliasInfo> m_aliases;
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
+    Design* const m_designp;  // Design context for generic specialization
 
     AstNodeDType* findBasic(FileLine* flp, VBasicDTypeKwd kwd) const {
         return m_rootp->typeTablep()->findBasicDType(flp, kwd);
@@ -260,7 +268,11 @@ class Lowering final {
     void registerType(const TypeDecl& decl);
     void emitPackage(const PackageUnit& pkg);
     void importPackage(const std::string& name);
-    void emitConstant(const Decl& decl, bool deferredOk);
+    void emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
+                      const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk);
+    bool registerGenerics(const EntityUnit& entity, const GenericBindings* bindings, bool probe);
+    AstModule* specializeInstance(const Concurrent& conc, const EntityUnit& entity,
+                                  AstModule* basep);
     bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
     AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
     bool applyRange(const TypeSpec& spec, VType& type);
@@ -384,13 +396,15 @@ class Lowering final {
 
 public:
     explicit Lowering(AstNetlist* rootp, const PackageTable::Impl* packagesp = nullptr,
-                      const ModuleMap* modulesp = nullptr)
+                      const ModuleMap* modulesp = nullptr, Design* designp = nullptr)
         : m_rootp{rootp}
         , m_packagesp{packagesp}
-        , m_modulesp{modulesp} {}
+        , m_modulesp{modulesp}
+        , m_designp{designp} {}
     ~Lowering() = default;
 
-    void emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp);
+    bool emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
+              const GenericBindings* bindings = nullptr);
     AstNode* lowerInstance(const Concurrent& conc);
     void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table);
 };
@@ -411,6 +425,16 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         if (enumIt != m_enumConsts.end()) {
             value = static_cast<int64_t>(enumIt->second->num().toUInt());
             return true;
+        }
+        const auto valueIt = m_constValues.find(expr.text);
+        if (valueIt != m_constValues.end()) {
+            const auto constTypeIt = m_constTypes.find(expr.text);
+            if (constTypeIt != m_constTypes.end()
+                && (constTypeIt->second.kind == VType::INT
+                    || constTypeIt->second.kind == VType::ENUM)) {
+                value = static_cast<int64_t>(valueIt->second->num().toUInt());
+                return true;
+            }
         }
         return false;
     }
@@ -3111,7 +3135,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
     for (const TypeDecl& typeDecl : process.types) registerType(typeDecl);
     for (const Decl& decl : process.decls) {
         if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl, false);
+            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
             continue;
         }
         VType type;
@@ -3155,46 +3179,85 @@ bool Lowering::reserveName(const std::string& folded, const std::string& spellin
     return true;
 }
 
-void Lowering::emitConstant(const Decl& decl, bool deferredOk) {
-    if (!decl.init) {
+void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
+                            const TypeSpec& type, const Expr* initp, FileLine* flp,
+                            bool deferredOk) {
+    if (!initp) {
         // A package body completes the constants its specification deferred
-        if (!deferredOk) decl.flp->v3error("VHDL: constant without a value");
+        if (!deferredOk) flp->v3error("VHDL: constant without a value");
         return;
     }
     VType constType;
     bool intConstant = true;
-    if (decl.type.flp && resolveType(decl.type, constType)) intConstant = constType.isInt();
+    if (type.flp && resolveType(type, constType)) intConstant = constType.isInt();
     if (intConstant) {
         int64_t value = 0;
-        if (!evalInt(*decl.init, value)) {
-            unsupportedError(decl.flp, "constant value that is not a static integer expression");
+        if (!evalInt(*initp, value)) {
+            unsupportedError(flp, "constant value that is not a static integer expression");
             return;
         }
-        for (const auto& name : decl.names) {
-            if (!reserveName(name.first, name.second, decl.flp)) continue;
+        for (const auto& name : names) {
+            if (!reserveName(name.first, name.second, flp)) continue;
             m_consts[name.first] = value;
         }
         return;
     }
-    AstNodeExpr* valuep = lowerExpr(*decl.init, &constType);
+    AstNodeExpr* valuep = lowerExpr(*initp, &constType);
     if (!valuep) return;
     if (AstConst* const foldedp = foldToConst(valuep)) valuep = foldedp;
     AstConst* const constp = VN_CAST(valuep, Const);
     if (!constp) {
-        unsupportedError(decl.flp, "constant value that is not static");
+        unsupportedError(flp, "constant value that is not static");
         valuep->deleteTree();
         return;
     }
     constp->dtypep(constType.dtp);
-    for (size_t i = 0; i < decl.names.size(); ++i) {
-        const auto& name = decl.names[i];
-        if (!reserveName(name.first, name.second, decl.flp)) continue;
-        const bool last = i + 1 == decl.names.size();
+    for (size_t i = 0; i < names.size(); ++i) {
+        const auto& name = names[i];
+        if (!reserveName(name.first, name.second, flp)) continue;
+        const bool last = i + 1 == names.size();
         m_ownedConsts.push_back(
             std::unique_ptr<AstConst>(last ? constp : constp->cloneTree(false)));
         m_constValues[name.first] = m_ownedConsts.back().get();
         m_constTypes[name.first] = constType;
     }
+}
+
+//! Register the entity's generics as constants; bindings hold the bound actuals and
+//! the rest fall back to their defaults. A probe binds only what a range needs.
+bool Lowering::registerGenerics(const EntityUnit& entity, const GenericBindings* bindings,
+                                bool probe) {
+    bool ok = true;
+    for (const GenericDecl& gen : entity.generics) {
+        for (const auto& name : gen.names) {
+            if (bindings) {
+                const auto it = bindings->find(name.first);
+                if (it != bindings->end()) {
+                    if (it->second.isInt) {
+                        m_consts[name.first] = it->second.intValue;
+                    } else {
+                        m_ownedConsts.push_back(
+                            std::unique_ptr<AstConst>(it->second.valuep->cloneTree(false)));
+                        m_constValues[name.first] = m_ownedConsts.back().get();
+                        VType declared;
+                        if (resolveType(gen.type, declared)) m_constTypes[name.first] = declared;
+                    }
+                    continue;
+                }
+            }
+            if (!gen.init) {
+                ok = false;
+                continue;
+            }
+            if (probe) {
+                int64_t value = 0;
+                if (evalInt(*gen.init, value)) m_consts[name.first] = value;
+                continue;
+            }
+            emitConstant({name}, gen.type, gen.init.get(), gen.flp, false);
+        }
+    }
+    return ok;
 }
 
 void Lowering::importPackage(const std::string& name) {
@@ -3248,7 +3311,8 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     m_aliases.clear();
     for (const TypeDecl& typeDecl : pkg.types) registerType(typeDecl);
     for (const AliasDecl& alias : pkg.aliases) registerAlias(alias);
-    for (const Decl& decl : pkg.decls) emitConstant(decl, !pkg.isBody);
+    for (const Decl& decl : pkg.decls)
+        emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
 
     PackageInfo info;
     info.aliases = m_aliases;
@@ -3282,7 +3346,8 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
 }
 
-void Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp) {
+bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
+                    const GenericBindings* bindings) {
     m_modp = modp;
 
     for (const auto& use : entity.uses) importPackage(use.second);
@@ -3290,7 +3355,20 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
 
     // Types are visible to the whole declarative part, and must be registered first
     for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
-    for (const TypeDecl& typeDecl : arch.types) registerType(typeDecl);
+    for (const TypeDecl& archType : arch.types) registerType(archType);
+
+    // Generics are constants visible to the port clause and the architecture
+    if (!registerGenerics(entity, bindings, false)) {
+        m_modp = nullptr;
+        m_scope.clear();
+        m_consts.clear();
+        m_constValues.clear();
+        m_constTypes.clear();
+        m_enumConsts.clear();
+        m_ownedConsts.clear();
+        m_types.clear();
+        return false;
+    }
 
     for (const AliasDecl& alias : arch.aliases) registerAlias(alias);
 
@@ -3298,7 +3376,7 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     int entityVarSeq = 0;
     for (const Decl& decl : entity.decls) {
         if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl, false);
+            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
             continue;
         }
         VType type;
@@ -3346,7 +3424,7 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
 
     for (const Decl& decl : arch.decls) {
         if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl, false);
+            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
             continue;
         }
         VType type;
@@ -3381,7 +3459,174 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     m_enumConsts.clear();
     m_ownedConsts.clear();
     m_types.clear();
-    return;
+    return true;
+}
+
+//! Type marks whose subtype a generic's actual can be checked against directly
+static bool isBuiltinGenericMark(const std::string& mark) {
+    static const char* const marks[]
+        = {"integer",   "natural",    "positive",         "boolean",           "bit",
+           "std_logic", "std_ulogic", "std_logic_vector", "std_ulogic_vector", "bit_vector",
+           "unsigned",  "signed",     "u_unsigned",       "u_signed"};
+    for (const char* const candidate : marks) {
+        if (mark == candidate) return true;
+    }
+    return false;
+}
+
+//! Bind an instance's generics and return the module specialized for that binding
+AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit& entity,
+                                        AstModule* basep) {
+    FileLine* const flp = conc.flp;
+    struct Item final {
+        const GenericDecl* declp;
+        std::string folded;
+        std::string spelling;
+    };
+    std::vector<Item> items;
+    for (const GenericDecl& gen : entity.generics) {
+        for (const auto& name : gen.names) items.push_back({&gen, name.first, name.second});
+    }
+    const std::vector<PortAssoc>& assocs = conc.genericAssociations;
+    const bool positional = std::any_of(
+        assocs.begin(), assocs.end(), [](const PortAssoc& assoc) { return assoc.formal.empty(); });
+    auto freeBindings = [](GenericBindings& bs) {
+        for (auto& entry : bs) {
+            if (entry.second.valuep) entry.second.valuep->deleteTree();
+        }
+    };
+    if (positional && assocs.size() > items.size()) {
+        flp->v3error("VHDL: instance of '" + entity.spelling
+                     + "' binds more generics than the entity has");
+        return nullptr;
+    }
+    if (!positional) {
+        for (const PortAssoc& assoc : assocs) {
+            const bool known = std::any_of(items.begin(), items.end(), [&](const Item& item) {
+                return item.folded == assoc.formal;
+            });
+            if (!known) {
+                assoc.flp->v3error("VHDL: entity '" + entity.spelling + "' has no generic '"
+                                   + assoc.formalSpelling + "'");
+                return nullptr;
+            }
+        }
+    }
+    GenericBindings bindings;
+    for (size_t k = 0; k < items.size(); ++k) {
+        const PortAssoc* assocp = nullptr;
+        if (positional) {
+            if (k < assocs.size()) assocp = &assocs[k];
+        } else {
+            for (const PortAssoc& assoc : assocs) {
+                if (assoc.formal == items[k].folded) assocp = &assoc;
+            }
+        }
+        const GenericDecl& gen = *items[k].declp;
+        if (!assocp) {
+            if (!gen.init) {
+                flp->v3error("VHDL: generic '" + items[k].spelling + "' of entity '"
+                             + entity.spelling + "' has no default value and no association");
+                freeBindings(bindings);
+                return nullptr;
+            }
+            continue;
+        }
+        if (!assocp->actual) {
+            assocp->flp->v3error("VHDL: 'open' is not allowed on a generic association");
+            freeBindings(bindings);
+            return nullptr;
+        }
+        if (gen.type.mark == "string") {
+            unsupportedError(assocp->flp, "string generic");
+            freeBindings(bindings);
+            return nullptr;
+        }
+        // The declared type resolves in the entity's scope, where the generics that
+        // precede this one already carry the value bound at this instance
+        ScopeSave saved = saveScope();
+        const std::set<std::string> savedImported = m_imported;
+        for (const auto& use : entity.uses) importPackage(use.second);
+        for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
+        registerGenerics(entity, &bindings, true);
+        VType declared;
+        const bool haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
+                              && resolveType(gen.type, declared);
+        restoreScope(saved);
+        m_imported = savedImported;
+        if (!haveType && isBuiltinGenericMark(gen.type.mark)) {
+            unsupportedError(gen.flp, "generic of type '" + gen.type.mark + "'");
+            freeBindings(bindings);
+            return nullptr;
+        }
+        if (!haveType) {
+            unsupportedError(assocp->flp, "generic of type '" + gen.type.mark + "'");
+            freeBindings(bindings);
+            return nullptr;
+        }
+        GenericBinding binding;
+        bool bound = false;
+        if (declared.isInt()) {
+            bound = evalInt(*assocp->actual, binding.intValue);
+            binding.isInt = bound;
+        }
+        if (!bound) {
+            AstNodeExpr* const valuep = lowerExpr(*assocp->actual, &declared);
+            AstConst* const foldedp = valuep ? foldToConst(valuep) : nullptr;
+            if (foldedp) {
+                binding.valuep = foldedp;
+                bound = true;
+            } else {
+                if (valuep) valuep->deleteTree();
+                if (!V3Error::errorCount()) {
+                    unsupportedError(assocp->flp, "generic actual that is not static");
+                }
+                freeBindings(bindings);
+                return nullptr;
+            }
+        }
+        bindings[items[k].folded] = binding;
+    }
+    if (bindings.empty()) return basep;  // Every generic keeps its default
+    std::string key = entity.name;
+    for (const auto& entry : bindings) {
+        key += "|" + entry.first + "=";
+        if (entry.second.isInt)
+            key += std::to_string(entry.second.intValue);
+        else
+            key += entry.second.valuep->num().ascii(false);
+    }
+    auto& cache = m_designp->specializations;
+    const auto found = cache.find(key);
+    if (found != cache.end()) {
+        AstModule* const cachedp = found->second;
+        freeBindings(bindings);
+        return cachedp;  // Null when an earlier specialization of this key failed
+    }
+    if (++m_designp->specDepth > 32) {
+        unsupportedError(flp, "generic binding recursion that does not terminate");
+        freeBindings(bindings);
+        return nullptr;
+    }
+    const auto archIt = m_designp->archs.find(entity.name);
+    if (archIt == m_designp->archs.end()) {
+        flp->v3error("VHDL: entity '" + entity.spelling
+                     + "' has no architecture to specialize for this instance");
+        cache[key] = nullptr;
+        freeBindings(bindings);
+        return nullptr;
+    }
+    AstModule* const specp = new AstModule{
+        entity.flp, entity.spelling + "__Vgen" + std::to_string(++m_designp->specSeq),
+        entity.libname};
+    specp->inLibrary(entity.inLibrary);
+    m_rootp->addModulesp(specp);
+    Lowering child{m_rootp, m_packagesp, m_modulesp, m_designp};
+    const bool ok = child.emit(entity, *archIt->second, specp, &bindings);
+    --m_designp->specDepth;
+    freeBindings(bindings);
+    cache[key] = ok ? specp : nullptr;
+    return ok ? specp : nullptr;
 }
 
 //! An instantiation becomes an AstCell bound to the instantiated entity's module
@@ -3398,7 +3643,21 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                      + conc.instanceLabel + "'");
         return nullptr;
     }
-    AstModule* const modp = modIt->second;
+    AstModule* modp = modIt->second;
+    const EntityUnit* entityp = nullptr;
+    if (m_designp) {
+        const auto entityIt = m_designp->entities.find(conc.instanceName);
+        if (entityIt != m_designp->entities.end()) entityp = entityIt->second;
+    }
+    if (!conc.genericAssociations.empty() && (!entityp || entityp->generics.empty())) {
+        flp->v3error("VHDL: generic map on instance '" + conc.instanceLabel + "' of '"
+                     + conc.instanceName + "', which has no generics");
+        return nullptr;
+    }
+    if (entityp && !entityp->generics.empty()) {
+        modp = specializeInstance(conc, *entityp, modp);
+        if (!modp) return nullptr;
+    }
     std::vector<AstVar*> ports;
     for (AstNode* const itemp : modp->stmtspList()) {
         AstVar* const varp = VN_CAST(itemp, Var);
@@ -3581,7 +3840,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
     for (const TypeDecl& typeDecl : types) registerType(typeDecl);
     for (const Decl& decl : decls) {
         if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl, false);
+            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
             continue;
         }
         VType type;
@@ -3609,6 +3868,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
 
 void Lowering::emitConcurrent(const Concurrent& conc) {
     const Concurrent& stmt = conc;
+    if (stmt.kind == Concurrent::ASSERT) return;  // Synthesis ignores assertions
     if (stmt.kind == Concurrent::GEN_FOR) {
         // A generate loop is unrolled with its parameter bound as a constant
         int64_t left = 0;
@@ -3648,18 +3908,19 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         return;
     }
     if (stmt.kind == Concurrent::GEN_IF) {
-        int64_t value = 0;
-        if (!stmt.cond || !evalInt(*stmt.cond, value)) {
+        AstNodeExpr* const condp = stmt.cond ? lowerCond(*stmt.cond) : nullptr;
+        AstConst* const foldedp = condp ? foldToConst(condp) : nullptr;
+        if (!foldedp) {
             unsupportedError(stmt.flp, "generate condition that is not static");
             return;
         }
-        const std::vector<std::unique_ptr<Concurrent>>& taken
-            = value != 0 ? stmt.body : stmt.elseBody;
+        const bool taken = foldedp->num().mostSetBitP1() == 1 && foldedp->num().toUInt();
+        const std::vector<std::unique_ptr<Concurrent>>& body = taken ? stmt.body : stmt.elseBody;
         const ScopeSave saved = saveScope();
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
         emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
-        for (const auto& bodyConcp : taken) {
+        for (const auto& bodyConcp : body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
         m_genSuffix = savedSuffix;
@@ -3782,10 +4043,10 @@ void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
     }
 }
 
-void lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-           const PackageTable& table, const ModuleMap& modules) {
-    Lowering lowering{rootpFromModules(modules), &table.impl(), &modules};
-    lowering.emit(entity, arch, modp);
+bool lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
+           const PackageTable& table, const ModuleMap& modules, Design& design) {
+    Lowering lowering{rootpFromModules(modules), &table.impl(), &modules, &design};
+    return lowering.emit(entity, arch, modp);
 }
 
 }  // namespace vhdlnative

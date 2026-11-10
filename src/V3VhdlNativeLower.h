@@ -60,9 +60,20 @@ void lowerPackages(const std::vector<PackageUnit>& packages, AstNetlist* rootp,
 void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
                    ModuleMap& modules) VL_MT_DISABLED;
 
-//! Lower one entity/architecture pair into the module created for its entity
-void lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-           const PackageTable& table, const ModuleMap& modules) VL_MT_DISABLED;
+//! Design context shared by every lowering of one run. Entities whose generics lack
+//! a default get a module per generic binding; the specializations are cached by key.
+struct Design final {
+    std::map<std::string, const EntityUnit*> entities;  // Folded entity name -> entity
+    std::map<std::string, const Architecture*> archs;  // Folded entity name -> architecture
+    std::map<std::string, AstModule*> specializations;  // Generic binding key -> module
+    int specSeq = 0;  // Disambiguates the specialized module names
+    int specDepth = 0;  // Generic specialization recursion depth
+};
+
+//! Lower one entity/architecture pair into the module created for its entity. False
+//! if the entity's generics have no defaults to elaborate, and no binding supplied
+bool lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
+           const PackageTable& table, const ModuleMap& modules, Design& design) VL_MT_DISABLED;
 
 }  // namespace vhdlnative
 

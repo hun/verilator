@@ -23,18 +23,18 @@ int main(int argc, char** argv) {
             ++fails;
         }
     };
-    const auto checkAll = [&](int q, int qg, int qp, int qn, int qc, int qf, int qr, int qe,
-                              int qe2) {
-        check("q", static_cast<int>(topp->q), q);
-        check("qg", static_cast<int>(topp->qg), qg);
-        check("qp", static_cast<int>(topp->qp), qp);
-        check("qn", static_cast<int>(topp->qn), qn);
-        check("qc", static_cast<int>(topp->qc), qc);
-        check("qf", static_cast<int>(topp->qf), qf);
-        check("qr", static_cast<int>(topp->qr), qr);
-        check("qe", static_cast<int>(topp->qe), qe);
-        check("qe2", static_cast<int>(topp->qe2), qe2);
-    };
+    const auto checkAll
+        = [&](int q, int qg, int qp, int qn, int qc, int qf, int qr, int qe, int qe2) {
+              check("q", static_cast<int>(topp->q), q);
+              check("qg", static_cast<int>(topp->qg), qg);
+              check("qp", static_cast<int>(topp->qp), qp);
+              check("qn", static_cast<int>(topp->qn), qn);
+              check("qc", static_cast<int>(topp->qc), qc);
+              check("qf", static_cast<int>(topp->qf), qf);
+              check("qr", static_cast<int>(topp->qr), qr);
+              check("qe", static_cast<int>(topp->qe), qe);
+              check("qe2", static_cast<int>(topp->qe2), qe2);
+          };
 
     // Initialize every register: a rising edge with d=0, then a falling edge
     topp->clk = 0;

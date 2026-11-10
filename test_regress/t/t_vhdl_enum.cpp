@@ -34,8 +34,8 @@ int main(int argc, char** argv) {
             ++fails;
         }
         if (static_cast<int>(topp->q) != (state == 0)) {
-            std::printf("%%Error: step %d q=%d state=%d\n", step,
-                        static_cast<int>(topp->q), state);
+            std::printf("%%Error: step %d q=%d state=%d\n", step, static_cast<int>(topp->q),
+                        state);
             ++fails;
         }
         if (static_cast<int>(topp->pos_o) != state) {

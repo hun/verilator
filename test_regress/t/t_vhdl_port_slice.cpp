@@ -38,8 +38,8 @@ int main(int argc, char** argv) {
                     };
                     for (const auto& check : checks) {
                         if (check.got != check.want) {
-                            std::printf("%%Error: i0=%d i1=%d i2=%d i3=%d %s=%d expected %d\n",
-                                        i0, i1, i2, i3, check.name, check.got, check.want);
+                            std::printf("%%Error: i0=%d i1=%d i2=%d i3=%d %s=%d expected %d\n", i0,
+                                        i1, i2, i3, check.name, check.got, check.want);
                             ++fails;
                         }
                     }

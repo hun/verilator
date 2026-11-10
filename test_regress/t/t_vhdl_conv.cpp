@@ -94,10 +94,10 @@ int main(int argc, char** argv) {
                 std::printf("%%Error: a=%d conv1=%d conv2=%d\n", a, conv1, conv2);
                 ++fails;
             }
-            if (red_and != wantAnd || red_func != wantAnd || red_or != wantOr
-                || red_call != wantOr || red_xor != wantXor || red_nand != !wantAnd) {
-                std::printf("%%Error: a=%d reductions %d %d %d %d %d %d\n", a, red_and,
-                            red_or, red_xor, red_nand, red_call, red_func);
+            if (red_and != wantAnd || red_func != wantAnd || red_or != wantOr || red_call != wantOr
+                || red_xor != wantXor || red_nand != !wantAnd) {
+                std::printf("%%Error: a=%d reductions %d %d %d %d %d %d\n", a, red_and, red_or,
+                            red_xor, red_nand, red_call, red_func);
                 ++fails;
             }
             if (y != a) {
@@ -128,8 +128,7 @@ int main(int argc, char** argv) {
             const int agg1 = static_cast<int>(topp->agg1);
             const int agg2 = static_cast<int>(topp->agg2);
             const int agg3 = static_cast<int>(topp->agg3);
-            const int wantAgg0
-                = (((a >> 2) & 1) ? 0x01 : 0x00) | (((a >> 3) & 1) ? 0xfe : 0x00);
+            const int wantAgg0 = (((a >> 2) & 1) ? 0x01 : 0x00) | (((a >> 3) & 1) ? 0xfe : 0x00);
             if (agg0 != wantAgg0) {
                 std::printf("%%Error: a=%d agg0=%d\n", a, agg0);
                 ++fails;

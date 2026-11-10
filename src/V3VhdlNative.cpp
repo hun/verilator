@@ -49,6 +49,7 @@
 #include "V3VhdlNativeAst.h"
 #include "V3VhdlNativeLower.h"
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -87,8 +88,14 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     // Create the module of every entity first, so instances can bind to any of them
     vhdlnative::ModuleMap modules;
     vhdlnative::createModules(library.entities, rootp, modules);
+    vhdlnative::Design design;
+    for (const vhdlnative::EntityUnit& entity : library.entities) {
+        design.entities[entity.name] = &entity;
+    }
+    for (const auto& entry : archByEntity) design.archs[entry.first] = entry.second;
 
     std::set<std::string> entityNames;
+    std::vector<const vhdlnative::EntityUnit*> unelaborated;
     for (const vhdlnative::EntityUnit& entity : library.entities) {
         if (!entityNames.insert(entity.name).second) {
             entity.flp->v3error("Duplicate VHDL entity: '" + entity.spelling + "'");
@@ -100,11 +107,31 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
                                 + "' has no architecture; cannot elaborate it");
             continue;
         }
-        vhdlnative::lower(entity, *it->second, modules[entity.name], packages, modules);
+        if (!vhdlnative::lower(entity, *it->second, modules[entity.name], packages, modules,
+                               design)) {
+            unelaborated.push_back(&entity);
+        }
     }
     for (const vhdlnative::Architecture& arch : library.archs) {
         if (!entityNames.count(arch.entityName)) {
             arch.flp->v3error("VHDL architecture does not name a declared entity");
+        }
+    }
+    // An entity whose generics have no defaults elaborates only through instances
+    for (const vhdlnative::EntityUnit* const entityp : unelaborated) {
+        const std::string prefix = entityp->name + "|";
+        const bool covered = std::any_of(
+            design.specializations.begin(), design.specializations.end(), [&](const auto& entry) {
+                return entry.second && entry.first.compare(0, prefix.size(), prefix) == 0;
+            });
+        if (covered) {
+            // Only the specializations are referenced; the empty base would look like a top
+            AstModule* const modp = modules[entityp->name];
+            VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
+        } else {
+            entityp->flp->v3error("VHDL: entity '" + entityp->spelling
+                                  + "' has a generic without a default value, and no instance "
+                                    "binds it");
         }
     }
 }

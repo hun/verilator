@@ -216,6 +216,14 @@ struct Decl final {
         : kind{kind_} {}
 };
 
+//! One entity generic: a constant with an optional default value
+struct GenericDecl final {
+    FileLine* flp = nullptr;
+    std::vector<std::pair<std::string, std::string>> names;
+    TypeSpec type;
+    ExprP init;
+};
+
 //! `alias name [: subtype_mark] is designator;` renames an existing object
 struct AliasDecl final {
     FileLine* flp = nullptr;
@@ -276,6 +284,7 @@ struct Concurrent final {
         GEN_IF,
         BLOCK,
         INSTANCE,
+        ASSERT,  // `assert`; synthesis ignores assertions, only the syntax matters
     } kind;
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/COND_ASSIGN/SEL_ASSIGN
@@ -295,6 +304,8 @@ struct Concurrent final {
     std::string instanceLabel;
     std::string instanceName;  // Folded entity or component name
     std::vector<PortAssoc> associations;
+    // INSTANCE: the `generic map` associations, formal names the generic constant
+    std::vector<PortAssoc> genericAssociations;
     std::vector<Decl> decls;  // BLOCK: declarative items
     std::vector<TypeDecl> types;  // BLOCK
     std::vector<std::unique_ptr<Concurrent>> body;  // GEN_*/BLOCK: statements
@@ -317,6 +328,8 @@ struct EntityUnit final {
     std::vector<TypeDecl> types;
     // Packages named by the enclosing context clause: (library, package)
     std::vector<std::pair<std::string, std::string>> uses;
+    // Generic constants, visible in the port clause and every architecture
+    std::vector<GenericDecl> generics;
 };
 
 struct Architecture final {

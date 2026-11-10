@@ -146,7 +146,8 @@ class Parser final {
     void parseConcurrentStatement(Architecture& arch);
     bool parseChoices(std::vector<ExprP>& choices);
     void parseInstance(Architecture& arch, FileLine* flp, const std::string& label, bool direct);
-    void parsePortMap(Concurrent& inst);
+    void parseGenericClause(EntityUnit& entity);
+    void parseAssocList(std::vector<PortAssoc>& out, const char* what);
     void parseComponentDecl(Architecture& arch);
     void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
                              std::vector<Decl>* decls = nullptr,
@@ -593,6 +594,43 @@ void Parser::parsePortClause(EntityUnit& entity) {
     expectSym(";");
 }
 
+//! `generic (name_list : subtype_indication [:= default], ...);`
+void Parser::parseGenericClause(EntityUnit& entity) {
+    if (!acceptSym("(")) {
+        error("expected '(' after 'generic'");
+        return;
+    }
+    for (;;) {
+        if (m_failed) return;
+        if (isId("type")) {
+            unsupported("generic type parameter");
+            return;
+        }
+        GenericDecl generic;
+        generic.flp = m_cur.flp;
+        parseNameList(generic.names);
+        if (m_failed) return;
+        // IEEE 1800-2023 17.2: a generic's mode is omitted or `in`
+        if (acceptId("in")) {
+        } else if (isId("out") || isId("inout") || isId("buffer") || isId("linkage")) {
+            unsupported("generic mode '" + m_cur.text + "'");
+            return;
+        }
+        parseTypeSpec(generic.type);
+        if (m_failed) return;
+        if (acceptSym(":=")) {
+            generic.init = parseExpr();
+            if (!generic.init) return;
+        }
+        entity.generics.push_back(std::move(generic));
+        if (acceptSym(";")) continue;
+        if (acceptSym(")")) break;
+        error("expected ';' or ')' in a generic clause, got '" + m_cur.text + "'");
+        return;
+    }
+    expectSym(";");
+}
+
 void Parser::parseEntity(FileLine* flp) {
     Token nameTok;
     if (!takeId(nameTok)) return;
@@ -643,8 +681,9 @@ void Parser::parseEntity(FileLine* flp) {
             continue;
         }
         if (isId("generic")) {
-            unsupported("generic clause");
-            return;
+            advance();
+            parseGenericClause(entity);
+            continue;
         }
         if (isId("begin")) {
             unsupported("entity statement part");
@@ -883,13 +922,14 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
         if (isId("generic")) {
             advance();
             if (!expectId("map")) return;
-            unsupported("generic map on an instance");
-            return;
+            parseAssocList(inst->genericAssociations, "generic");
+            if (m_failed) return;
+            continue;
         }
         if (isId("port")) {
             advance();
             if (!expectId("map")) return;
-            parsePortMap(*inst);
+            parseAssocList(inst->associations, "port");
             if (m_failed) return;
             continue;
         }
@@ -902,10 +942,10 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
     arch.stmts.push_back(std::move(inst));
 }
 
-//! `(formal [range] => actual, ...)` associations of a port map
-void Parser::parsePortMap(Concurrent& inst) {
+//! `(formal [range] => actual, ...)` associations of a port or generic map
+void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
     if (!acceptSym("(")) {
-        error("expected '(' after 'port map'");
+        error(std::string{"expected '(' after '"} + what + " map'");
         return;
     }
     for (;;) {
@@ -951,7 +991,7 @@ void Parser::parsePortMap(Concurrent& inst) {
                 assoc.hasFormalRange = true;
             }
             if (!acceptSym("=>")) {
-                error("expected '=>' in a port association");
+                error(std::string{"expected '=>' in a "} + what + " association");
                 return;
             }
             if (isId("open")) {
@@ -961,11 +1001,11 @@ void Parser::parsePortMap(Concurrent& inst) {
                 if (!assoc.actual) return;
             }
         } else {
-            // Positional association: the actual maps to the next port in order
+            // Positional association: the actual maps to the next item in order
             assoc.actual = parseExpr();
             if (!assoc.actual) return;
         }
-        inst.associations.push_back(std::move(assoc));
+        out.push_back(std::move(assoc));
         if (!acceptSym(",")) break;
     }
     expectSym(")");
@@ -1260,7 +1300,26 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         arch.stmts.push_back(std::move(block));
         return;
     }
-    if (isId("entity") || isId("component") || isId("case") || isId("assert")) {
+    if (isId("assert")) {
+        advance();
+        auto conc = std::make_unique<Concurrent>(Concurrent::ASSERT);
+        conc->flp = flp;
+        conc->target = parseExpr();  // The condition
+        if (!conc->target) return;
+        if (acceptId("report")) {
+            conc->value = parseExpr();
+            if (!conc->value) return;
+        }
+        if (acceptId("severity")) {
+            Token sevTok;
+            if (!takeId(sevTok)) return;
+            (void)sevTok;  // Synthesis ignores the severity
+        }
+        if (!acceptSym(";")) error("expected ';' after 'assert'");
+        arch.stmts.push_back(std::move(conc));
+        return;
+    }
+    if (isId("entity") || isId("component") || isId("case")) {
         unsupported("concurrent statement '" + m_cur.text + "'");
         return;
     }

@@ -42,8 +42,8 @@ int main(int argc, char** argv) {
                     };
                     for (const auto& check : checks) {
                         if (check.got != check.want) {
-                            std::printf("%%Error: a=%d b=%d c=%d d=%d %s=%d expected %d\n", a,
-                                        b, c, d, check.name, check.got, check.want);
+                            std::printf("%%Error: a=%d b=%d c=%d d=%d %s=%d expected %d\n", a, b,
+                                        c, d, check.name, check.got, check.want);
                             ++fails;
                         }
                     }

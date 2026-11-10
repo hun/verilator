@@ -46,8 +46,7 @@ int main(int argc, char** argv) {
     topp->eval();
     // The first edge after reset deassertion counts 0 -> 1
     if (static_cast<int>(topp->q) != 1) {
-        std::printf("%%Error: after reset edge: q=%d expected 1\n",
-                    static_cast<int>(topp->q));
+        std::printf("%%Error: after reset edge: q=%d expected 1\n", static_cast<int>(topp->q));
         ++fails;
     }
 
