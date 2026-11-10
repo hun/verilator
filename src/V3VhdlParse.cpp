@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -318,6 +319,14 @@ class VhdlXmlFrontend final {
         bool readable = true;  // False for an out signal parameter, whose reads are rejected
     };
     using FuncEnv = std::map<std::string, InlineBinding>;  // Subprogram bindings during inlining
+    using FuncCont = std::function<AstNodeExpr*(FuncEnv&)>;  // Continuation for inlining
+    //! Continuations of active static function loops, for labeled exit/next
+    struct FuncLoopTarget final {
+        std::string label;
+        const FuncCont* nextp = nullptr;  // Continue with the following iteration
+        const FuncCont* exitp = nullptr;  // Continue after the loop
+    };
+    std::vector<FuncLoopTarget> m_funcLoopTargets;
     FuncEnv* m_inlineEnvp = nullptr;  // Active subprogram environment, or nullptr
     std::set<const Node*> m_inlineBodies;  // Bodies being inlined (recursion guard)
 
@@ -1754,32 +1763,37 @@ class VhdlXmlFrontend final {
         exprp->foreach([](AstVarRef* refp) { refp->access(VAccess::READ); });
     }
 
-    //! Merge variable values of two branch environments into env under condp
-    void funcEnvMerge(FuncEnv& env, AstNodeExpr* const condp, const FuncEnv& thenEnv,
-                      const FuncEnv& elseEnv) {
-        std::set<std::string> names;
-        for (const auto& pair : thenEnv) names.insert(pair.first);
-        for (const auto& pair : elseEnv) names.insert(pair.first);
-        for (const auto& name : names) {
-            const auto thenIt = thenEnv.find(name);
-            const auto elseIt = elseEnv.find(name);
-            AstNodeExpr* thenp
-                = thenIt != thenEnv.end() ? thenIt->second.exprp->cloneTree(false) : nullptr;
-            AstNodeExpr* elsep
-                = elseIt != elseEnv.end() ? elseIt->second.exprp->cloneTree(false) : nullptr;
-            if (!thenp) thenp = elsep->cloneTree(false);
-            if (!elsep) elsep = thenp->cloneTree(false);
-            AstCond* const condp2
-                = new AstCond{condp->fileline(), condp->cloneTree(false), thenp, elsep};
-            condp2->dtypep(thenp->dtypep());
-            funcEnvSet(env, name, condp2);
-        }
+    //! Value of a function-local vector after replacing one element/slice.  Locals are
+    //! bound to expressions, so an element assignment rebuilds the whole value.
+    AstNodeExpr* updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
+                                    AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width) {
+        const int total = oldp->dtypep()->width();
+        AstNodeExpr* valp = valuep;
+        if (valp->width() != width) valp = resizeExpr(valp, elemDtp);
+        AstNodeExpr* const extendedp
+            = valp->width() == total ? valp : new AstExtend{flp, valp, total};
+        AstNodeExpr* const shiftedp = new AstShiftL{flp, extendedp, lsbp->cloneTree(false), total};
+        const uint64_t maskValue
+            = width >= 64 ? ~static_cast<uint64_t>(0) : ((static_cast<uint64_t>(1) << width) - 1);
+        AstNodeExpr* const onesp = makeConst(flp, oldp->dtypep(), maskValue);
+        AstNodeExpr* const maskp = new AstShiftL{flp, onesp, lsbp, total};
+        AstNodeExpr* const notmaskp = new AstNot{flp, maskp->cloneTree(false)};
+        notmaskp->dtypep(maskp->dtypep());
+        AstNodeExpr* const clearedp = new AstAnd{flp, oldp, notmaskp};
+        clearedp->dtypep(oldp->dtypep());
+        AstNodeExpr* const setp = new AstAnd{flp, shiftedp, maskp};
+        setp->dtypep(oldp->dtypep());
+        AstNodeExpr* const resultp = new AstOr{flp, clearedp, setp};
+        resultp->dtypep(oldp->dtypep());
+        return resultp;
     }
 
-    //! Evaluate a function-body statement list; returns the function result of this path,
-    //! or nullptr when the path falls off the end of the list.  Updates env.
+    //! Evaluate a function-body statement list into the function result for this path.
+    //! `cont` supplies the result when the block falls through to the next statement;
+    //! `exitContp` is the enclosing static loop's exit target, if any.  Updates env.
     AstNodeExpr* evalFuncBlock(const std::vector<const Node*>& stmts, size_t index, FuncEnv& env,
-                               const Node* bodyp, int depth) {
+                               const FuncCont& cont, const FuncCont* exitContp, const Node* bodyp,
+                               int depth) {
         VL_RESTORER(m_inlineEnvp);
         m_inlineEnvp = &env;
         if (depth > 64) {
@@ -1796,11 +1810,46 @@ class VhdlXmlFrontend final {
                     unsupported(stmtp, "variable assignment without a target");
                     return nullptr;
                 }
-                if (targetp->attr("kind") != "simple_name") {
-                    // Function locals are bound to values, so sub-element updates cannot
-                    // be applied without a deep value rewrite
-                    unsupported(stmtp, "assignment to a variable element in an inlined function");
-                    return nullptr;
+                const std::string targetKind = targetp->attr("kind");
+                if (targetKind != "simple_name") {
+                    // Locals are bound to values: rebuild the whole value around the update
+                    if (targetKind != "indexed_name" && targetKind != "slice_name"
+                        && targetKind != "selected_element") {
+                        unsupported(stmtp, "assignment target form in an inlined function");
+                        return nullptr;
+                    }
+                    const Node* const prefixp = targetp->child("prefix");
+                    if (!prefixp || prefixp->attr("kind") != "simple_name") {
+                        unsupported(stmtp,
+                                    "assignment to a variable element in an inlined function");
+                        return nullptr;
+                    }
+                    const std::string baseName = vhdlFold(prefixp->attr("identifier"));
+                    const auto baseIt = env.find(baseName);
+                    if (baseIt == env.end() || !baseIt->second.exprp) {
+                        unsupported(stmtp,
+                                    "assignment to a variable element in an inlined function");
+                        return nullptr;
+                    }
+                    AstNodeExpr* const readp = lowerExpr(targetp, nullptr);
+                    AstSel* const selp = VN_CAST(readp, Sel);
+                    if (!selp) {
+                        if (readp) VL_DO_DANGLING(readp->deleteTree(), readp);
+                        unsupported(stmtp,
+                                    "assignment to a variable element in an inlined function");
+                        return nullptr;
+                    }
+                    AstNodeExpr* const valuep = lowerExpr(exprp, selp->dtypep());
+                    if (!valuep) {
+                        VL_DO_DANGLING(readp->deleteTree(), readp);
+                        return nullptr;
+                    }
+                    AstNodeExpr* const updatedp = updateLocalElement(
+                        flpOf(stmtp), baseIt->second.exprp->cloneTree(false), valuep,
+                        selp->dtypep(), selp->lsbp()->cloneTree(false), selp->widthConst());
+                    VL_DO_DANGLING(readp->deleteTree(), readp);
+                    funcEnvSet(env, baseName, updatedp);
+                    continue;
                 }
                 // The target constrains the value, e.g. an aggregate or literal width
                 const std::string targetName = vhdlFold(targetp->attr("identifier"));
@@ -1825,33 +1874,88 @@ class VhdlXmlFrontend final {
             if (kind == "return_statement") {
                 return lowerExpr(stmtp->child("expression"), nullptr);
             }
-            if (kind == "if_statement") {
-                return evalFuncIf(stmtp, stmts, i, env, bodyp, depth + 1);
+            if (kind == "if_statement" || kind == "case_statement"
+                || kind == "for_loop_statement") {
+                // Control statements continue with the rest of this statement list
+                const FuncCont restCont = [&, i](FuncEnv& restEnv) -> AstNodeExpr* {
+                    return evalFuncBlock(stmts, i + 1, restEnv, cont, exitContp, bodyp, depth);
+                };
+                if (kind == "if_statement") {
+                    return evalFuncIf(stmtp, env, restCont, exitContp, bodyp, depth + 1);
+                }
+                if (kind == "case_statement") {
+                    return evalFuncCase(stmtp, env, restCont, exitContp, bodyp, depth + 1);
+                }
+                return evalFuncFor(stmtp, env, restCont, exitContp, bodyp, depth + 1);
             }
-            if (kind == "case_statement") {
-                return evalFuncCase(stmtp, stmts, i, env, bodyp, depth + 1);
+            if (kind == "exit_statement" || kind == "next_statement") {
+                const Node* const condp = stmtp->child("condition");
+                AstNodeExpr* const condExprp
+                    = condp ? lowerExpr(condp, bitDType(flpOf(stmtp))) : nullptr;
+                if (condp && !condExprp) return nullptr;
+                AstNodeExpr* targetp = nullptr;
+                const Node* const labelp = stmtp->child("loop_label");
+                if (labelp) {
+                    // A label selects that active loop; the innermost match wins
+                    const std::string label = vhdlFold(labelp->attr("identifier"));
+                    const FuncLoopTarget* foundp = nullptr;
+                    for (size_t t = m_funcLoopTargets.size(); t-- > 0;) {
+                        if (vhdlFold(m_funcLoopTargets[t].label) == label) {
+                            foundp = &m_funcLoopTargets[t];
+                            break;
+                        }
+                    }
+                    if (!foundp) {
+                        unsupported(stmtp, kind == "exit_statement"
+                                               ? "exit statement to an unknown loop"
+                                               : "next statement to an unknown loop");
+                        return nullptr;
+                    }
+                    targetp
+                        = kind == "exit_statement" ? (*foundp->exitp)(env) : (*foundp->nextp)(env);
+                } else if (kind == "exit_statement") {
+                    if (!exitContp) {
+                        unsupported(stmtp, "exit statement outside a static loop");
+                        return nullptr;
+                    }
+                    targetp = (*exitContp)(env);
+                } else {
+                    targetp = cont(env);
+                }
+                if (!condExprp) return targetp;
+                // The statements after a conditional exit/next only run when it is not taken
+                AstNodeExpr* const restp
+                    = evalFuncBlock(stmts, i + 1, env, cont, exitContp, bodyp, depth);
+                if (!targetp || !restp) {
+                    error(stmtp, "VHDL function does not return a value on all paths");
+                    if (targetp) VL_DO_DANGLING(targetp->deleteTree(), targetp);
+                    if (restp) VL_DO_DANGLING(restp->deleteTree(), restp);
+                    return nullptr;
+                }
+                AstCond* const resultp = new AstCond{flpOf(stmtp), condExprp, targetp, restp};
+                resultp->dtypep(targetp->dtypep());
+                return resultp;
             }
             unsupported(stmtp, "statement '" + kind + "' in a VHDL function body");
             return nullptr;
         }
-        return nullptr;
+        return cont(env);
     }
 
-    //! Evaluate an if/elsif/else statement plus the statements that follow it
-    AstNodeExpr* evalFuncIf(const Node* ifp, const std::vector<const Node*>& stmts, size_t index,
-                            FuncEnv& env, const Node* bodyp, int depth) {
+    //! Evaluate an if/elsif/else statement; each path continues through `cont`
+    AstNodeExpr* evalFuncIf(const Node* ifp, FuncEnv& env, const FuncCont& cont,
+                            const FuncCont* exitContp, const Node* bodyp, int depth) {
         VL_RESTORER(m_inlineEnvp);
         m_inlineEnvp = &env;
         AstNodeExpr* const condp = lowerExpr(ifp->child("condition"), bitDType(flpOf(ifp)));
         if (!condp) return nullptr;
         FuncEnv thenEnv = cloneFuncEnv(env);
-        AstNodeExpr* thenResultp = evalFuncBlock(
-            childEls(ifp->child("sequential_statement_chain")), 0, thenEnv, bodyp, depth);
+        AstNodeExpr* const thenResultp
+            = evalFuncBlock(childEls(ifp->child("sequential_statement_chain")), 0, thenEnv, cont,
+                            exitContp, bodyp, depth);
         FuncEnv elseEnv = cloneFuncEnv(env);
-        AstNodeExpr* elseResultp
-            = evalFuncElse(ifp->child("else_clause"), stmts, index + 1, elseEnv, bodyp, depth);
-        if (!thenResultp) { thenResultp = evalFuncBlock(stmts, index + 1, thenEnv, bodyp, depth); }
-        if (!elseResultp) { elseResultp = evalFuncBlock(stmts, index + 1, elseEnv, bodyp, depth); }
+        AstNodeExpr* const elseResultp
+            = evalFuncElse(ifp->child("else_clause"), elseEnv, cont, exitContp, bodyp, depth);
         if (!thenResultp || !elseResultp) {
             error(ifp, "VHDL function does not return a value on all paths");
             if (thenResultp) VL_DO_DANGLING(thenResultp->deleteTree(), thenResultp);
@@ -1867,30 +1971,27 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
-    //! Evaluate an else/elsif clause chain, continuing with stmts[index] when it falls through
-    AstNodeExpr* evalFuncElse(const Node* elsep, const std::vector<const Node*>& stmts,
-                              size_t index, FuncEnv& env, const Node* bodyp, int depth) {
+    //! Evaluate an else/elsif clause chain; a missing clause continues through `cont`
+    AstNodeExpr* evalFuncElse(const Node* elsep, FuncEnv& env, const FuncCont& cont,
+                              const FuncCont* exitContp, const Node* bodyp, int depth) {
         VL_RESTORER(m_inlineEnvp);
         m_inlineEnvp = &env;
-        if (!elsep) return evalFuncBlock(stmts, index, env, bodyp, depth);
+        if (!elsep) return cont(env);
         const std::string kind = elsep->attr("kind");
         const Node* const condp = elsep->child("condition");
         if (kind == "else" || !condp) {
-            AstNodeExpr* resultp = evalFuncBlock(
-                childEls(elsep->child("sequential_statement_chain")), 0, env, bodyp, depth);
-            if (!resultp) resultp = evalFuncBlock(stmts, index, env, bodyp, depth);
-            return resultp;
+            return evalFuncBlock(childEls(elsep->child("sequential_statement_chain")), 0, env,
+                                 cont, exitContp, bodyp, depth);
         }
         AstNodeExpr* const condExprp = lowerExpr(condp, bitDType(flpOf(elsep)));
         if (!condExprp) return nullptr;
         FuncEnv thenEnv = cloneFuncEnv(env);
-        AstNodeExpr* thenResultp = evalFuncBlock(
-            childEls(elsep->child("sequential_statement_chain")), 0, thenEnv, bodyp, depth);
+        AstNodeExpr* const thenResultp
+            = evalFuncBlock(childEls(elsep->child("sequential_statement_chain")), 0, thenEnv, cont,
+                            exitContp, bodyp, depth);
         FuncEnv elseEnv = cloneFuncEnv(env);
-        AstNodeExpr* elseResultp
-            = evalFuncElse(elsep->child("else_clause"), stmts, index, elseEnv, bodyp, depth);
-        if (!thenResultp) thenResultp = evalFuncBlock(stmts, index, thenEnv, bodyp, depth);
-        if (!elseResultp) elseResultp = evalFuncBlock(stmts, index, elseEnv, bodyp, depth);
+        AstNodeExpr* const elseResultp
+            = evalFuncElse(elsep->child("else_clause"), elseEnv, cont, exitContp, bodyp, depth);
         if (!thenResultp || !elseResultp) {
             error(elsep, "VHDL function does not return a value on all paths");
             if (thenResultp) VL_DO_DANGLING(thenResultp->deleteTree(), thenResultp);
@@ -1906,9 +2007,9 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
-    //! Evaluate a case statement plus the statements that follow it
-    AstNodeExpr* evalFuncCase(const Node* casep, const std::vector<const Node*>& stmts,
-                              size_t index, FuncEnv& env, const Node* bodyp, int depth) {
+    //! Evaluate a case statement; each alternative continues through `cont`
+    AstNodeExpr* evalFuncCase(const Node* casep, FuncEnv& env, const FuncCont& cont,
+                              const FuncCont* exitContp, const Node* bodyp, int depth) {
         VL_RESTORER(m_inlineEnvp);
         m_inlineEnvp = &env;
         AstNodeExpr* const selectorp = lowerExpr(casep->child("expression"), nullptr);
@@ -1928,17 +2029,12 @@ class VhdlXmlFrontend final {
         };
         size_t othersIndex = 0;
         bool haveOthers = false;
-        bool allFellThrough = true;
         for (const Node* const altp : childEls(casep->child("case_statement_alternative_chain"))) {
             if (altp->attr("kind") == "choice_by_others") {
                 CaseBranch branch;
                 branch.env = cloneFuncEnv(env);
                 branch.resultp = evalFuncBlock(childEls(altp->child("associated_chain")), 0,
-                                               branch.env, bodyp, depth);
-                if (!branch.resultp) {
-                    branch.resultp = evalFuncBlock(stmts, index + 1, branch.env, bodyp, depth);
-                }
-                allFellThrough = allFellThrough && !branch.resultp;
+                                               branch.env, cont, exitContp, bodyp, depth);
                 haveOthers = true;
                 othersIndex = branches.size();
                 branches.push_back(std::move(branch));
@@ -1975,48 +2071,16 @@ class VhdlXmlFrontend final {
             branch.condp = eqp;
             branch.env = cloneFuncEnv(env);
             branch.resultp = evalFuncBlock(childEls(altp->child("associated_chain")), 0,
-                                           branch.env, bodyp, depth);
-            if (!branch.resultp) {
-                branch.resultp = evalFuncBlock(stmts, index + 1, branch.env, bodyp, depth);
-            }
-            allFellThrough = allFellThrough && !branch.resultp;
+                                           branch.env, cont, exitContp, bodyp, depth);
             branches.push_back(std::move(branch));
-        }
-        if (allFellThrough) {
-            // Every branch continues after the case: merge the environments
-            const size_t baseIndex = haveOthers ? othersIndex : branches.size() - 1;
-            FuncEnv merged = cloneFuncEnv(branches[baseIndex].env);
-            for (size_t i = 0; i < branches.size(); ++i) {
-                if (i == baseIndex || !branches[i].condp) continue;
-                funcEnvMerge(merged, branches[i].condp, branches[i].env, merged);
-            }
-            for (CaseBranch& branch : branches) {
-                if (branch.condp) VL_DO_DANGLING(branch.condp->deleteTree(), branch.condp);
-                deleteFuncEnv(branch.env);
-            }
-            deleteFuncEnv(env);
-            env = std::move(merged);
-            VL_DO_DANGLING(selectorp->deleteTree(), selectorp);
-            return nullptr;
         }
         if (!haveOthers) { error(casep, "VHDL case in a function does not cover all choices"); }
         AstNodeExpr* resultp = nullptr;
         if (haveOthers) {
             resultp = branches[othersIndex].resultp;
             branches[othersIndex].resultp = nullptr;
-            if (!resultp) {
-                error(casep, "VHDL function does not return a value on all paths");
-                deleteFuncEnv(branches[othersIndex].env);
-                for (CaseBranch& branch : branches) {
-                    if (branch.resultp)
-                        VL_DO_DANGLING(branch.resultp->deleteTree(), branch.resultp);
-                    if (branch.condp) VL_DO_DANGLING(branch.condp->deleteTree(), branch.condp);
-                    deleteFuncEnv(branch.env);
-                }
-                VL_DO_DANGLING(selectorp->deleteTree(), selectorp);
-                return nullptr;
-            }
         }
+        if (!resultp) { error(casep, "VHDL function does not return a value on all paths"); }
         for (size_t i = branches.size(); i-- > 0;) {
             CaseBranch& branch = branches[i];
             if (!branch.condp) continue;
@@ -2045,6 +2109,62 @@ class VhdlXmlFrontend final {
         return resultp;
     }
 
+    //! Unroll a static for loop in a function body; `postCont` continues after it
+    AstNodeExpr* evalFuncFor(const Node* loopp, FuncEnv& env, const FuncCont& postCont,
+                             const FuncCont* /*outerExitContp*/, const Node* bodyp, int depth) {
+        VL_RESTORER(m_inlineEnvp);
+        m_inlineEnvp = &env;
+        const Node* const specp = loopp->child("parameter_specification");
+        if (!specp || specp->attr("kind") != "iterator_declaration") {
+            unsupported(loopp, "for loop without an iterator specification");
+            return nullptr;
+        }
+        const std::string name = specp->attr("identifier");
+        const Node* const subtypep = specp->child("subtype_indication");
+        const Node* const rangep = subtypep ? subtypep->child("range_constraint") : nullptr;
+        int left = 0;
+        int right = 0;
+        bool ascending = true;
+        if (!discreteRange(rangep, left, right, ascending)) {
+            unsupported(loopp, "non-static loop range");
+            return nullptr;
+        }
+        const int iterations = rangeLength(left, right, ascending);
+        // Each iteration becomes a continuation frame; bound the recursion
+        if (iterations > 4096) {
+            unsupported(loopp, "function loop with more than 4096 iterations");
+            return nullptr;
+        }
+        const std::string key = vhdlFold(name);
+        const int step = ascending ? 1 : -1;
+        // Unroll one iteration at a time; the body's continuation is the next iteration
+        std::function<AstNodeExpr*(int64_t, FuncEnv&)> evalIteration;
+        evalIteration = [&](int64_t value, FuncEnv& inEnv) -> AstNodeExpr* {
+            FuncEnv iterEnv = cloneFuncEnv(inEnv);
+            funcEnvSet(
+                iterEnv, key,
+                makeConst(flpOf(loopp), intDType(flpOf(loopp)), static_cast<uint64_t>(value)));
+            const int64_t nextValue = value + step;
+            const bool more = ascending ? nextValue <= right : nextValue >= right;
+            FuncCont bodyCont = [&, nextValue, more](FuncEnv& bodyEnv) -> AstNodeExpr* {
+                return more ? evalIteration(nextValue, bodyEnv) : postCont(bodyEnv);
+            };
+            FuncCont exitCont
+                = [&](FuncEnv& exitEnv) -> AstNodeExpr* { return postCont(exitEnv); };
+            // The continuations live in this iteration's frame.  The entry is popped
+            // before the frame returns, and only labeled exits in the body can use it.
+            m_funcLoopTargets.push_back(
+                FuncLoopTarget{vhdlFold(loopp->attr("label")), &bodyCont, &exitCont});
+            AstNodeExpr* const resultp
+                = evalFuncBlock(childEls(loopp->child("sequential_statement_chain")), 0, iterEnv,
+                                bodyCont, &exitCont, bodyp, depth);
+            m_funcLoopTargets.pop_back();
+            deleteFuncEnv(iterEnv);
+            return resultp;
+        };
+        return iterations > 0 ? evalIteration(left, env) : postCont(env);
+    }
+
     //! Whether function-body statements can be lowered by inlining
     static bool funcStatementsSupported(const Node* chainp, int depth) {
         if (depth > 32) return false;
@@ -2052,7 +2172,15 @@ class VhdlXmlFrontend final {
             const std::string kind = stmtp->attr("kind");
             if (kind == "variable_assignment_statement" || kind == "return_statement"
                 || kind == "null_statement" || kind == "assertion_statement"
-                || kind == "report_statement") {
+                || kind == "report_statement" || kind == "exit_statement"
+                || kind == "next_statement") {
+                continue;
+            }
+            if (kind == "for_loop_statement") {
+                if (!funcStatementsSupported(stmtp->child("sequential_statement_chain"),
+                                             depth + 1)) {
+                    return false;
+                }
                 continue;
             }
             if (kind == "if_statement") {
@@ -2184,8 +2312,25 @@ class VhdlXmlFrontend final {
         m_inlineFrames.back().envp = &env;
         for (const Node* const declp2 : childEls(bodyp->child("declaration_chain"))) {
             const std::string kind = declp2->attr("kind");
-            if (kind != "variable_declaration" && kind != "constant_declaration") continue;
             const std::string name = vhdlFold(declp2->attr("identifier"));
+            if (kind == "object_alias_declaration") {
+                // A local alias denotes its target; the declared subtype carries its range
+                const Node* const targetp = declp2->child("name");
+                if (!targetp) continue;
+                AstNodeExpr* const valuep = lowerExpr(targetp, nullptr);
+                if (!valuep) {
+                    deleteFuncEnv(env);
+                    return nullptr;
+                }
+                const VhdlDTypeSpec aliasSpec = probeTypeSpec(declp2->child("subtype_indication"));
+                if (aliasSpec.isVector && !aliasSpec.isUnconstrained) {
+                    AstNodeDType* const aliasDtp = dtypeOf(aliasSpec, flpOf(declp2));
+                    if (aliasDtp->width() == valuep->dtypep()->width()) valuep->dtypep(aliasDtp);
+                }
+                funcEnvSet(env, name, valuep);
+                continue;
+            }
+            if (kind != "variable_declaration" && kind != "constant_declaration") continue;
             AstNodeDType* const dtp
                 = dtypeOf(parseType(declp2->child("subtype_indication")), flpOf(declp2));
             AstNodeExpr* valuep = nullptr;
@@ -2195,8 +2340,9 @@ class VhdlXmlFrontend final {
             if (!valuep) valuep = makeConst(flpOf(declp2), dtp, 0);
             funcEnvSet(env, name, valuep);
         }
+        const FuncCont noContinuation = [](FuncEnv&) -> AstNodeExpr* { return nullptr; };
         AstNodeExpr* resultp = evalFuncBlock(childEls(bodyp->child("sequential_statement_chain")),
-                                             0, env, bodyp, 0);
+                                             0, env, noContinuation, nullptr, bodyp, 0);
         if (!resultp) { error(callp, "VHDL function does not return a value on all paths"); }
         deleteFuncEnv(env);
         if (!resultp) return nullptr;
@@ -4750,7 +4896,7 @@ class VhdlXmlFrontend final {
         }
         // `a'range` as a constraint or index carries the array's bounds directly
         const std::string rangeKind = rangep->attr("kind");
-        if (rangeKind == "range_array_attribute") {
+        if (rangeKind == "range_array_attribute" || rangeKind == "reverse_range_array_attribute") {
             int leftBound = 0;
             int rightBound = 0;
             bool rangeAscending = true;
@@ -4758,9 +4904,15 @@ class VhdlXmlFrontend final {
                                     rangeAscending)) {
                 return false;
             }
-            left = leftBound;
-            right = rightBound;
-            ascending = rangeAscending;
+            if (rangeKind == "reverse_range_array_attribute") {
+                left = rightBound;
+                right = leftBound;
+                ascending = !rangeAscending;
+            } else {
+                left = leftBound;
+                right = rightBound;
+                ascending = rangeAscending;
+            }
             return true;
         }
         // "for i in a'range" carries the array's range as an attribute origin
