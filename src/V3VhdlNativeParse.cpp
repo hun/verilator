@@ -563,6 +563,7 @@ void Parser::parsePortClause(EntityUnit& entity) {
         port.flp = m_cur.flp;
         parseNameList(port.names);
         if (m_failed) return;
+        // IEEE 1800-2023 17.2: an omitted port mode means `in`
         if (acceptId("in")) {
             port.dir = PortMode::IN;
         } else if (acceptId("out")) {
@@ -575,8 +576,7 @@ void Parser::parsePortClause(EntityUnit& entity) {
             unsupported("linkage port mode");
             return;
         } else {
-            error("expected a port mode (in/out/inout/buffer), got '" + m_cur.text + "'");
-            return;
+            port.dir = PortMode::IN;
         }
         parseTypeSpec(port.type);
         if (m_failed) return;
