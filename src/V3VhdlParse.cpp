@@ -5048,6 +5048,12 @@ class VhdlXmlFrontend final {
                 return true;
             }
             if (kind != "simple_name") return false;
+            // A generic bound by an instance's map overrides its default value
+            const auto bindIt = m_constBindings.find(id);
+            if (bindIt != m_constBindings.end()) {
+                value = bindIt->second != 0;
+                return true;
+            }
             // Constants and generic defaults resolve through the analyzed reference
             const Node* const refp = nodep->child("named_entity");
             if (!refp || !refp->has("ref")) return false;

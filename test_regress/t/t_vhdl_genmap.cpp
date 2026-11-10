@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
     topp->c = 0xc;
     topp->d = 1;
     topp->eval();
-    if (static_cast<int>(topp->y) != 0xa5) {
+    if (static_cast<int>(topp->y) != 0x5a) {
         std::printf("%%Error: y=%d\n", static_cast<int>(topp->y));
         ++fails;
     }
