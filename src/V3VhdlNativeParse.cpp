@@ -50,6 +50,9 @@ class Parser final {
     bool m_inLibrary = false;  // Current file came from a library
     std::vector<EntityUnit> m_entities;  // Parsed design units
     std::vector<Architecture> m_archs;
+    std::vector<PackageUnit> m_packages;  // Parsed package specs and bodies
+    // Packages named by the context clauses seen so far
+    std::vector<std::pair<std::string, std::string>> m_uses;
 
     void advance() { m_cur = m_lexer.next(); }
     bool isSym(const char* symText) const {
@@ -100,7 +103,7 @@ class Parser final {
         names.emplace_back(tok.text, tok.spelling);
     }
 
-    //! Skip a context clause (`library`/`use`/`context`) up to its semicolon
+    //! Record a `use lib.pkg.all` clause so the unit can see the package
     void skipContextClause() {
         int parens = 0;
         while (m_cur.kind != Token::END) {
@@ -126,8 +129,14 @@ class Parser final {
     void parseEntity(FileLine* flp);
     void parseNameList(std::vector<std::pair<std::string, std::string>>& names);
     void parseDecl(Architecture& arch, Decl::Kind kind);
+    void parseDeclInto(std::vector<Decl>& decls, Decl::Kind kind);
     void parseTypeDecl(Architecture& arch);
+    void parseTypeDeclInto(std::vector<TypeDecl>& types);
     void parseSubtypeDecl(Architecture& arch);
+    void parseSubtypeInto(std::vector<TypeDecl>& types);
+    void parsePackage(FileLine* flp, bool isBody);
+    void parseUseClause();
+    void skipLibraryClause();
     void parseRecordBody(TypeDecl& decl);
     void parseIndexConstraint(TypeSpec& type);
     void parseArchitecture(FileLine* flp);
@@ -148,6 +157,7 @@ public:
     void parseDesignFile();
     std::vector<EntityUnit>& entities() { return m_entities; }
     std::vector<Architecture>& archs() { return m_archs; }
+    std::vector<PackageUnit>& packages() { return m_packages; }
 };
 
 //######################################################################
@@ -527,6 +537,7 @@ void Parser::parseEntity(FileLine* flp) {
     entity.spelling = nameTok.spelling;
     entity.libname = m_libname;
     entity.inLibrary = m_inLibrary;
+    entity.uses = m_uses;
     if (!expectId("is")) return;
     for (;;) {
         if (m_failed) return;
@@ -565,7 +576,9 @@ void Parser::parseEntity(FileLine* flp) {
     m_entities.push_back(std::move(entity));
 }
 
-void Parser::parseDecl(Architecture& arch, Decl::Kind kind) {
+void Parser::parseDecl(Architecture& arch, Decl::Kind kind) { parseDeclInto(arch.decls, kind); }
+
+void Parser::parseDeclInto(std::vector<Decl>& decls, Decl::Kind kind) {
     Decl decl{kind};
     decl.flp = m_cur.flp;
     parseNameList(decl.names);
@@ -584,7 +597,7 @@ void Parser::parseDecl(Architecture& arch, Decl::Kind kind) {
         error("expected ';' after a declaration");
         return;
     }
-    arch.decls.push_back(std::move(decl));
+    decls.push_back(std::move(decl));
 }
 
 //! Parse the index constraint of an array type definition
@@ -633,7 +646,9 @@ void Parser::parseRecordBody(TypeDecl& decl) {
     if (!acceptSym(";")) error("expected ';' after 'end record'");
 }
 
-void Parser::parseTypeDecl(Architecture& arch) {
+void Parser::parseTypeDecl(Architecture& arch) { parseTypeDeclInto(arch.types); }
+
+void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
     Token nameTok;
     if (!takeId(nameTok)) return;
     TypeDecl decl{TypeDecl::ARRAY};
@@ -656,7 +671,7 @@ void Parser::parseTypeDecl(Architecture& arch) {
         advance();
         parseRecordBody(decl);
         if (m_failed) return;
-        arch.types.push_back(std::move(decl));
+        types.push_back(std::move(decl));
         return;
     } else if (isId("array")) {
         decl.kind = TypeDecl::ARRAY;
@@ -679,10 +694,12 @@ void Parser::parseTypeDecl(Architecture& arch) {
         error("expected ';' after a type declaration");
         return;
     }
-    arch.types.push_back(std::move(decl));
+    types.push_back(std::move(decl));
 }
 
-void Parser::parseSubtypeDecl(Architecture& arch) {
+void Parser::parseSubtypeDecl(Architecture& arch) { parseSubtypeInto(arch.types); }
+
+void Parser::parseSubtypeInto(std::vector<TypeDecl>& types) {
     Token nameTok;
     if (!takeId(nameTok)) return;
     TypeDecl decl{TypeDecl::SUBTYPE};
@@ -696,7 +713,7 @@ void Parser::parseSubtypeDecl(Architecture& arch) {
         error("expected ';' after a subtype declaration");
         return;
     }
-    arch.types.push_back(std::move(decl));
+    types.push_back(std::move(decl));
 }
 
 void Parser::parseArchitecture(FileLine* flp) {
@@ -707,6 +724,7 @@ void Parser::parseArchitecture(FileLine* flp) {
     arch.name = nameTok.text;
     arch.libname = m_libname;
     arch.inLibrary = m_inLibrary;
+    arch.uses = m_uses;
     if (!expectId("of")) return;
     Token entityTok;
     if (!takeId(entityTok)) return;
@@ -1026,10 +1044,101 @@ StmtP Parser::parseIf(FileLine* flp) {
     return stmt;
 }
 
+//! Record `use lib.pkg[.item];`; only whole-package uses make names visible
+void Parser::parseUseClause() {
+    advance();  // 'use'
+    std::vector<std::string> parts;
+    for (;;) {
+        if (m_cur.kind != Token::ID) break;
+        parts.push_back(m_cur.text);
+        advance();
+        if (!acceptSym(".")) break;
+    }
+    expectSym(";");
+    if (parts.size() >= 3 && parts.back() == "all") m_uses.emplace_back(parts[0], parts[1]);
+}
+
+//! Skip `library <name>;`, which only affects which library GHDL would search
+void Parser::skipLibraryClause() {
+    while (!m_failed && m_cur.kind != Token::END && !isSym(";")) advance();
+    expectSym(";");
+}
+
+void Parser::parsePackage(FileLine* flp, bool isBody) {
+    if (isBody && !expectId("body")) return;
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    PackageUnit pkg;
+    pkg.flp = flp;
+    pkg.name = nameTok.text;
+    pkg.spelling = nameTok.spelling;
+    pkg.libname = m_libname;
+    pkg.inLibrary = m_inLibrary;
+    pkg.isBody = isBody;
+    if (!expectId("is")) return;
+    for (;;) {
+        if (m_failed) return;
+        if (isId("end")) break;
+        if (isId("use")) {
+            parseUseClause();
+            continue;
+        }
+        if (isId("constant")) {
+            advance();
+            parseDeclInto(pkg.decls, Decl::CONSTANT);
+            continue;
+        }
+        if (isId("type")) {
+            advance();
+            parseTypeDeclInto(pkg.types);
+            continue;
+        }
+        if (isId("subtype")) {
+            advance();
+            parseSubtypeInto(pkg.types);
+            continue;
+        }
+        if (isId("function") || isId("procedure") || isId("component") || isId("attribute")
+            || isId("signal") || isId("shared") || isId("variable") || isId("alias")
+            || isId("file") || isId("disconnect") || isId("group")) {
+            unsupported("package declarative item '" + m_cur.text + "'");
+            return;
+        }
+        error("unexpected package declaration '" + m_cur.text + "'");
+        return;
+    }
+    if (!expectId("end")) return;
+    (void)acceptId("package");
+    if (isBody) (void)acceptId("body");
+    if (m_cur.kind == Token::ID) {
+        Token endTok;
+        if (!takeId(endTok)) return;
+        if (endTok.text != pkg.name) {
+            error(flp, "package end name '" + endTok.spelling + "' does not match '" + pkg.spelling
+                           + "'");
+            return;
+        }
+    }
+    if (!acceptSym(";")) {
+        error("expected ';' after 'end' of package");
+        return;
+    }
+    m_packages.push_back(std::move(pkg));
+}
+
 void Parser::parseDesignFile() {
     advance();
     while (!m_failed && m_cur.kind != Token::END) {
-        if (isId("library") || isId("use") || isId("context")) {
+        if (isId("use")) {
+            parseUseClause();
+            continue;
+        }
+        if (isId("library")) {
+            advance();
+            skipLibraryClause();
+            continue;
+        }
+        if (isId("context")) {
             skipContextClause();
             continue;
         }
@@ -1045,7 +1154,13 @@ void Parser::parseDesignFile() {
             parseArchitecture(flp);
             continue;
         }
-        if (isId("package") || isId("configuration")) {
+        if (isId("package")) {
+            FileLine* const flp = m_cur.flp;
+            advance();
+            parsePackage(flp, isId("body"));
+            continue;
+        }
+        if (isId("configuration")) {
             unsupported("design unit '" + m_cur.text + "'");
             return;
         }
@@ -1069,6 +1184,7 @@ void parseFile(const V3VhdlNativeFile& file, DesignLibrary& library) {
     parser.parseDesignFile();
     for (EntityUnit& entity : parser.entities()) library.entities.push_back(std::move(entity));
     for (Architecture& arch : parser.archs()) library.archs.push_back(std::move(arch));
+    for (PackageUnit& pkg : parser.packages()) library.packages.push_back(std::move(pkg));
 }
 
 }  // namespace vhdlnative

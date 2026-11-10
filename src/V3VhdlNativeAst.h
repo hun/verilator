@@ -239,6 +239,8 @@ struct EntityUnit final {
     bool inLibrary = false;
     FileLine* flp = nullptr;
     std::vector<PortDecl> ports;
+    // Packages named by the enclosing context clause: (library, package)
+    std::vector<std::pair<std::string, std::string>> uses;
 };
 
 struct Architecture final {
@@ -250,12 +252,26 @@ struct Architecture final {
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
     std::vector<std::unique_ptr<Concurrent>> stmts;
+    std::vector<std::pair<std::string, std::string>> uses;
+};
+
+//! A package declaration or body; its declarative part is elaborated once
+struct PackageUnit final {
+    std::string name;  // Folded
+    std::string spelling;
+    std::string libname;
+    bool inLibrary = false;
+    bool isBody = false;  // Package body: completes the constants declared by the spec
+    FileLine* flp = nullptr;
+    std::vector<Decl> decls;
+    std::vector<TypeDecl> types;
 };
 
 //! Design units parsed from all source files, in source order
 struct DesignLibrary final {
     std::vector<EntityUnit> entities;
     std::vector<Architecture> archs;
+    std::vector<PackageUnit> packages;  // Specs and bodies, in source order
 };
 
 //! Parse one design file and append its design units to the library

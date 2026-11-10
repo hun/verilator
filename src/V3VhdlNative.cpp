@@ -81,6 +81,9 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         archByEntity[arch.entityName] = &arch;
     }
 
+    vhdlnative::PackageTable packages;
+    vhdlnative::lowerPackages(library.packages, rootp, packages);
+
     std::set<std::string> entityNames;
     for (const vhdlnative::EntityUnit& entity : library.entities) {
         if (!entityNames.insert(entity.name).second) {
@@ -93,7 +96,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
                                 + "' has no architecture; cannot elaborate it");
             continue;
         }
-        vhdlnative::lower(entity, *it->second, rootp);
+        vhdlnative::lower(entity, *it->second, rootp, packages);
     }
     for (const vhdlnative::Architecture& arch : library.archs) {
         if (!entityNames.count(arch.entityName)) {

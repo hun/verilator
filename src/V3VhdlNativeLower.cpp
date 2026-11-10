@@ -77,6 +77,24 @@ struct VType final {
     int indexOffset(int index) const { return index - lowIndex(); }
 };
 
+//! Elaborated contents of one package, publishable to the units that use it
+struct PackageInfo final {
+    std::map<std::string, VType> types;
+    std::map<std::string, int64_t> consts;
+    std::map<std::string, AstConst*> constValues;
+    std::map<std::string, VType> constTypes;
+    std::map<std::string, AstConst*> enumConsts;
+    std::vector<std::unique_ptr<AstConst>> owned;  // Owns the constants above
+};
+
+struct PackageTable::Impl final {
+    std::map<std::string, PackageInfo> packages;  // Folded package name -> contents
+};
+
+PackageTable::PackageTable()
+    : m_implp{new Impl} {}
+PackageTable::~PackageTable() = default;
+
 class Lowering final {
     AstNetlist* const m_rootp;  // Netlist to emit into
     AstModule* m_modp = nullptr;  // Module being emitted
@@ -98,6 +116,9 @@ class Lowering final {
     };
     std::vector<Edge> m_edges;  // Clock edges collected while lowering a process
     bool m_initial = false;  // Emitting the time-zero evaluation
+    PackageTable::Impl* m_publishp = nullptr;  // Package table to publish into
+    const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
+    std::set<std::string> m_imported;  // Names that came from a used package
 
     AstNodeDType* findBasic(FileLine* flp, VBasicDTypeKwd kwd) const {
         return m_rootp->typeTablep()->findBasicDType(flp, kwd);
@@ -213,6 +234,10 @@ class Lowering final {
 
     bool resolveType(const TypeSpec& spec, VType& out);
     void registerType(const TypeDecl& decl);
+    void emitPackage(const PackageUnit& pkg);
+    void importPackage(const std::string& name);
+    void emitConstant(const Decl& decl, bool deferredOk);
+    bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
     AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
     bool applyRange(const TypeSpec& spec, VType& type);
     bool evalInt(const Expr& expr, int64_t& value) const;
@@ -246,6 +271,7 @@ class Lowering final {
     AstConst* foldToConst(AstNodeExpr* exprp);
     AstNodeExpr* lowerSelectedExpr(const Expr& expr);
     const VType* typeOfName(const Expr& expr) const;
+    VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
     AstNode* lowerSelected(const Concurrent& conc);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
@@ -257,11 +283,13 @@ class Lowering final {
     void lowerProcess(const Process& process);
 
 public:
-    explicit Lowering(AstNetlist* rootp)
-        : m_rootp{rootp} {}
+    explicit Lowering(AstNetlist* rootp, const PackageTable::Impl* packagesp = nullptr)
+        : m_rootp{rootp}
+        , m_packagesp{packagesp} {}
     ~Lowering() = default;
 
     void emit(const EntityUnit& entity, const Architecture& arch);
+    void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table);
 };
 
 //######################################################################
@@ -407,12 +435,15 @@ void Lowering::registerType(const TypeDecl& decl) {
             VType memberType;
             if (!resolveType(member.type, memberType)) return;
             if (memberType.kwd == VBasicDTypeKwd::LOGIC) kwd = VBasicDTypeKwd::LOGIC;
-            VField field;
-            field.name = member.names.front().first;
-            field.width = memberType.width;
-            field.type = std::make_shared<VType>(memberType);
-            fields.push_back(std::move(field));
-            total += memberType.width;
+            // `a, b : t` declares one record element per name, in order
+            for (const auto& name : member.names) {
+                VField field;
+                field.name = name.first;
+                field.width = memberType.width;
+                field.type = std::make_shared<VType>(memberType);
+                fields.push_back(std::move(field));
+                total += memberType.width;
+            }
         }
         // Declaration order is most significant first
         int offset = total;
@@ -452,7 +483,8 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
             type.width = type.elemWidth * type.length();
             type.dtp = type.kind == VType::ARRAY
                            ? findVectorWidth(flp, type.kwd, type.signing, type.width)
-                           : findVector(flp, type.kwd, type.signing, type.left, type.right, false);
+                           : findVector(flp, type.kwd, type.signing, type.left, type.right,
+                                        type.ascending);
         } else {
             unsupportedError(flp, "range constraint on a type that is not an array");
             return false;
@@ -480,7 +512,8 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
             type.width = type.elemWidth * type.length();
             type.dtp = type.kind == VType::ARRAY
                            ? findVectorWidth(flp, type.kwd, type.signing, type.width)
-                           : findVector(flp, type.kwd, type.signing, type.left, type.right, false);
+                           : findVector(flp, type.kwd, type.signing, type.left, type.right,
+                                        type.ascending);
             return true;
         }
         return true;
@@ -1163,7 +1196,23 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
 }
 
 //! Type of a prefix name, or null when the name is not a signal or constant
+//! Type of an assignment target: the declared type keeps record and array structure
+VType Lowering::typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const {
+    const VType* const typep = target.kind == Expr::NAME ? typeOfName(target) : nullptr;
+    return typep ? *typep : typeOfDType(lhsp->dtypep());
+}
+
 const VType* Lowering::typeOfName(const Expr& expr) const {
+    if (expr.kind == Expr::SELECTED) {
+        // A nested selected name: the element's type within the prefix record
+        const VType* const prefixTypep = expr.a ? typeOfName(*expr.a) : nullptr;
+        if (!prefixTypep || prefixTypep->kind != VType::RECORD) return nullptr;
+        for (const VField& field : prefixTypep->fields) {
+            if (field.name == expr.text) return field.type.get();
+        }
+        return nullptr;
+    }
+    if (expr.kind != Expr::NAME) return nullptr;
     const auto it = m_scope.find(expr.text);
     if (it != m_scope.end()) return &it->second.type;
     const auto constIt = m_constTypes.find(expr.text);
@@ -1182,6 +1231,10 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
     if (attribute == "event" || attribute == "stable" || attribute == "active"
         || attribute == "last_event" || attribute == "last_active") {
         unsupportedError(flp, "signal attribute '" + attribute + "'");
+        return nullptr;
+    }
+    if (attribute != "ascending" && !typep) {
+        unsupportedError(flp, "attribute '" + attribute + "' of an unresolved name");
         return nullptr;
     }
     int64_t value = 0;
@@ -1238,8 +1291,8 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
 
 AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
     FileLine* const flp = expr.flp;
-    if (!expr.a || expr.a->kind != Expr::NAME) {
-        unsupportedError(flp, "selected name of a non-name prefix");
+    if (!expr.a || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::SELECTED)) {
+        unsupportedError(flp, "selected name of a non-record prefix");
         return nullptr;
     }
     const VType* const typep = typeOfName(*expr.a);
@@ -1296,17 +1349,42 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
     };
     std::vector<Segment> segments;
     if (type.kind == VType::RECORD) {
-        // Positional association fills record elements in declaration order
-        if (expr.kind != Expr::AGG_POSITIONAL || expr.args.size() != type.fields.size()) {
-            unsupportedError(flp, "record aggregate that is not a full positional list");
-            return nullptr;
-        }
-        for (size_t i = 0; i < expr.args.size(); ++i) {
-            Segment segment;
-            segment.offset = type.fields[i].offset;
-            segment.width = type.fields[i].width;
-            segment.exprp = expr.args[i].get();
-            segments.push_back(segment);
+        if (expr.kind == Expr::AGG_POSITIONAL) {
+            // Positional association fills record elements in declaration order
+            if (expr.args.size() != type.fields.size()) {
+                unsupportedError(flp, "record aggregate that is not a full positional list");
+                return nullptr;
+            }
+            for (size_t i = 0; i < expr.args.size(); ++i) {
+                Segment segment;
+                segment.offset = type.fields[i].offset;
+                segment.width = type.fields[i].width;
+                segment.exprp = expr.args[i].get();
+                segments.push_back(segment);
+            }
+        } else {
+            // Named association: each choice names one record element
+            for (size_t i = 0; i < expr.args.size(); ++i) {
+                for (const ExprP& choicep : expr.choices[i]) {
+                    if (choicep->kind != Expr::NAME) {
+                        unsupportedError(flp,
+                                         "record aggregate choice that is not an element name");
+                        return nullptr;
+                    }
+                    const auto fieldIt = std::find_if(
+                        type.fields.begin(), type.fields.end(),
+                        [&](const VField& field) { return field.name == choicep->text; });
+                    if (fieldIt == type.fields.end()) {
+                        flp->v3error("VHDL: record has no element '" + choicep->spelling + "'");
+                        return nullptr;
+                    }
+                    Segment segment;
+                    segment.offset = fieldIt->offset;
+                    segment.width = fieldIt->width;
+                    segment.exprp = expr.args[i].get();
+                    segments.push_back(segment);
+                }
+            }
         }
     } else {
         const int elemWidth = type.elemWidth;
@@ -1566,7 +1644,7 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
         selectorp->deleteTree();
         return nullptr;
     }
-    const VType ltype = typeOfDType(lhsp->dtypep());
+    const VType ltype = typeOfTarget(*conc.target, lhsp);
     AstNodeDType* const selDtp = selectorp->dtypep();
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;
@@ -1629,7 +1707,7 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent) {
             return nullptr;
         }
     }
-    const VType ltype = typeOfDType(lhsp->dtypep());
+    const VType ltype = typeOfTarget(*stmt.target, lhsp);
     AstNodeExpr* rhsp = lowerExpr(*stmt.value, &ltype);
     if (!rhsp) {
         lhsp->deleteTree();
@@ -1749,9 +1827,147 @@ void Lowering::lowerProcess(const Process& process) {
     if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
 }
 
+//! Register a declared name; a local declaration hides a name from a used package
+bool Lowering::reserveName(const std::string& folded, const std::string& spelling, FileLine* flp) {
+    if (m_imported.erase(folded)) {  // The local declaration shadows the package member
+        m_consts.erase(folded);
+        m_constValues.erase(folded);
+        m_constTypes.erase(folded);
+        m_enumConsts.erase(folded);
+        m_types.erase(folded);
+        return true;
+    }
+    if (m_scope.count(folded) || m_consts.count(folded) || m_constValues.count(folded)
+        || m_enumConsts.count(folded) || m_types.count(folded)) {
+        flp->v3error("VHDL: duplicate declaration of '" + spelling + "'");
+        return false;
+    }
+    return true;
+}
+
+void Lowering::emitConstant(const Decl& decl, bool deferredOk) {
+    if (!decl.init) {
+        // A package body completes the constants its specification deferred
+        if (!deferredOk) decl.flp->v3error("VHDL: constant without a value");
+        return;
+    }
+    VType constType;
+    bool intConstant = true;
+    if (decl.type.flp && resolveType(decl.type, constType)) intConstant = constType.isInt();
+    if (intConstant) {
+        int64_t value = 0;
+        if (!evalInt(*decl.init, value)) {
+            unsupportedError(decl.flp, "constant value that is not a static integer expression");
+            return;
+        }
+        for (const auto& name : decl.names) {
+            if (!reserveName(name.first, name.second, decl.flp)) continue;
+            m_consts[name.first] = value;
+        }
+        return;
+    }
+    AstNodeExpr* valuep = lowerExpr(*decl.init, &constType);
+    if (!valuep) return;
+    if (AstConst* const foldedp = foldToConst(valuep)) valuep = foldedp;
+    AstConst* const constp = VN_CAST(valuep, Const);
+    if (!constp) {
+        unsupportedError(decl.flp, "constant value that is not static");
+        valuep->deleteTree();
+        return;
+    }
+    constp->dtypep(constType.dtp);
+    for (size_t i = 0; i < decl.names.size(); ++i) {
+        const auto& name = decl.names[i];
+        if (!reserveName(name.first, name.second, decl.flp)) continue;
+        const bool last = i + 1 == decl.names.size();
+        m_ownedConsts.push_back(
+            std::unique_ptr<AstConst>(last ? constp : constp->cloneTree(false)));
+        m_constValues[name.first] = m_ownedConsts.back().get();
+        m_constTypes[name.first] = constType;
+    }
+}
+
+void Lowering::importPackage(const std::string& name) {
+    if (!m_packagesp) return;
+    const auto pkgIt = m_packagesp->packages.find(name);
+    if (pkgIt == m_packagesp->packages.end()) return;  // Standard package: intrinsics
+    const PackageInfo& info = pkgIt->second;
+    for (const auto& type : info.types) {
+        if (m_types.count(type.first)) continue;
+        m_types[type.first] = type.second;
+        m_imported.insert(type.first);
+    }
+    for (const auto& constant : info.consts) {
+        if (m_consts.count(constant.first) || m_constValues.count(constant.first)) continue;
+        m_consts[constant.first] = constant.second;
+        m_imported.insert(constant.first);
+    }
+    for (const auto& value : info.constValues) {
+        if (m_consts.count(value.first) || m_constValues.count(value.first)) continue;
+        m_ownedConsts.push_back(std::unique_ptr<AstConst>(value.second->cloneTree(false)));
+        m_constValues[value.first] = m_ownedConsts.back().get();
+        m_imported.insert(value.first);
+    }
+    for (const auto& type : info.constTypes) {
+        if (m_constTypes.count(type.first)) continue;
+        m_constTypes[type.first] = type.second;
+    }
+    for (const auto& literal : info.enumConsts) {
+        if (m_enumConsts.count(literal.first)) continue;
+        m_ownedConsts.push_back(std::unique_ptr<AstConst>(literal.second->cloneTree(false)));
+        m_enumConsts[literal.first] = m_ownedConsts.back().get();
+        m_imported.insert(literal.first);
+    }
+}
+
+void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
+    // A package sees only its own declarations
+    m_types.clear();
+    m_consts.clear();
+    m_constValues.clear();
+    m_constTypes.clear();
+    m_enumConsts.clear();
+    m_ownedConsts.clear();
+    m_imported.clear();
+    m_scope.clear();
+    for (const TypeDecl& typeDecl : pkg.types) registerType(typeDecl);
+    for (const Decl& decl : pkg.decls) emitConstant(decl, !pkg.isBody);
+
+    PackageInfo info;
+    info.types = std::move(m_types);
+    info.consts = std::move(m_consts);
+    info.constValues = std::move(m_constValues);
+    info.constTypes = std::move(m_constTypes);
+    info.enumConsts = std::move(m_enumConsts);
+    info.owned = std::move(m_ownedConsts);
+    m_types.clear();
+    m_consts.clear();
+    m_constValues.clear();
+    m_constTypes.clear();
+    m_enumConsts.clear();
+    m_ownedConsts.clear();
+
+    const auto existing = table.packages.find(pkg.name);
+    if (existing == table.packages.end()) {
+        table.packages.emplace(pkg.name, std::move(info));
+        return;
+    }
+    // A package body (or a repeated declaration) adds to what is already published
+    PackageInfo& dest = existing->second;
+    for (const auto& type : info.types) dest.types[type.first] = type.second;
+    for (const auto& constant : info.consts) dest.consts[constant.first] = constant.second;
+    for (const auto& value : info.constValues) dest.constValues[value.first] = value.second;
+    for (const auto& type : info.constTypes) dest.constTypes[type.first] = type.second;
+    for (const auto& literal : info.enumConsts) dest.enumConsts[literal.first] = literal.second;
+    for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
+}
+
 void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
     m_modp = new AstModule{entity.flp, entity.spelling, entity.libname};
     m_modp->inLibrary(entity.inLibrary || arch.inLibrary);
+
+    for (const auto& use : entity.uses) importPackage(use.second);
+    for (const auto& use : arch.uses) importPackage(use.second);
 
     // Types are visible to the whole declarative part, and must be registered first
     for (const TypeDecl& typeDecl : arch.types) registerType(typeDecl);
@@ -1779,64 +1995,13 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
 
     for (const Decl& decl : arch.decls) {
         if (decl.kind == Decl::CONSTANT) {
-            if (!decl.init) {
-                decl.flp->v3error("VHDL: constant without a value");
-                continue;
-            }
-            VType constType;
-            bool intConstant = true;
-            if (decl.type.flp && resolveType(decl.type, constType)) {
-                intConstant = constType.isInt();
-            }
-            if (intConstant) {
-                int64_t value = 0;
-                if (!evalInt(*decl.init, value)) {
-                    unsupportedError(decl.flp,
-                                     "constant value that is not a static integer expression");
-                    continue;
-                }
-                for (const auto& name : decl.names) {
-                    if (m_scope.count(name.first) || m_consts.count(name.first)
-                        || m_constValues.count(name.first)) {
-                        decl.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
-                        continue;
-                    }
-                    m_consts[name.first] = value;
-                }
-                continue;
-            }
-            AstNodeExpr* valuep = lowerExpr(*decl.init, &constType);
-            if (!valuep) continue;
-            if (AstConst* const foldedp = foldToConst(valuep)) { valuep = foldedp; }
-            AstConst* const constp = VN_CAST(valuep, Const);
-            if (!constp) {
-                unsupportedError(decl.flp, "constant value that is not static");
-                valuep->deleteTree();
-                continue;
-            }
-            constp->dtypep(constType.dtp);
-            for (size_t i = 0; i < decl.names.size(); ++i) {
-                const auto& name = decl.names[i];
-                if (m_scope.count(name.first) || m_consts.count(name.first)
-                    || m_constValues.count(name.first)) {
-                    decl.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
-                    continue;
-                }
-                const bool last = i + 1 == decl.names.size();
-                m_ownedConsts.push_back(
-                    std::unique_ptr<AstConst>(last ? constp : constp->cloneTree(false)));
-                m_constValues[name.first] = m_ownedConsts.back().get();
-                m_constTypes[name.first] = constType;
-            }
+            emitConstant(decl, false);
             continue;
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
         for (const auto& name : decl.names) {
-            if (m_scope.count(name.first) || m_consts.count(name.first)) {
-                decl.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
-                continue;
-            }
+            if (!reserveName(name.first, name.second, decl.flp)) continue;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.second, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
@@ -1867,7 +2032,7 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
         }
         AstNodeExpr* const lhsp = lowerDesignator(*stmtp->target, true);
         if (!lhsp) continue;
-        const VType ltype = typeOfDType(lhsp->dtypep());
+        const VType ltype = typeOfTarget(*stmtp->target, lhsp);
         AstNodeExpr* rhsp = nullptr;
         if (stmtp->kind == Concurrent::COND_ASSIGN) {
             rhsp = lowerAlternatives(*stmtp, ltype);
@@ -1897,8 +2062,21 @@ void Lowering::emit(const EntityUnit& entity, const Architecture& arch) {
 //######################################################################
 // Entry point
 
-void lower(const EntityUnit& entity, const Architecture& arch, AstNetlist* rootp) {
+void lowerPackages(const std::vector<PackageUnit>& packages, AstNetlist* rootp,
+                   PackageTable& table) {
     Lowering lowering{rootp};
+    // Specifications first: a body completes the constants its spec declared
+    for (const PackageUnit& pkg : packages) {
+        if (!pkg.isBody) lowering.emitPackage(pkg, table.impl());
+    }
+    for (const PackageUnit& pkg : packages) {
+        if (pkg.isBody) lowering.emitPackage(pkg, table.impl());
+    }
+}
+
+void lower(const EntityUnit& entity, const Architecture& arch, AstNetlist* rootp,
+           const PackageTable& table) {
+    Lowering lowering{rootp, &table.impl()};
     lowering.emit(entity, arch);
 }
 

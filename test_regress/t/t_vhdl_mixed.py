@@ -17,6 +17,6 @@ vhdl_frontend.require_frontend(test)
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', 't/t_vhdl_mixed.v'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)  # Frontend-independent message
 
 test.passes()

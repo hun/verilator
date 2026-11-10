@@ -22,12 +22,38 @@
 
 #include "V3VhdlNativeAst.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
 class AstNetlist;
 
 namespace vhdlnative {
 
+//! Elaborated package declarations, shared by every unit that uses them
+class PackageTable final {
+public:
+    struct Impl;  // Elaborated packages, private to the lowering stage
+
+    PackageTable();
+    ~PackageTable();
+    PackageTable(const PackageTable&) = delete;
+    PackageTable& operator=(const PackageTable&) = delete;
+
+    Impl& impl() { return *m_implp; }
+    const Impl& impl() const { return *m_implp; }
+
+private:
+    std::unique_ptr<Impl> m_implp;
+};
+
+//! Elaborate the declarative parts of all packages
+void lowerPackages(const std::vector<PackageUnit>& packages, AstNetlist* rootp,
+                   PackageTable& table) VL_MT_DISABLED;
+
 //! Lower one entity/architecture pair to a module appended to the netlist
-void lower(const EntityUnit& entity, const Architecture& arch, AstNetlist* rootp) VL_MT_DISABLED;
+void lower(const EntityUnit& entity, const Architecture& arch, AstNetlist* rootp,
+           const PackageTable& table) VL_MT_DISABLED;
 
 }  // namespace vhdlnative
 
