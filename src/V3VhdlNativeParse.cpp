@@ -118,6 +118,8 @@ class Parser final {
     ExprP parseExpr();
     ExprP parseLogical();
     ExprP parseRelation();
+    ExprP parseShift();
+    ExprP parseExp();
     ExprP parseAdd();
     ExprP parseMul();
     ExprP parseUnary();
@@ -188,11 +190,29 @@ ExprP Parser::parseLogical() {
 }
 
 ExprP Parser::parseRelation() {
-    ExprP lhsp = parseAdd();
+    ExprP lhsp = parseShift();
     if (!lhsp) return nullptr;
     while (isSym("=") || isSym("/=") || isSym("<") || isSym("<=") || isSym(">") || isSym(">=")
            || isSym("?=") || isSym("?/=") || isSym("?<") || isSym("?<=") || isSym("?>")
            || isSym("?>=")) {
+        ExprP node = std::make_unique<Expr>(Expr::BINARY);
+        node->flp = m_cur.flp;
+        node->text = m_cur.text;
+        advance();
+        ExprP rhsp = parseShift();
+        if (!rhsp) return nullptr;
+        node->a = std::move(lhsp);
+        node->b = std::move(rhsp);
+        lhsp = std::move(node);
+    }
+    return lhsp;
+}
+
+ExprP Parser::parseShift() {
+    ExprP lhsp = parseAdd();
+    if (!lhsp) return nullptr;
+    while (isId("sll") || isId("srl") || isId("sla") || isId("sra") || isId("rol")
+           || isId("ror")) {
         ExprP node = std::make_unique<Expr>(Expr::BINARY);
         node->flp = m_cur.flp;
         node->text = m_cur.text;
@@ -224,14 +244,14 @@ ExprP Parser::parseAdd() {
 }
 
 ExprP Parser::parseMul() {
-    ExprP lhsp = parseUnary();
+    ExprP lhsp = parseExp();
     if (!lhsp) return nullptr;
     while (isSym("*") || isSym("/") || isId("mod") || isId("rem")) {
         ExprP node = std::make_unique<Expr>(Expr::BINARY);
         node->flp = m_cur.flp;
         node->text = m_cur.text;
         advance();
-        ExprP rhsp = parseUnary();
+        ExprP rhsp = parseExp();
         if (!rhsp) return nullptr;
         node->a = std::move(lhsp);
         node->b = std::move(rhsp);
@@ -240,8 +260,23 @@ ExprP Parser::parseMul() {
     return lhsp;
 }
 
+ExprP Parser::parseExp() {
+    ExprP lhsp = parseUnary();
+    if (!lhsp) return nullptr;
+    if (!isSym("**")) return lhsp;
+    ExprP node = std::make_unique<Expr>(Expr::BINARY);
+    node->flp = m_cur.flp;
+    node->text = "**";
+    advance();
+    ExprP rhsp = parseExp();  // Right associative
+    if (!rhsp) return nullptr;
+    node->a = std::move(lhsp);
+    node->b = std::move(rhsp);
+    return node;
+}
+
 ExprP Parser::parseUnary() {
-    if (isSym("+") || isSym("-") || isId("abs") || isId("not")) {
+    if (isSym("+") || isSym("-") || isSym("??") || isId("abs") || isId("not")) {
         ExprP node = std::make_unique<Expr>(Expr::UNARY);
         node->flp = m_cur.flp;
         node->text = m_cur.text;
@@ -374,6 +409,20 @@ ExprP Parser::parseDesignator() {
     for (;;) {
         if (isSym("'")) {
             advance();
+            if (isSym("(")) {
+                // Type qualification: `type_mark'(expression)`
+                advance();
+                ExprP operand = parseExpr();
+                if (!operand) return nullptr;
+                expectSym(")");
+                ExprP qual = std::make_unique<Expr>(Expr::QUAL);
+                qual->flp = node->flp;
+                qual->text = node->text;
+                qual->spelling = node->spelling;
+                qual->a = std::move(operand);
+                node = std::move(qual);
+                continue;
+            }
             Token attrTok;
             if (!takeId(attrTok)) return nullptr;
             ExprP attr = std::make_unique<Expr>(Expr::ATTR);

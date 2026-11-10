@@ -129,6 +129,7 @@ struct Expr final {
         INDEX,  // a=prefix, args
         SLICE,  // a=prefix, b=left, c=right, text="downto"/"to"
         ATTR,  // a=prefix, text=attribute name, args=optional attribute parameter
+        QUAL,  // a=operand, text=type mark of a type qualification
         SELECTED,  // a=prefix, text=selected name (record element or package member)
         AGG_OTHERS,  // a=value
         AGG_POSITIONAL,  // args=element values, leftmost index first

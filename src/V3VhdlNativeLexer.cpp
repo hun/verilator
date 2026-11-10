@@ -117,7 +117,7 @@ void Lexer::skipSpace() {
 Token Lexer::lexSymbol(FileLine* flp) {
     static const char* const threech[] = {"?/=", "?<=", "?>="};
     static const char* const twoch[]
-        = {"<=", ">=", ":=", "=>", "/=", "**", "<>", "?=", "?<", "?>", "<<", ">>"};
+        = {"<=", ">=", ":=", "=>", "/=", "**", "<>", "?=", "?<", "?>", "<<", ">>", "??"};
     Token tok;
     tok.kind = Token::SYM;
     tok.flp = flp;

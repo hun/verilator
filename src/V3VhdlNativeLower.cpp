@@ -287,6 +287,10 @@ class Lowering final {
     AstNodeExpr* lowerIntrinsic(const Expr& expr);
     AstNodeExpr* lowerEdgeCall(const Expr& expr);
     AstNodeExpr* makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp, bool left);
+    AstNodeExpr* makeMod(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
+                         bool sign);
+    AstNodeExpr* makeRem(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
+                         bool sign);
     bool isConversion(const std::string& name) const {
         return name == "std_logic_vector" || name == "std_ulogic_vector" || name == "bit_vector"
                || name == "unsigned" || name == "signed" || name == "to_integer"
@@ -335,6 +339,8 @@ class Lowering final {
     AstNodeExpr* lowerSelectedExpr(const Expr& expr);
     const VType* typeOfName(const Expr& expr) const;
     bool typeOfDesignator(const Expr& expr, VType& out) const;
+    bool packageNameOf(const Expr& prefix, std::string& name) const;
+    AstNodeExpr* lowerPackageMember(const Expr& expr, const std::string& pkgName);
     VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
     AstNode* lowerSelected(const Concurrent& conc);
@@ -773,6 +779,20 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         }
         return lowerAggregate(expr, *context);
     }
+    case Expr::QUAL: {
+        // A type qualification fixes the operand's type and keeps its width
+        AstNodeExpr* valuep = lowerExpr(*expr.a, context);
+        if (!valuep) return nullptr;
+        const VType valueType = typeOfDType(valuep->dtypep());
+        const auto declared = m_types.find(expr.text);
+        if (declared != m_types.end()) return resizeExpr(valuep, declared->second, flp);
+        VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
+        VSigning signing = VSigning::UNSIGNED;
+        if (expr.text == "bit_vector" || expr.text == "bit") kwd = VBasicDTypeKwd::BIT;
+        if (expr.text == "signed") signing = VSigning::SIGNED;
+        const VType target = vectorType(flp, kwd, signing, valueType.width);
+        return resizeExpr(valuep, target, flp);
+    }
     case Expr::ATTR: return lowerAttr(expr);
     case Expr::SELECTED: return lowerSelectedExpr(expr);
     case Expr::PAREN: return lowerExpr(*expr.a, context);
@@ -780,6 +800,31 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
         if (!operandp) return nullptr;
         const VType type = typeOfDType(operandp->dtypep());
+        if (expr.text == "abs") {
+            if (!type.isInt()) {
+                unsupportedError(flp, "abs of a non-integer value");
+                operandp->deleteTree();
+                return nullptr;
+            }
+            // |x| is x when x is not negative, and -x otherwise
+            AstNodeExpr* const zerop = makeIntConst(flp, 0);
+            AstNodeExpr* const ltZeroP = new AstLtS{flp, operandp->cloneTree(false), zerop};
+            ltZeroP->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            AstNegate* const negp = new AstNegate{flp, operandp->cloneTree(false)};
+            negp->dtypep(type.dtp);
+            AstCond* const resultp = new AstCond{flp, ltZeroP, negp, operandp};
+            resultp->dtypep(type.dtp);
+            return resultp;
+        }
+        if (expr.text == "??") {
+            // Implicit condition: false for metavalues, which the 2-state model has none of
+            AstNodeExpr* const oneConstp = operandp->dtypep()->width() == 1
+                                               ? bitConst(flp, '1')
+                                               : resizeExpr(bitConst(flp, '1'), type, flp);
+            AstEqCase* const eqp = new AstEqCase{flp, operandp, oneConstp};
+            eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            return eqp;
+        }
         if (expr.text == "not") {
             AstNot* const notp = new AstNot{flp, operandp};
             notp->dtypep(type.dtp);
@@ -1025,7 +1070,60 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         return resultp;
     }
 
-    const bool arithmetic = op == "+" || op == "-" || op == "*" || op == "/";
+    if (op == "sll" || op == "srl" || op == "sla" || op == "sra" || op == "rol" || op == "ror") {
+        if (!lt.isVector()) {
+            unsupportedError(flp, "shift or rotate of a non-vector value");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+        AstNodeDType* const dtp = lp->dtypep();
+        const int width = dtp->width();
+        if (op == "rol" || op == "ror") return makeRotate(flp, lp, rp, op == "rol");
+        AstNodeExpr* resultp = nullptr;
+        if (op == "sll" || op == "sla") {
+            resultp = new AstShiftL{flp, lp, rp, width};
+        } else if (op == "sra") {
+            // Arithmetic only for a signed operand; an unsigned value shifts in zeros
+            resultp = lt.isSigned() ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, lp, rp, width})
+                                    : static_cast<AstNodeExpr*>(new AstShiftR{flp, lp, rp, width});
+        } else {
+            resultp = new AstShiftR{flp, lp, rp, width};
+        }
+        resultp->dtypep(dtp);
+        return resultp;
+    }
+    if (op == "**") {
+        // A static exponent unrolls into a chain of multiplications
+        int64_t exponent = 0;
+        if (!staticInt(expr.b, exponent) || exponent < 0 || exponent > 64) {
+            unsupportedError(flp, "non-static exponent");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+        rp->deleteTree();
+        if (!lt.isInt()) {
+            unsupportedError(flp, "exponentiation of a non-integer value");
+            lp->deleteTree();
+            return nullptr;
+        }
+        if (exponent == 0) {
+            lp->deleteTree();
+            return makeIntConst(flp, 1);
+        }
+        AstNodeExpr* resultp = lp->cloneTree(false);
+        for (int64_t i = 1; i < exponent; ++i) {
+            AstNodeExpr* const mulp = new AstMul{flp, resultp, lp->cloneTree(false)};
+            mulp->dtypep(lt.dtp);
+            resultp = mulp;
+        }
+        lp->deleteTree();
+        return resultp;
+    }
+
+    const bool arithmetic
+        = op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem";
     if (!arithmetic) {
         unsupportedError(flp, "operator '" + op + "'");
         lp->deleteTree();
@@ -1040,6 +1138,11 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             resultp = new AstSub{flp, lp, rp};
         } else if (op == "*") {
             resultp = new AstMul{flp, lp, rp};
+        } else if (op == "rem") {
+            // rem takes the dividend's sign, which is what the remainder gives
+            resultp = makeRem(flp, lp, rp, lt.dtp, true);
+        } else if (op == "mod") {
+            resultp = makeMod(flp, lp, rp, lt.dtp, true);
         } else {
             resultp = new AstDivS{flp, lp, rp};
         }
@@ -1084,7 +1187,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     int resultWidth = 0;
     if (op == "*") {
         resultWidth = lt.width + rt.width;
-    } else if (op == "/") {
+    } else if (op == "/" || op == "mod" || op == "rem") {
         resultWidth = lt.width;
     } else {
         resultWidth = std::max(lt.width, rt.width);
@@ -1100,6 +1203,10 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         resultp = new AstSub{flp, lp, rp};
     } else if (op == "*") {
         resultp = new AstMul{flp, lp, rp};
+    } else if (op == "rem") {
+        resultp = makeRem(flp, lp, rp, lp->dtypep(), signing == VSigning::SIGNED);
+    } else if (op == "mod") {
+        resultp = makeMod(flp, lp, rp, lp->dtypep(), signing == VSigning::SIGNED);
     } else {
         resultp = signing == VSigning::SIGNED ? static_cast<AstNodeExpr*>(new AstDivS{flp, lp, rp})
                                               : static_cast<AstNodeExpr*>(new AstDiv{flp, lp, rp});
@@ -1132,6 +1239,24 @@ AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
     m_edges.push_back(edge);
     // The sensitivity item supplies the edge; at time zero no signal has had an event
     return bitConst(flp, m_initial ? '0' : '1');
+}
+
+//! The remainder operator, signed or unsigned
+AstNodeExpr* Lowering::makeRem(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
+                               bool sign) {
+    AstNodeExpr* const remp = sign ? static_cast<AstNodeExpr*>(new AstModDivS{flp, lp, rp})
+                                   : static_cast<AstNodeExpr*>(new AstModDiv{flp, lp, rp});
+    remp->dtypep(dtp);
+    return remp;
+}
+
+//! VHDL mod takes the divisor's sign, so it is ((a % b) + b) % b
+AstNodeExpr* Lowering::makeMod(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
+                               bool sign) {
+    AstNodeExpr* const remp = makeRem(flp, lp, rp->cloneTree(false), dtp, sign);
+    AstNodeExpr* const plusp = new AstAdd{flp, remp, rp};
+    plusp->dtypep(dtp);
+    return makeRem(flp, plusp, rp->cloneTree(false), dtp, sign);
 }
 
 //! One rotation of a vector: the low `count mod width` bits move to the other end
@@ -1790,12 +1915,48 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
     return selp;
 }
 
+//! Package name when a prefix denotes one, e.g. `pkg` or `work.pkg`
+bool Lowering::packageNameOf(const Expr& prefix, std::string& name) const {
+    if (!m_packagesp) return false;
+    const auto isPackage = [&](const std::string& candidate) {
+        return m_packagesp->packages.count(candidate) != 0;
+    };
+    if (prefix.kind == Expr::NAME) {
+        if (!isPackage(prefix.text)) return false;
+        name = prefix.text;
+        return true;
+    }
+    if (prefix.kind == Expr::SELECTED && prefix.a && prefix.a->kind == Expr::NAME
+        && isPackage(prefix.text)) {
+        // Library-qualified package name: the library is not modelled
+        name = prefix.text;
+        return true;
+    }
+    return false;
+}
+
+//! A name declared by a package: import the package, then resolve in its tables
+AstNodeExpr* Lowering::lowerPackageMember(const Expr& expr, const std::string& pkgName) {
+    FileLine* const flp = expr.flp;
+    importPackage(pkgName);
+    const auto constIt = m_consts.find(expr.text);
+    if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
+    const auto valueIt = m_constValues.find(expr.text);
+    if (valueIt != m_constValues.end()) return valueIt->second->cloneTree(false);
+    const auto enumIt = m_enumConsts.find(expr.text);
+    if (enumIt != m_enumConsts.end()) return enumIt->second->cloneTree(false);
+    flp->v3error("VHDL: package '" + pkgName + "' has no declaration '" + expr.spelling + "'");
+    return nullptr;
+}
+
 AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
     FileLine* const flp = expr.flp;
     if (!expr.a) {
         unsupportedError(flp, "selected name without a prefix");
         return nullptr;
     }
+    std::string pkgName;
+    if (packageNameOf(*expr.a, pkgName)) return lowerPackageMember(expr, pkgName);
     VType prefixType;
     if (!typeOfDesignator(*expr.a, prefixType) || prefixType.kind != VType::RECORD) {
         unsupportedError(flp, "selected name '" + expr.spelling + "'");
