@@ -888,6 +888,18 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             }
             if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
             if (isConversion(expr.a->text)) return lowerConversion(expr);
+            // A declared type mark applied to a value is a type conversion
+            const auto typeIt = m_types.find(expr.a->text);
+            if (typeIt != m_types.end()) {
+                if (expr.args.size() != 1) {
+                    unsupportedError(flp, "type conversion with "
+                                              + std::to_string(expr.args.size()) + " arguments");
+                    return nullptr;
+                }
+                AstNodeExpr* valuep = lowerExpr(*expr.args[0], &typeIt->second);
+                if (!valuep) return nullptr;
+                return resizeExpr(valuep, typeIt->second, flp);
+            }
         }
         return lowerDesignator(expr, false);
     case Expr::SLICE: return lowerDesignator(expr, false);
