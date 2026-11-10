@@ -1351,7 +1351,18 @@ class VhdlXmlFrontend final {
         }
 
         // slice_name; only one-dimensional arrays can be sliced
-        const Node* const suffixp = derefNode(nodep->child("suffix"));
+        const Node* suffixp = derefNode(nodep->child("suffix"));
+        if (suffixp && suffixp->attr("kind") != "range_expression"
+            && (suffixp->attr("kind") == "simple_name"
+                || suffixp->attr("kind") == "selected_name")) {
+            // A subtype mark denotes its range
+            const Node* const refp = suffixp->child("named_entity");
+            const Node* const declp
+                = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+            const Node* const subp = declp ? declp->child("subtype_indication") : nullptr;
+            const Node* const rangep = subp ? subp->child("range_constraint") : nullptr;
+            if (rangep) suffixp = derefNode(rangep);
+        }
         if (!suffixp || suffixp->attr("kind") != "range_expression") {
             unsupported(nodep, "slice form");
             return basep;
@@ -2681,6 +2692,22 @@ class VhdlXmlFrontend final {
         return false;
     }
 
+    //! Fold a constant expression made of concatenations, returning a new node
+    AstConst* foldConstant(AstNodeExpr* exprp) const {
+        if (AstConst* const constp = VN_CAST(exprp, Const)) return constp;
+        if (AstConcat* const concatp = VN_CAST(exprp, Concat)) {
+            AstConst* const lhsp = foldConstant(concatp->lhsp());
+            AstConst* const rhsp = foldConstant(concatp->rhsp());
+            if (!lhsp || !rhsp) return nullptr;
+            V3Number num{exprp->fileline(), lhsp->width() + rhsp->width(), 0U};
+            num.opConcat(lhsp->num(), rhsp->num());
+            AstConst* const resultp = new AstConst{exprp->fileline(), num};
+            resultp->dtypep(exprp->dtypep());
+            return resultp;
+        }
+        return nullptr;
+    }
+
     //! Split a linear integer expression; false when two different bases are mixed
     bool splitLinear(AstNodeExpr* exprp, LinearSplit& out) const {
         int64_t constValue = 0;
@@ -3864,7 +3891,14 @@ class VhdlXmlFrontend final {
             }
             AstNodeExpr* const choiceValp = lowerExpr(choiceExprp, dtypep);
             if (!choiceValp) return conds;
-            AstConst* const constp = VN_CAST(choiceValp, Const);
+            AstConst* constp = VN_CAST(choiceValp, Const);
+            if (!constp) {
+                // Constants defined as concatenations lower to an AstConcat
+                if (AstConst* const foldedp = foldConstant(choiceValp)) {
+                    VL_DO_DANGLING(choiceValp->deleteTree(), choiceValp);
+                    constp = foldedp;
+                }
+            }
             if (!constp) {
                 VL_DO_DANGLING(choiceValp->deleteTree(), choiceValp);
                 unsupported(choicep, "non-constant " + std::string{what} + " choice");
@@ -4021,11 +4055,46 @@ class VhdlXmlFrontend final {
                 basicp = VN_CAST(it->second.exprp->dtypep()->skipRefp(), BasicDType);
             }
         }
-        if (!basicp) return false;
+        if (!basicp) {
+            // A type mark used as an attribute prefix (`subtype T is ...; T'length`)
+            const Node* const refp = prefixp->child("named_entity");
+            const Node* const declp
+                = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+            const std::string declKind = declp ? declp->attr("kind") : std::string{};
+            if (declKind == "subtype_declaration" || declKind == "type_declaration"
+                || declKind == "anonymous_type_declaration") {
+                const Node* subp = declp->child("subtype_indication");
+                if (!subp) subp = declp->child("type_definition");
+                const VhdlDTypeSpec spec = probeTypeSpec(subp);
+                if (spec.isVector && !spec.isUnconstrained) {
+                    left = spec.left;
+                    right = spec.right;
+                    ascending = spec.ascending;
+                    return true;
+                }
+            }
+            return false;
+        }
         left = basicp->left();
         right = basicp->right();
         ascending = basicp->ascending();
         return true;
+    }
+
+    //! Bounds of an integer subtype behind a type-mark prefix
+    bool integerRangeOfPrefix(const Node* prefixp, int& left, int& right, bool& ascending) const {
+        if (!prefixp
+            || (prefixp->attr("kind") != "simple_name"
+                && prefixp->attr("kind") != "selected_name")) {
+            return false;
+        }
+        const Node* const refp = prefixp->child("named_entity");
+        const Node* const declp = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+        if (!declp) return false;
+        const Node* const subp = declp->child("subtype_indication");
+        const Node* const rangep = subp ? derefNode(subp->child("range_constraint")) : nullptr;
+        if (!rangep) return false;
+        return discreteRange(rangep, left, right, ascending);
     }
 
     //! Value of a static array attribute ('left/'right/'high/'low/'length/'ascending)
@@ -4043,7 +4112,10 @@ class VhdlXmlFrontend final {
         int left = 0;
         int right = 0;
         bool ascending = true;
-        if (!arrayRangeOfPrefix(nodep->child("prefix"), left, right, ascending)) return false;
+        if (!arrayRangeOfPrefix(nodep->child("prefix"), left, right, ascending)
+            && !integerRangeOfPrefix(nodep->child("prefix"), left, right, ascending)) {
+            return false;
+        }
         if (kind == "left") {
             value = left;
         } else if (kind == "right") {
@@ -4060,9 +4132,14 @@ class VhdlXmlFrontend final {
         return true;
     }
 
+    //! Integer environment for evaluating a pure function during static elaboration
+    struct ConstFuncEnv final {
+        std::map<std::string, int64_t> values;
+    };
+
     //! Evaluate a locally static integer expression from the dump
     bool evalConst(const Node* nodep, int64_t& value, int depth = 0) const {
-        if (!nodep || depth > 16) return false;
+        if (!nodep || depth > 32) return false;
         const std::string kind = nodep->attr("kind");
         if (kind == "integer_literal") {
             value = std::strtoll(nodep->attr("value").c_str(), nullptr, 10);
@@ -4167,7 +4244,398 @@ class VhdlXmlFrontend final {
             }
             return false;
         }
+        if (kind == "function_call") {
+            return evalConstCall(nodep, ConstFuncEnv{}, value, depth + 1);
+        }
         return attrValue(nodep, value);
+    }
+
+    enum ConstFlow : uint8_t { CF_NORMAL, CF_RETURN, CF_EXIT, CF_NEXT };
+
+    //! Evaluate an integer/boolean expression in a static function's environment
+    bool evalConstFuncExpr(const Node* nodep, const ConstFuncEnv& env, int64_t& value,
+                           int depth) const {
+        if (!nodep || depth > 32) return false;
+        const std::string kind = nodep->attr("kind");
+        if (kind == "integer_literal") {
+            value = std::strtoll(nodep->attr("value").c_str(), nullptr, 10);
+            return true;
+        }
+        if (kind == "simple_name" || kind == "selected_name") {
+            const auto it = env.values.find(vhdlFold(nodep->attr("identifier")));
+            if (it != env.values.end()) {
+                value = it->second;
+                return true;
+            }
+            return evalConst(nodep, value, depth + 1);
+        }
+        if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
+            return evalConstFuncExpr(nodep->child("expression"), env, value, depth + 1);
+        }
+        if (kind == "implicit_condition_operator" || kind == "condition_operator") {
+            int64_t operandv = 0;
+            if (!evalConstFuncExpr(nodep->child("operand"), env, operandv, depth + 1)) {
+                return false;
+            }
+            value = operandv != 0;
+            return true;
+        }
+        if (kind == "function_call") { return evalConstCall(nodep, env, value, depth + 1); }
+        if (kind == "addition_operator" || kind == "subtraction_operator"
+            || kind == "substraction_operator" || kind == "multiplication_operator"
+            || kind == "division_operator" || kind == "modulus_operator"
+            || kind == "remainder_operator" || kind == "exponentiation_operator") {
+            int64_t lhsv = 0;
+            int64_t rhsv = 0;
+            if (!evalConstFuncExpr(nodep->child("left"), env, lhsv, depth + 1)
+                || !evalConstFuncExpr(nodep->child("right"), env, rhsv, depth + 1)) {
+                return false;
+            }
+            if (kind == "addition_operator") {
+                value = lhsv + rhsv;
+            } else if (kind == "multiplication_operator") {
+                value = lhsv * rhsv;
+            } else if (kind == "division_operator") {
+                if (!rhsv) return false;
+                value = lhsv / rhsv;
+            } else if (kind == "modulus_operator") {
+                if (!rhsv) return false;
+                value = lhsv % rhsv;
+                if (value && ((value < 0) != (rhsv < 0))) value += rhsv;
+            } else if (kind == "remainder_operator") {
+                if (!rhsv) return false;
+                value = lhsv % rhsv;
+            } else if (kind == "exponentiation_operator") {
+                if (rhsv < 0) return false;
+                value = 1;
+                for (int64_t i = 0; i < rhsv; ++i) value *= lhsv;
+            } else {
+                value = lhsv - rhsv;
+            }
+            return true;
+        }
+        if (kind == "negation_operator" || kind == "absolute_operator") {
+            int64_t operandv = 0;
+            if (!evalConstFuncExpr(nodep->child("operand"), env, operandv, depth + 1)) {
+                return false;
+            }
+            value
+                = kind == "negation_operator" ? -operandv : (operandv < 0 ? -operandv : operandv);
+            return true;
+        }
+        if (kind == "not_operator") {
+            int64_t operandv = 0;
+            if (!evalConstFuncExpr(nodep->child("operand"), env, operandv, depth + 1)) {
+                return false;
+            }
+            value = !operandv;
+            return true;
+        }
+        if (kind == "equality_operator" || kind == "inequality_operator"
+            || kind == "less_than_operator" || kind == "less_than_or_equal_operator"
+            || kind == "greater_than_operator" || kind == "greater_than_or_equal_operator"
+            || kind == "and_operator" || kind == "or_operator" || kind == "xor_operator"
+            || kind == "nand_operator" || kind == "nor_operator" || kind == "xnor_operator") {
+            int64_t lhsv = 0;
+            int64_t rhsv = 0;
+            if (!evalConstFuncExpr(nodep->child("left"), env, lhsv, depth + 1)
+                || !evalConstFuncExpr(nodep->child("right"), env, rhsv, depth + 1)) {
+                return false;
+            }
+            if (kind == "equality_operator") {
+                value = lhsv == rhsv;
+            } else if (kind == "inequality_operator") {
+                value = lhsv != rhsv;
+            } else if (kind == "less_than_operator") {
+                value = lhsv < rhsv;
+            } else if (kind == "less_than_or_equal_operator") {
+                value = lhsv <= rhsv;
+            } else if (kind == "greater_than_operator") {
+                value = lhsv > rhsv;
+            } else if (kind == "greater_than_or_equal_operator") {
+                value = lhsv >= rhsv;
+            } else if (kind == "and_operator") {
+                value = lhsv && rhsv;
+            } else if (kind == "or_operator") {
+                value = lhsv || rhsv;
+            } else if (kind == "xor_operator") {
+                value = static_cast<bool>(lhsv) != static_cast<bool>(rhsv);
+            } else if (kind == "nand_operator") {
+                value = !(lhsv && rhsv);
+            } else if (kind == "nor_operator") {
+                value = !(lhsv || rhsv);
+            } else {
+                value = static_cast<bool>(lhsv) == static_cast<bool>(rhsv);
+            }
+            return true;
+        }
+        return evalConst(nodep, value, depth + 1);
+    }
+
+    //! Run a static function body; `flow` selects return/exit/next
+    bool evalConstFuncBlock(const std::vector<const Node*>& stmts, ConstFuncEnv& env,
+                            int64_t& result, ConstFlow& flow, int depth) const {
+        if (depth > 32) return false;
+        for (const Node* const stmtp : stmts) {
+            const std::string kind = stmtp->attr("kind");
+            if (kind == "variable_assignment_statement") {
+                const Node* const targetp = stmtp->child("target");
+                const Node* const exprp = stmtp->child("expression");
+                if (!targetp || !exprp || targetp->attr("kind") != "simple_name") return false;
+                int64_t value = 0;
+                if (!evalConstFuncExpr(exprp, env, value, depth + 1)) return false;
+                env.values[vhdlFold(targetp->attr("identifier"))] = value;
+                continue;
+            }
+            if (kind == "null_statement" || kind == "assertion_statement"
+                || kind == "report_statement") {
+                continue;
+            }
+            if (kind == "return_statement") {
+                if (!evalConstFuncExpr(stmtp->child("expression"), env, result, depth + 1)) {
+                    return false;
+                }
+                flow = CF_RETURN;
+                return true;
+            }
+            if (kind == "exit_statement" || kind == "next_statement") {
+                if (stmtp->child("loop_label")) return false;
+                int64_t taken = 1;
+                if (stmtp->child("condition")
+                    && !evalConstFuncExpr(stmtp->child("condition"), env, taken, depth + 1)) {
+                    return false;
+                }
+                if (taken) {
+                    flow = kind == "exit_statement" ? CF_EXIT : CF_NEXT;
+                    return true;
+                }
+                continue;
+            }
+            if (kind == "if_statement") {
+                const Node* branchp = stmtp;
+                while (branchp) {
+                    const Node* const condp = branchp->child("condition");
+                    bool take = true;
+                    if (condp) {
+                        int64_t value = 0;
+                        if (!evalConstFuncExpr(condp, env, value, depth + 1)) return false;
+                        take = value != 0;
+                    }
+                    if (take) {
+                        ConstFlow branchFlow = CF_NORMAL;
+                        if (!evalConstFuncBlock(
+                                childEls(branchp->child("sequential_statement_chain")), env,
+                                result, branchFlow, depth + 1)) {
+                            return false;
+                        }
+                        if (branchFlow != CF_NORMAL) {
+                            flow = branchFlow;
+                            return true;
+                        }
+                        break;
+                    }
+                    branchp = branchp->child("else_clause");
+                }
+                continue;
+            }
+            if (kind == "case_statement") {
+                int64_t selector = 0;
+                if (!evalConstFuncExpr(stmtp->child("expression"), env, selector, depth + 1)) {
+                    return false;
+                }
+                const Node* bodyp = nullptr;
+                const Node* othersBodyp = nullptr;
+                const Node* groupBodyp = nullptr;
+                for (const Node* const altp :
+                     childEls(stmtp->child("case_statement_alternative_chain"))) {
+                    const std::string altKind = altp->attr("kind");
+                    const Node* const assocp = altp->child("associated_chain");
+                    if (assocp) groupBodyp = assocp;
+                    if (altKind == "choice_by_others") {
+                        if (assocp) othersBodyp = assocp;
+                        continue;
+                    }
+                    bool match = false;
+                    if (altKind == "choice_by_range") {
+                        int64_t left = 0;
+                        int64_t right = 0;
+                        const Node* const rangep = altp->child("choice_range");
+                        if (!rangep
+                            || !evalConstFuncExpr(rangeBound(rangep, true), env, left, depth + 1)
+                            || !evalConstFuncExpr(rangeBound(rangep, false), env, right,
+                                                  depth + 1)) {
+                            return false;
+                        }
+                        match = selector >= std::min(left, right)
+                                && selector <= std::max(left, right);
+                    } else {
+                        int64_t choice = 0;
+                        if (!evalConstFuncExpr(altp->child("choice_expression"), env, choice,
+                                               depth + 1)) {
+                            return false;
+                        }
+                        match = selector == choice;
+                    }
+                    if (match) bodyp = assocp ? assocp : groupBodyp;
+                }
+                if (!bodyp) bodyp = othersBodyp;
+                if (!bodyp) return false;
+                if (!evalConstFuncBlock(childEls(bodyp), env, result, flow, depth + 1))
+                    return false;
+                if (flow != CF_NORMAL) return true;
+                continue;
+            }
+            if (kind == "for_loop_statement") {
+                const Node* const specp = stmtp->child("parameter_specification");
+                const Node* const subtypep = specp ? specp->child("subtype_indication") : nullptr;
+                const Node* const rangep
+                    = subtypep ? subtypep->child("range_constraint") : nullptr;
+                if (!specp || !rangep) return false;
+                int64_t left = 0;
+                int64_t right = 0;
+                if (!evalConstFuncExpr(rangeBound(rangep, true), env, left, depth + 1)
+                    || !evalConstFuncExpr(rangeBound(rangep, false), env, right, depth + 1)) {
+                    return false;
+                }
+                const bool ascending = rangep->attr("direction") == "to";
+                const int64_t step = ascending ? 1 : -1;
+                const std::string key = vhdlFold(specp->attr("identifier"));
+                for (int64_t value = left; ascending ? value <= right : value >= right;
+                     value += step) {
+                    env.values[key] = value;
+                    ConstFlow bodyFlow = CF_NORMAL;
+                    if (!evalConstFuncBlock(childEls(stmtp->child("sequential_statement_chain")),
+                                            env, result, bodyFlow, depth + 1)) {
+                        return false;
+                    }
+                    if (bodyFlow == CF_RETURN) {
+                        flow = CF_RETURN;
+                        return true;
+                    }
+                    if (bodyFlow == CF_EXIT) break;
+                }
+                continue;
+            }
+            if (kind == "while_loop_statement" || kind == "loop_statement") {
+                const Node* const condp
+                    = kind == "while_loop_statement" ? stmtp->child("condition") : nullptr;
+                int iterations = 0;
+                while (true) {
+                    if (condp) {
+                        int64_t condValue = 0;
+                        if (!evalConstFuncExpr(condp, env, condValue, depth + 1)) return false;
+                        if (!condValue) break;
+                    }
+                    ConstFlow bodyFlow = CF_NORMAL;
+                    if (!evalConstFuncBlock(childEls(stmtp->child("sequential_statement_chain")),
+                                            env, result, bodyFlow, depth + 1)) {
+                        return false;
+                    }
+                    if (bodyFlow == CF_RETURN) {
+                        flow = CF_RETURN;
+                        return true;
+                    }
+                    if (bodyFlow == CF_EXIT) break;
+                    if (++iterations > 100000) return false;
+                }
+                continue;
+            }
+            return false;
+        }
+        flow = CF_NORMAL;
+        return true;
+    }
+
+    //! Evaluate a call to a pure function with integer/boolean parameters
+    bool evalConstCall(const Node* callp, const ConstFuncEnv& callerEnv, int64_t& value,
+                       int depth) const {
+        if (depth > 32) return false;
+        const Node* const declp = functionDeclOf(callp);
+        if (!declp) return false;
+        const Node* const bodyp = subprogramBodyOf(declp);
+        if (!bodyp || bodyp->attr("kind") != "function_body") return false;
+        ConstFuncEnv env;
+        std::map<std::string, const Node*> actualByName;
+        std::vector<const Node*> positional;
+        for (const Node* const assocp : childEls(callp->child("parameter_association_chain"))) {
+            const Node* const formalp = assocp->child("formal");
+            const Node* const actualp = assocp->child("actual");
+            if (formalp) {
+                actualByName[vhdlFold(formalp->attr("identifier"))] = actualp;
+            } else {
+                positional.push_back(actualp);
+            }
+        }
+        size_t positionalIndex = 0;
+        for (const Node* const paramp : childEls(declp->child("interface_declaration_chain"))) {
+            const std::string paramKind = paramp->attr("kind");
+            if (paramKind != "interface_constant_declaration"
+                && paramKind != "interface_variable_declaration") {
+                return false;
+            }
+            const std::string mode = paramp->attr("mode");
+            if (!mode.empty() && mode != "in") return false;
+            const std::string name = vhdlFold(paramp->attr("identifier"));
+            const Node* actualp = nullptr;
+            const auto namedIt = actualByName.find(name);
+            if (namedIt != actualByName.end()) {
+                actualp = namedIt->second;
+            } else if (positionalIndex < positional.size()) {
+                actualp = positional[positionalIndex++];
+            }
+            if (!actualp) actualp = paramp->child("default_value");
+            if (!actualp) return false;
+            int64_t paramValue = 0;
+            if (!evalConstFuncExpr(actualp, callerEnv, paramValue, depth + 1)) return false;
+            env.values[name] = paramValue;
+        }
+        for (const Node* const declp2 : childEls(bodyp->child("declaration_chain"))) {
+            const std::string kind = declp2->attr("kind");
+            if (kind != "variable_declaration" && kind != "constant_declaration") continue;
+            int64_t initValue = 0;
+            if (const Node* const defp = declp2->child("default_value")) {
+                if (!evalConstFuncExpr(defp, env, initValue, depth + 1)) return false;
+            }
+            env.values[vhdlFold(declp2->attr("identifier"))] = initValue;
+        }
+        int64_t result = 0;
+        ConstFlow flow = CF_NORMAL;
+        if (!evalConstFuncBlock(childEls(bodyp->child("sequential_statement_chain")), env, result,
+                                flow, depth + 1)) {
+            return false;
+        }
+        if (flow != CF_RETURN) return false;
+        value = result;
+        return true;
+    }
+
+    //! String value of a literal or a string generic/constant, if known
+    bool stringValue(const Node* nodep, std::string& value) const {
+        if (!nodep) return false;
+        if (stringLiteral(nodep, value)) return true;
+        const std::string kind = nodep->attr("kind");
+        if (kind == "simple_name" || kind == "selected_name") {
+            const auto it = m_stringBindings.find(vhdlFold(nodep->attr("identifier")));
+            if (it != m_stringBindings.end()) {
+                value = it->second;
+                return true;
+            }
+            const Node* const refp = nodep->child("named_entity");
+            const Node* const declp
+                = refp && refp->has("ref") ? nodeById(refp->attr("ref")) : nullptr;
+            if (declp) {
+                const std::string declKind = declp->attr("kind");
+                if ((declKind == "constant_declaration"
+                     || declKind == "interface_constant_declaration")
+                    && declp->child("default_value")) {
+                    return stringValue(declp->child("default_value"), value);
+                }
+            }
+        }
+        if (kind == "parentheses_expression" || kind == "parenthesis_expression") {
+            return stringValue(nodep->child("expression"), value);
+        }
+        return false;
     }
 
     //! Evaluate a locally static boolean expression (if-generate conditions)
@@ -4222,6 +4690,15 @@ class VhdlXmlFrontend final {
         if (kind == "equality_operator" || kind == "inequality_operator"
             || kind == "less_than_operator" || kind == "less_than_or_equal_operator"
             || kind == "greater_than_operator" || kind == "greater_than_or_equal_operator") {
+            if (kind == "equality_operator" || kind == "inequality_operator") {
+                std::string lhss;
+                std::string rhss;
+                if (stringValue(nodep->child("left"), lhss)
+                    && stringValue(nodep->child("right"), rhss)) {
+                    value = kind == "equality_operator" ? lhss == rhss : lhss != rhss;
+                    return true;
+                }
+            }
             int64_t lhsv = 0;
             int64_t rhsv = 0;
             if (!evalConst(nodep->child("left"), lhsv)
