@@ -1,4 +1,4 @@
-# VHDL frontend handoff — 2026-11-09 (evening)
+# VHDL frontend handoff — 2026-11-10
 
 Branch: `vhdl-frontend-wp0`
 Repo: `/home/hannes/git_extern/verilator`
@@ -29,6 +29,8 @@ sanitizer or huge-allocation tests in a fresh shell with no `ulimit -v`.
 
 Commits today:
 
+- `3d52ec9` Support VHDL exit and next in static loops
+- `8a39064` Support VHDL one-element indexing and variable slice widths
 - `bd8f2c8` Fix VHDL contextless logic literals and grouped record aggregates
 - `5556440` Remove unused VHDL aggregate type inference
 - `c76ea3b` Support VHDL static ranges and aggregate forms
@@ -74,11 +76,36 @@ Commits today:
 - `d9f4596` Fix VHDL operator widths and wide literals
 - `227b24d` Clean up VHDL diagnostic strings
 
-Working tree: clean at `bd8f2c8` on `vhdl-frontend-wp0`.
+This session's commits (on top of `639d6ab`):
+
+- `7eb72cc` Accept implicit VHDL asynchronous reset conditions
+- `09137e5` Use the last VHDL architecture without a diagnostic
+- `02df48b` Support VHDL arrays of integer and generic-type elements
+- `d29200a` Evaluate VHDL pure functions and subtype attributes statically
+- `1667302` Support loops and local updates in inlined VHDL functions
+
+The frontend changes in those commits:
+- Function inlining now unrolls static `for` loops and supports `exit`/`next`
+  (including labels and exits to outer loops), conditional `return`, local
+  aliases, and element/slice assignments of local variables (the whole value is
+  rebuilt around the update).
+- Static elaboration evaluates pure integer/boolean functions, including static
+  `if`/`case`/`for`/`while`/`loop` bodies and constant concatenation case
+  choices.
+- Subtype marks work as slice bounds, and subtype attributes
+  (`slice1_t'high`/`'low`/`'left`/`'right`/`'length`/`'ascending`) resolve for
+  integer subtypes.
+- Arrays accept integer/subtype elements and generic-type elements; generic
+  type parameters passed through another generic resolve through the enclosing
+  binding.
+- Multiple architectures are accepted (last analyzed wins) with no diagnostic.
+- Async resets accept implicit and `??` conditions.
 
 Build/test status at stop: `make -j4 -C src` clean; the full `t_vhdl_*` suite
-passes (45 tests); the GHDL `synth` corpus was rerun (PASS 665, UNSUPPORTED 300,
-ERROR 31, EXPECTED_FAIL 48, GHDL_ERROR 94, NO_TOP 1); `clang-format` clean.
+passes (52 tests); the GHDL `synth` corpus was rerun (PASS 741, UNSUPPORTED 232,
+ERROR 31, EXPECTED_FAIL 48, GHDL_ERROR 86, NO_TOP 1); `clang-format` clean.
+The working tree additionally contains VHDL shared-variable support
+(`src/V3VhdlParse.cpp`, `t_vhdl_shared`).
 `make lint-py` was not rerun in this session -- the pinned dev tools are not
 installed here; the new test scripts pass `python3 -m py_compile`.
 
@@ -109,6 +136,11 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   generics (constants and generic type parameters), direct/component
   instantiation, named/positional/bare-expression port associations, writable
   actuals that are names/slices/indices.
+- Shared variables (`shared variable` in entity, architecture and block/generate
+  declarative parts) are module-level variables: immediate assignment, initializer
+  at time zero, visible to every process, and excluded from `process(all)`
+  sensitivity. GHDL is invoked with `-frelaxed` so non-protected shared variables
+  analyze; protected-type shared variables remain unsupported.
 - Individual port associations: record members (`i.x => a`) and array elements
   or slices (`v(7 downto 4) => a`, `v(0 to 3) => a`). Individually associated
   unconstrained record/array ports are specialized from GHDL's synthesized
@@ -173,6 +205,8 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   (`'left`/`'right`/`'high`/`'low`/`'length`/`'range`) use element indices, and
   aggregates support positional, named, range and `others` choices.
   Ascending arrays use the rightmost element as the least significant.
+  One-element arrays are indexable, and a slice/index of a function or
+  conversion result lowers the prefix as an expression.
 - String generics: the actual (or default) is a string literal, bound per
   specialization and included in the specialization key. The value is an
   array of 8-bit `character` enum elements indexed `1 to length`, so `'low`/
@@ -181,8 +215,15 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   Positional and named generic associations are both supported. Type
   attributes over `subtype T is natural range arr'range` resolve through the
   array's range as well.
+- Static `for` loops lower `exit [when cond]` and `next [when cond]`. An exit
+  latches into a per-loop 1-bit flag, so later iterations are skipped even if
+  variables used in the exit condition change after the exit point. `next`
+  guards only the rest of the current iteration. Exits inside a `case`
+  alternative or targeting an outer loop stay a clean Unsupported.
 - Non-static slices are supported when the width is statically known
-  (`mem(a*8+7 downto a*8)`), including writes.
+  (`mem(a*8+7 downto a*8)`), including writes. Constant subexpressions are
+  folded, and variable bounds whose linear relation cancels
+  (`lo := k*8; hi := lo + 7; x(hi downto lo)`) give a static width.
 - Static elaboration expressions: integer division, modulus, remainder,
   exponentiation and `abs` in ranges; `'range` used as a constraint; aggregates
   whose GHDL-determined type supplies their bounds (qualified element choices
@@ -215,9 +256,23 @@ Implemented in `src/V3VhdlParse.cpp` on top of the GHDL XML path:
   zero-width (null) arrays/slices rejected cleanly.
 - User-defined pure functions and procedures, inlined; unconstrained formal
   parameters take the actual's type, parameter-dependent local bounds and
-  attributes on formals work. Function-local variable *element* assignment is
-  rejected (locals are bound to values).
-- Recursion is unsupported (explicit diagnostic).
+  attributes on formals work. Function bodies may contain static `for` loops,
+  `exit`/`next` (unlabeled, labeled, and to an outer loop), conditional
+  `return`, local aliases, and element/slice assignments of local variables
+  (the whole local value is rebuilt around the update). Static function calls
+  are also evaluated during elaboration, including integer/boolean `if`/`case`/
+  `for`/`while`/`loop` bodies, so constant ranges and widths can use them.
+  Inlined loops are unrolled one continuation frame per iteration and are
+  capped at 4096 iterations (a larger static range is a clean `Unsupported`).
+- Integer subtype attributes used as type marks (`slice1_t'high`) and subtype
+  marks as slice bounds resolve; constant concatenations work as `case`
+  choices. Arrays accept integer/subtype elements and generic-type elements,
+  and a generic type passed through another generic resolves through the
+  enclosing binding.
+- Multiple architectures for one entity are accepted (last analyzed wins), and
+  async reset conditions accept implicit scalar and `??` forms.
+- Recursion is unsupported (explicit diagnostic); static recursion is not
+  folded.
 
 Tests:
 
@@ -235,7 +290,14 @@ Tests:
 - `t_vhdl_string_generic` — string generics at different lengths and contents,
   positional and named generic associations, `'low`/`'high`/`'length`, dynamic
   indexing, and character case choices.
-- `t_vhdl_slice` — non-static slices (read and write), ascending order.
+- `t_vhdl_slice` — non-static slices (read and write), ascending order,
+  variable bounds with a linear relation, a slice of a function result, and a
+  variable slice as a `process(all)` write target.
+- `t_vhdl_index1` — one-element array indexing by a literal and a variable,
+  including writes, plus wide and four-state variable assignments.
+- `t_vhdl_loop_exit` — priority-encoder `exit`, `next when`, nested-loop exits,
+  unreachable statements after an exit, and exit-condition latching against a
+  variable assigned later in the same iteration.
 - `t_vhdl_event` — clock idioms, level gates, `'event` forms, async reset,
   concurrent clocked assignment.
 - `t_vhdl_split` — two same-edge statement chains that share a target, a clocked
@@ -248,6 +310,9 @@ Tests:
   variable initialized before it.
 - `t_vhdl_process_all` — process(all) with a variable, if/else and output
   updates on input changes without a clock.
+- `t_vhdl_shared` — shared variables in entity, architecture and block
+  declarative parts, an accumulator and a RAM written and read across
+  processes, and `process(all)` insensitivity to a shared variable.
 - `t_vhdl_match` — matching equality/inequality with don't-care positions,
   wildcards in the middle and same-value matching without wildcards.
 - `t_vhdl_clock_bad` — rejected clock chains (later branch with a multi-signal
@@ -270,6 +335,17 @@ Tests:
   unconstrained array ports, read and write directions.
 - `t_vhdl_function`, `t_vhdl_procedure` — inlining, unconstrained formals,
   nested capture.
+- `t_vhdl_function_loop` — static `for` loops in functions, `return` inside a
+  loop, `'reverse_range` with a local alias, element updates of a local vector,
+  labeled `exit` to an outer loop, and constant function calls with loops.
+- `t_vhdl_int_array` — arrays of integer subtypes, ascending and descending,
+  element writes and reads, and `'length`.
+- `t_vhdl_multiarches` — two architectures for one entity; the last analyzed is
+  selected.
+- `t_vhdl_static_eval` — pure function with a static `while` loop in a signal
+  range, integer-subtype attributes, a subtype-mark slice bound, constant
+  concatenation choices in a selected assignment, and a string-generic
+  `if generate`.
 - `t_vhdl_alias`, `t_vhdl_ifgen`, `t_vhdl_gen_inst`, `t_vhdl_gen` (also a generic
   package instantiation and a block with a local signal), `t_vhdl_event` (also a
   PSL default clock),
@@ -294,19 +370,21 @@ Tests:
 
 | status | count |
 |---|---|
-| PASS | 665 |
-| UNSUPPORTED | 300 |
+| PASS | 741 |
+| UNSUPPORTED | 232 |
 | EXPECTED_FAIL | 48 |
-| GHDL_ERROR | 94 |
+| GHDL_ERROR | 86 |
 | ERROR | 31 |
 | NO_TOP | 1 |
 
-Progress across the day's states (original / after width fixes / now):
-PASS 369 -> 360 -> 665; UNSUPPORTED 622 -> 642 -> 300;
-ERROR 38 -> 27 -> 31; GHDL_ERROR 107 -> 94; EXPECTED_FAIL 50 -> 48; NO_TOP 3 -> 1.
+Progress across the day's states (original / after width fixes / before this
+session / now):
+PASS 369 -> 360 -> 699 -> 741; UNSUPPORTED 622 -> 642 -> 274 -> 232;
+ERROR 38 -> 27 -> 31 -> 31; GHDL_ERROR 107 -> 94 -> 86 -> 86;
+EXPECTED_FAIL 50 -> 48 -> 48; NO_TOP 3 -> 1 -> 1.
 `EXPECTED_FAIL` was split out of the older `ERROR`/`UNSUPPORTED`/`GHDL_ERROR`
 buckets for files the testsuite marks `synth_failure`, so the ERROR comparison
-is not apples-to-apples.  Net vs original: +296 PASS, -322 UNSUPPORTED,
+is not apples-to-apples.  Net vs original: +322 PASS, -348 UNSUPPORTED,
 -7 ERROR. The element-port step
 added `iassoc04`/`riassoc04` and X/weak logic literals (`toint02`, `toint03`,
 and related cases); the type-name step added the `issue2826`/`issue2834`
@@ -323,8 +401,9 @@ identifiers, out-of-range constants) and 6 pre-existing internal faults
 
 Main remaining UNSUPPORTED buckets:
 
-- waits without a top-level clock edge (44; `wait on`, `wait for`, waits inside
-  loops)
+- waits without a top-level clock edge (44; `wait on`, simulation-only `wait`
+  and `wait for`). Only `wait on <signal> until <condition>` is in the
+  synthesizable subset, and it is deferred.
 - PSL assertion/assume directives (21) — verification only, ignored by
   synthesis but rejected rather than dropped.  The string-generic `issue` tops
   now lower fully and stop only at these directives; the two standalone
@@ -332,22 +411,23 @@ Main remaining UNSUPPORTED buckets:
   `issue1850/issue` still stops at its unsupported `process_statement`.
 - generic map on units with no VHDL entity (14; the runner analyses one top
   file and cross-language binding is WP3)
-- non-static slice bounds and multi-dimensional arrays (10 each)
+- multi-dimensional arrays (10; deferred by the synthesis subset)
 - generic without a default on the selected top entity (10) — previously these
   passed lint-only as body-less base modules; the frontend now rejects them
   instead of silently emitting an empty top.
-- indexing a non-vector name (10)
-- character literals `'Z'` (9) and string-literal characters (8)
+- character literals `'Z'` (9) and non-logic string-literal characters (10)
 - process variables shared by clocked and unclocked statements (8) and null
   arrays (8; intentionally zero-width designs)
-- non-static range limits (7; pure function calls and variable-derived bounds)
+- non-static range limits (8; real/`math_real` or record-valued static
+  functions, and recursive functions)
 - `external_signal_name` (7)
-- unsupported library/user function calls: `ffs` (6), `get_val` (4), `is_x`
-  (3), `init_ram` (3) and other numeric/file helpers
-- asynchronous reset conditions (6) and array element type `integer` (6)
-- unconstrained port on a top-level entity (5), `exit_statement` (5)
-- interface view ports (3), non-static `resize` widths (3), assignment to a
-  variable element in an inlined function (3)
+- unsupported library/user function calls: `get_val` (4, generic package),
+  `is_x`/`to_x01`/`to_01` (O/X tier), `init_ram` (3, file I/O), fixed-point
+  helpers, and VHDL-2008 generic subprogram parameters
+- concurrent/selected conditional assignments and variable assignments (8;
+  VHDL-2008, deferred by the synthesis subset)
+- unconstrained port on a top-level entity (5)
+- interface view ports (3), non-static `resize` widths (3)
 - `floating_point_literal` (3) and `event_attribute` on non-sensitivity names
   (3)
 
@@ -384,8 +464,9 @@ configuration-bound component; `issue1117/ent` moved ERROR -> PASS.
 5. Remaining non-logic character/string literal contexts (`'a'`, `'Z'`,
    characters used as an enum type rather than as logic values), and
    matching relational operators (`?<`/`?<=`/`?>`/`?>=`).
-6. Function-local variable element assignment inside inlined functions (deep
-   value rewrite; currently a clean `Unsupported`).
+6. Inlined-function gaps: static functions returning records/arrays (element
+   association into a record formal is also unsupported) and recursive static
+   functions. Dynamic recursive functions remain a clean `Unsupported`.
 7. In an environment with `help2man`, lz4 headers, `wavediff` and without a
    hard virtual-memory cap, rerun `make test` for a clean full-suite result.
    Run `make cppcheck` where installed.
@@ -396,6 +477,19 @@ configuration-bound component; `issue1117/ent` moved ERROR -> PASS.
 - A VHDL array is packed flat with no dtype range of its own; anything that needs
   VHDL indices or element width must recover it with `arraySpec()`/`multiArraySpec()`
   from the analyzed type. Ascending arrays put the rightmost index at the LSB.
+  A one-element array is still indexable; only a `!haveLayout` width-1 base is a
+  non-vector.
+- Slice widths come from `staticRangeWidth`, which splits bounds into
+  `base*scale + offset`. `constIntValue` folds constant arithmetic (32-bit,
+  two-state only). `m_varRelations` supplies linear values for integer process
+  variables; it is copied into if/case branches, cleared at merges, loops,
+  procedure calls and each concurrent statement/process start. Never track
+  non-integer assignments or let a relation's base be the variable itself.
+- Static-loop `exit` uses a unique 1-bit `VAR` per loop, initialized before the
+  unrolled iterations and set at each exit point; later iterations run under
+  `!flag`. The flag is created only when that loop body contains an exit.
+  `next` only guards the remaining chain of the current iteration. Exits in a
+  `case` alternative or to an outer loop are rejected with `Unsupported`.
 - An entity base module is populated only when every constant generic has a
   default; a generic without one has no single body, so only its
   specializations emit.  Populating a base module binds its string generic
@@ -404,16 +498,27 @@ configuration-bound component; `issue1117/ent` moved ERROR -> PASS.
   formal lose their VHDL layout: the formal is a flat 8*length logic vector, so
   indexing inside the function selects one bit and attributes use the bit
   width.  Only direct indexing/attributes on the generic name are supported.
-- Function locals are bound to expressions, not `AstVar`s: only simple-name
-  assignments update them; constants bound via inlining are visible to
-  `evalConst` through `m_inlineEnvp`.
+- Function locals are bound to expressions, not `AstVar`s: whole-name
+  assignments replace the binding, and element/slice assignments rebuild the
+  value as `(old & ~mask) | ((value << lsb) & mask)`. Constants bound via
+  inlining are visible to `evalConst` through `m_inlineEnvp`.
+- Function loops are unrolled through continuations: one recursive frame per
+  iteration, capped at 4096. Labeled `exit`/`next` resolve through a
+  per-iteration stack of pointers to that frame's continuations; entries are
+  popped before the frame returns.
 - Clock chains: with a single sensitivity signal, later branches, `else` and both
   edges in one chain are lowered exactly (the edge becomes the signal's level).
   Otherwise the clock branch must be last, branches before it on a
   sensitivity-list signal must be simple level resets, and an `else` is rejected.
 - Process splitting only groups same-sensitivity statements; different clock
   groups and the unclocked remainder must have disjoint assignment targets and
-  no shared process variables, else the process stays a clean Unsupported.
+  no shared process variables or module-level shared variables, else the process
+  stays a clean Unsupported.
+- Shared variables are module-level `AstVar`s of kind `VAR`, so assignments are
+  immediate/blocking. GHDL needs `-frelaxed` under `--std=08` for non-protected
+  shared variables; the frontend passes it unconditionally. `m_sharedVars` tracks
+  them so `process(all)` does not treat them as sensitivity signals and process
+  splitting stays conservative.
 - `emitSingleClockProcess` runs before `emitClockedIf` whenever the fast path
   does not apply; a single top-level clocked chain still takes the edge-sensitivity
   fast path.
