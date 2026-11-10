@@ -151,6 +151,8 @@ def run_one(job):  # pylint: disable=too-many-locals
         args.verilator,
         '--language',
         'vhdl',
+        '--vhdl-frontend',
+        args.frontend,
         '--lint-only',
         '-Wno-fatal',
         '--top-module',
@@ -159,13 +161,14 @@ def run_one(job):  # pylint: disable=too-many-locals
         str(workdir),
     ] + [f.name for f in files]
     env = os.environ.copy()
-    if args.ghdl:
-        env['VERILATOR_GHDL'] = args.ghdl
-    flags = ghdl_flags(testdir)
-    if args.ghdl_flags:
-        flags = (flags + ' ' + args.ghdl_flags).strip()
-    if flags:
-        env['VERILATOR_GHDL_FLAGS'] = flags
+    if args.frontend == 'ghdl':
+        if args.ghdl:
+            env['VERILATOR_GHDL'] = args.ghdl
+        flags = ghdl_flags(testdir)
+        if args.ghdl_flags:
+            flags = (flags + ' ' + args.ghdl_flags).strip()
+        if flags:
+            env['VERILATOR_GHDL_FLAGS'] = flags
     started = time.monotonic()
     try:
         result = subprocess.run(cmd,
@@ -213,6 +216,10 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
     parser.add_argument('--verilator',
                         default=str(root / 'bin' / 'verilator'),
                         help='Verilator executable (default: bin/verilator)')
+    parser.add_argument('--frontend',
+                        choices=('ghdl', 'native'),
+                        default='ghdl',
+                        help='VHDL frontend to pass to Verilator (default: ghdl)')
     parser.add_argument('--ghdl', default=None, help='GHDL executable (sets VERILATOR_GHDL)')
     parser.add_argument('--ghdl-flags',
                         default='',

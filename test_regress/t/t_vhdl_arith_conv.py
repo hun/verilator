@@ -8,23 +8,22 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import os
-import shutil
 
 import vltest_bootstrap
+import vhdl_frontend
 
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_arith_conv.vhdl'
 
-ghdl = os.environ.get('VERILATOR_GHDL', 'ghdl')
-if not shutil.which(ghdl):
-    test.skip("GHDL not available")
+vhdl_frontend.require_frontend(test)
 
 # std_logic_arith is a Synopsys package
 os.environ['VERILATOR_GHDL_FLAGS'] = '-fsynopsys'
 
 test.compile(make_top_shell=False,
              make_main=False,
-             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
+             verilator_flags2=[
+                 *vhdl_frontend.flags(), '--language', 'vhdl', '--exe', test.pli_filename])
 
 test.execute()
 

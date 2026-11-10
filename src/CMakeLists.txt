@@ -210,6 +210,8 @@ set(HEADERS
     V3VariableOrder.h
     V3VhdlLink.h
     V3VhdlNative.h
+    V3VhdlNativeAst.h
+    V3VhdlNativeLower.h
     V3VhdlParse.h
     V3VhdlXml.h
     V3Waiver.h
@@ -401,6 +403,9 @@ set(COMMON_SOURCES
     V3VariableOrder.cpp
     V3VhdlLink.cpp
     V3VhdlNative.cpp
+    V3VhdlNativeLexer.cpp
+    V3VhdlNativeLower.cpp
+    V3VhdlNativeParse.cpp
     V3VhdlParse.cpp
     V3VhdlXml.cpp
     V3Waiver.cpp

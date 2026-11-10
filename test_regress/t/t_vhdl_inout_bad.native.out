@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_inout_bad.vhdl:24:1: VHDL procedural assignment to an inout port is not supported yet
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

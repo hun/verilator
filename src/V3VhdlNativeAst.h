@@ -1,0 +1,238 @@
+// -*- mode: C++; c-file-style: "cc-mode" -*-
+//*************************************************************************
+// DESCRIPTION: Verilator: Self-contained VHDL frontend: tokens and syntax tree
+//
+// Code available from: https://verilator.org
+//
+//*************************************************************************
+//
+// This program is free software; you can redistribute it and/or modify it
+// under the terms of either the GNU Lesser General Public License Version 3
+// or the Perl Artistic License Version 2.0.
+// SPDX-FileCopyrightText: 2026 Hannes Klas
+// SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+//
+//*************************************************************************
+//
+// Frontend interface types shared by the native VHDL stages:
+//   lexer (V3VhdlNativeLexer.cpp) -> parser (V3VhdlNativeParse.cpp) ->
+//   semantic analysis (V3VhdlNativeSem.cpp) -> elaboration
+//   (V3VhdlNativeElab.cpp) -> lowering (V3VhdlNativeLower.cpp).
+//
+//*************************************************************************
+
+#ifndef VERILATOR_V3VHDLNATIVE_AST_H_
+#define VERILATOR_V3VHDLNATIVE_AST_H_
+
+#include "config_build.h"
+#include "verilatedos.h"
+
+#include "V3FileLine.h"
+#include "V3VhdlNative.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace vhdlnative {
+
+//######################################################################
+// Tokens and lexer
+
+//! Map one VHDL logic value character to the 2-state model: '0', '1', 'x', 'z', or 0
+char vhdlLogicBit(char c);
+
+//! Report a language construct outside the implemented subset at its source location
+void unsupportedError(FileLine* flp, const std::string& what);
+
+struct Token final {
+    enum Kind : uint8_t { ID, INT, CHAR, BITS, STRING, SYM, END } kind = END;
+    std::string text;  // ID: folded identifier. SYM: operator. INT: spelling
+    std::string spelling;  // ID: identifier as written
+    std::string bits;  // BITS: one character ('0'/'1'/'x'/'z') per bit, msb first
+    char sym = 0;  // SYM: first character
+    int64_t intValue = 0;  // INT
+    char charValue = 0;  // CHAR
+    FileLine* flp = nullptr;
+};
+
+class Lexer final {
+    const std::string m_filename;  // File being lexed
+    const std::string m_text;  // File contents
+    size_t m_pos = 0;  // Current offset
+    int m_line = 1;  // Current line number
+
+    FileLine* newFileLine() const {
+        FileLine* const flp = new FileLine{m_filename};
+        flp->lineno(m_line);
+        flp->applyIgnores();  // Respect .vlt lint waivers
+        return flp;
+    }
+    char peek(size_t ahead) const {
+        return m_pos + ahead < m_text.size() ? m_text[m_pos + ahead] : '\0';
+    }
+    static bool isIdStart(char c) {
+        return std::isalpha(static_cast<unsigned char>(c)) || c == '_';
+    }
+    static bool isIdChar(char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    }
+    static int bitsPerDigit(int base) { return base == 2 ? 1 : base == 8 ? 3 : 4; }
+    static bool bitsFromDigits(const std::string& digits, int base, std::string& out);
+    static bool decimalValue(const std::string& digits, int64_t& out);
+
+    void skipSpace();
+    Token lexSymbol(FileLine* flp);
+    Token lexBits(FileLine* flp, const std::string& baseText);
+
+public:
+    Lexer(std::string filename, std::string text)
+        : m_filename{std::move(filename)}
+        , m_text{std::move(text)} {}
+    ~Lexer() = default;
+
+    //! Save/restore point for one-token lookahead
+    std::pair<size_t, int> state() const { return {m_pos, m_line}; }
+    void restore(const std::pair<size_t, int>& st) {
+        m_pos = st.first;
+        m_line = st.second;
+    }
+
+    Token next();
+};
+
+//######################################################################
+// Frontend syntax tree
+
+//! Port mode as written in a port clause
+enum class PortMode : uint8_t { IN, OUT, INOUT };
+
+struct Expr;
+using ExprP = std::unique_ptr<Expr>;
+
+struct Expr final {
+    enum Kind : uint8_t {
+        INT_LIT,  // intValue
+        BITS_LIT,  // bits
+        STRING_LIT,  // spelling: a string value that is not a bit-vector literal
+        CHAR_LIT,  // charValue
+        NAME,  // text/spelling
+        TRUE_LIT,
+        FALSE_LIT,
+        PAREN,  // a
+        UNARY,  // text=operator, a
+        BINARY,  // text=operator, a, b
+        INDEX,  // a=prefix, args
+        SLICE,  // a=prefix, b=left, c=right, text="downto"/"to"
+        AGG_OTHERS,  // a=value
+    } kind;
+    FileLine* flp = nullptr;
+    std::string text;  // Name/operator, folded
+    std::string spelling;  // Name as written
+    int64_t intValue = 0;
+    char charValue = 0;
+    std::string bits;
+    ExprP a, b, c;
+    std::vector<ExprP> args;
+
+    explicit Expr(Kind kind_)
+        : kind{kind_} {}
+};
+
+struct Stmt;
+using StmtP = std::unique_ptr<Stmt>;
+
+struct Stmt final {
+    enum Kind : uint8_t { ASSIGN, IF } kind;
+    FileLine* flp = nullptr;
+    ExprP target;  // ASSIGN
+    ExprP value;  // ASSIGN
+    // IF: (condition, body); a null condition marks the final else
+    std::vector<std::pair<ExprP, std::vector<StmtP>>> branches;
+
+    explicit Stmt(Kind kind_)
+        : kind{kind_} {}
+};
+
+struct TypeSpec final {
+    std::string mark;  // Folded type mark
+    FileLine* flp = nullptr;
+    bool hasRange = false;
+    bool ascending = false;  // "to", else "downto"
+    ExprP left, right;
+};
+
+struct PortDecl final {
+    FileLine* flp = nullptr;
+    std::vector<std::pair<std::string, std::string>> names;  // (folded, spelling)
+    PortMode dir = PortMode::IN;
+    TypeSpec type;
+};
+
+struct Decl final {
+    enum Kind : uint8_t { SIGNAL, CONSTANT } kind;
+    FileLine* flp = nullptr;
+    std::vector<std::pair<std::string, std::string>> names;
+    TypeSpec type;
+    ExprP init;
+    explicit Decl(Kind kind_)
+        : kind{kind_} {}
+};
+
+struct Process final {
+    FileLine* flp = nullptr;
+    bool hasSensitivity = false;
+    std::vector<std::string> sensitivity;  // Folded names
+    std::vector<StmtP> body;
+};
+
+struct Concurrent final {
+    enum Kind : uint8_t { ASSIGN, COND_ASSIGN, SEL_ASSIGN, PROCESS } kind;
+    FileLine* flp = nullptr;
+    ExprP target;  // ASSIGN/COND_ASSIGN/SEL_ASSIGN
+    ExprP value;  // ASSIGN/SEL_ASSIGN
+    // COND_ASSIGN: (value, condition); a null condition marks the final else
+    std::vector<std::pair<ExprP, ExprP>> alternatives;
+    ExprP selector;  // SEL_ASSIGN
+    // SEL_ASSIGN: (choices, value); an empty choice list marks "others"
+    std::vector<std::pair<std::vector<ExprP>, ExprP>> choices;
+    std::unique_ptr<Process> process;  // PROCESS
+    explicit Concurrent(Kind kind_)
+        : kind{kind_} {}
+};
+
+struct EntityUnit final {
+    std::string name;  // Folded
+    std::string spelling;
+    std::string libname;
+    bool inLibrary = false;
+    FileLine* flp = nullptr;
+    std::vector<PortDecl> ports;
+};
+
+struct Architecture final {
+    std::string name;  // Folded
+    std::string entityName;  // Folded
+    std::string libname;
+    bool inLibrary = false;
+    FileLine* flp = nullptr;
+    std::vector<Decl> decls;
+    std::vector<std::unique_ptr<Concurrent>> stmts;
+};
+
+//! Design units parsed from all source files, in source order
+struct DesignLibrary final {
+    std::vector<EntityUnit> entities;
+    std::vector<Architecture> archs;
+};
+
+//! Parse one design file and append its design units to the library
+void parseFile(const V3VhdlNativeFile& file, DesignLibrary& library) VL_MT_DISABLED;
+
+}  // namespace vhdlnative
+
+#endif  // Guard

@@ -1995,6 +1995,16 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
         showVersion(false);
         v3Global.vlExit(0);
     });
+    DECL_OPTION("-vhdl-frontend", CbVal, [this, fl](const char* valp) {
+        const string val = VString::downcase(valp);
+        if (val == "native") {
+            m_vhdlFrontend = V3VhdlFrontend::NATIVE;
+        } else if (val == "ghdl") {
+            m_vhdlFrontend = V3VhdlFrontend::GHDL;
+        } else {
+            fl->v3error("Unknown VHDL frontend specified: " << valp);
+        }
+    });
     DECL_OPTION("-vpi", OnOff, &m_vpi);
 
     DECL_OPTION("-Wall", CbCall, []() { FileLine::globalWarnOff(V3ErrorCode::I_LINT, false); });

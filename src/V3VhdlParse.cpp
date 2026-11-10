@@ -16,8 +16,8 @@
 //
 // VHDL frontend driver: collects design files, then runs one of two frontends.
 // The default frontend runs GHDL out of process and lowers its analyzed XML
-// (V3VhdlXml + finishXml below). The in-tree frontend (V3VhdlNative) is selected
-// with VERILATOR_VHDL_FRONTEND=native and needs no external analyzer.
+// (V3VhdlXml + finishXml below). The in-tree frontend (V3VhdlNative), selected
+// with --vhdl-frontend native, needs no external analyzer.
 //
 //*************************************************************************
 
@@ -8282,8 +8282,7 @@ void V3VhdlParse::parseFile(FileLine* fileline, const std::string& filename, boo
 }
 
 void V3VhdlParse::finish() {
-    const char* const frontendp = std::getenv("VERILATOR_VHDL_FRONTEND");
-    if (frontendp && std::string{frontendp} == "native") {
+    if (v3Global.opt.vhdlFrontend() == V3VhdlFrontend::NATIVE) {
         m_impp->finishNative();
     } else {
         m_impp->finishXml();
