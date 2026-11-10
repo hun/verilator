@@ -40,6 +40,9 @@ int main(int argc, char** argv) {
             check("ay", static_cast<int>(topp->ay), (a >> ((i & 1) ? 0 : 8)) & 0xff);
             check("vy", static_cast<int>(topp->vy), (a >> ((i & 1) * 8)) & 0xff);
             check("fy", static_cast<int>(topp->fy), (a >> 8) & 0xff);
+            check("ry", static_cast<int>(topp->ry), (a << 16) | a);
+            check("ary", static_cast<int>(topp->ary), (a << 16) | a);
+            check("wy", static_cast<int>(topp->wy), (a << 16) | a);
         }
     }
 
