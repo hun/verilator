@@ -346,6 +346,75 @@ class Lowering final {
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);
     }
+    //! Whether two expressions are structurally the same
+    static bool sameExpr(const Expr& l, const Expr& r) {
+        if (l.kind != r.kind || l.text != r.text || l.intValue != r.intValue
+            || l.charValue != r.charValue || l.bits != r.bits || l.args.size() != r.args.size()
+            || l.choices.size() != r.choices.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < l.args.size(); ++i) {
+            if (static_cast<bool>(l.args[i]) != static_cast<bool>(r.args[i])) return false;
+            if (l.args[i] && !sameExpr(*l.args[i], *r.args[i])) return false;
+        }
+        for (size_t i = 0; i < l.choices.size(); ++i) {
+            if (l.choices[i].size() != r.choices[i].size()) return false;
+            for (size_t j = 0; j < l.choices[i].size(); ++j) {
+                if (static_cast<bool>(l.choices[i][j]) != static_cast<bool>(r.choices[i][j])) {
+                    return false;
+                }
+                if (l.choices[i][j] && !sameExpr(*l.choices[i][j], *r.choices[i][j])) {
+                    return false;
+                }
+            }
+        }
+        const auto sameChild = [](const ExprP& lc, const ExprP& rc) {
+            return static_cast<bool>(lc) == static_cast<bool>(rc) && (!lc || sameExpr(*lc, *rc));
+        };
+        return sameChild(l.a, r.a) && sameChild(l.b, r.b) && sameChild(l.c, r.c);
+    }
+    //! Split `base + constant` (or `constant + base`) into its base and offset
+    void additiveBase(const Expr& expr, const Expr*& basep, int64_t& offset) const {
+        const Expr* e = &expr;
+        while (e->kind == Expr::PAREN && e->a) e = e->a.get();
+        basep = e;
+        offset = 0;
+        if (e->kind != Expr::BINARY || !e->a || !e->b) return;
+        int64_t value = 0;
+        if (e->text == "+") {
+            if (evalInt(*e->b, value)) {
+                basep = e->a.get();
+                offset = value;
+            } else if (evalInt(*e->a, value)) {
+                basep = e->b.get();
+                offset = value;
+            }
+        } else if (e->text == "-" && evalInt(*e->b, value)) {
+            basep = e->a.get();
+            offset = -value;
+        }
+    }
+    //! Width of a slice whose bounds are not both static, when they differ by a
+    //! constant: two positions with a common subexpression and constant offsets
+    bool sliceWidth(const Expr& left, const Expr& right, bool ascending, int64_t& width) const {
+        const Expr& hip = ascending ? right : left;
+        const Expr& lop = ascending ? left : right;
+        int64_t hiValue = 0;
+        int64_t loValue = 0;
+        if (evalInt(hip, hiValue) && evalInt(lop, loValue)) {
+            width = hiValue - loValue + 1;
+            return width > 0;
+        }
+        const Expr* hiBasep = nullptr;
+        const Expr* loBasep = nullptr;
+        int64_t hiOffset = 0;
+        int64_t loOffset = 0;
+        additiveBase(hip, hiBasep, hiOffset);
+        additiveBase(lop, loBasep, loOffset);
+        if (!hiBasep || !loBasep || !sameExpr(*hiBasep, *loBasep)) return false;
+        width = hiOffset - loOffset + 1;
+        return width > 0;
+    }
 
     AstVar* lookupVar(const Expr& nameExpr) const {
         const auto it = m_scope.find(nameExpr.text);
@@ -1731,11 +1800,19 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
     if (expr.kind == Expr::INDEX || expr.kind == Expr::SLICE) {
         if (!expr.a
             || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::INDEX
-                && expr.a->kind != Expr::SLICE && expr.a->kind != Expr::SELECTED)) {
+                && expr.a->kind != Expr::SLICE && expr.a->kind != Expr::SELECTED
+                && expr.a->kind != Expr::CALL)) {
             unsupportedError(flp, "selection of a non-name expression");
             return nullptr;
         }
-        AstNodeExpr* const basep = lowerDesignator(*expr.a, write);
+        // A slice of a function result is an expression, not a variable designator
+        const bool expressionPrefix
+            = expr.a->kind == Expr::CALL
+              || (expr.a->kind == Expr::INDEX && expr.a->a && expr.a->a->kind == Expr::NAME
+                  && (m_subprograms.count(expr.a->a->text) || isIntrinsic(expr.a->a->text)
+                      || isConversion(expr.a->a->text) || m_types.count(expr.a->a->text)));
+        AstNodeExpr* const basep
+            = expressionPrefix ? lowerExpr(*expr.a, nullptr) : lowerDesignator(*expr.a, write);
         if (!basep) return nullptr;
         // Prefer the declared type: it keeps the element width of an array type
         VType baseType;
@@ -1843,26 +1920,54 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
     }
     int64_t leftValue = 0;
     int64_t rightValue = 0;
-    if (!staticInt(expr.b, leftValue) || !staticInt(expr.c, rightValue)) {
-        unsupportedError(flp, "non-static slice bounds");
+    if (staticInt(expr.b, leftValue) && staticInt(expr.c, rightValue)) {
+        int hi = 0;
+        int lo = 0;
+        if (expr.text == "downto") {
+            hi = static_cast<int>(leftValue);
+            lo = static_cast<int>(rightValue);
+        } else {
+            lo = static_cast<int>(leftValue);
+            hi = static_cast<int>(rightValue);
+        }
+        if (hi < lo) {
+            flp->v3error("VHDL: empty or reversed slice");
+            basep->deleteTree();
+            return nullptr;
+        }
+        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, expr.text != "downto");
+    }
+    // A dynamic slice position keeps the width static and runs in the base's
+    // direction, so the selected elements need no reordering
+    const bool ascendingSlice = expr.text != "downto";
+    if (ascendingSlice != baseType.ascending) {
+        unsupportedError(flp, "slice against the array direction with non-static bounds");
         basep->deleteTree();
         return nullptr;
     }
-    int hi = 0;
-    int lo = 0;
-    if (expr.text == "downto") {
-        hi = static_cast<int>(leftValue);
-        lo = static_cast<int>(rightValue);
-    } else {
-        lo = static_cast<int>(leftValue);
-        hi = static_cast<int>(rightValue);
-    }
-    if (hi < lo) {
-        flp->v3error("VHDL: empty or reversed slice");
+    int64_t count = 0;
+    if (!sliceWidth(*expr.b, *expr.c, ascendingSlice, count)) {
+        unsupportedError(flp, "non-static slice width");
         basep->deleteTree();
         return nullptr;
     }
-    return sliceOf(flp, basep, baseType, elemWidth, hi, lo, expr.text != "downto");
+    AstNodeExpr* rightp = lowerExpr(*expr.c, nullptr);
+    if (!rightp) {
+        basep->deleteTree();
+        return nullptr;
+    }
+    // The right operand is the selection's least significant element
+    AstNodeExpr* offsetp = rightp;
+    if (baseType.ascending) {
+        offsetp = new AstSub{flp, makeIntConst(flp, baseType.right), rightp};
+    } else if (baseType.right != 0) {
+        offsetp = new AstSub{flp, rightp, makeIntConst(flp, baseType.right)};
+    }
+    offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+    const int width = static_cast<int>(count) * elemWidth;
+    AstSel* const selp = new AstSel{flp, basep, offsetp, width};
+    selp->dtypep(findVectorWidth(flp, baseType.kwd, baseType.signing, width));
+    return selp;
 }
 
 AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
