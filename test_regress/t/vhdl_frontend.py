@@ -41,6 +41,12 @@ def ghdl_only(test):
         test.skip("GHDL-specific test")
 
 
+def native_only(test):
+    """Skip when the test needs in-tree frontend behavior GHDL XML has no answer for."""
+    if FRONTEND != 'native':
+        test.skip("native-frontend-only test")
+
+
 def golden_filename(test):
     """Golden file name for the selected frontend."""
     if FRONTEND == 'native':

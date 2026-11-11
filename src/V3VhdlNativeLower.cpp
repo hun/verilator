@@ -235,6 +235,14 @@ class Lowering final {
         type.dtp = findVectorWidth(flp, kwd, signing, width);
         return type;
     }
+    //! Element type of an array or vector; a vector's element is a scalar of its kind
+    VType elementType(const VType& type, FileLine* flp) const {
+        if (type.kind == VType::ARRAY && type.elemp) return *type.elemp;
+        VType elem;
+        elem.kind = type.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+        elem.dtp = findBasic(flp, type.kwd);
+        return elem;
+    }
     VType intType(FileLine* flp) const {
         VType type;
         type.kind = VType::INT;
@@ -1052,13 +1060,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             unsupportedError(flp, "aggregate value for a non-array type");
             return nullptr;
         }
-        VType elemType;
-        if (context->kind == VType::ARRAY && context->elemp) {
-            elemType = *context->elemp;
-        } else {
-            elemType.kind = context->kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
-            elemType.dtp = findBasic(flp, context->kwd);
-        }
+        VType elemType = elementType(*context, flp);
         AstNodeExpr* valuep = lowerExpr(*expr.a, &elemType);
         if (!valuep) return nullptr;
         valuep = resizeExpr(valuep, elemType, flp);
@@ -2377,12 +2379,38 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
                           ? vectorType(flp, type.kwd, VSigning::UNSIGNED, segment.width)
                           : vectorType(flp, type.kwd, type.signing, segment.width);
         }
-        AstNodeExpr* valuep = lowerExpr(*segment.exprp, &segType);
-        if (!valuep) {
-            if (resultp) resultp->deleteTree();
-            return nullptr;
+        AstNodeExpr* valuep = nullptr;
+        if (type.isVector() && segment.width > type.elemWidth) {
+            // A range association's value is either one element, repeated over the
+            // whole range, or spans the range itself
+            const VType elemType = elementType(type, flp);
+            if (elemType.width <= 0) {
+                if (resultp) resultp->deleteTree();
+                return nullptr;
+            }
+            valuep = lowerExpr(*segment.exprp, &elemType);
+            if (!valuep) {
+                if (resultp) resultp->deleteTree();
+                return nullptr;
+            }
+            if (valuep->width() == elemType.width) {
+                AstNodeExpr* const elemp = valuep;
+                valuep = elemp->cloneTree(false);
+                for (int width = elemType.width; width < segment.width; width += elemType.width) {
+                    valuep = new AstConcat{flp, elemp->cloneTree(false), valuep};
+                }
+                elemp->deleteTree();
+            }
+            if (valuep->width() != segment.width) valuep = resizeExpr(valuep, segType, flp);
         }
-        valuep = resizeExpr(valuep, segType, flp);
+        if (!valuep) {
+            valuep = lowerExpr(*segment.exprp, &segType);
+            if (!valuep) {
+                if (resultp) resultp->deleteTree();
+                return nullptr;
+            }
+            valuep = resizeExpr(valuep, segType, flp);
+        }
         if (!VN_IS(valuep, Const)) allConst = false;
         resultp
             = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, valuep, resultp}) : valuep;

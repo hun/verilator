@@ -144,6 +144,7 @@ class Parser final {
     void parseIndexConstraint(TypeSpec& type);
     void parseArchitecture(FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
+    ExprP parseChoice();
     bool parseChoices(std::vector<ExprP>& choices);
     void parseInstance(Architecture& arch, FileLine* flp, const std::string& label, bool direct);
     void parseGenericClause(EntityUnit& entity);
@@ -355,25 +356,15 @@ ExprP Parser::parsePrimary() {
         ExprP agg = std::make_unique<Expr>(Expr::AGG_POSITIONAL);
         agg->flp = aggFlp;
         for (;;) {
-            ExprP item = parseExpr();
+            ExprP item = parseChoice();
             if (!item) return nullptr;
-            if (isId("to") || isId("downto")) {  // Range choice, e.g. 1 to 2
-                ExprP range = std::make_unique<Expr>(Expr::SLICE);
-                range->flp = item->flp;
-                range->text = m_cur.text;
-                advance();
-                range->b = std::move(item);
-                range->c = parseExpr();
-                if (!range->c) return nullptr;
-                item = std::move(range);
-            }
             if (agg->kind == Expr::AGG_NAMED || isSym("=>") || isSym("|")) {
                 // Named association: one or more choices, then the associated value
                 agg->kind = Expr::AGG_NAMED;
                 std::vector<ExprP> choiceList;
                 choiceList.push_back(std::move(item));
                 while (acceptSym("|")) {
-                    ExprP more = parseExpr();
+                    ExprP more = parseChoice();
                     if (!more) return nullptr;
                     choiceList.push_back(std::move(more));
                 }
@@ -1303,25 +1294,31 @@ void Parser::parseArchitecture(FileLine* flp) {
     m_archs.push_back(std::move(arch));
 }
 
-//! Parse the choice list of one selected-assignment alternative; empty means "others"
+//! One choice: an expression, optionally a discrete range such as `1 to 2`
+ExprP Parser::parseChoice() {
+    ExprP choice = parseExpr();
+    if (!choice) return nullptr;
+    if (!isId("to") && !isId("downto")) return choice;
+    ExprP range = std::make_unique<Expr>(Expr::SLICE);
+    range->flp = choice->flp;
+    range->text = m_cur.text;
+    advance();
+    range->b = std::move(choice);
+    range->c = parseExpr();
+    if (!range->c) return nullptr;
+    return range;
+}
+
+//! Parse a choice list, as in a case alternative, selected assignment or
+//! aggregate association; an empty list means "others"
 bool Parser::parseChoices(std::vector<ExprP>& choices) {
     if (isId("others")) {
         advance();
         return true;
     }
     for (;;) {
-        ExprP choice = parseExpr();
+        ExprP choice = parseChoice();
         if (!choice) return false;
-        if (isId("to") || isId("downto")) {
-            ExprP range = std::make_unique<Expr>(Expr::SLICE);
-            range->flp = choice->flp;
-            range->text = m_cur.text;
-            advance();
-            range->b = std::move(choice);
-            range->c = parseExpr();
-            if (!range->c) return false;
-            choice = std::move(range);
-        }
         choices.push_back(std::move(choice));
         if (!acceptSym("|")) return true;
     }
