@@ -176,6 +176,8 @@ class Lowering final {
     int m_procVarSeq = 0;  // Disambiguates procedure local variables
     const VType* m_funcRetp = nullptr;  // Return-type context for function bodies
     std::map<std::string, VarInfo> m_scope;  // Signals and ports by folded name
+    // Symbolic values of process variables, for slice widths from their relations
+    std::map<std::string, ExprP> m_varVals;
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
     std::map<std::string, VType> m_types;  // Declared types by folded name
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
@@ -394,11 +396,65 @@ class Lowering final {
             offset = -value;
         }
     }
+    //! Clone an expression, replacing variables with their tracked values
+    ExprP substVars(const Expr& expr, int depth = 0) const {
+        ExprP copy = std::make_unique<Expr>(expr.kind);
+        copy->flp = expr.flp;
+        copy->text = expr.text;
+        copy->spelling = expr.spelling;
+        copy->intValue = expr.intValue;
+        copy->charValue = expr.charValue;
+        copy->bits = expr.bits;
+        copy->formalNames = expr.formalNames;
+        if (expr.a) copy->a = substVars(*expr.a, depth + 1);
+        if (expr.b) copy->b = substVars(*expr.b, depth + 1);
+        if (expr.c) copy->c = substVars(*expr.c, depth + 1);
+        for (const ExprP& argp : expr.args) {
+            copy->args.push_back(argp ? substVars(*argp, depth + 1) : nullptr);
+        }
+        for (const auto& choiceList : expr.choices) {
+            copy->choices.emplace_back();
+            for (const ExprP& choicep : choiceList) {
+                copy->choices.back().push_back(choicep ? substVars(*choicep, depth + 1) : nullptr);
+            }
+        }
+        if (expr.kind == Expr::NAME && depth < 8 && !activeEnv().count(expr.text)) {
+            const auto it = m_varVals.find(expr.text);
+            if (it != m_varVals.end()) return substVars(*it->second, depth + 1);
+        }
+        return copy;
+    }
+    //! Record or invalidate a variable's tracked value after a statement
+    void updateVarVals(const Stmt& stmt) {
+        if (stmt.kind == Stmt::VAR_ASSIGN) {
+            const Expr* basep = stmt.target.get();
+            while (basep
+                   && (basep->kind == Expr::INDEX || basep->kind == Expr::SLICE
+                       || basep->kind == Expr::SELECTED)) {
+                basep = basep->a.get();
+            }
+            if (basep && basep->kind == Expr::NAME) {
+                if (stmt.target->kind == Expr::NAME) {
+                    m_varVals[basep->text] = substVars(*stmt.value);
+                } else {
+                    m_varVals.erase(basep->text);  // Partial write: the value is unknown
+                }
+            }
+            return;
+        }
+        // A control statement or call may change any variable
+        if (stmt.kind == Stmt::IF || stmt.kind == Stmt::CASE || stmt.kind == Stmt::FOR
+            || stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP || stmt.kind == Stmt::CALL) {
+            m_varVals.clear();
+        }
+    }
     //! Width of a slice whose bounds are not both static, when they differ by a
     //! constant: two positions with a common subexpression and constant offsets
     bool sliceWidth(const Expr& left, const Expr& right, bool ascending, int64_t& width) const {
-        const Expr& hip = ascending ? right : left;
-        const Expr& lop = ascending ? left : right;
+        const ExprP leftCopy = substVars(left);
+        const ExprP rightCopy = substVars(right);
+        const Expr& hip = ascending ? *rightCopy : *leftCopy;
+        const Expr& lop = ascending ? *leftCopy : *rightCopy;
         int64_t hiValue = 0;
         int64_t loValue = 0;
         if (evalInt(hip, hiValue) && evalInt(lop, loValue)) {
@@ -2077,7 +2133,16 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
         VType prefixType;
         if (!expr.a || !typeOfDesignator(*expr.a, prefixType)) return false;
         if (!prefixType.isVector()) return false;
-        if (expr.kind == Expr::INDEX) {
+        // An attribute range selects a slice: `a'range` or `a(a'range)`
+        const Expr* rangep = nullptr;
+        if (expr.kind == Expr::INDEX && expr.args.size() == 1 && expr.args[0]->kind == Expr::ATTR
+            && expr.args[0]->text == "range") {
+            rangep = expr.args[0].get();
+        } else if (expr.kind == Expr::SLICE && expr.b && expr.b->kind == Expr::ATTR
+                   && expr.b->text == "range") {
+            rangep = expr.b.get();
+        }
+        if (expr.kind == Expr::INDEX && !rangep) {
             if (prefixType.kind == VType::ARRAY && prefixType.elemp) {
                 out = *prefixType.elemp;
             } else {
@@ -2088,14 +2153,24 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
             return true;
         }
         // A slice keeps the element type over the sliced index range
-        if (!expr.b || !expr.c) return false;
         int64_t left = 0;
         int64_t right = 0;
-        if (!staticInt(expr.b, left) || !staticInt(expr.c, right)) return false;
+        bool ascending = expr.text == "to";
+        if (rangep) {
+            if (!rangep->a || rangep->a->kind != Expr::NAME) return false;
+            const VType* const prefixTypep = typeOfName(*rangep->a);
+            if (!prefixTypep || !prefixTypep->isVector()) return false;
+            left = prefixTypep->left;
+            right = prefixTypep->right;
+            ascending = prefixTypep->ascending;
+        } else {
+            if (!expr.b || !expr.c) return false;
+            if (!staticInt(expr.b, left) || !staticInt(expr.c, right)) return false;
+        }
         out = prefixType;
         out.left = static_cast<int>(left);
         out.right = static_cast<int>(right);
-        out.ascending = expr.text == "to";
+        out.ascending = ascending;
         out.width = out.elemWidth * (std::abs(out.left - out.right) + 1);
         out.dtp = findVectorWidth(expr.flp, out.kwd, out.signing, out.width);
         return true;
@@ -2886,8 +2961,10 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
 
 AstNode* Lowering::lowerIf(const Stmt& stmt) {
     AstNode* elsesp = nullptr;
+    m_varVals.clear();
     for (std::size_t i = stmt.branches.size(); i-- > 0;) {
         const auto& branch = stmt.branches[i];
+        m_varVals.clear();
         AstNode* bodyp = lowerStmtList(branch.second);
         if (!branch.first) {
             elsesp = bodyp;
@@ -2934,12 +3011,14 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
 
 AstNode* Lowering::lowerCase(const Stmt& stmt) {
     FileLine* const flp = stmt.flp;
+    m_varVals.clear();
     AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
     if (!selectorp) return nullptr;
     AstNodeDType* const selDtp = selectorp->dtypep();
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen
     for (const auto& item : stmt.caseItems) {
+        m_varVals.clear();
         AstNode* const bodyp = lowerStmtList(item.second);
         std::vector<AstConst*> cops;
         if (!lowerChoiceConsts(item.first, selDtp, cops)) {
@@ -3009,6 +3088,7 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
             continue;
         }
         AstNode* nodep = lowerStmt(*stmtp);
+        updateVarVals(*stmtp);
         if (!nodep) continue;
         // Statements after a conditional exit/next only run when it was not taken
         if (runCondp) nodep = new AstIf{stmtp->flp, runCondp->cloneTree(false), nodep, nullptr};
@@ -3109,7 +3189,10 @@ void Lowering::collectReadNames(const std::vector<StmtP>& stmts, std::set<std::s
             }
             collectReadNames(item.second, names);
         }
-        collectReadNames(stmtp->body, names);
+        std::set<std::string> bodyNames;
+        collectReadNames(stmtp->body, bodyNames);
+        if (stmtp->kind == Stmt::FOR) bodyNames.erase(stmtp->loopVar);
+        names.insert(bodyNames.begin(), bodyNames.end());
     }
 }
 
@@ -3271,6 +3354,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
 }
 
 AstNode* Lowering::lowerFor(const Stmt& stmt) {
+    m_varVals.clear();
     FileLine* const flp = stmt.flp;
     int64_t left = 0;
     int64_t right = 0;
@@ -3335,6 +3419,7 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
             AstNode* const clearNextp = clearLoopFlag(flp, frame.nextp);
             headp = AstNode::addNext<AstNode, AstNode>(headp, clearNextp);
         }
+        m_varVals.clear();
         AstNode* const bodyp = lowerStmtList(stmt.body);
         if (bodyp) {
             AstNode* const guardp = new AstIf{flp, exitNotp->cloneTree(false), bodyp, nullptr};
@@ -4192,6 +4277,7 @@ std::vector<const Stmt*> Lowering::rawPtrs(const std::vector<StmtP>& stmts) {
 //! Lower a procedure statement chain. `fallsThroughp` is false when every path returns
 AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
                                   bool& fallsThroughp) {
+    m_varVals.clear();
     AstNode* headp = nullptr;
     const auto add = [&headp](AstNode* nodep) {
         if (nodep) headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
@@ -4262,6 +4348,7 @@ AstNode* Lowering::lowerProcChainWithTail(const std::vector<StmtP>& stmts,
 //! Lower an if/elsif/else statement, appending the following statements to each branch
 AstNode* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
                                const std::vector<const Stmt*>& tail, bool& fallsThroughp) {
+    m_varVals.clear();
     FileLine* const flp = stmt.flp;
     const auto& branch = stmt.branches[branchIndex];
     AstNodeExpr* const condp = branch.first ? lowerCond(*branch.first) : nullptr;
@@ -4286,6 +4373,7 @@ AstNode* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
 //! Lower a case statement, appending the following statements to each alternative
 AstNode* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*>& tail,
                                  bool& fallsThroughp) {
+    m_varVals.clear();
     FileLine* const flp = stmt.flp;
     AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
     if (!selectorp) {
@@ -4314,6 +4402,15 @@ AstNode* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*
 }
 
 void Lowering::lowerProcess(const Process& process) {
+    // Tracked variable values hold only within one process
+    struct VarValsScope final {
+        std::map<std::string, ExprP>& vals;
+        explicit VarValsScope(std::map<std::string, ExprP>& vals_)
+            : vals{vals_} {
+            vals.clear();
+        }
+        ~VarValsScope() { vals.clear(); }
+    } varValsScope{m_varVals};
     if (!process.hasSensitivity) {
         lowerWaitProcess(process);
         return;
@@ -4348,10 +4445,12 @@ void Lowering::lowerProcess(const Process& process) {
 
     m_edges.clear();
     m_initial = false;
+    m_varVals.clear();
     AstNode* const bodyp = lowerStmtList(process.body);
     const std::vector<Edge> edges = m_edges;
     m_edges.clear();
     m_initial = true;
+    m_varVals.clear();
     AstNode* const initp = lowerStmtList(process.body);
     m_initial = false;
 
