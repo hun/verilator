@@ -31,6 +31,9 @@ int main(int argc, char** argv) {
     check("a(0)", static_cast<int>(topp->o_a0), 1);
     check("a(3)", static_cast<int>(topp->o_a3), 0);
     check("a(1 to 2)", static_cast<int>(topp->o_sl), 0x1);
+    check("d(1 to 2)", static_cast<int>(topp->o_sl2), 0x2);
+    check("a(2 downto 1)", static_cast<int>(topp->o_sl3), 0x2);
+    check("d(2 downto 1)", static_cast<int>(topp->o_sl4), 0x1);
     check("ascending aggregate", static_cast<int>(topp->o_ca), 0x8);
     check("reverse range", static_cast<int>(topp->o_rr), 1);
     check("generic range", static_cast<int>(topp->o_g), 0xFF);

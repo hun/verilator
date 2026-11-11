@@ -17,6 +17,9 @@ entity t is
     o_a0  : out std_logic;
     o_a3  : out std_logic;
     o_sl  : out std_logic_vector(1 downto 0);
+    o_sl2 : out std_logic_vector(1 downto 0);
+    o_sl3 : out std_logic_vector(1 downto 0);
+    o_sl4 : out std_logic_vector(1 downto 0);
     o_ca  : out std_logic_vector(3 downto 0);
     o_rr  : out std_logic;
     o_g   : out std_logic_vector(2**N - 1 downto 0);
@@ -37,6 +40,10 @@ begin
   o_a3 <= a(3);
   -- A slice keeps the aggregate's own direction: a(1) is the left element
   o_sl <= a(1 to 2);
+  -- A slice's left bound is its most significant element in either direction
+  o_sl2 <= d(1 to 2);
+  o_sl3 <= a(2 downto 1);
+  o_sl4 <= d(2 downto 1);
   o_ca <= CA;
   rs <= "1010";
   o_rr <= rs(0);

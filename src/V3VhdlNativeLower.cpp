@@ -396,7 +396,7 @@ class Lowering final {
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
     AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
-                         int hi, int lo);
+                         int hi, int lo, bool ascending);
 
     AstNode* lowerCase(const Stmt& stmt);
     //! Build an AstCase; a case over an enumeration is exhaustive
@@ -1805,7 +1805,7 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         int hi = prefixTypep->ascending ? prefixTypep->right : prefixTypep->left;
         int lo = prefixTypep->ascending ? prefixTypep->left : prefixTypep->right;
         if (hi < lo) std::swap(hi, lo);
-        return sliceOf(flp, basep, baseType, elemWidth, hi, lo);
+        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, prefixTypep->ascending);
     }
     if (expr.kind == Expr::INDEX) {
         if (expr.args.size() != 1) {
@@ -1862,7 +1862,7 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         basep->deleteTree();
         return nullptr;
     }
-    return sliceOf(flp, basep, baseType, elemWidth, hi, lo);
+    return sliceOf(flp, basep, baseType, elemWidth, hi, lo, expr.text != "downto");
 }
 
 AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
@@ -2135,7 +2135,7 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
 
 //! Slice elements hi..lo (inclusive, hi >= lo) out of an array-typed value
 AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType,
-                               int elemWidth, int hi, int lo) {
+                               int elemWidth, int hi, int lo, bool ascending) {
     // Element offsets from the least significant end; the higher index is not
     // necessarily the more significant element for an ascending array
     const int offsetHi = baseType.indexOffset(hi);
@@ -2148,7 +2148,7 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
         basep->deleteTree();
         return nullptr;
     }
-    AstSel* const selp = new AstSel{flp, basep, offset, width};
+    AstNodeExpr* slicep = new AstSel{flp, basep, offset, width};
     VType sliceType;
     if (baseType.kind == VType::ARRAY) {
         sliceType = baseType;
@@ -2160,8 +2160,26 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
     } else {
         sliceType = vectorType(flp, baseType.kwd, baseType.signing, width);
     }
-    selp->dtypep(sliceType.dtp);
-    return selp;
+    slicep->dtypep(sliceType.dtp);
+    if (ascending != baseType.ascending) {
+        // The slice's left bound is its most significant element. When its
+        // direction differs from the base's, the selected elements are reversed.
+        AstNodeDType* const elemDtp = baseType.kind == VType::ARRAY && baseType.elemp
+                                          ? baseType.elemp->dtp
+                                          : findBasic(flp, baseType.kwd);
+        AstNodeExpr* reversedp = nullptr;
+        for (int unit = 0; unit < count; ++unit) {
+            AstNodeExpr* const unitp = new AstSel{flp, slicep->cloneTree(false),
+                                                  (count - 1 - unit) * elemWidth, elemWidth};
+            unitp->dtypep(elemDtp);
+            reversedp = reversedp ? static_cast<AstNodeExpr*>(new AstConcat{flp, unitp, reversedp})
+                                  : unitp;
+        }
+        slicep->deleteTree();
+        reversedp->dtypep(sliceType.dtp);
+        return reversedp;
+    }
+    return slicep;
 }
 
 //! An alias takes the index bounds its mark declares; the bits come from the designator
