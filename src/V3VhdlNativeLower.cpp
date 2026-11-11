@@ -76,10 +76,9 @@ struct VType final {
     bool isSigned() const { return signing == VSigning::SIGNED; }
     //! Number of elements of an array, or 1 for a scalar
     int length() const { return isVector() ? std::abs(left - right) + 1 : 1; }
-    //! Index of the least significant packed element
-    int lowIndex() const { return ascending ? left : right; }
-    //! Bit offset of a declared array index from the least significant element
-    int indexOffset(int index) const { return index - lowIndex(); }
+    //! Bit offset of a declared array index from the least significant element;
+    //! the right bound is the least significant element in either direction
+    int indexOffset(int index) const { return ascending ? right - index : index - right; }
 };
 
 //! Elaborated contents of one package, publishable to the units that use it
@@ -342,6 +341,7 @@ class Lowering final {
     bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
     AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
     bool applyRange(const TypeSpec& spec, VType& type);
+    bool constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right, bool& ascending);
     bool evalInt(const Expr& expr, int64_t& value) const;
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);
@@ -628,6 +628,20 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
             if (rhs == 0) return false;
             value = lhs - (lhs / rhs) * rhs;
             if (value != 0 && ((value < 0) != (rhs < 0))) value += rhs;
+        } else if (op == "**") {
+            // Integer exponentiation with a non-negative exponent
+            if (rhs < 0) return false;
+            int64_t result = 1;
+            int64_t base = lhs;
+            int64_t exponent = rhs;
+            while (exponent > 0) {
+                if (exponent & 1) {
+                    if (__builtin_mul_overflow(result, base, &result)) return false;
+                }
+                exponent >>= 1;
+                if (exponent && __builtin_mul_overflow(base, base, &base)) return false;
+            }
+            value = result;
         } else {
             return false;
         }
@@ -698,8 +712,9 @@ void Lowering::registerType(const TypeDecl& decl) {
         type.signing = VSigning::UNSIGNED;
         int64_t left = 0;
         int64_t right = 0;
-        if (!staticInt(decl.index.left, left) || !staticInt(decl.index.right, right)) {
-            // An unconstrained array type: every use must supply the index constraint
+        bool ascending = false;
+        if (!constraintBounds(decl.index, left, right, ascending)) {
+            // Unconstrained array type: every use must supply the index constraint
             type.left = 0;
             type.right = 0;
             type.width = 0;
@@ -707,7 +722,7 @@ void Lowering::registerType(const TypeDecl& decl) {
         }
         type.left = static_cast<int>(left);
         type.right = static_cast<int>(right);
-        type.ascending = decl.index.ascending;
+        type.ascending = ascending;
         type.width = elem.width * type.length();
         type.dtp = findVectorWidth(flp, elem.kwd, VSigning::UNSIGNED, type.width);
         break;
@@ -747,18 +762,47 @@ void Lowering::registerType(const TypeDecl& decl) {
     m_types[decl.name] = type;
 }
 
+//! Bounds of an index constraint; a discrete range attribute such as `sig'range`
+//! contributes the bounds and direction of its prefix
+bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right,
+                                bool& ascending) {
+    if (spec.right) {
+        if (!staticInt(spec.left, left) || !staticInt(spec.right, right)) return false;
+        ascending = spec.ascending;
+        return true;
+    }
+    if (!spec.left || spec.left->kind != Expr::ATTR
+        || (spec.left->text != "range" && spec.left->text != "reverse_range") || !spec.left->a
+        || spec.left->a->kind != Expr::NAME) {
+        return false;
+    }
+    VType prefix;
+    if (!typeOfDesignator(*spec.left->a, prefix)) return false;
+    left = prefix.left;
+    right = prefix.right;
+    ascending = prefix.ascending;
+    if (spec.left->text == "reverse_range") {
+        // The same bounds in the opposite direction
+        left = prefix.right;
+        right = prefix.left;
+        ascending = !prefix.ascending;
+    }
+    return true;
+}
+
 bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
     FileLine* const flp = spec.flp;
     if (spec.hasRange) {
         int64_t left = 0;
         int64_t right = 0;
-        if (!staticInt(spec.left, left) || !staticInt(spec.right, right)) {
+        bool ascending = false;
+        if (!constraintBounds(spec, left, right, ascending)) {
             unsupportedError(flp, "non-static range constraint");
             return false;
         }
         type.left = static_cast<int>(left);
         type.right = static_cast<int>(right);
-        type.ascending = spec.ascending;
+        type.ascending = ascending;
         if (type.kind == VType::INT) {
             type.intLow = static_cast<int>(std::min(left, right));
             type.intHigh = static_cast<int>(std::max(left, right));
@@ -852,7 +896,8 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     }
     int64_t left = 0;
     int64_t right = 0;
-    if (!staticInt(spec.left, left) || !staticInt(spec.right, right)) {
+    bool ascending = false;
+    if (!constraintBounds(spec, left, right, ascending)) {
         unsupportedError(flp, "non-static array range");
         return false;
     }
@@ -862,7 +907,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
                      std::abs(static_cast<int>(left) - static_cast<int>(right)) + 1);
     out.left = static_cast<int>(left);
     out.right = static_cast<int>(right);
-    out.ascending = spec.ascending;
+    out.ascending = ascending;
     out.dtp = findVector(flp, kwd, signing, out.left, out.right, out.ascending);
     return true;
 }
@@ -1779,10 +1824,13 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
             basep->deleteTree();
             return nullptr;
         }
-        const int lowIndex = baseType.lowIndex();
-        // The least significant element is the lowest index, in either direction
+        // The right bound is the least significant element in either direction
         AstNodeExpr* offsetp = indexp;
-        if (lowIndex != 0) { offsetp = new AstSub{flp, indexp, makeIntConst(flp, lowIndex)}; }
+        if (baseType.ascending) {
+            offsetp = new AstSub{flp, makeIntConst(flp, baseType.right), indexp};
+        } else if (baseType.right != 0) {
+            offsetp = new AstSub{flp, indexp, makeIntConst(flp, baseType.right)};
+        }
         offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
         if (elemWidth != 1) {
             AstNodeExpr* const scaledp = new AstMul{flp, offsetp, makeIntConst(flp, elemWidth)};
@@ -2291,6 +2339,15 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
                 segment.exprp = valuep;
                 segments.push_back(segment);
             };
+            auto addRange = [&](int64_t left, int64_t right, const Expr* valuep) {
+                const int offsetLeft = type.indexOffset(static_cast<int>(left));
+                const int offsetRight = type.indexOffset(static_cast<int>(right));
+                Segment segment;
+                segment.offset = std::min(offsetLeft, offsetRight) * elemWidth;
+                segment.width = (std::abs(offsetLeft - offsetRight) + 1) * elemWidth;
+                segment.exprp = valuep;
+                segments.push_back(segment);
+            };
             if (choiceList.empty()) {
                 // Positional: the next element in declaration order
                 const int64_t index = type.ascending ? type.left + static_cast<int64_t>(i)
@@ -2306,13 +2363,19 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
                         unsupportedError(flp, "non-static aggregate choice range");
                         return nullptr;
                     }
-                    const int offsetLeft = type.indexOffset(static_cast<int>(left));
-                    const int offsetRight = type.indexOffset(static_cast<int>(right));
-                    Segment segment;
-                    segment.offset = std::min(offsetLeft, offsetRight) * elemWidth;
-                    segment.width = (std::abs(offsetLeft - offsetRight) + 1) * elemWidth;
-                    segment.exprp = expr.args[i].get();
-                    segments.push_back(segment);
+                    addRange(left, right, expr.args[i].get());
+                    continue;
+                }
+                if (choicep->kind == Expr::ATTR
+                    && (choicep->text == "range" || choicep->text == "reverse_range")
+                    && choicep->a) {
+                    // The range of an object, e.g. `a'range`
+                    VType rangeType;
+                    if (!typeOfDesignator(*choicep->a, rangeType) || !rangeType.isVector()) {
+                        unsupportedError(flp, "non-static aggregate choice range");
+                        return nullptr;
+                    }
+                    addRange(rangeType.left, rangeType.right, expr.args[i].get());
                     continue;
                 }
                 int64_t index = 0;
@@ -4843,7 +4906,6 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             return nullptr;
         } else {
             // Collect the bit range each association connects
-            const int lowIndex = portType.lowIndex();
             std::vector<Connection> connections;
             bool bad = false;
             for (const PortAssoc* const assocp : assocs) {
@@ -4863,8 +4925,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                 }
                 if (!haveRight) right = left;
                 Connection connection;
-                const int offsetLeft = static_cast<int>(left) - lowIndex;
-                const int offsetRight = static_cast<int>(right) - lowIndex;
+                const int offsetLeft = portType.indexOffset(static_cast<int>(left));
+                const int offsetRight = portType.indexOffset(static_cast<int>(right));
                 connection.lsb = std::min(offsetLeft, offsetRight);
                 connection.width = std::abs(offsetLeft - offsetRight) + 1;
                 if (connection.lsb < 0 || connection.lsb + connection.width > portType.width) {

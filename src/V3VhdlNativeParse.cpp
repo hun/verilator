@@ -558,14 +558,35 @@ void Parser::parseTypeSpec(TypeSpec& type) {
     } else if (isSym("(")) {
         advance();
         if (m_cur.kind == Token::ID) {
-            // The constraint may name a subtype instead of giving a range
             const auto saved = m_lexer.state();
             const Token ahead = m_lexer.next();
+            const Token second = m_lexer.next();
+            const Token third = m_lexer.next();
             m_lexer.restore(saved);
             if (ahead.kind == Token::SYM && ahead.text == ")") {
                 Token markTok2;
                 if (!takeId(markTok2)) return;
                 type.constraintMark = markTok2.text;
+                expectSym(")");
+                return;
+            }
+            if (ahead.kind == Token::SYM && ahead.text == "'" && second.kind == Token::ID
+                && (second.text == "range" || second.text == "reverse_range")) {
+                // Discrete range attribute, e.g. std_logic_vector(signal'range)
+                Token nameTok;
+                if (!takeId(nameTok)) return;
+                advance();  // The apostrophe
+                advance();  // The attribute name
+                ExprP nameExpr = std::make_unique<Expr>(Expr::NAME);
+                nameExpr->flp = nameTok.flp;
+                nameExpr->text = nameTok.text;
+                nameExpr->spelling = nameTok.spelling;
+                ExprP attr = std::make_unique<Expr>(Expr::ATTR);
+                attr->flp = nameTok.flp;
+                attr->text = second.text;
+                attr->a = std::move(nameExpr);
+                type.left = std::move(attr);  // A null right marks the attribute form
+                type.hasRange = true;
                 expectSym(")");
                 return;
             }
