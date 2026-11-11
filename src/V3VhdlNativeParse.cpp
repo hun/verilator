@@ -149,9 +149,12 @@ class Parser final {
     void parseGenericClause(EntityUnit& entity);
     void parseAssocList(std::vector<PortAssoc>& out, const char* what);
     void parseComponentDecl(Architecture& arch);
+    void parseInterfaceList(std::vector<FormalDecl>& formals);
+    void parseSubprogramInto(std::vector<SubprogramDecl>& out);
     void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
                              std::vector<Decl>* decls = nullptr,
-                             std::vector<TypeDecl>* types = nullptr);
+                             std::vector<TypeDecl>* types = nullptr,
+                             std::vector<SubprogramDecl>* subprograms = nullptr);
     bool parseGenerateEnd();
     void parseProcess(Architecture& arch, FileLine* flp);
     std::vector<StmtP> parseStmtList(bool stopAtElse);
@@ -464,6 +467,18 @@ ExprP Parser::parseDesignator() {
         }
         if (!isSym("(")) break;
         advance();
+        if (acceptSym(")")) {  // An empty actual list is always a subprogram call
+            ExprP call = std::make_unique<Expr>(Expr::CALL);
+            call->flp = node->flp;
+            call->text = node->text;
+            if (node->kind == Expr::NAME) {
+                call->spelling = node->spelling;
+            } else {
+                call->a = std::move(node);  // Qualified name: the prefix chain
+            }
+            node = std::move(call);
+            continue;
+        }
         ExprP first = parseExpr();
         if (!first) return nullptr;
         if (isId("downto") || isId("to")) {
@@ -478,17 +493,43 @@ ExprP Parser::parseDesignator() {
             node2->b = std::move(first);
             node = std::move(node2);
         } else {
-            ExprP node2 = std::make_unique<Expr>(Expr::INDEX);
-            node2->flp = node->flp;
-            node2->args.push_back(std::move(first));
-            while (acceptSym(",")) {
-                ExprP more = parseExpr();
-                if (!more) return nullptr;
-                node2->args.push_back(std::move(more));
+            std::vector<ExprP> actuals;
+            std::vector<std::string> formalNames;
+            bool named = false;
+            for (;;) {
+                if (acceptSym("=>")) {
+                    if (first->kind != Expr::NAME) {
+                        error("expected a formal name before '=>' in an actual part");
+                        return nullptr;
+                    }
+                    named = true;
+                    formalNames.push_back(first->text);
+                    first = parseExpr();
+                    if (!first) return nullptr;
+                } else {
+                    formalNames.emplace_back();
+                }
+                actuals.push_back(std::move(first));
+                if (!acceptSym(",")) break;
+                first = parseExpr();
+                if (!first) return nullptr;
             }
             expectSym(")");
-            node2->a = std::move(node);
-            node = std::move(node2);
+            if (named) {
+                ExprP call = std::make_unique<Expr>(Expr::CALL);
+                call->flp = node->flp;
+                call->text = node->text;
+                if (node->kind != Expr::NAME) call->a = std::move(node);
+                call->args = std::move(actuals);
+                call->formalNames = std::move(formalNames);
+                node = std::move(call);
+            } else {
+                ExprP node2 = std::make_unique<Expr>(Expr::INDEX);
+                node2->flp = node->flp;
+                node2->a = std::move(node);
+                node2->args = std::move(actuals);
+                node = std::move(node2);
+            }
         }
     }
     return node;
@@ -690,6 +731,10 @@ void Parser::parseEntity(FileLine* flp) {
             return;
         }
         if (isId("end")) break;
+        if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+            parseSubprogramInto(entity.subprograms);
+            continue;
+        }
         error("unsupported entity declaration item '" + m_cur.text + "'");
         return;
     }
@@ -733,6 +778,153 @@ void Parser::parseDeclInto(std::vector<Decl>& decls, Decl::Kind kind) {
         return;
     }
     decls.push_back(std::move(decl));
+}
+
+//! Parse `( name_list [mode] : subtype_indication [:= default] ; ... )` of a subprogram
+void Parser::parseInterfaceList(std::vector<FormalDecl>& formals) {
+    if (!acceptSym("(")) return;
+    for (;;) {
+        if (m_failed) return;
+        if (acceptSym(")")) break;
+        FormalDecl formal;
+        formal.flp = m_cur.flp;
+        if (acceptId("constant")) {
+            formal.cls = FormalDecl::CONSTANT;
+        } else if (acceptId("signal")) {
+            formal.cls = FormalDecl::SIGNAL;
+        } else if (acceptId("variable")) {
+            formal.cls = FormalDecl::VARIABLE;
+        }
+        parseNameList(formal.names);
+        if (m_failed) return;
+        // IEEE 1800-2023 4.3.3: an omitted mode means `in`, `buffer` is a readable `out`
+        if (acceptId("in")) {
+            formal.mode = PortMode::IN;
+        } else if (acceptId("out")) {
+            formal.mode = PortMode::OUT;
+        } else if (acceptId("inout")) {
+            formal.mode = PortMode::INOUT;
+        } else if (acceptId("buffer")) {
+            formal.mode = PortMode::OUT;
+        } else if (isId("linkage")) {
+            unsupported("subprogram parameter mode 'linkage'");
+            return;
+        }
+        parseTypeSpec(formal.type);
+        if (m_failed) return;
+        if (acceptSym(":=")) {
+            formal.init = parseExpr();
+            if (!formal.init) return;
+        }
+        formals.push_back(std::move(formal));
+        if (acceptSym(";")) continue;
+        if (acceptSym(")")) break;
+        error("expected ';' or ')' in an interface list, got '" + m_cur.text + "'");
+        return;
+    }
+}
+
+//! Parse a subprogram declaration: a package prototype, or a full declaration with a body
+void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
+    bool impure = false;
+    if (acceptId("pure")) {
+    } else if (acceptId("impure")) {
+        impure = true;
+    }
+    if (!isId("function") && !isId("procedure")) {
+        error("expected 'function' or 'procedure', got '" + m_cur.text + "'");
+        return;
+    }
+    SubprogramDecl sub{isId("function") ? SubprogramDecl::FUNCTION : SubprogramDecl::PROCEDURE};
+    if (impure && sub.kind == SubprogramDecl::PROCEDURE) {
+        error("'impure' applies only to a function");
+        return;
+    }
+    sub.impure = impure;
+    advance();  // 'function' / 'procedure'
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    sub.flp = nameTok.flp;
+    sub.name = nameTok.text;
+    sub.spelling = nameTok.spelling;
+    parseInterfaceList(sub.formals);
+    if (m_failed) return;
+    if (sub.kind == SubprogramDecl::FUNCTION) {
+        if (!expectId("return")) return;
+        parseTypeSpec(sub.returnType);
+        if (m_failed) return;
+    }
+    if (acceptSym(";")) {  // A prototype; the body may arrive with the package body
+        out.push_back(std::move(sub));
+        return;
+    }
+    if (!expectId("is")) return;
+    while (!m_failed && !isId("begin")) {
+        if (m_cur.kind == Token::END) {
+            error("unexpected end of file in a subprogram declarative part");
+            return;
+        }
+        if (isId("use")) {
+            skipContextClause();
+            continue;
+        }
+        if (isId("variable")) {
+            advance();
+            parseDeclInto(sub.decls, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("constant")) {
+            advance();
+            parseDeclInto(sub.decls, Decl::CONSTANT);
+            continue;
+        }
+        if (isId("type")) {
+            advance();
+            parseTypeDeclInto(sub.types);
+            continue;
+        }
+        if (isId("subtype")) {
+            advance();
+            parseSubtypeInto(sub.types);
+            continue;
+        }
+        if (isId("alias")) {
+            advance();
+            parseAliasInto(sub.aliases);
+            continue;
+        }
+        if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+            parseSubprogramInto(sub.subprograms);
+            continue;
+        }
+        unsupported("subprogram declarative item '" + m_cur.text + "'");
+        return;
+    }
+    if (m_failed) return;
+    advance();  // 'begin'
+    sub.body = parseStmtList(false);
+    if (m_failed) return;
+    sub.hasBody = true;
+    if (!expectId("end")) return;
+    if (sub.kind == SubprogramDecl::FUNCTION) {
+        (void)acceptId("function");
+    } else {
+        (void)acceptId("procedure");
+    }
+    if (m_cur.kind == Token::ID) {
+        Token endTok;
+        if (!takeId(endTok)) return;
+        if (endTok.text != sub.name) {
+            error(nameTok.flp, "subprogram end name '" + endTok.spelling + "' does not match '"
+                                   + sub.spelling + "'");
+            return;
+        }
+    }
+    if (!acceptSym(";")) {
+        error("expected ';' after 'end' of subprogram");
+        return;
+    }
+    out.push_back(std::move(sub));
 }
 
 //! Parse the index constraint of an array type definition
@@ -1078,7 +1270,11 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseComponentDecl(arch);
             continue;
         }
-        if (isId("attribute") || isId("function") || isId("procedure") || isId("package")) {
+        if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+            parseSubprogramInto(arch.subprograms);
+            continue;
+        }
+        if (isId("attribute") || isId("package")) {
             unsupported("architecture declarative item '" + m_cur.text + "'");
             return;
         }
@@ -1217,7 +1413,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             return;
         }
         if (!expectId("generate")) return;
-        parseConcurrentList(gen->body, &gen->decls, &gen->types);
+        parseConcurrentList(gen->body, &gen->decls, &gen->types, &gen->subprograms);
         if (m_failed) return;
         if (!parseGenerateEnd()) return;
         arch.stmts.push_back(std::move(gen));
@@ -1230,11 +1426,11 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         gen->cond = parseExpr();
         if (!gen->cond) return;
         if (!expectId("generate")) return;
-        parseConcurrentList(gen->body, &gen->decls, &gen->types);
+        parseConcurrentList(gen->body, &gen->decls, &gen->types, &gen->subprograms);
         if (m_failed) return;
         if (acceptId("else")) {
             if (!expectId("generate")) return;
-            parseConcurrentList(gen->elseBody, &gen->decls, &gen->types);
+            parseConcurrentList(gen->elseBody, &gen->decls, &gen->types, &gen->subprograms);
             if (m_failed) return;
         }
         if (!parseGenerateEnd()) return;
@@ -1284,6 +1480,10 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             }
             if (isId("use")) {
                 skipContextClause();
+                continue;
+            }
+            if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+                parseSubprogramInto(block->subprograms);
                 continue;
             }
             unsupported("block declarative item '" + m_cur.text + "'");
@@ -1364,12 +1564,20 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         unsupported("variable assignment at architecture level");
         return;
     }
-    unsupported("component or direct entity instantiation");
+    if (!acceptSym(";")) {
+        error("expected ';' after a procedure call, got '" + m_cur.text + "'");
+        return;
+    }
+    auto call = std::make_unique<Concurrent>(Concurrent::CALL);
+    call->flp = flp;
+    call->value = std::move(target);
+    arch.stmts.push_back(std::move(call));
 }
 
 //! Parse concurrent statements up to `end [generate|block]`, without the terminator
 void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
-                                 std::vector<Decl>* decls, std::vector<TypeDecl>* types) {
+                                 std::vector<Decl>* decls, std::vector<TypeDecl>* types,
+                                 std::vector<SubprogramDecl>* subprograms) {
     Architecture scratch;  // The statements of a generate body
     while (!m_failed && !isId("end") && !isId("elsif") && !isId("else")
            && m_cur.kind != Token::END) {
@@ -1408,6 +1616,11 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
         if (types && isId("subtype")) {
             advance();
             parseSubtypeInto(*types);
+            continue;
+        }
+        if (subprograms
+            && (isId("function") || isId("procedure") || isId("pure") || isId("impure"))) {
+            parseSubprogramInto(*subprograms);
             continue;
         }
         if (decls && isId("alias")) {
@@ -1485,6 +1698,10 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
         if (isId("constant")) {
             advance();
             parseDeclInto(process.decls, Decl::CONSTANT);
+            continue;
+        }
+        if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+            parseSubprogramInto(process.subprograms);
             continue;
         }
         unsupported("process declarative item '" + m_cur.text + "'");
@@ -1642,8 +1859,15 @@ StmtP Parser::parseSequentialStatement() {
         return stmt;
     }
     if (isId("return")) {
-        unsupported("sequential statement 'return'");
-        return nullptr;
+        advance();
+        auto stmt = std::make_unique<Stmt>(Stmt::RETURN);
+        stmt->flp = flp;
+        if (!isSym(";")) {
+            stmt->value = parseExpr();
+            if (!stmt->value) return nullptr;
+        }
+        expectSym(";");
+        return stmt;
     }
     if (isId("null")) {
         advance();
@@ -1669,9 +1893,16 @@ StmtP Parser::parseSequentialStatement() {
         expectSym(";");
         return stmt;
     }
+    // A designator that is not an assignment target is a procedure call
     if (!acceptSym("<=")) {
-        error("expected '<=' in a sequential signal assignment, got '" + m_cur.text + "'");
-        return nullptr;
+        if (!acceptSym(";")) {
+            error("expected ':=', '<=' or ';' after a name, got '" + m_cur.text + "'");
+            return nullptr;
+        }
+        auto stmt = std::make_unique<Stmt>(Stmt::CALL);
+        stmt->flp = flp;
+        stmt->value = std::move(target);
+        return stmt;
     }
     auto stmt = std::make_unique<Stmt>(Stmt::ASSIGN);
     stmt->flp = flp;
@@ -1773,9 +2004,12 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             parseAliasInto(pkg.aliases);
             continue;
         }
-        if (isId("function") || isId("procedure") || isId("component") || isId("attribute")
-            || isId("signal") || isId("shared") || isId("variable") || isId("file")
-            || isId("disconnect") || isId("group")) {
+        if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+            parseSubprogramInto(pkg.subprograms);
+            continue;
+        }
+        if (isId("component") || isId("attribute") || isId("signal") || isId("shared")
+            || isId("variable") || isId("file") || isId("disconnect") || isId("group")) {
             unsupported("package declarative item '" + m_cur.text + "'");
             return;
         }

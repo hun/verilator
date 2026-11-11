@@ -24,6 +24,7 @@
 
 #include "V3VhdlNativeLower.h"
 
+#include "V3Const.h"
 #include "V3Error.h"
 #include "V3FileLine.h"
 
@@ -31,8 +32,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -93,6 +97,7 @@ struct PackageInfo final {
     std::map<std::string, AstConst*> constValues;
     std::map<std::string, VType> constTypes;
     std::map<std::string, AstConst*> enumConsts;
+    std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
     std::vector<std::unique_ptr<AstConst>> owned;  // Owns the constants above
 };
 
@@ -118,6 +123,59 @@ class Lowering final {
         AstVar* varp = nullptr;
         VType type;
     };
+    //! A visible subprogram: its declaration and whether a process declared it
+    struct SubprogramRef final {
+        const SubprogramDecl* declp = nullptr;
+        bool processLocal = false;
+        int frame = -1;  // Active inline frame that owns it, or -1
+    };
+    //! Module-level declarations a process hides, restored when it ends
+    struct ScopeSave final {
+        std::map<std::string, VarInfo> scope;
+        std::map<std::string, int64_t> consts;
+        std::map<std::string, VType> types;
+        std::map<std::string, AstConst*> constValues;
+        std::map<std::string, VType> constTypes;
+        std::map<std::string, AstConst*> enumConsts;
+        std::map<std::string, std::vector<SubprogramRef>> subprograms;
+    };
+    //! One name bound during subprogram inlining: an expression value, or an lvalue
+    struct InlineBinding final {
+        AstNodeExpr* exprp = nullptr;  // Bound expression; cloned at each use
+        bool lvalue = false;  // exprp denotes a writable location (an out/inout parameter)
+        bool readable = true;  // False for an out signal parameter, whose reads are rejected
+        VType type;  // Resolved type of the bound value, for attributes of the name
+    };
+    using InlineEnv = std::map<std::string, InlineBinding>;  // Bindings while inlining
+    using InlineCont = std::function<AstNodeExpr*(InlineEnv&)>;  // Continuation for inlining
+    //! Continuations of active static function loops, for labeled exit/next
+    struct FuncLoopTarget final {
+        std::string label;
+        const InlineCont* nextp = nullptr;  // Continue with the following iteration
+        const InlineCont* exitp = nullptr;  // Continue after the loop
+    };
+    //! An active inlining: the body, the scope its callee captures, and its bindings
+    struct InlineFrame final {
+        const SubprogramDecl* declp = nullptr;
+        ScopeSave entryScope;  // The caller's scope when the call was made
+        ScopeSave liveScope;  // Grows with procedure locals
+        InlineEnv* envp = nullptr;
+    };
+    //! Active bindings, referenced before the scope tables: a callee owns its map while
+    //! its body lowers, so nested lowering sees it
+    InlineEnv m_ownEnv;  // Bindings outside any inlining: always empty
+    InlineEnv* m_inlineP = &m_ownEnv;
+    InlineEnv& activeEnv() { return *m_inlineP; }
+    const InlineEnv& activeEnv() const { return *m_inlineP; }
+    std::deque<InlineFrame> m_inlineFrames;
+    std::vector<FuncLoopTarget> m_funcLoopTargets;
+    std::set<const SubprogramDecl*> m_inlineBodies;  // Recursion guard
+    std::map<std::string, std::vector<SubprogramRef>> m_subprograms;  // Visible, by name
+    std::vector<const Stmt*> m_procTail;  // Statements after the current procedure return
+    int m_concurrentProc = 0;  // Lowering a concurrent procedure call body
+    ScopeSave m_moduleScope;  // Module declarative part, hidden by processes
+    int m_procVarSeq = 0;  // Disambiguates procedure local variables
+    const VType* m_funcRetp = nullptr;  // Return-type context for function bodies
     std::map<std::string, VarInfo> m_scope;  // Signals and ports by folded name
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
     std::map<std::string, VType> m_types;  // Declared types by folded name
@@ -340,15 +398,6 @@ class Lowering final {
         return casep;
     }
     void lowerWaitProcess(const Process& process);
-    //! Module-level declarations a process hides, restored when it ends
-    struct ScopeSave final {
-        std::map<std::string, VarInfo> scope;
-        std::map<std::string, int64_t> consts;
-        std::map<std::string, VType> types;
-        std::map<std::string, AstConst*> constValues;
-        std::map<std::string, VType> constTypes;
-        std::map<std::string, AstConst*> enumConsts;
-    };
     ScopeSave saveScope() const;
     void restoreScope(const ScopeSave& saved);
     void emitProcessDecls(const Process& process, std::set<std::string>& varNames);
@@ -393,6 +442,41 @@ class Lowering final {
     AstNode* lowerIf(const Stmt& stmt);
     AstNode* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
     void lowerProcess(const Process& process);
+    void registerSubprograms(const std::vector<SubprogramDecl>& decls, int frame,
+                             bool processLocal = false);
+    void setScope(const ScopeSave& saved);
+    bool subprogramMatches(const Expr& call, const SubprogramDecl& sub, std::string& why) const;
+    std::vector<const SubprogramDecl*> visibleSubprograms(const std::string& name) const;
+    const SubprogramDecl* resolveCall(const Expr& call, bool function,
+                                      const SubprogramRef** foundpp = nullptr);
+    void captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const;
+    AstNodeExpr* inlineBinding(FileLine* flp, const std::string& name, bool write) const;
+    bool bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub, InlineEnv& env,
+                               AstNode*& prologsp, bool lvalueFormals, bool concurrent);
+    AstNodeExpr* lowerFunctionCall(const Expr& call, const VType* context);
+    AstNodeExpr* evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index, InlineEnv& env,
+                               const InlineCont& cont, const InlineCont* exitContp, int depth);
+    AstNodeExpr* evalFuncBlockBody(const std::vector<StmtP>& stmts, std::size_t index,
+                                   const InlineCont& cont, const InlineCont* exitContp, int depth);
+    AstNodeExpr* evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,
+                                  const InlineCont& cont, const InlineCont* exitContp, int depth);
+    AstNodeExpr* evalFuncCase(const Stmt& stmt, const InlineCont& cont,
+                              const InlineCont* exitContp, int depth);
+    AstNodeExpr* evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth);
+    AstNodeExpr* updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
+                                    AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width);
+    AstNode* lowerProcedureCall(const Expr& callExpr, bool concurrent);
+    AstNode* lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
+                            bool& fallsThroughp);
+    AstNode* lowerProcChainWithTail(const std::vector<StmtP>& stmts,
+                                    const std::vector<const Stmt*>& tail, bool& fallsThroughp);
+    AstNode* lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
+                         const std::vector<const Stmt*>& tail, bool& fallsThroughp);
+    AstNode* lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*>& tail,
+                           bool& fallsThroughp);
+    static void deleteInlineEnv(InlineEnv& env);
+    static InlineEnv cloneInlineEnv(const InlineEnv& env);
+    static std::vector<const Stmt*> rawPtrs(const std::vector<StmtP>& stmts);
 
 public:
     explicit Lowering(AstNetlist* rootp, const PackageTable::Impl* packagesp = nullptr,
@@ -416,6 +500,11 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     switch (expr.kind) {
     case Expr::INT_LIT: value = expr.intValue; return true;
     case Expr::NAME: {
+        const auto bindIt = activeEnv().find(expr.text);
+        if (bindIt != activeEnv().end() && VN_IS(bindIt->second.exprp, Const)) {
+            value = static_cast<int64_t>(VN_AS(bindIt->second.exprp, Const)->num().toSInt());
+            return true;
+        }
         const auto it = m_consts.find(expr.text);
         if (it != m_consts.end()) {
             value = it->second;
@@ -814,6 +903,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return makeBitsConst(flp, dtp, expr.bits);
     }
     case Expr::NAME: {
+        if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, false);
         const auto constIt = m_consts.find(expr.text);
         if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
         const auto valueIt = m_constValues.find(expr.text);
@@ -823,6 +913,14 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         const auto it = m_scope.find(expr.text);
         if (it == m_scope.end()) {
             if (AstNodeExpr* const aliasp = lowerAlias(expr, false)) return aliasp;
+            if (m_subprograms.count(expr.text)) {
+                // A function that has no formal arguments may be called without parentheses
+                Expr call{Expr::CALL};
+                call.flp = flp;
+                call.text = expr.text;
+                call.spelling = expr.spelling;
+                return lowerFunctionCall(call, context);
+            }
             flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'");
             return nullptr;
         }
@@ -925,7 +1023,11 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
                 return resizeExpr(valuep, typeIt->second, flp);
             }
         }
+        if (expr.a && expr.a->kind == Expr::NAME && m_subprograms.count(expr.a->text)) {
+            return lowerFunctionCall(expr, context);
+        }
         return lowerDesignator(expr, false);
+    case Expr::CALL: return lowerFunctionCall(expr, context);
     case Expr::SLICE: return lowerDesignator(expr, false);
     case Expr::AGG_OTHERS: {
         if (!context) {
@@ -1546,6 +1648,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
 AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
     FileLine* const flp = expr.flp;
     if (expr.kind == Expr::NAME) {
+        if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, write);
         const auto constIt = m_consts.find(expr.text);
         if (constIt != m_consts.end()) {
             if (write) {
@@ -1855,6 +1958,11 @@ VType Lowering::typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const {
 
 const VType* Lowering::typeOfName(const Expr& expr) const {
     if (expr.kind != Expr::NAME) return nullptr;
+    const auto bindIt = activeEnv().find(expr.text);
+    if (bindIt != activeEnv().end()) {
+        if (!bindIt->second.type.dtp) return nullptr;
+        return &bindIt->second.type;
+    }
     const auto it = m_scope.find(expr.text);
     if (it != m_scope.end()) return &it->second.type;
     const auto constIt = m_constTypes.find(expr.text);
@@ -2251,7 +2359,6 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
     }
     // Assemble from the least significant segment up
     AstNodeExpr* resultp = nullptr;
-    V3Number constValue{flp, type.width, 0u};  // Valid when every segment is constant
     bool allConst = true;
     for (std::size_t i = 0; i < segments.size(); ++i) {
         const Segment& segment = segments[i];
@@ -2276,28 +2383,16 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
             return nullptr;
         }
         valuep = resizeExpr(valuep, segType, flp);
-        if (AstConst* const constp = VN_CAST(valuep, Const)) {
-            for (int bit = 0; bit < segment.width; ++bit) {
-                char value = '0';
-                if (constp->num().bitIs1(bit)) {
-                    value = '1';
-                } else if (constp->num().bitIsXZ(bit)) {
-                    value = 'x';
-                }
-                constValue.setBit(segment.offset + bit, value);
-            }
-            VL_DO_DANGLING(valuep->deleteTree(), valuep);
-            continue;
-        }
-        // A non-static segment: build the value with concatenations instead
-        allConst = false;
+        if (!VN_IS(valuep, Const)) allConst = false;
         resultp
             = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, valuep, resultp}) : valuep;
     }
     if (allConst) {
-        AstConst* const constp = new AstConst{flp, constValue};
-        constp->dtypep(type.dtp);
-        return constp;
+        // Fold an aggregate of constants down to a single constant
+        if (AstConst* const constp = foldToConst(resultp)) {
+            constp->dtypep(type.dtp);
+            return constp;
+        }
     }
     resultp->dtypep(type.dtp);
     return resultp;
@@ -2565,8 +2660,12 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         return nullptr;
     }
     rhsp = resizeExpr(rhsp, ltype, stmt.flp);
-    if (concurrent) return new AstAssignW{stmt.flp, lhsp, rhsp};
-    // A variable assignment updates its target immediately
+    // A concurrent procedure call drives its signal actuals as continuous assignments
+    if (m_concurrentProc) {
+        return new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
+                             new AstAssignW{stmt.flp, lhsp, rhsp}};
+    }
+    // Only variable assignments update immediately; a signal write is nonblocking
     if (variable || m_initial) return new AstAssign{stmt.flp, lhsp, rhsp};
     return new AstAssignDly{stmt.flp, lhsp, rhsp};
 }
@@ -2608,6 +2707,11 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::IF) return lowerIf(stmt);
     if (stmt.kind == Stmt::CASE) return lowerCase(stmt);
     if (stmt.kind == Stmt::REPORT) return nullptr;  // Only its syntax matters
+    if (stmt.kind == Stmt::CALL) return lowerProcedureCall(*stmt.value, m_concurrentProc > 0);
+    if (stmt.kind == Stmt::RETURN) {
+        unsupportedError(stmt.flp, "return outside a subprogram body");
+        return nullptr;
+    }
     if (stmt.kind == Stmt::FOR) return lowerFor(stmt);
     if (stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) return lowerWhile(stmt);
     // exit/next are handled by lowerStmtList, which owns their flags
@@ -2995,6 +3099,13 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
     headp = AstNode::addNext<AstNode, AstNode>(headp, initp);
 
     // The loop variable is a static constant, so each iteration can be unrolled
+    // An inline binding of the loop variable's name, e.g. a procedure formal, must not
+    // shadow the iteration constant
+    const auto boundIt = activeEnv().find(stmt.loopVar);
+    std::unique_ptr<InlineBinding> boundSavep
+        = boundIt != activeEnv().end() ? std::make_unique<InlineBinding>(boundIt->second)
+                                       : nullptr;
+    activeEnv().erase(stmt.loopVar);
     const auto savedConst = m_consts.find(stmt.loopVar);
     const bool hadConst = savedConst != m_consts.end();
     const int64_t savedValue = hadConst ? savedConst->second : 0;
@@ -3023,6 +3134,7 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
     } else {
         m_consts.erase(stmt.loopVar);
     }
+    if (boundSavep) activeEnv()[stmt.loopVar] = *boundSavep;
     m_loops.pop_back();
     return headp;
 }
@@ -3030,6 +3142,961 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
 AstNode* Lowering::lowerWhile(const Stmt& stmt) {
     unsupportedError(stmt.flp, stmt.kind == Stmt::WHILE ? "while loop" : "bare loop");
     return nullptr;
+}
+
+//######################################################################
+// Subprograms: lookup, function inlining, procedure expansion
+
+void Lowering::setScope(const ScopeSave& saved) {
+    m_scope = saved.scope;
+    m_consts = saved.consts;
+    m_types = saved.types;
+    m_constValues = saved.constValues;
+    m_constTypes = saved.constTypes;
+    m_enumConsts = saved.enumConsts;
+    m_subprograms = saved.subprograms;
+}
+
+void Lowering::registerSubprograms(const std::vector<SubprogramDecl>& decls, int frame,
+                                   bool processLocal) {
+    for (const SubprogramDecl& decl : decls) {
+        m_imported.erase(decl.name);  // The local declaration shadows the package member
+        m_subprograms[decl.name].push_back(SubprogramRef{&decl, processLocal, frame});
+    }
+}
+
+std::vector<const SubprogramDecl*> Lowering::visibleSubprograms(const std::string& name) const {
+    std::vector<const SubprogramDecl*> out;
+    const auto it = m_subprograms.find(name);
+    if (it == m_subprograms.end()) return out;
+    // Declarations of a nested inlining hide the outer ones, then a process's own
+    // subprograms hide those of the declarative part and packages
+    int bestFrame = -2;
+    bool bestProcessLocal = false;
+    for (const SubprogramRef& ref : it->second) {
+        if (ref.frame > bestFrame
+            || (ref.frame == bestFrame && ref.processLocal && !bestProcessLocal)) {
+            bestFrame = ref.frame;
+            bestProcessLocal = ref.processLocal;
+        }
+    }
+    for (const SubprogramRef& ref : it->second) {
+        if (ref.frame != bestFrame || ref.processLocal != bestProcessLocal) continue;
+        out.push_back(ref.declp);
+    }
+    return out;
+}
+
+bool Lowering::subprogramMatches(const Expr& call, const SubprogramDecl& sub,
+                                 std::string& why) const {
+    // A formal declaration can declare several names; positional actuals fill them in order
+    std::vector<std::pair<const FormalDecl*, std::string>> slots;
+    for (const FormalDecl& formal : sub.formals)
+        for (const auto& name : formal.names) slots.emplace_back(&formal, name.first);
+    std::vector<bool> given(slots.size(), false);
+    std::size_t positional = 0;
+    for (std::size_t i = 0; i < call.args.size(); ++i) {
+        if (i >= call.formalNames.size() || call.formalNames[i].empty()) {
+            ++positional;
+            continue;
+        }
+        bool found = false;
+        for (std::size_t s = 0; s < slots.size(); ++s) {
+            if (slots[s].second != call.formalNames[i]) continue;
+            if (given[s]) {
+                why = "formal '" + call.formalNames[i] + "' is given twice";
+                return false;
+            }
+            given[s] = true;
+            found = true;
+            break;
+        }
+        if (!found) {
+            why = "no formal named '" + call.formalNames[i] + "'";
+            return false;
+        }
+    }
+    if (positional > slots.size()) {
+        why = "more actuals than formals";
+        return false;
+    }
+    for (std::size_t s = 0; s < slots.size(); ++s) {
+        if (s < positional) {
+            if (given[s]) {
+                why = "formal '" + slots[s].second + "' is given twice";
+                return false;
+            }
+            continue;
+        }
+        if (given[s]) continue;
+        if (!slots[s].first->init) {
+            why = "no actual for formal '" + slots[s].second + "'";
+            return false;
+        }
+    }
+    return true;
+}
+
+const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
+                                            const SubprogramRef** foundpp) {
+    std::string name;
+    std::vector<const SubprogramRef*> refs;
+    if (call.a && call.a->kind == Expr::SELECTED && call.a->a && call.a->a->kind == Expr::NAME) {
+        // A qualified call `package.name(...)`: consult that package
+        name = call.a->text;
+        importPackage(call.a->a->text);
+        const auto it = m_subprograms.find(name);
+        if (it != m_subprograms.end())
+            for (const SubprogramRef& ref : it->second) refs.push_back(&ref);
+    } else {
+        name = call.kind == Expr::INDEX && call.a ? call.a->text : call.text;
+        const auto it = m_subprograms.find(name);
+        if (it != m_subprograms.end()) {
+            for (const SubprogramDecl* const declp : visibleSubprograms(name)) {
+                for (const SubprogramRef& ref : it->second)
+                    if (ref.declp == declp) refs.push_back(&ref);
+            }
+        }
+    }
+    std::string firstWhy;
+    bool withoutBody = false;
+    bool impureSeen = false;
+    for (const SubprogramRef* const refp : refs) {
+        const SubprogramDecl& sub = *refp->declp;
+        if ((sub.kind == SubprogramDecl::FUNCTION) != function) continue;
+        if (!sub.hasBody) {
+            withoutBody = true;
+            continue;
+        }
+        if (function && sub.impure) {
+            impureSeen = true;
+            continue;
+        }
+        std::string why;
+        if (!subprogramMatches(call, sub, why)) {
+            if (firstWhy.empty()) firstWhy = why;
+            continue;
+        }
+        if (foundpp) *foundpp = refp;
+        return &sub;
+    }
+    if (withoutBody) {
+        unsupportedError(call.flp, "call to subprogram '" + name + "' whose body was not read");
+    } else if (impureSeen) {
+        unsupportedError(call.flp, "impure function call '" + name + "'");
+    } else if (!refs.empty() && !firstWhy.empty()) {
+        unsupportedError(call.flp,
+                         "arguments to '" + name + "' match no declaration: " + firstWhy);
+    }
+    return nullptr;
+}
+
+//! A type mark that has no width until a constraint or context gives it one
+static bool isUnconstrainedMark(const std::string& mark) {
+    return mark == "std_logic_vector" || mark == "std_ulogic_vector" || mark == "bit_vector"
+           || mark == "unsigned" || mark == "signed" || mark == "string";
+}
+
+void Lowering::captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const {
+    // The scope a call captures: an active inlining's environment, else the process that
+    // declared it, else the module's declarative part
+    if (ref.frame >= 0) {
+        base = m_inlineFrames[ref.frame].liveScope;
+        if (m_inlineFrames[ref.frame].envp) env = cloneInlineEnv(*m_inlineFrames[ref.frame].envp);
+        return;
+    }
+    if (ref.processLocal) {
+        base = m_inlineFrames.empty() ? saveScope() : m_inlineFrames.front().entryScope;
+        return;
+    }
+    base = m_moduleScope;
+}
+
+Lowering::InlineEnv Lowering::cloneInlineEnv(const InlineEnv& env) {
+    InlineEnv out;
+    for (const auto& entry : env) {
+        out[entry.first] = entry.second;
+        out[entry.first].exprp = entry.second.exprp->cloneTree(false);
+    }
+    return out;
+}
+
+void Lowering::deleteInlineEnv(InlineEnv& env) {
+    for (auto& entry : env) entry.second.exprp->deleteTree();
+    env.clear();
+}
+
+AstNodeExpr* Lowering::inlineBinding(FileLine* flp, const std::string& name, bool write) const {
+    const auto it = activeEnv().find(name);
+    if (it == activeEnv().end()) return nullptr;
+    const InlineBinding& binding = it->second;
+    if (write && !binding.lvalue) {
+        flp->v3error("VHDL: cannot assign to formal argument '" + name + "'");
+        return nullptr;
+    }
+    if (!write && !binding.readable) {
+        flp->v3error("VHDL: out mode parameter '" + name
+                     + "' may not be read before the procedure returns");
+        return nullptr;
+    }
+    AstNodeExpr* const clonep = binding.exprp->cloneTree(false);
+    if (binding.lvalue) {
+        clonep->foreach([write](AstVarRef* const refp) {
+            refp->access(write ? VAccess::WRITE : VAccess::READ);
+        });
+    }
+    return clonep;
+}
+
+bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub, InlineEnv& env,
+                                     AstNode*& prologsp, bool lvalueFormals, bool concurrent) {
+    std::vector<std::pair<const FormalDecl*, std::string>> slots;
+    for (const FormalDecl& formal : sub.formals)
+        for (const auto& name : formal.names) slots.emplace_back(&formal, name.first);
+    std::size_t positional = 0;
+    for (std::size_t i = 0; i < call.args.size(); ++i)
+        if (i >= call.formalNames.size() || call.formalNames[i].empty()) ++positional;
+    if (positional > slots.size()) {
+        unsupportedError(call.flp, "more actuals than formals in call to '" + sub.name + "'");
+        return false;
+    }
+    for (std::size_t i = 0; i < call.args.size(); ++i) {
+        const bool named = i < call.formalNames.size() && !call.formalNames[i].empty();
+        if (named && i < positional) {
+            unsupportedError(call.flp, "positional actual after a named one");
+            return false;
+        }
+        const std::string formalName = named ? call.formalNames[i] : slots[i].second;
+        const FormalDecl* formalp = nullptr;
+        for (const auto& slot : slots)
+            if (slot.second == formalName) {
+                formalp = slot.first;
+                break;
+            }
+        if (!formalp) {
+            unsupportedError(call.flp,
+                             "no formal named '" + formalName + "' in '" + sub.name + "'");
+            return false;
+        }
+        if (!lvalueFormals && formalp->mode != PortMode::IN) {
+            unsupportedError(formalp->flp, "function formal not in mode in");
+            return false;
+        }
+        // Out and inout parameters, and variables, bind the actual's location itself
+        const bool asLvalue
+            = lvalueFormals
+              && (formalp->mode != PortMode::IN || formalp->cls == FormalDecl::VARIABLE);
+        const Expr& actual = *call.args[i];
+        VType formalType;
+        const bool constrained = formalp->type.hasRange || !formalp->type.constraintMark.empty();
+        const VType* ctxp
+            = constrained && resolveType(formalp->type, formalType) ? &formalType : nullptr;
+        AstNodeExpr* actualp = asLvalue ? lowerDesignator(actual, true) : lowerExpr(actual, ctxp);
+        if (!actualp) return false;
+        InlineBinding binding{actualp, asLvalue, true};
+        binding.type = typeOfDType(actualp->dtypep());
+        if (asLvalue && formalp->mode == PortMode::OUT && formalp->cls == FormalDecl::SIGNAL) {
+            // Reading an out signal formal before return would see the actual's old value
+            binding.readable = false;
+        }
+        // An out parameter starts at its default value; a concurrent call's body drives
+        // the actual with continuous assignments, so a prologue would add a second driver
+        if (asLvalue && formalp->mode == PortMode::OUT && !concurrent) {
+            FileLine* const pflp = formalp->flp;
+            AstNodeExpr* const defp = resizeExpr(makeIntConst(pflp, 0), binding.type, pflp);
+            AstNode* const initp = formalp->cls == FormalDecl::SIGNAL
+                                       ? static_cast<AstNode*>(new AstAssignDly{
+                                             pflp, actualp->cloneTree(false), defp})
+                                       : static_cast<AstNode*>(
+                                             new AstAssign{pflp, actualp->cloneTree(false), defp});
+            prologsp = prologsp ? AstNode::addNext<AstNode, AstNode>(prologsp, initp) : initp;
+        }
+        env[formalName] = std::move(binding);
+    }
+    // Formals without an actual take the default value of their declaration
+    for (std::size_t s = 0; s < slots.size(); ++s) {
+        if (s < positional || env.count(slots[s].second)) continue;
+        const FormalDecl& formal = *slots[s].first;
+        if (!formal.init) {
+            unsupportedError(call.flp, "missing actual for formal '" + slots[s].second
+                                           + "' in call to '" + sub.name + "'");
+            return false;
+        }
+        AstNodeExpr* const initp = lowerExpr(*formal.init, nullptr);
+        if (!initp) return false;
+        InlineBinding binding{initp, false, true};
+        binding.type = typeOfDType(initp->dtypep());
+        env[slots[s].second] = std::move(binding);
+    }
+    return true;
+}
+
+AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context) {
+    const SubprogramRef* refp = nullptr;
+    const SubprogramDecl* const subp = resolveCall(call, true, &refp);
+    if (!subp) return nullptr;  // resolveCall reported why
+    if (!m_inlineBodies.insert(subp).second) {
+        unsupportedError(call.flp, "recursive call of function '" + subp->spelling + "'");
+        return nullptr;
+    }
+    InlineEnv env;
+    AstNode* unusedPrologsp = nullptr;  // A function has no out mode formal
+    // The captured environment supplies enclosing names; formals bind on top of them
+    ScopeSave base;
+    captureBaseFor(*refp, base, env);
+    if (!bindSubprogramFormals(call, *subp, env, unusedPrologsp, false, false)) {
+        m_inlineBodies.erase(subp);
+        deleteInlineEnv(env);
+        return nullptr;
+    }
+    const ScopeSave outer = saveScope();
+    InlineEnv* const savedInlineP = m_inlineP;
+    m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
+    InlineFrame& frameRef = m_inlineFrames.back();
+    setScope(base);
+    m_inlineP = &env;
+    const auto fail = [&](AstNodeExpr* nullp) -> AstNodeExpr* {
+        deleteInlineEnv(env);
+        m_inlineFrames.pop_back();
+        m_inlineP = savedInlineP;
+        restoreScope(outer);
+        m_inlineBodies.erase(subp);
+        return nullp;
+    };
+
+    for (const TypeDecl& typeDecl : subp->types) registerType(typeDecl);
+    registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
+    // An alias denotes its designator; its subtype mark gives it bounds of its own
+    for (const AliasDecl& alias : subp->aliases) {
+        if (!alias.designator) continue;
+        AstNodeExpr* const valuep = lowerExpr(*alias.designator, nullptr);
+        if (!valuep) return fail(nullptr);
+        InlineBinding binding{valuep, false, true};
+        VType aliasType;
+        if (alias.mark.flp && resolveType(alias.mark, aliasType)
+            && aliasType.width == valuep->width()) {
+            valuep->dtypep(aliasType.dtp);
+            binding.type = aliasType;
+        } else {
+            binding.type = typeOfDType(valuep->dtypep());
+        }
+        env[alias.name] = std::move(binding);
+    }
+    // Locals are bound to values; assignments rebuild the whole bound expression
+    for (const Decl& decl : subp->decls) {
+        VType declType;
+        const bool resolved = resolveType(decl.type, declType);
+        AstNodeExpr* initp = nullptr;
+        if (decl.init) {
+            initp = lowerExpr(*decl.init, resolved ? &declType : nullptr);
+        } else if (resolved) {
+            initp = makeVectorConst(decl.flp, declType, 0);
+        }
+        if (!initp) return fail(nullptr);
+        bool first = true;
+        for (const auto& name : decl.names) {
+            InlineBinding binding{first ? initp : initp->cloneTree(false), false, true};
+            binding.type = resolved ? declType : typeOfDType(binding.exprp->dtypep());
+            env[name.first] = std::move(binding);
+            first = false;
+        }
+    }
+    VType retType;
+    const VType* const outerRetp = m_funcRetp;
+    // An unconstrained array return type takes its width from the body and the context
+    const bool retSized = !isUnconstrainedMark(subp->returnType.mark) || subp->returnType.hasRange
+                          || !subp->returnType.constraintMark.empty();
+    m_funcRetp = retSized && resolveType(subp->returnType, retType) ? &retType : nullptr;
+    const InlineCont noCont = [](InlineEnv&) -> AstNodeExpr* { return nullptr; };
+    AstNodeExpr* resultp = evalFuncBlock(subp->body, 0, env, noCont, nullptr, 0);
+    m_funcRetp = outerRetp;
+    if (resultp && retType.dtp && retType.width > 0) {
+        // The return expression was lowered without the return type; normalize it so an
+        // enum-backed std_ulogic adopts the one-bit logic type and vice versa
+        if (resultp->width() == retType.width) {
+            resultp->dtypep(retType.dtp);
+        } else {
+            resultp = resizeExpr(resultp, retType, call.flp);
+        }
+    }
+    if (resultp && context && context->dtp && resultp->width() == context->width) {
+        resultp->dtypep(context->dtp);
+    }
+    return fail(resultp);
+}
+
+AstNodeExpr* Lowering::evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index,
+                                     InlineEnv& env, const InlineCont& cont,
+                                     const InlineCont* exitContp, int depth) {
+    InlineEnv* const savedInlineP = m_inlineP;
+    m_inlineP = &env;
+    if (depth > 64) {
+        unsupportedError(m_inlineFrames.back().declp->flp,
+                         "VHDL function statement nesting is too deep");
+        m_inlineP = savedInlineP;
+        return nullptr;
+    }
+    AstNodeExpr* const resultp = evalFuncBlockBody(stmts, index, cont, exitContp, depth);
+    m_inlineP = savedInlineP;
+    return resultp;
+}
+
+AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::size_t index,
+                                         const InlineCont& cont, const InlineCont* exitContp,
+                                         int depth) {
+    for (std::size_t i = index; i < stmts.size(); ++i) {
+        const Stmt& stmt = *stmts[i];
+        FileLine* const flp = stmt.flp;
+        if (stmt.kind == Stmt::VAR_ASSIGN) {
+            const Expr& target = *stmt.target;
+            if (target.kind == Expr::NAME) {
+                const auto it = activeEnv().find(target.text);
+                if (it == activeEnv().end()) {
+                    unsupportedError(flp, "assignment to a name that is not local to the "
+                                          "inlined subprogram");
+                    return nullptr;
+                }
+                // The target constrains the value, e.g. an aggregate's width
+                AstNodeExpr* const valuep
+                    = lowerExpr(*stmt.value, it->second.type.dtp ? &it->second.type : nullptr);
+                if (!valuep) return nullptr;
+                it->second.exprp->deleteTree();
+                it->second.exprp = valuep;
+                continue;
+            }
+            // Locals are bound to values: rebuild the whole value around the element update
+            const Expr* basep = nullptr;
+            if ((target.kind == Expr::INDEX || target.kind == Expr::SLICE) && target.a
+                && target.a->kind == Expr::NAME) {
+                basep = target.a.get();
+            }
+            if (!basep) {
+                unsupportedError(flp, "assignment target form in an inlined function body");
+                return nullptr;
+            }
+            const auto it = activeEnv().find(basep->text);
+            if (it == activeEnv().end()) {
+                unsupportedError(flp, "assignment to an element outside the inlined subprogram");
+                return nullptr;
+            }
+            AstNodeExpr* const readp = lowerDesignator(target, false);
+            AstSel* const selp = VN_CAST(readp, Sel);
+            if (!selp) {
+                if (readp) readp->deleteTree();
+                unsupportedError(flp, "assignment to an element of a non-vector value");
+                return nullptr;
+            }
+            const VType elemType = typeOfDType(selp->dtypep());
+            AstNodeExpr* valuep = lowerExpr(*stmt.value, &elemType);
+            if (!valuep) {
+                readp->deleteTree();
+                return nullptr;
+            }
+            AstNodeExpr* const updatedp = updateLocalElement(
+                flp, it->second.exprp->cloneTree(false), valuep, selp->dtypep(),
+                selp->lsbp()->cloneTree(false), selp->widthConst());
+            readp->deleteTree();
+            it->second.exprp->deleteTree();
+            it->second.exprp = updatedp;
+            continue;
+        }
+        if (stmt.kind == Stmt::REPORT) continue;
+        if (stmt.kind == Stmt::RETURN) {
+            if (!stmt.value) {
+                unsupportedError(flp, "return without a value in a VHDL function body");
+                return nullptr;
+            }
+            return lowerExpr(*stmt.value, m_funcRetp);
+        }
+        if (stmt.kind == Stmt::IF || stmt.kind == Stmt::CASE || stmt.kind == Stmt::FOR) {
+            // Control statements continue with the rest of this statement list
+            const InlineCont restCont = [&](InlineEnv& restEnv) -> AstNodeExpr* {
+                return evalFuncBlock(stmts, i + 1, restEnv, cont, exitContp, depth);
+            };
+            if (stmt.kind == Stmt::IF) {
+                return evalFuncBranches(stmt, 0, restCont, exitContp, depth + 1);
+            }
+            if (stmt.kind == Stmt::CASE) return evalFuncCase(stmt, restCont, exitContp, depth + 1);
+            return evalFuncFor(stmt, restCont, depth + 1);
+        }
+        if (stmt.kind == Stmt::EXIT || stmt.kind == Stmt::NEXT) {
+            AstNodeExpr* const condExprp = stmt.value ? lowerCond(*stmt.value) : nullptr;
+            if (stmt.value && !condExprp) return nullptr;
+            AstNodeExpr* targetp = nullptr;
+            if (!stmt.loopLabel.empty()) {
+                // A label selects that active loop; the innermost match wins
+                const InlineCont* foundp = nullptr;
+                for (std::size_t t = m_funcLoopTargets.size(); t-- > 0;) {
+                    if (m_funcLoopTargets[t].label != stmt.loopLabel) continue;
+                    foundp = stmt.kind == Stmt::EXIT ? m_funcLoopTargets[t].exitp
+                                                     : m_funcLoopTargets[t].nextp;
+                    break;
+                }
+                if (!foundp) {
+                    unsupportedError(flp, "exit/next to a loop that is not visible here");
+                    if (condExprp) condExprp->deleteTree();
+                    return nullptr;
+                }
+                targetp = (*foundp)(activeEnv());
+            } else if (stmt.kind == Stmt::EXIT) {
+                if (!exitContp) {
+                    unsupportedError(flp, "exit statement outside a static loop in a function");
+                    if (condExprp) condExprp->deleteTree();
+                    return nullptr;
+                }
+                targetp = (*exitContp)(activeEnv());
+            } else {
+                targetp = cont(activeEnv());
+            }
+            if (!condExprp) return targetp;
+            // The statements after a conditional exit/next only run when it is not taken
+            AstNodeExpr* restp = evalFuncBlockBody(stmts, i + 1, cont, exitContp, depth);
+            if (!targetp || !restp) {
+                if (targetp) targetp->deleteTree();
+                if (restp) restp->deleteTree();
+                return nullptr;
+            }
+            if (targetp->width() != restp->width()) {
+                if (targetp->width() > restp->width()) {
+                    restp = resizeExpr(restp, typeOfDType(targetp->dtypep()), flp);
+                } else {
+                    targetp = resizeExpr(targetp, typeOfDType(restp->dtypep()), flp);
+                }
+            }
+            AstCond* const resultp = new AstCond{flp, condExprp, targetp, restp};
+            resultp->dtypep(targetp->dtypep());
+            return resultp;
+        }
+        unsupportedError(flp, "this statement form in an inlined VHDL function body");
+        return nullptr;
+    }
+    AstNodeExpr* const resultp = cont(activeEnv());
+    if (!resultp) {
+        unsupportedError(m_inlineFrames.back().declp->flp,
+                         "VHDL function does not return a value on all paths");
+    }
+    return resultp;
+}
+
+AstNodeExpr* Lowering::evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,
+                                        const InlineCont& cont, const InlineCont* exitContp,
+                                        int depth) {
+    const auto& branch = stmt.branches[branchIndex];
+    if (!branch.first) {
+        // The final else continues through the rest of the enclosing block
+        return evalFuncBlock(branch.second, 0, activeEnv(), cont, exitContp, depth);
+    }
+    AstNodeExpr* const condp = lowerCond(*branch.first);
+    if (!condp) return nullptr;
+    InlineEnv thenEnv = cloneInlineEnv(activeEnv());
+    AstNodeExpr* thenp = evalFuncBlock(branch.second, 0, thenEnv, cont, exitContp, depth);
+    AstNodeExpr* elsep = branchIndex + 1 < stmt.branches.size()
+                             ? evalFuncBranches(stmt, branchIndex + 1, cont, exitContp, depth)
+                             : evalFuncBlock({}, 0, activeEnv(), cont, exitContp, depth);
+    deleteInlineEnv(thenEnv);
+    if (!thenp || !elsep) {
+        unsupportedError(stmt.flp, "VHDL function does not return a value on all paths");
+        if (thenp) thenp->deleteTree();
+        if (elsep) elsep->deleteTree();
+        return nullptr;
+    }
+    if (thenp->width() != elsep->width()) {
+        if (thenp->width() > elsep->width()) {
+            elsep = resizeExpr(elsep, typeOfDType(thenp->dtypep()), stmt.flp);
+        } else {
+            thenp = resizeExpr(thenp, typeOfDType(elsep->dtypep()), stmt.flp);
+        }
+    }
+    AstCond* const resultp = new AstCond{stmt.flp, condp, thenp, elsep};
+    resultp->dtypep(thenp->dtypep());
+    return resultp;
+}
+
+AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
+                                    const InlineCont* exitContp, int depth) {
+    AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
+    if (!selectorp) return nullptr;
+    struct Branch final {
+        AstNodeExpr* condp = nullptr;  // null for the "others" alternative
+        AstNodeExpr* resultp = nullptr;
+        InlineEnv env;
+    };
+    std::vector<Branch> branches;
+    const auto cleanup = [&]() {
+        for (Branch& branch : branches) {
+            if (branch.condp) branch.condp->deleteTree();
+            if (branch.resultp) branch.resultp->deleteTree();
+            deleteInlineEnv(branch.env);
+        }
+    };
+    AstNodeDType* const bitdtp = findBasic(stmt.flp, VBasicDTypeKwd::LOGIC);
+    for (const auto& item : stmt.caseItems) {
+        std::vector<AstConst*> cops;
+        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
+            for (AstConst* const cop : cops) cop->deleteTree();
+            cleanup();
+            selectorp->deleteTree();
+            return nullptr;
+        }
+        Branch branch;
+        branch.env = cloneInlineEnv(activeEnv());
+        branch.resultp = evalFuncBlock(item.second, 0, branch.env, cont, exitContp, depth);
+        if (!cops.empty()) {
+            AstNodeExpr* condp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[0]};
+            condp->dtypep(bitdtp);
+            for (std::size_t i = 1; i < cops.size(); ++i) {
+                AstNodeExpr* const eqp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[i]};
+                eqp->dtypep(bitdtp);
+                AstNodeExpr* const orp = new AstOr{stmt.flp, condp, eqp};
+                orp->dtypep(bitdtp);
+                condp = orp;
+            }
+            branch.condp = condp;
+        }
+        branches.push_back(std::move(branch));
+    }
+    AstNodeExpr* resultp = nullptr;
+    for (Branch& branch : branches) {
+        if (branch.condp) continue;
+        resultp = branch.resultp;
+        branch.resultp = nullptr;
+        break;
+    }
+    if (!resultp) {
+        unsupportedError(stmt.flp, "case without 'others' in an inlined VHDL function body");
+        cleanup();
+        selectorp->deleteTree();
+        return nullptr;
+    }
+    for (std::size_t i = branches.size(); i-- > 0;) {
+        Branch& branch = branches[i];
+        if (!branch.condp) continue;
+        if (!branch.resultp) {
+            resultp->deleteTree();
+            cleanup();
+            selectorp->deleteTree();
+            return nullptr;  // evalFuncBlock reported the missing path
+        }
+        if (branch.resultp->width() != resultp->width()) {
+            if (branch.resultp->width() > resultp->width()) {
+                resultp = resizeExpr(resultp, typeOfDType(branch.resultp->dtypep()), stmt.flp);
+            } else {
+                branch.resultp
+                    = resizeExpr(branch.resultp, typeOfDType(resultp->dtypep()), stmt.flp);
+            }
+        }
+        AstCond* const condp = new AstCond{stmt.flp, branch.condp, branch.resultp, resultp};
+        condp->dtypep(branch.resultp->dtypep());
+        branch.condp = nullptr;
+        branch.resultp = nullptr;
+        resultp = condp;
+    }
+    cleanup();
+    selectorp->deleteTree();
+    return resultp;
+}
+
+AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth) {
+    FileLine* const flp = stmt.flp;
+    int64_t left = 0;
+    int64_t right = 0;
+    bool up = stmt.rangeAscending;
+    if (!stmt.c) {
+        // `for i in name'range` / `name'reverse_range`: the bounds come from the prefix type
+        const Expr* const rangep = stmt.b.get();
+        if (!rangep || rangep->kind != Expr::ATTR || !rangep->a
+            || (rangep->text != "range" && rangep->text != "reverse_range")) {
+            unsupportedError(flp, "function loop range without static bounds");
+            return nullptr;
+        }
+        VType bounds;
+        if (!typeOfDesignator(*rangep->a, bounds)) {
+            unsupportedError(flp, "function loop range of an unresolved name");
+            return nullptr;
+        }
+        left = bounds.left;
+        right = bounds.right;
+        up = bounds.ascending;
+        if (rangep->text == "reverse_range") {
+            std::swap(left, right);
+            up = !up;
+        }
+    } else if (!staticInt(stmt.b, left) || !staticInt(stmt.c, right)) {
+        unsupportedError(flp, "function loop range that is not static");
+        return nullptr;
+    }
+    if (up ? right < left : right > left) return postCont(activeEnv());  // Empty range
+    if (std::llabs(right - left) > 4096) {
+        unsupportedError(flp, "function loop with more than 4096 iterations");
+        return nullptr;
+    }
+    const int64_t step = up ? 1 : -1;
+    // Each iteration becomes a continuation frame; the body's continuation is the next
+    std::function<AstNodeExpr*(int64_t, InlineEnv&)> evalIteration;
+    evalIteration = [&](int64_t value, InlineEnv& inEnv) -> AstNodeExpr* {
+        InlineEnv iterEnv = cloneInlineEnv(inEnv);
+        InlineBinding loopBinding{makeIntConst(flp, value), false, true};
+        loopBinding.type = intType(flp);
+        iterEnv[stmt.loopVar] = std::move(loopBinding);
+        const int64_t nextValue = value + step;
+        const bool more = up ? nextValue <= right : nextValue >= right;
+        const InlineCont bodyCont = [&](InlineEnv& bodyEnv) -> AstNodeExpr* {
+            return more ? evalIteration(nextValue, bodyEnv) : postCont(bodyEnv);
+        };
+        const InlineCont exitCont
+            = [&](InlineEnv& exitEnv) -> AstNodeExpr* { return postCont(exitEnv); };
+        // The continuations live in this iteration's frame. Only a labeled exit or next
+        // in the body can use one, and the body returns before the frame is popped.
+        m_funcLoopTargets.push_back(FuncLoopTarget{stmt.loopLabel, &bodyCont, &exitCont});
+        AstNodeExpr* const resultp
+            = evalFuncBlock(stmt.body, 0, iterEnv, bodyCont, &exitCont, depth);
+        m_funcLoopTargets.pop_back();
+        deleteInlineEnv(iterEnv);
+        return resultp;
+    };
+    return evalIteration(left, activeEnv());
+}
+
+//! Value of a vector-bound local after replacing one element or slice
+AstNodeExpr* Lowering::updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
+                                          AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width) {
+    const int total = oldp->dtypep()->width();
+    AstNodeExpr* valp = valuep;
+    if (valp->width() != width) valp = resizeExpr(valp, typeOfDType(elemDtp), flp);
+    AstNodeExpr* const extendedp
+        = valp->width() == total ? valp
+                                 : static_cast<AstNodeExpr*>(new AstExtend{flp, valp, total});
+    extendedp->dtypep(oldp->dtypep());
+    AstNodeExpr* const shiftedp = new AstShiftL{flp, extendedp, lsbp->cloneTree(false), total};
+    shiftedp->dtypep(oldp->dtypep());
+    V3Number maskNum{flp, total, 0u};
+    for (int bit = 0; bit < width && bit < total; ++bit) maskNum.setBit(bit, '1');
+    AstConst* const onesp = new AstConst{flp, maskNum};
+    onesp->dtypep(oldp->dtypep());
+    AstNodeExpr* const maskp = new AstShiftL{flp, onesp, lsbp, total};
+    maskp->dtypep(oldp->dtypep());
+    AstNodeExpr* const notmaskp = new AstNot{flp, maskp->cloneTree(false)};
+    notmaskp->dtypep(oldp->dtypep());
+    AstNodeExpr* const clearedp = new AstAnd{flp, oldp, notmaskp};
+    clearedp->dtypep(oldp->dtypep());
+    AstNodeExpr* const setp = new AstAnd{flp, shiftedp, maskp};
+    setp->dtypep(oldp->dtypep());
+    AstNodeExpr* const resultp = new AstOr{flp, clearedp, setp};
+    resultp->dtypep(oldp->dtypep());
+    return resultp;
+}
+
+AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
+    const SubprogramRef* refp = nullptr;
+    const SubprogramDecl* const subp = resolveCall(callExpr, false, &refp);
+    if (!subp) {
+        const std::string name
+            = callExpr.kind == Expr::INDEX && callExpr.a ? callExpr.a->text : callExpr.text;
+        if (!m_subprograms.count(name)) {
+            callExpr.flp->v3error("VHDL: unknown subprogram '" + name + "'");
+        }
+        return nullptr;  // resolveCall reported the reason for a known subprogram
+    }
+    if (!m_inlineBodies.insert(subp).second) {
+        unsupportedError(callExpr.flp, "recursive call of procedure '" + subp->spelling + "'");
+        return nullptr;
+    }
+    InlineEnv env;
+    AstNode* prologsp = nullptr;  // Out-parameter initializations
+    // The captured environment supplies enclosing names; formals bind on top of them
+    ScopeSave base;
+    captureBaseFor(*refp, base, env);
+    if (!bindSubprogramFormals(callExpr, *subp, env, prologsp, true, concurrent)) {
+        m_inlineBodies.erase(subp);
+        deleteInlineEnv(env);
+        if (prologsp) prologsp->deleteTree();
+        return nullptr;
+    }
+    const ScopeSave outer = saveScope();
+    InlineEnv* const savedInlineP = m_inlineP;
+    m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
+    InlineFrame& frameRef = m_inlineFrames.back();
+    frameRef.liveScope = base;
+    setScope(base);
+    m_inlineP = &env;
+    const auto fail = [&](AstNode* nullp) -> AstNode* {
+        deleteInlineEnv(env);
+        m_inlineFrames.pop_back();
+        m_inlineP = savedInlineP;
+        restoreScope(outer);
+        m_inlineBodies.erase(subp);
+        if (prologsp) prologsp->deleteTree();
+        return nullp;
+    };
+
+    for (const TypeDecl& typeDecl : subp->types) registerType(typeDecl);
+    for (const AliasDecl& alias : subp->aliases) registerAlias(alias);
+    registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
+
+    // Locals are real module variables reinitialized on every call, like automatics
+    AstNode* initsp = nullptr;
+    for (const Decl& decl : subp->decls) {
+        if (decl.kind == Decl::CONSTANT) {
+            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
+            continue;
+        }
+        VType ltype;
+        if (!resolveType(decl.type, ltype)) return fail(nullptr);
+        for (const auto& name : decl.names) {
+            const std::string mangled
+                = "vhdlproc_" + std::to_string(++m_procVarSeq) + "__" + name.second;
+            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, ltype.dtp};
+            m_modp->addStmtsp(varp);
+            m_scope[name.first] = VarInfo{varp, ltype};
+            m_variables.insert(name.first);
+            frameRef.liveScope = saveScope();
+            AstNodeExpr* rhsp = nullptr;
+            if (decl.init) rhsp = lowerExpr(*decl.init, &ltype);
+            if (!rhsp) rhsp = makeVectorConst(decl.flp, ltype, 0);
+            AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
+            AstNode* const initp = new AstAssign{decl.flp, lhsp, rhsp};
+            initsp = initsp ? AstNode::addNext<AstNode, AstNode>(initsp, initp) : initp;
+        }
+    }
+
+    bool fallsThrough = true;
+    AstNode* const bodysp = lowerProcChain(rawPtrs(subp->body), 0, fallsThrough);
+    AstNode* resultp = prologsp;
+    prologsp = nullptr;
+    if (initsp) resultp = resultp ? AstNode::addNext<AstNode, AstNode>(resultp, initsp) : initsp;
+    if (bodysp) resultp = resultp ? AstNode::addNext<AstNode, AstNode>(resultp, bodysp) : bodysp;
+    return fail(resultp);
+}
+
+std::vector<const Stmt*> Lowering::rawPtrs(const std::vector<StmtP>& stmts) {
+    std::vector<const Stmt*> out;
+    out.reserve(stmts.size());
+    for (const StmtP& stmtp : stmts) out.push_back(stmtp.get());
+    return out;
+}
+
+//! Lower a procedure statement chain. `fallsThroughp` is false when every path returns
+AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
+                                  bool& fallsThroughp) {
+    AstNode* headp = nullptr;
+    const auto add = [&headp](AstNode* nodep) {
+        if (nodep) headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+    };
+    for (std::size_t i = index; i < stmts.size(); ++i) {
+        const Stmt& stmt = *stmts[i];
+        if (stmt.kind == Stmt::RETURN) {
+            if (stmt.value) unsupportedError(stmt.flp, "return value in a procedure body");
+            fallsThroughp = false;
+            return headp;
+        }
+        if (stmt.kind == Stmt::IF) {
+            AstNode* const ifp
+                = lowerProcIf(stmt, 0, {stmts.begin() + i + 1, stmts.end()}, fallsThroughp);
+            add(ifp);
+            return headp;
+        }
+        if (stmt.kind == Stmt::CASE) {
+            AstNode* const casep
+                = lowerProcCase(stmt, {stmts.begin() + i + 1, stmts.end()}, fallsThroughp);
+            add(casep);
+            return headp;
+        }
+        if (stmt.kind == Stmt::EXIT || stmt.kind == Stmt::NEXT) {
+            const bool isExit = stmt.kind == Stmt::EXIT;
+            LoopFrame* const framep = findLoop(stmt.loopLabel);
+            if (!framep) {
+                unsupportedError(stmt.flp, isExit ? "exit outside a loop" : "next outside a loop");
+                continue;
+            }
+            AstNodeExpr* condp = stmt.value ? lowerCond(*stmt.value) : nullptr;
+            if (stmt.value && !condp) continue;
+            AstNode* const setp
+                = setLoopFlag(stmt.flp, isExit ? framep->exitp : framep->nextp, condp);
+            add(setp);
+            if (!stmt.value) {
+                // An unconditional exit truncates every following statement
+                fallsThroughp = false;
+                return headp;
+            }
+            bool restFalls = true;
+            AstNode* restp = lowerProcChain(stmts, i + 1, restFalls);
+            if (!restp) {
+                fallsThroughp = false;
+                return headp;
+            }
+            AstNodeExpr* const notp = new AstNot{stmt.flp, condp};
+            notp->dtypep(findBasic(stmt.flp, VBasicDTypeKwd::LOGIC));
+            add(new AstIf{stmt.flp, notp, restp, nullptr});
+            fallsThroughp = restFalls;
+            return headp;
+        }
+        add(lowerStmt(stmt));
+    }
+    fallsThroughp = true;
+    return headp;
+}
+
+//! Lower the statements and then `tail`, so a return truncates the tail in that path only
+AstNode* Lowering::lowerProcChainWithTail(const std::vector<StmtP>& stmts,
+                                          const std::vector<const Stmt*>& tail,
+                                          bool& fallsThroughp) {
+    std::vector<const Stmt*> combined = rawPtrs(stmts);
+    combined.insert(combined.end(), tail.begin(), tail.end());
+    return lowerProcChain(combined, 0, fallsThroughp);
+}
+
+//! Lower an if/elsif/else statement, appending the following statements to each branch
+AstNode* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
+                               const std::vector<const Stmt*>& tail, bool& fallsThroughp) {
+    FileLine* const flp = stmt.flp;
+    const auto& branch = stmt.branches[branchIndex];
+    AstNodeExpr* const condp = branch.first ? lowerCond(*branch.first) : nullptr;
+    if (branch.first && !condp) {
+        fallsThroughp = false;
+        return nullptr;
+    }
+    bool thenFalls = true;
+    AstNode* const thensp = lowerProcChainWithTail(branch.second, tail, thenFalls);
+    AstNode* elsesp = nullptr;
+    bool elseFalls = true;
+    if (condp && branchIndex + 1 < stmt.branches.size()) {
+        elsesp = lowerProcIf(stmt, branchIndex + 1, tail, elseFalls);
+    } else if (condp) {
+        // A missing else falls through to the following statements
+        elsesp = lowerProcChain(tail, 0, elseFalls);
+    }
+    fallsThroughp = thenFalls || elseFalls;
+    return new AstIf{flp, condp, thensp, elsesp};
+}
+
+//! Lower a case statement, appending the following statements to each alternative
+AstNode* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*>& tail,
+                                 bool& fallsThroughp) {
+    FileLine* const flp = stmt.flp;
+    AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
+    if (!selectorp) {
+        fallsThroughp = false;
+        return nullptr;
+    }
+    AstCaseItem* itemsp = nullptr;
+    fallsThroughp = false;
+    for (const auto& item : stmt.caseItems) {
+        std::vector<AstConst*> cops;
+        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
+            for (AstConst* const cop : cops) cop->deleteTree();
+            if (itemsp) itemsp->deleteTree();
+            selectorp->deleteTree();
+            return nullptr;
+        }
+        bool altFalls = true;
+        AstNode* const bodyp = lowerProcChainWithTail(item.second, tail, altFalls);
+        fallsThroughp = fallsThroughp || altFalls;
+        AstCaseItem* const itemp = cops.empty() ? new AstCaseItem{flp, nullptr, bodyp}
+                                                : new AstCaseItem{flp, cops.front(), bodyp};
+        for (std::size_t i = 1; i < cops.size(); ++i) itemp->addCondsp(cops[i]);
+        itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, itemp) : itemp;
+    }
+    return makeCase(flp, selectorp, itemsp);
 }
 
 void Lowering::lowerProcess(const Process& process) {
@@ -3117,6 +4184,7 @@ Lowering::ScopeSave Lowering::saveScope() const {
     saved.constValues = m_constValues;
     saved.constTypes = m_constTypes;
     saved.enumConsts = m_enumConsts;
+    saved.subprograms = m_subprograms;
     return saved;
 }
 
@@ -3127,12 +4195,14 @@ void Lowering::restoreScope(const ScopeSave& saved) {
     m_constValues = saved.constValues;
     m_constTypes = saved.constTypes;
     m_enumConsts = saved.enumConsts;
+    m_subprograms = saved.subprograms;
 }
 
 //! Declare the types, constants and variables of a process declarative part
 void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& varNames) {
     int varSeq = 0;
     for (const TypeDecl& typeDecl : process.types) registerType(typeDecl);
+    registerSubprograms(process.subprograms, -1, true);
     for (const Decl& decl : process.decls) {
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
@@ -3192,18 +4262,19 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
     if (type.flp && resolveType(type, constType)) intConstant = constType.isInt();
     if (intConstant) {
         int64_t value = 0;
-        if (!evalInt(*initp, value)) {
-            unsupportedError(flp, "constant value that is not a static integer expression");
+        if (evalInt(*initp, value)) {
+            for (const auto& name : names) {
+                if (!reserveName(name.first, name.second, flp)) continue;
+                m_consts[name.first] = value;
+            }
             return;
         }
-        for (const auto& name : names) {
-            if (!reserveName(name.first, name.second, flp)) continue;
-            m_consts[name.first] = value;
-        }
-        return;
+        // A call to a declared function is static as well: lower and fold it below
+        if (!constType.dtp) constType = intType(flp);
     }
     AstNodeExpr* valuep = lowerExpr(*initp, &constType);
     if (!valuep) return;
+    valuep = V3Const::constifyEditCpp(valuep);
     if (AstConst* const foldedp = foldToConst(valuep)) valuep = foldedp;
     AstConst* const constp = VN_CAST(valuep, Const);
     if (!constp) {
@@ -3296,6 +4367,14 @@ void Lowering::importPackage(const std::string& name) {
         m_enumConsts[literal.first] = m_ownedConsts.back().get();
         m_imported.insert(literal.first);
     }
+    for (const SubprogramDecl* const subp : info.subprograms) {
+        std::vector<SubprogramRef>& refs = m_subprograms[subp->name];
+        const bool known = std::any_of(refs.begin(), refs.end(),
+                                       [=](const SubprogramRef& r) { return r.declp == subp; });
+        if (known) continue;
+        refs.push_back(SubprogramRef{subp, false, -1});
+        m_imported.insert(subp->name);
+    }
 }
 
 void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
@@ -3309,8 +4388,11 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     m_imported.clear();
     m_scope.clear();
     m_aliases.clear();
+    m_subprograms.clear();
     for (const TypeDecl& typeDecl : pkg.types) registerType(typeDecl);
     for (const AliasDecl& alias : pkg.aliases) registerAlias(alias);
+    // Subprograms are visible to the declarative items below, including deferred constants
+    registerSubprograms(pkg.subprograms, -1);
     for (const Decl& decl : pkg.decls)
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
 
@@ -3322,6 +4404,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     info.constTypes = std::move(m_constTypes);
     info.enumConsts = std::move(m_enumConsts);
     info.owned = std::move(m_ownedConsts);
+    for (const SubprogramDecl& sub : pkg.subprograms) info.subprograms.push_back(&sub);
     m_types.clear();
     m_consts.clear();
     m_constValues.clear();
@@ -3344,12 +4427,14 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     for (const auto& type : info.constTypes) dest.constTypes[type.first] = type.second;
     for (const auto& literal : info.enumConsts) dest.enumConsts[literal.first] = literal.second;
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
+    for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
 }
 
 bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
                     const GenericBindings* bindings) {
     m_modp = modp;
 
+    m_subprograms.clear();  // Packages published these only through importPackage
     for (const auto& use : entity.uses) importPackage(use.second);
     for (const auto& use : arch.uses) importPackage(use.second);
 
@@ -3371,6 +4456,11 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     }
 
     for (const AliasDecl& alias : arch.aliases) registerAlias(alias);
+    registerSubprograms(entity.subprograms, -1);
+    registerSubprograms(arch.subprograms, -1);
+
+    // Preliminary snapshot: declarative items may already call subprograms
+    m_moduleScope = saveScope();
 
     // Entity declarative items are visible to every architecture of the entity
     int entityVarSeq = 0;
@@ -3449,6 +4539,8 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         }
     }
 
+    // Subprograms of the declarative part capture the module scope as it stands here
+    m_moduleScope = saveScope();
     for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
 
     m_modp = nullptr;
@@ -3869,6 +4961,13 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
 void Lowering::emitConcurrent(const Concurrent& conc) {
     const Concurrent& stmt = conc;
     if (stmt.kind == Concurrent::ASSERT) return;  // Synthesis ignores assertions
+    if (stmt.kind == Concurrent::CALL) {
+        // A concurrent procedure call is lowered with continuous assignments
+        ++m_concurrentProc;
+        if (AstNode* const callp = lowerProcedureCall(*stmt.value, true)) m_modp->addStmtsp(callp);
+        --m_concurrentProc;
+        return;
+    }
     if (stmt.kind == Concurrent::GEN_FOR) {
         // A generate loop is unrolled with its parameter bound as a constant
         int64_t left = 0;
@@ -3892,6 +4991,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
             m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
             m_consts[stmt.loopVar] = value;
             emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
+            registerSubprograms(stmt.subprograms, -1);
             for (const auto& bodyConcp : stmt.body) {
                 if (bodyConcp) emitConcurrent(*bodyConcp);
             }
@@ -3920,6 +5020,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
         emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
+        registerSubprograms(stmt.subprograms, -1);
         for (const auto& bodyConcp : body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
@@ -3931,6 +5032,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         // A block's declarative items are visible to its statements only
         const ScopeSave saved = saveScope();
         emitLocalDecls(stmt.decls, stmt.types, "vhdlblk_");
+        registerSubprograms(stmt.subprograms, -1);
         for (const auto& bodyConcp : stmt.body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }

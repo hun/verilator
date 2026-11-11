@@ -127,6 +127,8 @@ struct Expr final {
         UNARY,  // text=operator, a
         BINARY,  // text=operator, a, b
         INDEX,  // a=prefix, args
+        CALL,  // Subprogram call: text=folded name (a=prefix for a qualified name),
+               // args=actuals, formalNames=associated formal of each actual
         SLICE,  // a=prefix, b=left, c=right, text="downto"/"to"
         ATTR,  // a=prefix, text=attribute name, args=optional attribute parameter
         QUAL,  // a=operand, text=type mark of a type qualification
@@ -146,6 +148,8 @@ struct Expr final {
     // AGG_NAMED: the choices associated with each element value; an empty list marks a
     // positional association
     std::vector<std::vector<ExprP>> choices;
+    // CALL: the formal associated with each actual; empty for a positional actual
+    std::vector<std::string> formalNames;
 
     explicit Expr(Kind kind_)
         : kind{kind_} {}
@@ -167,10 +171,12 @@ struct Stmt final {
         NEXT,
         WAIT,
         REPORT,
+        RETURN,  // Subprogram return; value is the function result, null for a procedure
+        CALL,  // Procedure call statement; value is the call
     } kind;
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/VAR_ASSIGN
-    ExprP value;  // ASSIGN/VAR_ASSIGN
+    ExprP value;  // ASSIGN/VAR_ASSIGN/RETURN; CALL: the call expression
     // IF: (condition, body); a null condition marks the final else
     std::vector<std::pair<ExprP, std::vector<StmtP>>> branches;
     ExprP selector;  // CASE: the case expression
@@ -252,6 +258,37 @@ struct TypeDecl final {
         : kind{kind_} {}
 };
 
+//! One formal parameter of a subprogram
+struct FormalDecl final {
+    enum Class : uint8_t { CONSTANT, VARIABLE, SIGNAL } cls = CONSTANT;
+    FileLine* flp = nullptr;
+    std::vector<std::pair<std::string, std::string>> names;
+    PortMode mode = PortMode::IN;
+    TypeSpec type;  // No range and no constraint mark: unconstrained
+    ExprP init;  // Default actual
+};
+
+//! A function or procedure declaration; `hasBody` is false for a package prototype, whose
+//! body arrives with the package body
+struct SubprogramDecl final {
+    enum Kind : uint8_t { FUNCTION, PROCEDURE } kind;
+    bool impure = false;  // `impure` prefix; no subprogram may read a signal yet
+    bool hasBody = false;
+    FileLine* flp = nullptr;
+    std::string name;  // Folded
+    std::string spelling;
+    std::vector<FormalDecl> formals;
+    TypeSpec returnType;  // FUNCTION
+    std::vector<TypeDecl> types;  // Declarative part of the body
+    std::vector<Decl> decls;
+    std::vector<AliasDecl> aliases;
+    std::vector<SubprogramDecl> subprograms;  // Nested declarations, visible in the body
+    std::vector<StmtP> body;
+
+    explicit SubprogramDecl(Kind kind_)
+        : kind{kind_} {}
+};
+
 struct Process final {
     FileLine* flp = nullptr;
     bool hasSensitivity = false;
@@ -259,6 +296,7 @@ struct Process final {
     std::vector<std::string> sensitivity;  // Folded names
     std::vector<Decl> decls;  // Variables of the process declarative part
     std::vector<TypeDecl> types;  // Types declared by the process
+    std::vector<SubprogramDecl> subprograms;  // Procedures and functions of the process
     std::vector<StmtP> body;
 };
 
@@ -285,6 +323,7 @@ struct Concurrent final {
         BLOCK,
         INSTANCE,
         ASSERT,  // `assert`; synthesis ignores assertions, only the syntax matters
+        CALL,  // Concurrent procedure call; value is the call
     } kind;
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/COND_ASSIGN/SEL_ASSIGN
@@ -307,7 +346,8 @@ struct Concurrent final {
     // INSTANCE: the `generic map` associations, formal names the generic constant
     std::vector<PortAssoc> genericAssociations;
     std::vector<Decl> decls;  // BLOCK: declarative items
-    std::vector<TypeDecl> types;  // BLOCK
+    std::vector<TypeDecl> types;  // BLOCK/GEN_*
+    std::vector<SubprogramDecl> subprograms;  // BLOCK/GEN_*
     std::vector<std::unique_ptr<Concurrent>> body;  // GEN_*/BLOCK: statements
     std::vector<std::unique_ptr<Concurrent>> elseBody;  // GEN_IF: else part
     explicit Concurrent(Kind kind_)
@@ -330,6 +370,7 @@ struct EntityUnit final {
     std::vector<std::pair<std::string, std::string>> uses;
     // Generic constants, visible in the port clause and every architecture
     std::vector<GenericDecl> generics;
+    std::vector<SubprogramDecl> subprograms;
 };
 
 struct Architecture final {
@@ -342,6 +383,7 @@ struct Architecture final {
     std::vector<TypeDecl> types;
     std::vector<AliasDecl> aliases;
     std::vector<std::string> components;  // Declared component names, folded
+    std::vector<SubprogramDecl> subprograms;
     std::vector<std::unique_ptr<Concurrent>> stmts;
     std::vector<std::pair<std::string, std::string>> uses;
 };
@@ -357,6 +399,7 @@ struct PackageUnit final {
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
     std::vector<AliasDecl> aliases;
+    std::vector<SubprogramDecl> subprograms;  // Prototypes in a spec, bodies in a body
 };
 
 //! Design units parsed from all source files, in source order
