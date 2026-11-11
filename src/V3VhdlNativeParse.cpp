@@ -413,11 +413,10 @@ ExprP Parser::parseDesignator() {
         if (isSym("'")) {
             advance();
             if (isSym("(")) {
-                // Type qualification: `type_mark'(expression)`
-                advance();
+                // Type qualification: `type_mark'(expression)`; the operand is a
+                // parenthesized expression or aggregate with its own parentheses
                 ExprP operand = parseExpr();
                 if (!operand) return nullptr;
-                expectSym(")");
                 ExprP qual = std::make_unique<Expr>(Expr::QUAL);
                 qual->flp = node->flp;
                 qual->text = node->text;

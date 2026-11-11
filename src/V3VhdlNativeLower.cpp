@@ -269,7 +269,8 @@ class Lowering final {
         type.kwd = basicp->keyword();
         if (basicp->keyword() == VBasicDTypeKwd::INT) {
             type.kind = VType::INT;
-        } else if (basicp->isRanged() && basicp->width() > 1) {
+        } else if (basicp->isRanged()) {
+            // A ranged width-1 dtype is a one-element vector, not a scalar
             type.kind = VType::VECTOR;
             type.left = basicp->left();
             type.right = basicp->right();
@@ -569,6 +570,7 @@ class Lowering final {
                         const char* prefix);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
                            std::vector<AstConst*>& cops);
+    bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
     AstNode* lowerStmt(const Stmt& stmt);
     AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
     AstNode* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin, std::size_t end);
@@ -1113,11 +1115,43 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return lowerAggregate(expr, *context);
     }
     case Expr::QUAL: {
-        // A type qualification fixes the operand's type and keeps its width
-        AstNodeExpr* valuep = lowerExpr(*expr.a, context);
+        // A type qualification fixes the operand's type and keeps its width. A
+        // vector mark without a constraint takes an aggregate operand's bounds
+        // from the choices it covers.
+        const auto declared = m_types.find(expr.text);
+        const bool builtinVector = expr.text == "std_logic_vector"
+                                   || expr.text == "std_ulogic_vector" || expr.text == "bit_vector"
+                                   || expr.text == "unsigned" || expr.text == "signed";
+        const bool aggregateOperand
+            = expr.a->kind == Expr::AGG_POSITIONAL || expr.a->kind == Expr::AGG_NAMED;
+        AstNodeExpr* valuep = nullptr;
+        if (aggregateOperand && declared != m_types.end()) {
+            valuep = lowerExpr(*expr.a, &declared->second);
+        } else if (aggregateOperand && builtinVector) {
+            VType aggregateType;
+            aggregateType.kind = VType::VECTOR;
+            aggregateType.kwd
+                = expr.text == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+            aggregateType.signing = expr.text == "signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+            int64_t low = 0;
+            int64_t high = 0;
+            if (!aggregateBounds(*expr.a, low, high)) {
+                unsupportedError(flp, "qualified aggregate with a non-static choice");
+                return nullptr;
+            }
+            aggregateType.left = static_cast<int>(low);
+            aggregateType.right = static_cast<int>(high);
+            aggregateType.ascending = true;
+            aggregateType.width = static_cast<int>(high - low + 1);
+            aggregateType.dtp
+                = findVector(flp, aggregateType.kwd, aggregateType.signing, aggregateType.left,
+                             aggregateType.right, aggregateType.ascending);
+            valuep = lowerExpr(*expr.a, &aggregateType);
+        } else {
+            valuep = lowerExpr(*expr.a, context);
+        }
         if (!valuep) return nullptr;
         const VType valueType = typeOfDType(valuep->dtypep());
-        const auto declared = m_types.find(expr.text);
         if (declared != m_types.end()) return resizeExpr(valuep, declared->second, flp);
         VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
         VSigning signing = VSigning::UNSIGNED;
@@ -2835,6 +2869,44 @@ AstNodeExpr* Lowering::lowerAlternatives(const Concurrent& conc, const VType& ty
         restp = condexprp;
     }
     return restp;
+}
+
+//! Index range an aggregate covers, for a vector mark with no constraint: the
+//! lowest index becomes the left bound and the range is ascending
+bool Lowering::aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const {
+    bool any = false;
+    const auto include = [&](int64_t first, int64_t last) {
+        const int64_t lo = std::min(first, last);
+        const int64_t hi = std::max(first, last);
+        low = any ? std::min(low, lo) : lo;
+        high = any ? std::max(high, hi) : hi;
+        any = true;
+    };
+    if (agg.kind == Expr::AGG_POSITIONAL) {
+        // Positional associations take consecutive indices from zero
+        for (size_t i = 0; i < agg.args.size(); ++i) {
+            if (!agg.choices[i].empty()) return false;
+            include(0, static_cast<int64_t>(i));
+        }
+        return any;
+    }
+    for (size_t i = 0; i < agg.args.size(); ++i) {
+        for (const ExprP& choicep : agg.choices[i]) {
+            if (!choicep) continue;
+            if (choicep->kind == Expr::NAME && choicep->text == "others") return false;
+            if (choicep->kind == Expr::SLICE) {
+                int64_t left = 0;
+                int64_t right = 0;
+                if (!staticInt(choicep->b, left) || !staticInt(choicep->c, right)) return false;
+                include(left, right);
+                continue;
+            }
+            int64_t index = 0;
+            if (!evalInt(*choicep, index)) return false;
+            include(index, index);
+        }
+    }
+    return any;
 }
 
 bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
