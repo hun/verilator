@@ -5008,20 +5008,33 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         return;
     }
     if (stmt.kind == Concurrent::GEN_IF) {
-        AstNodeExpr* const condp = stmt.cond ? lowerCond(*stmt.cond) : nullptr;
-        AstConst* const foldedp = condp ? foldToConst(condp) : nullptr;
-        if (!foldedp) {
-            unsupportedError(stmt.flp, "generate condition that is not static");
-            return;
+        // Conditions are evaluated in order; elaboration proceeds in the first
+        // branch whose condition is true, or in the else part
+        const GenBranch* takenp = nullptr;
+        for (const GenBranch& branch : stmt.branches) {
+            if (!branch.cond) {  // The else part
+                takenp = &branch;
+                break;
+            }
+            AstNodeExpr* const condp = lowerCond(*branch.cond);
+            AstConst* const foldedp
+                = condp ? foldToConst(V3Const::constifyEditCpp(condp)) : nullptr;
+            if (!foldedp) {
+                unsupportedError(stmt.flp, "generate condition that is not static");
+                return;
+            }
+            if (foldedp->num().mostSetBitP1() == 1 && foldedp->num().toUInt()) {
+                takenp = &branch;
+                break;
+            }
         }
-        const bool taken = foldedp->num().mostSetBitP1() == 1 && foldedp->num().toUInt();
-        const std::vector<std::unique_ptr<Concurrent>>& body = taken ? stmt.body : stmt.elseBody;
+        if (!takenp) return;  // No condition was true and there is no else part
         const ScopeSave saved = saveScope();
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
-        emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
-        registerSubprograms(stmt.subprograms, -1);
-        for (const auto& bodyConcp : body) {
+        emitLocalDecls(takenp->decls, takenp->types, "vhdlgen_");
+        registerSubprograms(takenp->subprograms, -1);
+        for (const auto& bodyConcp : takenp->stmts) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
         m_genSuffix = savedSuffix;

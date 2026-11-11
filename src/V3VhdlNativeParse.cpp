@@ -1423,15 +1423,24 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         advance();
         auto gen = std::make_unique<Concurrent>(Concurrent::GEN_IF);
         gen->flp = flp;
-        gen->cond = parseExpr();
-        if (!gen->cond) return;
-        if (!expectId("generate")) return;
-        parseConcurrentList(gen->body, &gen->decls, &gen->types, &gen->subprograms);
-        if (m_failed) return;
-        if (acceptId("else")) {
+        for (;;) {
+            GenBranch branch;
+            branch.cond = parseExpr();
+            if (!branch.cond) return;
             if (!expectId("generate")) return;
-            parseConcurrentList(gen->elseBody, &gen->decls, &gen->types, &gen->subprograms);
+            parseConcurrentList(branch.stmts, &branch.decls, &branch.types, &branch.subprograms);
             if (m_failed) return;
+            gen->branches.push_back(std::move(branch));
+            if (acceptId("elsif")) continue;
+            if (acceptId("else")) {
+                GenBranch elseBranch;  // The else part carries no condition
+                if (!expectId("generate")) return;
+                parseConcurrentList(elseBranch.stmts, &elseBranch.decls, &elseBranch.types,
+                                    &elseBranch.subprograms);
+                if (m_failed) return;
+                gen->branches.push_back(std::move(elseBranch));
+            }
+            break;
         }
         if (!parseGenerateEnd()) return;
         arch.stmts.push_back(std::move(gen));

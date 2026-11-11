@@ -312,6 +312,18 @@ struct PortAssoc final {
     ExprP actual;  // Null for `open`
 };
 
+struct Concurrent;
+
+//! One branch of a conditional generate. A null condition marks the final else
+//! part, which is taken only when no preceding condition is true.
+struct GenBranch final {
+    ExprP cond;
+    std::vector<Decl> decls;  // The branch's own declarative items
+    std::vector<TypeDecl> types;
+    std::vector<SubprogramDecl> subprograms;
+    std::vector<std::unique_ptr<Concurrent>> stmts;
+};
+
 struct Concurrent final {
     enum Kind : uint8_t {
         ASSIGN,
@@ -334,11 +346,10 @@ struct Concurrent final {
     // SEL_ASSIGN: (choices, value); an empty choice list marks "others"
     std::vector<std::pair<std::vector<ExprP>, ExprP>> choices;
     std::unique_ptr<Process> process;  // PROCESS
-    // GEN_FOR: loop variable over lo..hi; GEN_IF: cond; BLOCK: plain statement list
+    // GEN_FOR: loop variable over lo..hi; BLOCK: plain statement list
     std::string loopVar;
     bool rangeAscending = true;
     ExprP lo, hi;
-    ExprP cond;
     // INSTANCE: the instantiated entity and its port associations
     std::string instanceLabel;
     std::string instanceName;  // Folded entity or component name
@@ -346,10 +357,10 @@ struct Concurrent final {
     // INSTANCE: the `generic map` associations, formal names the generic constant
     std::vector<PortAssoc> genericAssociations;
     std::vector<Decl> decls;  // BLOCK: declarative items
-    std::vector<TypeDecl> types;  // BLOCK/GEN_*
-    std::vector<SubprogramDecl> subprograms;  // BLOCK/GEN_*
-    std::vector<std::unique_ptr<Concurrent>> body;  // GEN_*/BLOCK: statements
-    std::vector<std::unique_ptr<Concurrent>> elseBody;  // GEN_IF: else part
+    std::vector<TypeDecl> types;  // BLOCK/GEN_FOR
+    std::vector<SubprogramDecl> subprograms;  // BLOCK/GEN_FOR
+    std::vector<std::unique_ptr<Concurrent>> body;  // GEN_FOR/BLOCK: statements
+    std::vector<GenBranch> branches;  // GEN_IF: in source order
     explicit Concurrent(Kind kind_)
         : kind{kind_} {}
     Concurrent(const Concurrent&) = delete;
