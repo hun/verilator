@@ -1874,10 +1874,19 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
 
     if (op == "?=" || op == "?/=") {
         if (lt.isInt() != rt.isInt()) {
-            unsupportedError(flp, "matching comparison between an integer and a vector");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
+            // As with the plain relational operator, an integer matches a vector of the
+            // same value by taking on the vector's type.
+            const bool lhsInt = lt.isInt();
+            const VType& vectorT = lhsInt ? rt : lt;
+            AstNodeExpr*& intOperand = lhsInt ? lp : rp;
+            int64_t value = 0;
+            if (evalInt(lhsInt ? *expr.a : *expr.b, value)) {
+                intOperand->deleteTree();
+                intOperand = makeVectorConst(flp, vectorT, value);
+            } else {
+                intOperand = resizeExpr(intOperand, vectorT, flp);
+            }
+            (lhsInt ? lt : rt) = vectorT;
         }
         if (lt.width != rt.width) rp = resizeExpr(rp, lt, flp);
         AstNodeExpr* matchp = lowerMatching(expr, lp, rp);
@@ -1943,6 +1952,21 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             }
             (lhsInt ? lt : rt) = vectorT;
         }
+        // A bare bit-string literal is typeless: a comparison like `-vs >= "110"`
+        // resolves it to the signedness of the real operand so a signed/unsigned
+        // mismatch between the literal and that operand does not arise.
+        auto reSignLiteral = [&](const Expr& side, AstNodeExpr*& operandp, VType& opType,
+                                 const VType& modelType) {
+            if (side.kind != Expr::BITS_LIT || !opType.isVector() || !modelType.isVector()) return;
+            if (opType.isSigned() == modelType.isSigned()) return;
+            operandp->deleteTree();
+            const VType fixedType
+                = vectorType(flp, modelType.kwd, modelType.signing, opType.width);
+            operandp = makeBitsConst(flp, fixedType.dtp, side.bits);
+            opType = fixedType;
+        };
+        reSignLiteral(*expr.a, lp, lt, rt);
+        reSignLiteral(*expr.b, rp, rt, lt);
         if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
             unsupportedError(flp, "comparison between signed and unsigned operands");
             lp->deleteTree();
