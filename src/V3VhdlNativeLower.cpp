@@ -466,26 +466,78 @@ class Lowering final {
         };
         return sameChild(l.a, r.a) && sameChild(l.b, r.b) && sameChild(l.c, r.c);
     }
-    //! Split `base + constant` (or `constant + base`) into its base and offset
-    void additiveBase(const Expr& expr, const Expr*& basep, int64_t& offset) const {
+    //! Add or subtract two linear forms (coef * atom + const); atoms must match to keep
+    //! a single dynamic term, otherwise the sum is not linear in one unknown
+    static bool combineLinear(const Expr* atomA, int64_t coefA, int64_t conA, const Expr* atomB,
+                              int64_t coefB, int64_t conB, int64_t sign, const Expr*& atomOut,
+                              int64_t& coefOut, int64_t& conOut) {
+        const int64_t bCoef = coefB * sign;
+        const int64_t bCon = conB * sign;
+        if (coefA == 0) {
+            atomOut = atomB;
+            coefOut = bCoef;
+            conOut = conA + bCon;
+            return true;
+        }
+        if (bCoef == 0) {
+            atomOut = atomA;
+            coefOut = coefA;
+            conOut = conA + bCon;
+            return true;
+        }
+        if (!sameExpr(*atomA, *atomB)) return false;  // two distinct dynamic terms
+        atomOut = atomA;
+        coefOut = coefA + bCoef;
+        conOut = conA + bCon;
+        return true;
+    }
+    //! Parse an expression into coef * atom + const: fold constants, add/subtract like
+    //! terms and scale by a constant multiplicand; atomOut is null for a pure constant
+    bool linearForm(const Expr& expr, const Expr*& atomOut, int64_t& coefOut,
+                    int64_t& conOut) const {
         const Expr* e = &expr;
         while (e->kind == Expr::PAREN && e->a) e = e->a.get();
-        basep = e;
-        offset = 0;
-        if (e->kind != Expr::BINARY || !e->a || !e->b) return;
+        atomOut = nullptr;
+        coefOut = 0;
+        conOut = 0;
         int64_t value = 0;
-        if (e->text == "+") {
-            if (evalInt(*e->b, value)) {
-                basep = e->a.get();
-                offset = value;
-            } else if (evalInt(*e->a, value)) {
-                basep = e->b.get();
-                offset = value;
-            }
-        } else if (e->text == "-" && evalInt(*e->b, value)) {
-            basep = e->a.get();
-            offset = -value;
+        if (evalInt(*e, value)) {
+            conOut = value;
+            return true;
         }
+        if (e->kind == Expr::BINARY && e->a && e->b) {
+            const Expr* aAtom = nullptr;
+            const Expr* bAtom = nullptr;
+            int64_t aCoef = 0;
+            int64_t aCon = 0;
+            int64_t bCoef = 0;
+            int64_t bCon = 0;
+            const int sign = e->text == "+" ? 1 : e->text == "-" ? -1 : 0;
+            if (sign != 0 && linearForm(*e->a, aAtom, aCoef, aCon)
+                && linearForm(*e->b, bAtom, bCoef, bCon)) {
+                return combineLinear(aAtom, aCoef, aCon, bAtom, bCoef, bCon, sign, atomOut,
+                                     coefOut, conOut);
+            }
+            if (e->text == "*") {
+                if (evalInt(*e->b, value) && linearForm(*e->a, aAtom, aCoef, aCon)) {
+                    atomOut = aAtom;
+                    coefOut = aCoef * value;
+                    conOut = aCon * value;
+                    return true;
+                }
+                if (evalInt(*e->a, value) && linearForm(*e->b, bAtom, bCoef, bCon)) {
+                    atomOut = bAtom;
+                    coefOut = bCoef * value;
+                    conOut = bCon * value;
+                    return true;
+                }
+            }
+        }
+        // An opaque dynamic term: 1 * e + 0
+        atomOut = e;
+        coefOut = 1;
+        conOut = 0;
+        return true;
     }
     //! Clone an expression, replacing variables with their tracked values
     ExprP substVars(const Expr& expr, int depth = 0) const {
@@ -539,27 +591,24 @@ class Lowering final {
             m_varVals.clear();
         }
     }
-    //! Width of a slice whose bounds are not both static, when they differ by a
-    //! constant: two positions with a common subexpression and constant offsets
+    //! Width of a slice whose bounds are not both static, when they are linear in the
+    //! same dynamic term (e.g. `v(n * 8 - 1 downto (n - 1) * 8)`) so their difference is constant
     bool sliceWidth(const Expr& left, const Expr& right, bool ascending, int64_t& width) const {
         const ExprP leftCopy = substVars(left);
         const ExprP rightCopy = substVars(right);
         const Expr& hip = ascending ? *rightCopy : *leftCopy;
         const Expr& lop = ascending ? *leftCopy : *rightCopy;
-        int64_t hiValue = 0;
-        int64_t loValue = 0;
-        if (evalInt(hip, hiValue) && evalInt(lop, loValue)) {
-            width = hiValue - loValue + 1;
-            return width > 0;
+        const Expr* hiAtom = nullptr;
+        const Expr* loAtom = nullptr;
+        int64_t hiCoef = 0;
+        int64_t hiCon = 0;
+        int64_t loCoef = 0;
+        int64_t loCon = 0;
+        if (!linearForm(hip, hiAtom, hiCoef, hiCon) || !linearForm(lop, loAtom, loCoef, loCon)) {
+            return false;
         }
-        const Expr* hiBasep = nullptr;
-        const Expr* loBasep = nullptr;
-        int64_t hiOffset = 0;
-        int64_t loOffset = 0;
-        additiveBase(hip, hiBasep, hiOffset);
-        additiveBase(lop, loBasep, loOffset);
-        if (!hiBasep || !loBasep || !sameExpr(*hiBasep, *loBasep)) return false;
-        width = hiOffset - loOffset + 1;
+        if (hiCoef != loCoef || (hiCoef != 0 && !sameExpr(*hiAtom, *loAtom))) return false;
+        width = hiCon - loCon + 1;
         return width > 0;
     }
 
