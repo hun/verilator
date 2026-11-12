@@ -187,7 +187,6 @@ class Lowering final {
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
     //! Integer constants needed while registering types, before full declaration emission
     std::map<std::string, int64_t> m_preConsts;
-    int m_strSeq = 0;  // Disambiguates string-generic variables
     std::map<std::string, VType> m_types;  // Declared types by folded name
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
     std::map<std::string, VType> m_constTypes;  // Type of each typed constant
@@ -5460,17 +5459,19 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
 bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                                 const GenericBindings* bindings, bool probe) {
     bool ok = true;
-    // A string generic is a variable holding an array of 8-bit character codes
     const auto registerString = [&](FileLine* flp, const std::string& folded,
                                     const std::string& text) {
         if (text.empty()) {
             unsupportedError(flp, "empty string generic");
             return;
         }
+        // A string generic's value is fixed at elaboration, so register it as a typed
+        // constant of packed 8-bit character codes rather than a variable; that lets a
+        // reference fold, e.g. `if val = "one" generate`.
         VType type;
         type.kind = VType::ARRAY;
-        VType elem = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8);
-        type.elemp = std::make_shared<VType>(elem);
+        type.elemp = std::make_shared<VType>(
+            vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
         type.elemWidth = 8;
         type.kwd = VBasicDTypeKwd::LOGIC;
         type.signing = VSigning::UNSIGNED;
@@ -5479,14 +5480,10 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
         type.ascending = true;
         type.width = 8 * static_cast<int>(text.size());
         type.dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, type.width);
-        AstVar* const varp
-            = new AstVar{flp, VVarType::VAR, "vhdlstr_" + std::to_string(++m_strSeq), type.dtp};
-        m_modp->addStmtsp(varp);
-        m_scope[folded] = VarInfo{varp, type};
-        m_variables.insert(folded);
         AstConst* const valuep = makeStringConst(flp, text);
-        m_modp->addStmtsp(new AstInitialStatic{
-            flp, new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, valuep}});
+        m_ownedConsts.push_back(std::unique_ptr<AstConst>(valuep));
+        m_constValues[folded] = m_ownedConsts.back().get();
+        m_constTypes[folded] = type;
     };
     for (const GenericDecl& gen : generics) {
         for (const auto& name : gen.names) {
