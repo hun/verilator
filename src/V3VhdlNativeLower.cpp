@@ -306,7 +306,7 @@ class Lowering final {
         constp->dtypep(type.dtp);
         return constp;
     }
-    //! Constant with one repeated logic value; bit is '0', '1', 'x' or 'z'
+    //! Constant from a logic bit string; '1' sets, 'x'/'-' are don't-care, 'z' resolves low
     AstConst* makeBitsConst(FileLine* flp, AstNodeDType* dtp, const std::string& bits) const {
         const int width = static_cast<int>(bits.size());
         V3Number num{flp, width, 0u};
@@ -316,8 +316,7 @@ class Lowering final {
                 num.setBit(i, '1');
             else if (bit == 'x' || bit == '-')
                 num.setBit(i, 'x');
-            else if (bit == 'z')
-                num.setBit(i, 'z');
+            // 'z' has no driver and resolves to logic 0 in this two-state model
         }
         AstConst* const constp = new AstConst{flp, num};
         constp->dtypep(dtp);
@@ -1406,10 +1405,6 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
                                       + "' outside a logic context");
             return nullptr;
         }
-        if (bit == 'z') {
-            unsupportedError(flp, "'Z' literal");
-            return nullptr;
-        }
         return bitConst(flp, bit);
     }
     case Expr::BITS_LIT: {
@@ -1607,13 +1602,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         } else if (expr.a->kind == Expr::BITS_LIT && expr.a->bits.size() == 1) {
             bit = expr.a->bits[0];
         }
-        if (bit != 0) {
-            if (bit == 'z') {
-                unsupportedError(flp, "'Z' literal");
-                return nullptr;
-            }
-            return makeRepeatedConst(flp, *context, bit);
-        }
+        if (bit != 0) return makeRepeatedConst(flp, *context, bit);
         // An arbitrary value is replicated across every element
         if (!context->isVector()) {
             unsupportedError(flp, "aggregate value for a non-array type");
