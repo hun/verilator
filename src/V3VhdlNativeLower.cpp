@@ -490,6 +490,12 @@ class Lowering final {
                                             "rotate_right",
                                             "minimum",
                                             "maximum",
+                                            "and_reduce",
+                                            "or_reduce",
+                                            "xor_reduce",
+                                            "nand_reduce",
+                                            "nor_reduce",
+                                            "xnor_reduce",
                                             "conv_integer",
                                             "conv_std_logic_vector",
                                             "conv_unsigned",
@@ -505,7 +511,15 @@ class Lowering final {
         return false;
     }
     AstNodeExpr* lowerIntrinsic(const Expr& expr);
+    //! Unary reduction `and`/`or`/`xor` and their negations
+    AstNodeExpr* makeReduction(FileLine* flp, AstNodeExpr* operandp, const std::string& op);
     AstNodeExpr* lowerEdgeCall(const Expr& expr);
+    //! The clock's level, which is its edge when the process is change sensitive
+    AstNodeExpr* edgeLevel(FileLine* flp, AstVar* varp, bool rising);
+    //! Whether the signal differs from its value at the previous process run
+    AstNodeExpr* edgeChanged(FileLine* flp, AstVar* varp);
+    //! The signal's edge, from its level and whether it changed
+    AstNodeExpr* edgeFromChanged(FileLine* flp, AstVar* varp, bool rising);
     AstNodeExpr* makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp, bool left);
     AstNodeExpr* makeMod(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
                          bool sign);
@@ -1409,6 +1423,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
         if (!operandp) return nullptr;
         const VType type = typeOfDType(operandp->dtypep());
+        const bool reduction = expr.text == "and" || expr.text == "or" || expr.text == "xor"
+                               || expr.text == "nand" || expr.text == "nor" || expr.text == "xnor";
+        if (reduction) return makeReduction(flp, operandp, expr.text);
         if (expr.text == "abs") {
             if (!type.isInt()) {
                 unsupportedError(flp, "abs of a non-integer value");
@@ -1462,6 +1479,8 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             if (expr.a->text == "rising_edge" || expr.a->text == "falling_edge") {
                 return lowerEdgeCall(expr);
             }
+            // A user subprogram shadows a standard-package function of the same name
+            if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, context);
             if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
             if (isConversion(expr.a->text)) return lowerConversion(expr);
             // A declared type mark applied to a value is a type conversion
@@ -1477,11 +1496,19 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
                 return resizeExpr(valuep, typeIt->second, flp);
             }
         }
-        if (expr.a && expr.a->kind == Expr::NAME && m_subprograms.count(expr.a->text)) {
-            return lowerFunctionCall(expr, context);
-        }
         return lowerDesignator(expr, false);
-    case Expr::CALL: return lowerFunctionCall(expr, context);
+    case Expr::CALL: {
+        // An operator-symbol call to a unary reduction, e.g. `"or"(a)`
+        const std::string& name = expr.text;
+        const bool reduction = name == "and" || name == "or" || name == "xor" || name == "nand"
+                               || name == "nor" || name == "xnor";
+        if (reduction && expr.args.size() == 1 && !m_subprograms.count(name)) {
+            AstNodeExpr* const operandp = lowerExpr(*expr.args[0], nullptr);
+            if (!operandp) return nullptr;
+            return makeReduction(flp, operandp, name);
+        }
+        return lowerFunctionCall(expr, context);
+    }
     case Expr::SLICE: return lowerDesignator(expr, false);
     case Expr::AGG_OTHERS: {
         if (!context) {
@@ -1768,25 +1795,23 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         resultp->dtypep(lt.dtp);
         return resultp;
     }
-    // A static integer operand acts as a natural/signed literal of the vector operand's type
+    // A static integer operand acts as a natural/signed literal of the vector operand's
+    // type; a dynamic one is converted to that type, as numeric_std does
     if (lt.isInt() != rt.isInt()) {
         const Expr& intExpr = lt.isInt() ? *expr.a : *expr.b;
-        int64_t value = 0;
-        if (!evalInt(intExpr, value)) {
-            unsupportedError(flp, "arithmetic between an integer expression and a vector");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
         const VType& vectorT = lt.isInt() ? rt : lt;
-        AstNodeExpr* const constp = makeVectorConst(flp, vectorT, value);
+        int64_t value = 0;
+        AstNodeExpr* operandp = nullptr;
+        if (evalInt(intExpr, value)) {
+            operandp = makeVectorConst(flp, vectorT, value);
+        } else {
+            operandp = resizeExpr(lt.isInt() ? lp : rp, vectorT, flp);
+        }
         if (lt.isInt()) {
-            lp->deleteTree();
-            lp = constp;
+            lp = operandp;
             lt = vectorT;
         } else {
-            rp->deleteTree();
-            rp = constp;
+            rp = operandp;
             rt = vectorT;
         }
     }
@@ -1906,6 +1931,27 @@ AstNodeExpr* Lowering::makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExp
 }
 
 //! Standard-package functions that lower to an AST idiom, keyed by folded name
+AstNodeExpr* Lowering::makeReduction(FileLine* flp, AstNodeExpr* operandp, const std::string& op) {
+    const VType type = typeOfDType(operandp->dtypep());
+    AstNodeExpr* resultp = nullptr;
+    if (op == "and" || op == "nand") {
+        resultp = new AstRedAnd{flp, operandp};
+    } else if (op == "or" || op == "nor") {
+        resultp = new AstRedOr{flp, operandp};
+    } else {
+        resultp = new AstRedXor{flp, operandp};
+    }
+    AstNodeDType* const bitDtp = findBasic(
+        flp, type.kwd == VBasicDTypeKwd::BIT ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC);
+    resultp->dtypep(bitDtp);
+    if (op == "nand" || op == "nor" || op == "xnor") {
+        AstNot* const notp = new AstNot{flp, resultp};
+        notp->dtypep(bitDtp);
+        return notp;
+    }
+    return resultp;
+}
+
 AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
     FileLine* const flp = expr.flp;
     const std::string& fn = expr.a->text;
@@ -1917,6 +1963,16 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
     if (argsp.empty()) {
         unsupportedError(flp, "function '" + fn + "' without an argument");
         return nullptr;
+    }
+    if (fn == "and_reduce" || fn == "or_reduce" || fn == "xor_reduce" || fn == "nand_reduce"
+        || fn == "nor_reduce" || fn == "xnor_reduce") {
+        if (argsp.size() != 1) {
+            unsupportedError(flp, "function '" + fn + "' without one argument");
+            return nullptr;
+        }
+        AstNodeExpr* const operandp = lowerExpr(*argsp[0], nullptr);
+        if (!operandp) return nullptr;
+        return makeReduction(flp, operandp, fn.substr(0, fn.find("_reduce")));
     }
     if ((fn == "resize" || fn == "conv_std_logic_vector" || fn == "conv_unsigned"
          || fn == "conv_signed")

@@ -115,6 +115,73 @@ class Parser final {
         unsupported("context clause that reaches the end of the file");
     }
 
+    //! Skip a declaration whose meaning is only verification-time or unused
+    void skipToSemicolon() {
+        int parens = 0;
+        while (m_cur.kind != Token::END) {
+            if (isSym("(")) ++parens;
+            if (isSym(")")) --parens;
+            if (parens == 0 && acceptSym(";")) return;
+            advance();
+        }
+        unsupported("declaration that reaches the end of the file");
+    }
+
+    //! Consume up to and including the next balanced { ... } block (PSL directive bodies)
+    void skipToBraceBlock() {
+        while (m_cur.kind != Token::END && !isSym("{")) advance();
+        int depth = 0;
+        while (m_cur.kind != Token::END) {
+            if (isSym("{")) {
+                ++depth;
+            } else if (isSym("}")) {
+                if (--depth == 0) {
+                    advance();
+                    return;
+                }
+            }
+            advance();
+        }
+    }
+
+    //! Whether the 'assert' at m_cur is a PSL assertion (`[severity X] <psl-op> ...`)
+    bool looksLikePslAssertion() {
+        const auto saved = m_lexer.state();
+        const Token a = m_lexer.next();
+        const Token c = m_lexer.next();
+        const Token d = m_lexer.next();
+        m_lexer.restore(saved);
+        const auto prop = [](const Token& t) { return t.kind == Token::SYM && t.text == "{"; };
+        const auto kw = [](const Token& t) {
+            return t.kind == Token::ID
+                   && (t.text == "always" || t.text == "never" || t.text == "eventually"
+                       || t.text == "nexttime" || t.text == "until" || t.text == "abort"
+                       || t.text == "implies" || t.text == "iff" || t.text == "next"
+                       || t.text == "prev" || t.text == "back" || t.text == "rose"
+                       || t.text == "fell" || t.text == "stable" || t.text == "changed");
+        };
+        if (prop(a) || kw(a)) return true;
+        if (a.kind == Token::ID && a.text == "severity") return prop(d) || kw(d);
+        (void)c;
+        return false;
+    }
+
+    //! Skip to the next ';' at depth 0 over (), [] and {} (PSL statement bodies nest ';')
+    void skipToStatementEnd() {
+        int depth = 0;
+        while (m_cur.kind != Token::END) {
+            if (isSym("(") || isSym("{") || isSym("[")) {
+                ++depth;
+            } else if (isSym(")") || isSym("}") || isSym("]")) {
+                --depth;
+            } else if (depth <= 0 && isSym(";")) {
+                advance();
+                return;
+            }
+            advance();
+        }
+    }
+
     ExprP parseExpr();
     ExprP parseLogical();
     ExprP parseRelation();
@@ -289,7 +356,8 @@ ExprP Parser::parseExp() {
 }
 
 ExprP Parser::parseUnary() {
-    if (isSym("+") || isSym("-") || isSym("??") || isId("abs") || isId("not")) {
+    if (isSym("+") || isSym("-") || isSym("??") || isId("abs") || isId("not") || isId("and")
+        || isId("or") || isId("xor") || isId("nand") || isId("nor") || isId("xnor")) {
         ExprP node = std::make_unique<Expr>(Expr::UNARY);
         node->flp = m_cur.flp;
         node->text = m_cur.text;
@@ -302,11 +370,19 @@ ExprP Parser::parseUnary() {
 }
 
 ExprP Parser::parsePrimary() {
-    if (m_cur.kind == Token::INT || m_cur.kind == Token::BITS || m_cur.kind == Token::CHAR) {
+    if (m_cur.kind == Token::SYM && m_cur.text == "<<") {  // IEEE 1800-2023 ch.13 external name
+        unsupported("external name");
+        return nullptr;
+    }
+    if (m_cur.kind == Token::INT || m_cur.kind == Token::REAL || m_cur.kind == Token::BITS
+        || m_cur.kind == Token::CHAR) {
         ExprP node;
         if (m_cur.kind == Token::INT) {
             node = std::make_unique<Expr>(Expr::INT_LIT);
             node->intValue = m_cur.intValue;
+        } else if (m_cur.kind == Token::REAL) {
+            node = std::make_unique<Expr>(Expr::REAL_LIT);
+            node->realValue = m_cur.realValue;
         } else if (m_cur.kind == Token::BITS) {
             node = std::make_unique<Expr>(Expr::BITS_LIT);
             node->bits = m_cur.bits;
@@ -342,8 +418,26 @@ ExprP Parser::parsePrimary() {
             node->bits = std::move(bits);
         } else {
             node->spelling = m_cur.text;
+            node->text = m_cur.text;
         }
         advance();
+        // A string literal followed by an actual part is an operator-symbol call,
+        // e.g. `"or"(a)` for the overloaded `or` operator
+        if (!allBits && isSym("(")) {
+            ExprP call = std::make_unique<Expr>(Expr::CALL);
+            call->flp = node->flp;
+            call->text = node->text;
+            call->spelling = node->spelling;
+            advance();
+            for (;;) {
+                ExprP arg = parseExpr();
+                if (!arg) return nullptr;
+                call->args.push_back(std::move(arg));
+                if (!acceptSym(",")) break;
+            }
+            expectSym(")");
+            return call;
+        }
         return node;
     }
     if (isSym("(")) {
@@ -495,7 +589,7 @@ ExprP Parser::parseDesignator() {
             for (;;) {
                 if (acceptSym("=>")) {
                     if (first->kind != Expr::NAME) {
-                        error("expected a formal name before '=>' in an actual part");
+                        unsupported("actual name in a subprogram call");
                         return nullptr;
                     }
                     named = true;
@@ -573,7 +667,6 @@ void Parser::parseTypeSpec(TypeSpec& type) {
             const auto saved = m_lexer.state();
             const Token ahead = m_lexer.next();
             const Token second = m_lexer.next();
-            const Token third = m_lexer.next();
             m_lexer.restore(saved);
             if (ahead.kind == Token::SYM && ahead.text == ")") {
                 Token markTok2;
@@ -680,6 +773,7 @@ void Parser::parsePortClause(EntityUnit& entity) {
         if (m_failed) return;
         PortDecl port;
         port.flp = m_cur.flp;
+        (void)acceptId("signal");  // IEEE 1800-2023 17.2 interface-object keyword
         parseNameList(port.names);
         if (m_failed) return;
         // IEEE 1800-2023 17.2: an omitted port mode means `in`
@@ -1094,6 +1188,10 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
         }
         parseIndexConstraint(decl.index);
         if (m_failed) return;
+        if (isSym(",")) {
+            unsupported("multi-dimensional array index constraint");
+            return;
+        }
         expectSym(")");
         if (!expectId("of")) return;
         parseTypeSpec(decl.base);
@@ -1194,6 +1292,15 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
         name = partTok.text;  // The library is not modelled
     }
     inst->instanceName = name;
+    if (acceptSym("(")) {  // Architecture selection: `entity work.X(ARCH)`; only one is kept
+        if (isSym("-")) {
+            advance();  // `-` selects any architecture
+        } else {
+            Token archTok;
+            if (!takeId(archTok)) return;
+        }
+        expectSym(")");
+    }
     (void)direct;
     for (;;) {
         if (isId("generic")) {
@@ -1236,6 +1343,10 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             const auto savedState = m_lexer.state();
             if (m_cur.kind == Token::ID) {
                 advance();
+                while (isSym(".")) {  // A record-member formal `rec.field`
+                    advance();
+                    if (m_cur.kind == Token::ID) advance();
+                }
                 if (isSym("(")) {
                     int depth = 0;
                     do {
@@ -1254,6 +1365,10 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             if (!takeId(formalTok)) return;
             assoc.formal = formalTok.text;
             assoc.formalSpelling = formalTok.spelling;
+            if (isSym(".")) {  // Record-member association: port-member binding unmodelled
+                unsupported("record-member port association");
+                return;
+            }
             if (isSym("(")) {  // The association targets part of the port
                 advance();
                 assoc.formalLeft = parseExpr();
@@ -1306,8 +1421,12 @@ void Parser::parseArchitecture(FileLine* flp) {
         if (m_failed) return;
         if (isId("begin")) break;
         if (isId("use")) {
-            skipContextClause();
+            parseUseClauseInto(arch.uses);
             continue;
+        }
+        if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
+            unsupported("interface view");
+            return;
         }
         if (isId("default") || isId("attribute") || isId("disconnect")) {
             // Verification directives and attribute specifications have no synthesis meaning
@@ -1421,6 +1540,14 @@ bool Parser::parseChoices(std::vector<ExprP>& choices) {
 void Parser::parseConcurrentStatement(Architecture& arch) {
     if (m_failed) return;
     FileLine* const flp = m_cur.flp;
+    if (isId("default")) {  // A PSL directive has no synthesis meaning
+        skipContextClause();
+        return;
+    }
+    if (isSym("{")) {  // A PSL directive block
+        skipToBraceBlock();
+        return;
+    }
     // Optional statement label: `label : statement`
     std::string label;
     if (m_cur.kind == Token::ID) {
@@ -1431,6 +1558,17 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             label = m_cur.text;
             advance();
             advance();
+        }
+    }
+    if (isId("cover") || isId("restrict") || isId("assume") || isId("fair")
+        || isId("fairness")) {  // A PSL verification directive (IEEE 1800.1 ch.5)
+        const auto pslSaved = m_lexer.state();
+        const Token pslAhead = m_lexer.next();
+        m_lexer.restore(pslSaved);
+        if (pslAhead.kind == Token::SYM && pslAhead.text == "{") {
+            advance();  // The directive keyword
+            skipToStatementEnd();  // The property through its terminating ';'
+            return;
         }
     }
     if (isId("entity")) {
@@ -1601,6 +1739,11 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         return;
     }
     if (isId("assert")) {
+        if (looksLikePslAssertion()) {  // A PSL assertion has no synthesis meaning
+            advance();
+            skipToStatementEnd();
+            return;
+        }
         advance();
         auto conc = std::make_unique<Concurrent>(Concurrent::ASSERT);
         conc->flp = flp;
@@ -2237,6 +2380,19 @@ void Parser::parseDesignFile() {
             FileLine* const flp = m_cur.flp;
             advance();
             parsePackage(flp, isId("body"));
+            continue;
+        }
+        if (isId("default")) {  // A PSL directive
+            skipContextClause();
+            continue;
+        }
+        if (isId("vunit")) {  // A PSL verification unit: skip its header and body
+            advance();
+            skipToBraceBlock();
+            continue;
+        }
+        if (isSym("{")) {  // A PSL directive block
+            skipToBraceBlock();
             continue;
         }
         if (isId("configuration")) {
