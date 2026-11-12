@@ -1674,12 +1674,24 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
                             || cmpOp == ">" || cmpOp == ">=";
     if (relational) {
         if (lt.isInt() && rt.isInt()) {
-            if (cmpOp == "=") return new AstEq{flp, lp, rp};
-            if (cmpOp == "/=") return new AstNeq{flp, lp, rp};
-            if (cmpOp == "<") return new AstLtS{flp, lp, rp};
-            if (cmpOp == "<=") return new AstLteS{flp, lp, rp};
-            if (cmpOp == ">") return new AstGtS{flp, lp, rp};
-            return new AstGteS{flp, lp, rp};
+            AstNodeExpr* ip = nullptr;
+            if (cmpOp == "=") {
+                ip = new AstEq{flp, lp, rp};
+            } else if (cmpOp == "/=") {
+                ip = new AstNeq{flp, lp, rp};
+            } else if (cmpOp == "<") {
+                ip = new AstLtS{flp, lp, rp};
+            } else if (cmpOp == "<=") {
+                ip = new AstLteS{flp, lp, rp};
+            } else if (cmpOp == ">") {
+                ip = new AstGtS{flp, lp, rp};
+            } else {
+                ip = new AstGteS{flp, lp, rp};
+            }
+            // Tag the result like every other comparison so an integer test mixed with a
+            // vector test in a logical expression sees matching operand types
+            ip->dtypep(bitDtp);
+            return ip;
         }
         if (lt.isInt() != rt.isInt()) {
             // numeric_std compares a vector with an integer of the same value
