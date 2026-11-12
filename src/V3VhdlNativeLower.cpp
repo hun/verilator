@@ -1380,7 +1380,13 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     if (!flp) return false;
     const std::string& mark = spec.mark;
-    const auto declared = m_types.find(mark);
+    auto declared = m_types.find(mark);
+    if (declared == m_types.end() && !spec.pkg.empty()) {
+        // A qualified reference such as `work.defs.rec` may name a package the unit
+        // never imported with a `use` clause; import it so the mark resolves
+        importPackage(spec.pkg);
+        declared = m_types.find(mark);
+    }
     if (declared != m_types.end()) {
         out = declared->second;
         if (!spec.memberConstraints.empty() && !applyMemberConstraints(spec, out)) return false;

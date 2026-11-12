@@ -210,6 +210,7 @@ struct Stmt final {
 
 struct TypeSpec final {
     std::string mark;  // Folded type mark
+    std::string pkg;  // Package qualifier of a `work.pkg.mark` reference, if any
     FileLine* flp = nullptr;
     bool hasRange = false;
     bool ascending = false;  // "to", else "downto"

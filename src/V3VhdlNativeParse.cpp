@@ -684,15 +684,19 @@ void Parser::parseTypeSpec(TypeSpec& type) {
     Token markTok;
     if (!takeId(markTok)) return;
     type.flp = markTok.flp;
-    // A library- or package-qualified mark uses only its final name, which the `use`
-    // clauses have already made visible
+    // A library- or package-qualified mark uses only its final name; remember the
+    // package qualifier (ignoring a leading library) so a type such as `work.defs.rec`
+    // can be imported on demand when no `use work.defs.all` clause made it visible
+    std::string pkg;
     while (isSym(".")) {
         advance();
         Token next;
         if (!takeId(next)) return;
+        if (markTok.text != "work") pkg = markTok.text;
         markTok = next;
     }
     type.mark = markTok.text;
+    type.pkg = pkg;
     if (markTok.text == "view") {  // IEEE 1800-2023 ch.17 interface view
         unsupported("interface view");
         return;
