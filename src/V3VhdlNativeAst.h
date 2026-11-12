@@ -228,6 +228,7 @@ struct PortDecl final {
     std::vector<std::pair<std::string, std::string>> names;  // (folded, spelling)
     PortMode dir = PortMode::IN;
     TypeSpec type;
+    ExprP init;  // Default value for an unassociated input
 };
 
 struct Decl final {
@@ -243,6 +244,8 @@ struct Decl final {
 //! One entity generic: a constant with an optional default value
 struct GenericDecl final {
     FileLine* flp = nullptr;
+    bool isType = false;  // A generic type parameter; type and init are unused
+    bool isSubprogram = false;  // A generic subprogram parameter; only names is modelled
     std::vector<std::pair<std::string, std::string>> names;
     TypeSpec type;
     ExprP init;
@@ -422,6 +425,7 @@ struct PackageUnit final {
     std::string name;  // Folded
     std::string spelling;
     std::string libname;
+    std::vector<GenericDecl> generics;  // Generic parameters: the package is a template
     bool inLibrary = false;
     bool isBody = false;  // Package body: completes the constants declared by the spec
     FileLine* flp = nullptr;
@@ -430,12 +434,23 @@ struct PackageUnit final {
     std::vector<AliasDecl> aliases;
     std::vector<SubprogramDecl> subprograms;  // Prototypes in a spec, bodies in a body
 };
+//! `package NAME is new BASE [generic map (...)];` instantiates a generic package
+struct PackageInstance final {
+    std::string name;  // Folded
+    std::string spelling;
+    std::string libname;
+    bool inLibrary = false;
+    FileLine* flp = nullptr;
+    std::string baseName;  // Folded generic package being instantiated
+    std::vector<PortAssoc> genericAssociations;
+};
 
 //! Design units parsed from all source files, in source order
 struct DesignLibrary final {
     std::vector<EntityUnit> entities;
     std::vector<Architecture> archs;
     std::vector<PackageUnit> packages;  // Specs and bodies, in source order
+    std::vector<PackageInstance> packageInstances;  // Generic-package instances
 };
 
 //! Parse one design file and append its design units to the library

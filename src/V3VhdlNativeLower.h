@@ -24,6 +24,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,20 @@ namespace vhdlnative {
 
 //! Module created for each entity, so instances can bind to it by name
 using ModuleMap = std::map<std::string, AstModule*>;
+
+//! Index range fixed for an unconstrained entity port by one instantiation
+struct PortBounds final {
+    int left = 0;
+    int right = 0;
+    bool ascending = false;
+    // A port of an unconstrained record: one member entry per element, declaration order
+    bool isRecord = false;
+    std::vector<std::string> memberNames;
+    std::vector<int> memberLeft;
+    std::vector<int> memberRight;
+    std::vector<bool> memberAscending;
+};
+using PortBoundsMap = std::map<std::string, PortBounds>;
 
 //! Elaborated package declarations, shared by every unit that uses them
 class PackageTable final {
@@ -53,7 +68,7 @@ private:
 };
 
 //! Elaborate the declarative parts of all packages
-void lowerPackages(const std::vector<PackageUnit>& packages, AstNetlist* rootp,
+void lowerPackages(const DesignLibrary& library, AstNetlist* rootp,
                    PackageTable& table) VL_MT_DISABLED;
 
 //! Create the module of every entity, so an instance can bind before it is lowered
@@ -66,14 +81,28 @@ struct Design final {
     std::map<std::string, const EntityUnit*> entities;  // Folded entity name -> entity
     std::map<std::string, const Architecture*> archs;  // Folded entity name -> architecture
     std::map<std::string, AstModule*> specializations;  // Generic binding key -> module
+    std::set<std::string> unconstrainedRecordMarks;  // Record marks with an unconstrained member
     int specSeq = 0;  // Disambiguates the specialized module names
     int specDepth = 0;  // Generic specialization recursion depth
 };
 
+//! Whether an entity port's index range is fixed by each instance, not the entity
+bool hasUnconstrainedPorts(const EntityUnit& entity,
+                           const std::set<std::string>& unconstrainedRecordMarks);
+
+//! Report why an unconstrained-port entity with no instance cannot be modelled
+void reportUnspecializedPorts(const EntityUnit& entity,
+                              const std::set<std::string>& unconstrainedRecordMarks);
+
+//! Record type marks whose declaration has an element of an unconstrained array type
+void collectUnconstrainedRecordMarks(const DesignLibrary& library,
+                                     std::set<std::string>& out) VL_MT_DISABLED;
+
 //! Lower one entity/architecture pair into the module created for its entity. False
 //! if the entity's generics have no defaults to elaborate, and no binding supplied
 bool lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-           const PackageTable& table, const ModuleMap& modules, Design& design) VL_MT_DISABLED;
+           const PackageTable& table, const ModuleMap& modules, Design& design,
+           const PortBoundsMap* portBounds = nullptr) VL_MT_DISABLED;
 
 }  // namespace vhdlnative
 

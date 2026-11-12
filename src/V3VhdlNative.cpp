@@ -83,7 +83,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     }
 
     vhdlnative::PackageTable packages;
-    vhdlnative::lowerPackages(library.packages, rootp, packages);
+    vhdlnative::lowerPackages(library, rootp, packages);
 
     // Create the module of every entity first, so instances can bind to any of them
     vhdlnative::ModuleMap modules;
@@ -93,9 +93,12 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         design.entities[entity.name] = &entity;
     }
     for (const auto& entry : archByEntity) design.archs[entry.first] = entry.second;
+    // Record ports whose element widths come from the actual, like unconstrained arrays
+    vhdlnative::collectUnconstrainedRecordMarks(library, design.unconstrainedRecordMarks);
 
     std::set<std::string> entityNames;
     std::vector<const vhdlnative::EntityUnit*> unelaborated;
+    std::vector<const vhdlnative::EntityUnit*> portUnelaborated;
     for (const vhdlnative::EntityUnit& entity : library.entities) {
         if (!entityNames.insert(entity.name).second) {
             entity.flp->v3error("Duplicate VHDL entity: '" + entity.spelling + "'");
@@ -105,6 +108,11 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         if (it == archByEntity.end()) {
             entity.flp->v3error("Entity '" + entity.spelling
                                 + "' has no architecture; cannot elaborate it");
+            continue;
+        }
+        if (vhdlnative::hasUnconstrainedPorts(entity, design.unconstrainedRecordMarks)) {
+            // Only an instance's actuals fix the port ranges
+            portUnelaborated.push_back(&entity);
             continue;
         }
         if (!vhdlnative::lower(entity, *it->second, modules[entity.name], packages, modules,
@@ -132,6 +140,20 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
             entityp->flp->v3error("VHDL: entity '" + entityp->spelling
                                   + "' has a generic without a default value, and no instance "
                                     "binds it");
+        }
+    }
+    // An entity with unconstrained ports elaborates only through its instances
+    for (const vhdlnative::EntityUnit* const entityp : portUnelaborated) {
+        const std::string prefix = entityp->name + "|ports";
+        const bool covered = std::any_of(
+            design.specializations.begin(), design.specializations.end(), [&](const auto& entry) {
+                return entry.second && entry.first.compare(0, prefix.size(), prefix) == 0;
+            });
+        if (covered) {
+            AstModule* const modp = modules[entityp->name];
+            VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
+        } else {
+            vhdlnative::reportUnspecializedPorts(*entityp, design.unconstrainedRecordMarks);
         }
     }
 }

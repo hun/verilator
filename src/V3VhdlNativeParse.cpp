@@ -51,6 +51,7 @@ class Parser final {
     std::vector<EntityUnit> m_entities;  // Parsed design units
     std::vector<Architecture> m_archs;
     std::vector<PackageUnit> m_packages;  // Parsed package specs and bodies
+    std::vector<PackageInstance> m_packageInstances;  // Parsed generic-package instances
     // Packages named by the context clauses seen so far
     std::vector<std::pair<std::string, std::string>> m_uses;
 
@@ -206,6 +207,7 @@ class Parser final {
     void parseAliasInto(std::vector<AliasDecl>& aliases);
     void parsePackage(FileLine* flp, bool isBody);
     void parseUseClause();
+    void parseUseClauseInto(std::vector<std::pair<std::string, std::string>>& uses);
     void skipLibraryClause();
     void parseRecordBody(TypeDecl& decl);
     void parseIndexConstraint(TypeSpec& type);
@@ -214,11 +216,14 @@ class Parser final {
     ExprP parseChoice();
     bool parseChoices(std::vector<ExprP>& choices);
     void parseInstance(Architecture& arch, FileLine* flp, const std::string& label, bool direct);
-    void parseGenericClause(EntityUnit& entity);
+    void parseGenericClauseInto(std::vector<GenericDecl>& generics);
+    void parsePackageInstanceTail(FileLine* flp, const std::string& name,
+                                  const std::string& spelling);
     void parseAssocList(std::vector<PortAssoc>& out, const char* what);
     void parseComponentDecl(Architecture& arch);
     void parseInterfaceList(std::vector<FormalDecl>& formals);
     void parseSubprogramInto(std::vector<SubprogramDecl>& out);
+    bool parseSubprogramSpec(SubprogramDecl& sub);
     void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
                              std::vector<Decl>* decls = nullptr,
                              std::vector<TypeDecl>* types = nullptr,
@@ -243,6 +248,7 @@ public:
     std::vector<EntityUnit>& entities() { return m_entities; }
     std::vector<Architecture>& archs() { return m_archs; }
     std::vector<PackageUnit>& packages() { return m_packages; }
+    std::vector<PackageInstance>& packageInstances() { return m_packageInstances; }
 };
 
 //######################################################################
@@ -656,8 +662,20 @@ bool Parser::parseRange(TypeSpec& type) {
 void Parser::parseTypeSpec(TypeSpec& type) {
     Token markTok;
     if (!takeId(markTok)) return;
-    type.mark = markTok.text;
     type.flp = markTok.flp;
+    // A library- or package-qualified mark uses only its final name, which the `use`
+    // clauses have already made visible
+    while (isSym(".")) {
+        advance();
+        Token next;
+        if (!takeId(next)) return;
+        markTok = next;
+    }
+    type.mark = markTok.text;
+    if (markTok.text == "view") {  // IEEE 1800-2023 ch.17 interface view
+        unsupported("interface view");
+        return;
+    }
     if (isId("range")) {
         advance();
         parseRange(type);
@@ -793,9 +811,9 @@ void Parser::parsePortClause(EntityUnit& entity) {
         }
         parseTypeSpec(port.type);
         if (m_failed) return;
-        if (isSym(":=")) {
-            unsupported("port default expression");
-            return;
+        if (acceptSym(":=")) {
+            port.init = parseExpr();
+            if (!port.init) return;
         }
         entity.ports.push_back(std::move(port));
         if (acceptSym(";")) continue;
@@ -807,7 +825,7 @@ void Parser::parsePortClause(EntityUnit& entity) {
 }
 
 //! `generic (name_list : subtype_indication [:= default], ...);`
-void Parser::parseGenericClause(EntityUnit& entity) {
+void Parser::parseGenericClauseInto(std::vector<GenericDecl>& generics) {
     if (!acceptSym("(")) {
         error("expected '(' after 'generic'");
         return;
@@ -815,11 +833,36 @@ void Parser::parseGenericClause(EntityUnit& entity) {
     for (;;) {
         if (m_failed) return;
         if (isId("type")) {
-            unsupported("generic type parameter");
+            advance();
+            GenericDecl generic;
+            generic.flp = m_cur.flp;
+            generic.isType = true;
+            Token typeName;
+            if (!takeId(typeName)) return;
+            addName(generic.names, typeName);
+            generics.push_back(std::move(generic));
+            if (acceptSym(";")) continue;
+            if (acceptSym(")")) break;
+            error("expected ';' or ')' in a generic clause, got '" + m_cur.text + "'");
+            return;
+        }
+        if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+            // A generic subprogram parameter: parse the signature, but only the name is kept
+            GenericDecl generic;
+            generic.flp = m_cur.flp;
+            generic.isSubprogram = true;
+            SubprogramDecl spec{SubprogramDecl::FUNCTION};
+            if (!parseSubprogramSpec(spec)) return;
+            generic.names.emplace_back(spec.name, spec.spelling);
+            generics.push_back(std::move(generic));
+            if (acceptSym(";")) continue;
+            if (acceptSym(")")) break;
+            error("expected ';' or ')' in a generic clause, got '" + m_cur.text + "'");
             return;
         }
         GenericDecl generic;
         generic.flp = m_cur.flp;
+        (void)acceptId("constant");  // IEEE 1800-2023 17.2 interface-object keyword
         parseNameList(generic.names);
         if (m_failed) return;
         // IEEE 1800-2023 17.2: a generic's mode is omitted or `in`
@@ -834,7 +877,7 @@ void Parser::parseGenericClause(EntityUnit& entity) {
             generic.init = parseExpr();
             if (!generic.init) return;
         }
-        entity.generics.push_back(std::move(generic));
+        generics.push_back(std::move(generic));
         if (acceptSym(";")) continue;
         if (acceptSym(")")) break;
         error("expected ';' or ')' in a generic clause, got '" + m_cur.text + "'");
@@ -894,7 +937,7 @@ void Parser::parseEntity(FileLine* flp) {
         }
         if (isId("generic")) {
             advance();
-            parseGenericClause(entity);
+            parseGenericClauseInto(entity.generics);
             continue;
         }
         if (isId("begin")) {
@@ -902,8 +945,38 @@ void Parser::parseEntity(FileLine* flp) {
             return;
         }
         if (isId("end")) break;
+        if (isId("package")) {
+            // `package NAME is new BASE ...;` in the entity declarative part
+            advance();
+            Token instTok;
+            if (!takeId(instTok)) return;
+            if (!expectId("is")) return;
+            parsePackageInstanceTail(instTok.flp, instTok.text, instTok.spelling);
+            continue;
+        }
         if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
             parseSubprogramInto(entity.subprograms);
+            continue;
+        }
+        if (isId("use")) {
+            parseUseClauseInto(entity.uses);
+            continue;
+        }
+        if (isId("context")) {
+            skipContextClause();
+            continue;
+        }
+        if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
+            unsupported("interface view");
+            return;
+        }
+        if (isId("attribute") || isId("default") || isId("disconnect")) {
+            // Attribute specifications and PSL directives have no synthesis meaning
+            skipContextClause();
+            continue;
+        }
+        if (isSym("{")) {  // A PSL directive block
+            skipToBraceBlock();
             continue;
         }
         error("unsupported entity declaration item '" + m_cur.text + "'");
@@ -995,8 +1068,8 @@ void Parser::parseInterfaceList(std::vector<FormalDecl>& formals) {
     }
 }
 
-//! Parse a subprogram declaration: a package prototype, or a full declaration with a body
-void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
+//! Parse a subprogram specification (no body): `[pure|impure] kind name [formals] [return T]`
+bool Parser::parseSubprogramSpec(SubprogramDecl& sub) {
     bool impure = false;
     if (acceptId("pure")) {
     } else if (acceptId("impure")) {
@@ -1004,27 +1077,34 @@ void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
     }
     if (!isId("function") && !isId("procedure")) {
         error("expected 'function' or 'procedure', got '" + m_cur.text + "'");
-        return;
+        return false;
     }
-    SubprogramDecl sub{isId("function") ? SubprogramDecl::FUNCTION : SubprogramDecl::PROCEDURE};
+    sub.kind = isId("function") ? SubprogramDecl::FUNCTION : SubprogramDecl::PROCEDURE;
     if (impure && sub.kind == SubprogramDecl::PROCEDURE) {
         error("'impure' applies only to a function");
-        return;
+        return false;
     }
     sub.impure = impure;
     advance();  // 'function' / 'procedure'
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeId(nameTok)) return false;
     sub.flp = nameTok.flp;
     sub.name = nameTok.text;
     sub.spelling = nameTok.spelling;
     parseInterfaceList(sub.formals);
-    if (m_failed) return;
+    if (m_failed) return false;
     if (sub.kind == SubprogramDecl::FUNCTION) {
-        if (!expectId("return")) return;
+        if (!expectId("return")) return false;
         parseTypeSpec(sub.returnType);
-        if (m_failed) return;
+        if (m_failed) return false;
     }
+    return true;
+}
+
+//! Parse a subprogram declaration: a package prototype, or a full declaration with a body
+void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
+    SubprogramDecl sub{SubprogramDecl::FUNCTION};
+    if (!parseSubprogramSpec(sub)) return;
     if (acceptSym(";")) {  // A prototype; the body may arrive with the package body
         out.push_back(std::move(sub));
         return;
@@ -1086,8 +1166,8 @@ void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
         Token endTok;
         if (!takeId(endTok)) return;
         if (endTok.text != sub.name) {
-            error(nameTok.flp, "subprogram end name '" + endTok.spelling + "' does not match '"
-                                   + sub.spelling + "'");
+            error(sub.flp, "subprogram end name '" + endTok.spelling + "' does not match '"
+                               + sub.spelling + "'");
             return;
         }
     }
@@ -1101,8 +1181,17 @@ void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
 //! Parse the index constraint of an array type definition
 void Parser::parseIndexConstraint(TypeSpec& type) {
     if (m_cur.kind == Token::ID && !isId("to") && !isId("downto")) {
+        const Token savedTok = m_cur;
+        const auto savedState = m_lexer.state();
         Token markTok;
         if (!takeId(markTok)) return;
+        if (isSym("-") || isSym("+") || isSym("*") || isId("to") || isId("downto")) {
+            // The identifier began a range expression, e.g. `size - 1 downto 0`
+            m_cur = savedTok;
+            m_lexer.restore(savedState);
+            parseRange(type);
+            return;
+        }
         type.mark = markTok.text;
         type.flp = markTok.flp;
         if (acceptId("range")) {
@@ -1326,6 +1415,39 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
     arch.stmts.push_back(std::move(inst));
 }
 
+//! `new [work.]BASE [generic map (...)];` following `package NAME is`
+void Parser::parsePackageInstanceTail(FileLine* flp, const std::string& name,
+                                      const std::string& spelling) {
+    if (!expectId("new")) return;
+    PackageInstance inst;
+    inst.flp = flp;
+    inst.name = name;
+    inst.spelling = spelling;
+    inst.libname = m_libname;
+    inst.inLibrary = m_inLibrary;
+    if (isId("work")) {
+        advance();
+        if (!acceptSym(".")) {
+            error("expected '.' after 'work'");
+            return;
+        }
+    }
+    Token baseTok;
+    if (!takeId(baseTok)) return;
+    inst.baseName = baseTok.text;
+    if (isId("generic")) {
+        advance();
+        if (!expectId("map")) return;
+        parseAssocList(inst.genericAssociations, "generic");
+        if (m_failed) return;
+    }
+    if (!acceptSym(";")) {
+        error("expected ';' after a package instantiation");
+        return;
+    }
+    m_packageInstances.push_back(std::move(inst));
+}
+
 //! `(formal [range] => actual, ...)` associations of a port or generic map
 void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
     if (!acceptSym("(")) {
@@ -1478,7 +1600,21 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseSubprogramInto(arch.subprograms);
             continue;
         }
-        if (isId("attribute") || isId("package")) {
+        if (isId("package")) {
+            // `package NAME is new BASE ...;` in the architecture declarative part
+            advance();
+            Token instTok;
+            if (!takeId(instTok)) return;
+            if (!expectId("is")) return;
+            parsePackageInstanceTail(instTok.flp, instTok.text, instTok.spelling);
+            continue;
+        }
+        if (isId("for")) {  // IEEE 1800-2023 19.4 configuration specification
+            advance();
+            skipToSemicolon();
+            continue;
+        }
+        if (isId("attribute")) {
             unsupported("architecture declarative item '" + m_cur.text + "'");
             return;
         }
@@ -2225,17 +2361,27 @@ StmtP Parser::parseIf(FileLine* flp) {
 }
 
 //! Record `use lib.pkg[.item];`; only whole-package uses make names visible
-void Parser::parseUseClause() {
+void Parser::parseUseClause() { parseUseClauseInto(m_uses); }
+
+void Parser::parseUseClauseInto(std::vector<std::pair<std::string, std::string>>& uses) {
     advance();  // 'use'
-    std::vector<std::string> parts;
-    for (;;) {
-        if (m_cur.kind != Token::ID) break;
-        parts.push_back(m_cur.text);
-        advance();
-        if (!acceptSym(".")) break;
+    for (;;) {  // `use clause, clause;` -- IEEE 1800-2023 13.3.1
+        std::vector<std::string> parts;
+        for (;;) {
+            if (m_cur.kind != Token::ID) break;
+            parts.push_back(m_cur.text);
+            advance();
+            if (!acceptSym(".")) break;
+        }
+        // `use [lib.]pkg.all`: record the package; the library is not modelled
+        if (parts.size() >= 2 && parts.back() == "all") {
+            const std::string pkg = parts[parts.size() - 2];
+            const std::string lib = parts.size() >= 3 ? parts[parts.size() - 3] : "";
+            uses.emplace_back(lib, pkg);
+        }
+        if (!acceptSym(",")) break;
     }
     expectSym(";");
-    if (parts.size() >= 3 && parts.back() == "all") m_uses.emplace_back(parts[0], parts[1]);
 }
 
 //! Skip `library <name>;`, which only affects which library GHDL would search
@@ -2256,6 +2402,10 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
     pkg.inLibrary = m_inLibrary;
     pkg.isBody = isBody;
     if (!expectId("is")) return;
+    if (isId("new")) {  // `package X is new G ...;` generic-package instance
+        parsePackageInstanceTail(flp, pkg.name, pkg.spelling);
+        return;
+    }
     for (;;) {
         if (m_failed) return;
         if (isId("end")) break;
@@ -2283,12 +2433,30 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             parseAliasInto(pkg.aliases);
             continue;
         }
+        if (isId("generic")) {  // A generic package declaration: a template
+            advance();
+            parseGenericClauseInto(pkg.generics);
+            continue;
+        }
         if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
             parseSubprogramInto(pkg.subprograms);
             continue;
         }
-        if (isId("component") || isId("attribute") || isId("signal") || isId("shared")
-            || isId("variable") || isId("file") || isId("disconnect") || isId("group")) {
+        if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
+            unsupported("interface view");
+            return;
+        }
+        if (isId("attribute") || isId("disconnect") || isId("default")) {
+            // Attribute specifications and PSL directives have no synthesis meaning
+            skipContextClause();
+            continue;
+        }
+        if (isSym("{")) {  // A PSL directive block
+            skipToBraceBlock();
+            continue;
+        }
+        if (isId("component") || isId("signal") || isId("shared") || isId("variable")
+            || isId("file") || isId("group")) {
             unsupported("package declarative item '" + m_cur.text + "'");
             return;
         }
@@ -2456,6 +2624,9 @@ void parseFile(const V3VhdlNativeFile& file, DesignLibrary& library) {
     for (EntityUnit& entity : parser.entities()) library.entities.push_back(std::move(entity));
     for (Architecture& arch : parser.archs()) library.archs.push_back(std::move(arch));
     for (PackageUnit& pkg : parser.packages()) library.packages.push_back(std::move(pkg));
+    for (PackageInstance& inst : parser.packageInstances()) {
+        library.packageInstances.push_back(std::move(inst));
+    }
 }
 
 }  // namespace vhdlnative

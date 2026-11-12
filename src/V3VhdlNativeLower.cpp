@@ -113,7 +113,12 @@ PackageTable::~PackageTable() = default;
 struct GenericBinding final {
     bool isInt = false;
     int64_t intValue = 0;
+    bool isString = false;
+    std::string stringValue;
+    bool isType = false;
+    VType typeValue;  // The actual type mark of a generic type parameter
     AstConst* valuep = nullptr;  // Typed constant; cloned when registered, else owned here
+    const SubprogramDecl* subp = nullptr;  // The actual of a generic subprogram parameter
 };
 using GenericBindings = std::map<std::string, GenericBinding>;
 class Lowering final {
@@ -180,6 +185,9 @@ class Lowering final {
     // Symbolic values of process variables, for slice widths from their relations
     std::map<std::string, ExprP> m_varVals;
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
+    //! Integer constants needed while registering types, before full declaration emission
+    std::map<std::string, int64_t> m_preConsts;
+    int m_strSeq = 0;  // Disambiguates string-generic variables
     std::map<std::string, VType> m_types;  // Declared types by folded name
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
     std::map<std::string, VType> m_constTypes;  // Type of each typed constant
@@ -345,18 +353,73 @@ class Lowering final {
     void registerType(const TypeDecl& decl);
     void emitPackage(const PackageUnit& pkg);
     void importPackage(const std::string& name);
+    //! Record integer constants that a type declaration may depend on
+    void preScanIntConstants(const std::vector<Decl>& decls);
     void emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
                       const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk);
-    bool registerGenerics(const EntityUnit& entity, const GenericBindings* bindings, bool probe);
+    bool registerGenerics(const std::vector<GenericDecl>& generics,
+                          const GenericBindings* bindings, bool probe);
     AstModule* specializeInstance(const Concurrent& conc, const EntityUnit& entity,
                                   AstModule* basep);
+    //! Whether a port's index range comes from the instance rather than the entity
+    static bool unconstrainedPort(const PortDecl& port) {
+        const std::string& mark = port.type.mark;
+        const bool unconstrainedMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                                       || mark == "bit_vector" || mark == "unsigned"
+                                       || mark == "signed";
+        return unconstrainedMark && !port.type.hasRange && port.type.constraintMark.empty();
+    }
+    //! Derive an unconstrained port's range from its associations at one instance
+    bool derivePortBounds(const EntityUnit& entity, const Concurrent& conc, const PortDecl& port,
+                          PortBounds& out);
+    //! Derive an unconstrained record port's element ranges from its whole record actual
+    bool deriveRecordBounds(const EntityUnit& entity, const Concurrent& conc, const PortDecl& port,
+                            PortBounds& out);
+    //! Resolve a generic type association such as `std_logic_vector(3 downto 0)`
+    bool resolveTypeActual(const Expr& actual, VType& out);
+    //! Create and cache a module with this instance's unconstrained port ranges
+    AstModule* specializePortsInstance(const Concurrent& conc, const EntityUnit& entity,
+                                       const PortBoundsMap& portBounds);
     bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
     AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
     bool applyRange(const TypeSpec& spec, VType& type);
+    //! Apply a record subtype's per-member ranges, widening each constrained element
+    bool applyMemberConstraints(const TypeSpec& spec, VType& out);
+    //! Constrain one record element to a fixed vector range
+    void setRecordField(FileLine* flp, VField& field, int left, int right, bool ascending);
+    //! Recompute a record's total width, MSB-first offsets and packed dtype
+    void finalizeRecordFields(FileLine* flp, VType& rec);
     bool constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right, bool& ascending);
     bool evalInt(const Expr& expr, int64_t& value) const;
+    //! Evaluate a locally static real-valued expression
+    bool evalReal(const Expr& expr, double& value) const;
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);
+    }
+    //! Static integer value, also folding a call to a pure function
+    bool staticIntFold(const ExprP& exprp, int64_t& value);
+    //! Deep copy of a frontend expression, for a synthesized type constraint
+    static ExprP cloneExpr(const Expr& expr) {
+        ExprP out = std::make_unique<Expr>(expr.kind);
+        out->flp = expr.flp;
+        out->text = expr.text;
+        out->spelling = expr.spelling;
+        out->intValue = expr.intValue;
+        out->charValue = expr.charValue;
+        out->bits = expr.bits;
+        out->formalNames = expr.formalNames;
+        out->a = expr.a ? cloneExpr(*expr.a) : ExprP{};
+        out->b = expr.b ? cloneExpr(*expr.b) : ExprP{};
+        out->c = expr.c ? cloneExpr(*expr.c) : ExprP{};
+        for (const ExprP& argp : expr.args) out->args.push_back(argp ? cloneExpr(*argp) : ExprP{});
+        for (const std::vector<ExprP>& choiceList : expr.choices) {
+            std::vector<ExprP> copy;
+            for (const ExprP& choicep : choiceList) {
+                copy.push_back(choicep ? cloneExpr(*choicep) : ExprP{});
+            }
+            out->choices.push_back(std::move(copy));
+        }
+        return out;
     }
     //! Whether two expressions are structurally the same
     static bool sameExpr(const Expr& l, const Expr& r) {
@@ -649,9 +712,14 @@ public:
     ~Lowering() = default;
 
     bool emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-              const GenericBindings* bindings = nullptr);
+              const GenericBindings* bindings = nullptr,
+              const PortBoundsMap* portBounds = nullptr);
     AstNode* lowerInstance(const Concurrent& conc);
-    void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table);
+    void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
+                     const GenericBindings* bindings = nullptr,
+                     const std::string& publishName = {});
+    void instantiatePackage(const std::vector<PackageUnit>& packages, const PackageInstance& inst,
+                            PackageTable::Impl& table);
 };
 
 //######################################################################
@@ -676,6 +744,11 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         const auto it = m_consts.find(expr.text);
         if (it != m_consts.end()) {
             value = it->second;
+            return true;
+        }
+        const auto preIt = m_preConsts.find(expr.text);
+        if (preIt != m_preConsts.end()) {
+            value = preIt->second;
             return true;
         }
         const auto enumIt = m_enumConsts.find(expr.text);
@@ -1353,6 +1426,8 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, false);
         const auto constIt = m_consts.find(expr.text);
         if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
+        const auto preIt = m_preConsts.find(expr.text);
+        if (preIt != m_preConsts.end()) return makeIntConst(flp, preIt->second);
         const auto valueIt = m_constValues.find(expr.text);
         if (valueIt != m_constValues.end()) return valueIt->second->cloneTree(false);
         const auto enumIt = m_enumConsts.find(expr.text);
@@ -2208,6 +2283,14 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
                 return nullptr;
             }
             return makeIntConst(flp, constIt->second);
+        }
+        const auto preIt = m_preConsts.find(expr.text);
+        if (preIt != m_preConsts.end()) {
+            if (write) {
+                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'");
+                return nullptr;
+            }
+            return makeIntConst(flp, preIt->second);
         }
         const auto valueIt = m_constValues.find(expr.text);
         if (valueIt != m_constValues.end() || m_enumConsts.count(expr.text)) {
@@ -5108,6 +5191,21 @@ bool Lowering::reserveName(const std::string& folded, const std::string& spellin
     return true;
 }
 
+void Lowering::preScanIntConstants(const std::vector<Decl>& decls) {
+    for (const Decl& decl : decls) {
+        if (decl.kind != Decl::CONSTANT || !decl.init) continue;
+        const std::string& mark = decl.type.mark;
+        const bool intMark = mark == "integer" || mark == "natural" || mark == "positive";
+        if (!intMark) {
+            const auto typeIt = m_types.find(mark);
+            if (typeIt == m_types.end() || typeIt->second.kind != VType::INT) continue;
+        }
+        int64_t value = 0;
+        if (!evalInt(*decl.init, value)) continue;
+        for (const auto& name : decl.names) m_preConsts[name.first] = value;
+    }
+}
+
 void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
                             const TypeSpec& type, const Expr* initp, FileLine* flp,
                             bool deferredOk) {
@@ -5155,11 +5253,96 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
 
 //! Register the entity's generics as constants; bindings hold the bound actuals and
 //! the rest fall back to their defaults. A probe binds only what a range needs.
-bool Lowering::registerGenerics(const EntityUnit& entity, const GenericBindings* bindings,
-                                bool probe) {
+bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
+                                const GenericBindings* bindings, bool probe) {
     bool ok = true;
-    for (const GenericDecl& gen : entity.generics) {
+    // A string generic is a variable holding an array of 8-bit character codes
+    const auto registerString = [&](FileLine* flp, const std::string& folded,
+                                    const std::string& text) {
+        if (text.empty()) {
+            unsupportedError(flp, "empty string generic");
+            return;
+        }
+        VType type;
+        type.kind = VType::ARRAY;
+        VType elem = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8);
+        type.elemp = std::make_shared<VType>(elem);
+        type.elemWidth = 8;
+        type.kwd = VBasicDTypeKwd::LOGIC;
+        type.signing = VSigning::UNSIGNED;
+        type.left = 1;
+        type.right = static_cast<int>(text.size());
+        type.ascending = true;
+        type.width = 8 * static_cast<int>(text.size());
+        type.dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, type.width);
+        AstVar* const varp
+            = new AstVar{flp, VVarType::VAR, "vhdlstr_" + std::to_string(++m_strSeq), type.dtp};
+        m_modp->addStmtsp(varp);
+        m_scope[folded] = VarInfo{varp, type};
+        m_variables.insert(folded);
+        V3Number num{flp, type.width, 0u};
+        const int length = static_cast<int>(text.size());
+        for (int i = 0; i < length; ++i) {
+            const unsigned char code = static_cast<unsigned char>(text[static_cast<size_t>(i)]);
+            const int base = (length - 1 - i) * 8;
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((code >> bit) & 1U) num.setBit(base + bit, '1');
+            }
+        }
+        AstConst* const valuep = new AstConst{flp, num};
+        valuep->dtypep(type.dtp);
+        m_modp->addStmtsp(new AstInitialStatic{
+            flp, new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, valuep}});
+    };
+    for (const GenericDecl& gen : generics) {
         for (const auto& name : gen.names) {
+            if (gen.isType) {
+                if (bindings) {
+                    const auto it = bindings->find(name.first);
+                    if (it != bindings->end() && it->second.isType) {
+                        if (!probe) {
+                            m_types[name.first] = it->second.typeValue;
+                            m_imported.insert(name.first);
+                        }
+                        continue;
+                    }
+                }
+                if (!probe) ok = false;  // A type generic has no elaboratable default
+                continue;
+            }
+            if (gen.isSubprogram) {
+                if (bindings) {
+                    const auto it = bindings->find(name.first);
+                    if (it != bindings->end() && it->second.subp) {
+                        if (!probe) {
+                            m_subprograms[name.first].push_back(
+                                SubprogramRef{it->second.subp, false, -1});
+                            m_imported.erase(name.first);
+                        }
+                        continue;
+                    }
+                }
+                if (!probe) ok = false;  // A subprogram generic has no elaboratable default
+                continue;
+            }
+            if (gen.type.mark == "string") {
+                const Expr* actualp = nullptr;
+                if (bindings) {
+                    const auto it = bindings->find(name.first);
+                    if (it != bindings->end() && it->second.isString) {
+                        actualp = nullptr;
+                        if (!probe) registerString(gen.flp, name.first, it->second.stringValue);
+                        continue;
+                    }
+                }
+                if (gen.init && gen.init->kind == Expr::STRING_LIT) { actualp = gen.init.get(); }
+                if (actualp) {
+                    if (!probe) registerString(gen.flp, name.first, actualp->spelling);
+                } else if (!probe) {
+                    ok = false;  // No default, so only a binding can elaborate the base
+                }
+                continue;
+            }
             if (bindings) {
                 const auto it = bindings->find(name.first);
                 if (it != bindings->end()) {
@@ -5236,7 +5419,8 @@ void Lowering::importPackage(const std::string& name) {
     }
 }
 
-void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
+void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
+                           const GenericBindings* bindings, const std::string& publishName) {
     // A package sees only its own declarations
     m_types.clear();
     m_consts.clear();
@@ -5248,6 +5432,8 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     m_scope.clear();
     m_aliases.clear();
     m_subprograms.clear();
+    // A generic package is emitted once per instance, with its generics already bound
+    if (bindings) registerGenerics(pkg.generics, bindings, false);
     for (const TypeDecl& typeDecl : pkg.types) registerType(typeDecl);
     for (const AliasDecl& alias : pkg.aliases) registerAlias(alias);
     // Subprograms are visible to the declarative items below, including deferred constants
@@ -5272,9 +5458,10 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
     m_ownedConsts.clear();
     m_aliases.clear();
 
-    const auto existing = table.packages.find(pkg.name);
+    const std::string& pubName = publishName.empty() ? pkg.name : publishName;
+    const auto existing = table.packages.find(pubName);
     if (existing == table.packages.end()) {
-        table.packages.emplace(pkg.name, std::move(info));
+        table.packages.emplace(pubName, std::move(info));
         return;
     }
     // A package body (or a repeated declaration) adds to what is already published
@@ -5290,19 +5477,26 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table) {
 }
 
 bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-                    const GenericBindings* bindings) {
+                    const GenericBindings* bindings, const PortBoundsMap* portBounds) {
     m_modp = modp;
 
     m_subprograms.clear();  // Packages published these only through importPackage
     for (const auto& use : entity.uses) importPackage(use.second);
     for (const auto& use : arch.uses) importPackage(use.second);
 
-    // Types are visible to the whole declarative part, and must be registered first
+    // A type's range may call a pure function, so make the subprograms visible
+    // before registering any type
+    registerSubprograms(entity.subprograms, -1);
+    registerSubprograms(arch.subprograms, -1);
+
+    // Types are visible to the whole declarative part. A type's range may depend on
+    // an integer constant, which may in turn depend on a generic, so register the
+    // pieces in dependency order.
+    preScanIntConstants(entity.decls);
     for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
-    for (const TypeDecl& archType : arch.types) registerType(archType);
 
     // Generics are constants visible to the port clause and the architecture
-    if (!registerGenerics(entity, bindings, false)) {
+    if (!registerGenerics(entity.generics, bindings, false)) {
         m_modp = nullptr;
         m_scope.clear();
         m_consts.clear();
@@ -5311,12 +5505,16 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         m_enumConsts.clear();
         m_ownedConsts.clear();
         m_types.clear();
+        m_preConsts.clear();
         return false;
     }
 
+    // With generics bound, integer constants can size the architecture's types
+    preScanIntConstants(entity.decls);
+    preScanIntConstants(arch.decls);
+    for (const TypeDecl& archType : arch.types) registerType(archType);
+
     for (const AliasDecl& alias : arch.aliases) registerAlias(alias);
-    registerSubprograms(entity.subprograms, -1);
-    registerSubprograms(arch.subprograms, -1);
 
     // Preliminary snapshot: declarative items may already call subprograms
     m_moduleScope = saveScope();
@@ -5353,7 +5551,37 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
         VType type;
-        if (!resolveType(port.type, type)) continue;
+        const PortBounds* boundsp = nullptr;
+        if (portBounds) {
+            const auto it = portBounds->find(port.names.empty() ? "" : port.names.front().first);
+            if (it != portBounds->end()) boundsp = &it->second;
+        }
+        if (boundsp && boundsp->isRecord) {
+            // An unconstrained record port: each element's range comes from the actual
+            if (!resolveType(port.type, type) || type.kind != VType::RECORD) continue;
+            for (size_t i = 0; i < boundsp->memberNames.size(); ++i) {
+                for (VField& field : type.fields) {
+                    if (field.name != boundsp->memberNames[i]) continue;
+                    setRecordField(entity.flp, field, boundsp->memberLeft[i],
+                                   boundsp->memberRight[i], boundsp->memberAscending[i]);
+                }
+            }
+            finalizeRecordFields(entity.flp, type);
+        } else if (boundsp) {
+            // An unconstrained port specialized from the actual at this instance
+            VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
+            VSigning signing = VSigning::UNSIGNED;
+            if (port.type.mark == "bit_vector") kwd = VBasicDTypeKwd::BIT;
+            if (port.type.mark == "signed") signing = VSigning::SIGNED;
+            type = vectorType(entity.flp, kwd, signing,
+                              std::abs(boundsp->left - boundsp->right) + 1);
+            type.left = boundsp->left;
+            type.right = boundsp->right;
+            type.ascending = boundsp->ascending;
+            type.dtp = findVector(entity.flp, kwd, signing, type.left, type.right, type.ascending);
+        } else if (!resolveType(port.type, type)) {
+            continue;
+        }
         for (const auto& name : port.names) {
             if (!m_scope.emplace(name.first, VarInfo{}).second) {
                 port.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
@@ -5410,6 +5638,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     m_enumConsts.clear();
     m_ownedConsts.clear();
     m_types.clear();
+    m_preConsts.clear();
     return true;
 }
 
@@ -5488,10 +5717,49 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             freeBindings(bindings);
             return nullptr;
         }
+        if (gen.isType) {
+            GenericBinding binding;
+            binding.isType = true;
+            if (!resolveTypeActual(*assocp->actual, binding.typeValue)) {
+                unsupportedError(assocp->flp, "generic type actual");
+                freeBindings(bindings);
+                return nullptr;
+            }
+            bindings[items[k].folded] = binding;
+            continue;
+        }
+        if (gen.isSubprogram) {
+            // The actual names a subprogram visible where the instance is declared
+            GenericBinding binding;
+            const std::vector<const SubprogramDecl*> visible
+                = visibleSubprograms(assocp->actual->text);
+            if (visible.empty()) {
+                unsupportedError(assocp->flp, "generic subprogram parameter actual");
+                freeBindings(bindings);
+                return nullptr;
+            }
+            binding.subp = visible.back();
+            bindings[items[k].folded] = binding;
+            continue;
+        }
         if (gen.type.mark == "string") {
-            unsupportedError(assocp->flp, "string generic");
-            freeBindings(bindings);
-            return nullptr;
+            const Expr* const actualp = assocp ? assocp->actual.get() : gen.init.get();
+            if (!actualp) {
+                assocp->flp->v3error("VHDL: string generic '" + items[k].spelling
+                                     + "' has no default value and no association");
+                freeBindings(bindings);
+                return nullptr;
+            }
+            if (actualp->kind != Expr::STRING_LIT) {
+                unsupportedError(actualp->flp, "string generic actual");
+                freeBindings(bindings);
+                return nullptr;
+            }
+            GenericBinding binding;
+            binding.isString = true;
+            binding.stringValue = actualp->spelling;
+            bindings[items[k].folded] = binding;
+            continue;
         }
         // The declared type resolves in the entity's scope, where the generics that
         // precede this one already carry the value bound at this instance
@@ -5499,7 +5767,7 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         const std::set<std::string> savedImported = m_imported;
         for (const auto& use : entity.uses) importPackage(use.second);
         for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
-        registerGenerics(entity, &bindings, true);
+        registerGenerics(entity.generics, &bindings, true);
         VType declared;
         const bool haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
                               && resolveType(gen.type, declared);
@@ -5542,10 +5810,22 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
     std::string key = entity.name;
     for (const auto& entry : bindings) {
         key += "|" + entry.first + "=";
-        if (entry.second.isInt)
+        if (entry.second.isType) {
+            const VType& type = entry.second.typeValue;
+            key += std::to_string(static_cast<int>(type.kind)) + ":" + std::to_string(type.width)
+                   + ":" + std::to_string(type.left) + ":" + std::to_string(type.right) + ":"
+                   + (type.ascending ? "to" : "downto") + ":"
+                   + std::to_string(static_cast<int>(type.signing));
+        } else if (entry.second.isInt) {
             key += std::to_string(entry.second.intValue);
-        else
+        } else if (entry.second.isString) {
+            key += entry.second.stringValue;
+        } else if (entry.second.subp) {
+            // Unique per actual subprogram declaration within this run
+            key += "subp:" + std::to_string(reinterpret_cast<uintptr_t>(entry.second.subp));
+        } else {
             key += entry.second.valuep->num().ascii(false);
+        }
     }
     auto& cache = m_designp->specializations;
     const auto found = cache.find(key);
@@ -5580,6 +5860,243 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
     return ok ? specp : nullptr;
 }
 
+bool Lowering::resolveTypeActual(const Expr& actual, VType& out) {
+    TypeSpec spec;
+    spec.flp = actual.flp;
+    if (actual.kind == Expr::NAME) {
+        spec.mark = actual.text;
+        return resolveType(spec, out);
+    }
+    if ((actual.kind == Expr::SLICE || actual.kind == Expr::INDEX) && actual.a
+        && actual.a->kind == Expr::NAME) {
+        spec.mark = actual.a->text;
+        if (actual.kind != Expr::SLICE || !actual.b || !actual.c) return false;
+        spec.hasRange = true;
+        spec.ascending = actual.text == "to";
+        spec.left = cloneExpr(*actual.b);
+        spec.right = cloneExpr(*actual.c);
+        return resolveType(spec, out);
+    }
+    return false;
+}
+
+bool Lowering::derivePortBounds(const EntityUnit& entity, const Concurrent& conc,
+                                const PortDecl& port, PortBounds& out) {
+    const std::string& portName = port.names.front().first;
+    int targetIndex = -1;
+    int index = 0;
+    for (const PortDecl& candidate : entity.ports) {
+        for (const auto& name : candidate.names) {
+            if (name.first == portName) targetIndex = index;
+            ++index;
+        }
+    }
+    const bool positional
+        = std::any_of(conc.associations.begin(), conc.associations.end(),
+                      [](const PortAssoc& assoc) { return assoc.formal.empty(); });
+    std::vector<const PortAssoc*> assocs;
+    for (size_t i = 0; i < conc.associations.size(); ++i) {
+        const PortAssoc& assoc = conc.associations[i];
+        if (positional ? static_cast<int>(i) == targetIndex
+                       : assoc.formalSpelling == port.names.front().second) {
+            assocs.push_back(&assoc);
+        }
+    }
+    bool have = false;
+    bool ascending = false;
+    int left = 0;
+    int right = 0;
+    bool ranges = false;
+    bool wholes = false;
+    const auto addBounds = [&](int64_t l, int64_t r, bool asc) -> bool {
+        if (asc != ascending && have) return false;
+        ascending = asc;
+        const int lo = static_cast<int>(std::min(l, r));
+        const int hi = static_cast<int>(std::max(l, r));
+        if (!have) {
+            left = asc ? lo : hi;
+            right = asc ? hi : lo;
+            have = true;
+            return true;
+        }
+        left = asc ? std::min(left, lo) : std::max(left, hi);
+        right = asc ? std::max(right, hi) : std::min(right, lo);
+        return true;
+    };
+    for (const PortAssoc* const assocp : assocs) {
+        if (assocp->hasFormalRange) {
+            int64_t l = 0;
+            int64_t r = 0;
+            if (!staticInt(assocp->formalLeft, l)
+                || (assocp->formalRight && !staticInt(assocp->formalRight, r))) {
+                unsupportedError(assocp->flp, "non-static port association range");
+                return false;
+            }
+            if (!assocp->formalRight) r = l;
+            if (!addBounds(l, r, assocp->formalAscending)) {
+                unsupportedError(assocp->flp, "mixed directions on an unconstrained port");
+                return false;
+            }
+            ranges = true;
+            continue;
+        }
+        if (!assocp->actual) {
+            if (!port.init) {
+                unsupportedError(assocp->flp, "open unconstrained port with no default value");
+                return false;
+            }
+            AstNodeExpr* const valuep = lowerExpr(*port.init, nullptr);
+            if (!valuep) return false;
+            const VType type = typeOfDType(valuep->dtypep());
+            valuep->deleteTree();
+            if (!type.isVector() || !addBounds(type.left, type.right, type.ascending)) {
+                unsupportedError(assocp->flp, "default value of an unconstrained port");
+                return false;
+            }
+            wholes = true;
+            continue;
+        }
+        VType type;
+        if (!typeOfDesignator(*assocp->actual, type)) {
+            AstNodeExpr* const valuep = lowerExpr(*assocp->actual, nullptr);
+            if (!valuep) return false;
+            type = typeOfDType(valuep->dtypep());
+            valuep->deleteTree();
+        }
+        if (!type.isVector() || !addBounds(type.left, type.right, type.ascending)) {
+            unsupportedError(assocp->flp, "actual associated with an unconstrained port");
+            return false;
+        }
+        wholes = true;
+    }
+    if (!have && port.init) {
+        // An omitted input port takes its declared default, whose type fixes the range
+        AstNodeExpr* const valuep = lowerExpr(*port.init, nullptr);
+        if (!valuep) return false;
+        const VType type = typeOfDType(valuep->dtypep());
+        valuep->deleteTree();
+        if (!type.isVector() || !addBounds(type.left, type.right, type.ascending)) {
+            unsupportedError(port.flp, "default value of an unconstrained port");
+            return false;
+        }
+    }
+    if (!have) {
+        unsupportedError(port.flp, "unconstrained port '" + port.names.front().second
+                                       + "' with no association");
+        return false;
+    }
+    if (ranges && wholes) {
+        unsupportedError(port.flp, "mixed whole and part associations of an unconstrained port");
+        return false;
+    }
+    out.left = left;
+    out.right = right;
+    out.ascending = ascending;
+    return true;
+}
+
+bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& conc,
+                                  const PortDecl& port, PortBounds& out) {
+    FileLine* const flp = conc.flp;
+    const std::string& portName = port.names.front().first;
+    int targetIndex = -1;
+    int index = 0;
+    for (const PortDecl& candidate : entity.ports) {
+        for (const auto& name : candidate.names) {
+            if (name.first == portName) targetIndex = index;
+            ++index;
+        }
+    }
+    const bool positional
+        = std::any_of(conc.associations.begin(), conc.associations.end(),
+                      [](const PortAssoc& assoc) { return assoc.formal.empty(); });
+    const PortAssoc* assocp = nullptr;
+    for (size_t i = 0; i < conc.associations.size(); ++i) {
+        const PortAssoc& assoc = conc.associations[i];
+        if (positional ? static_cast<int>(i) == targetIndex
+                       : assoc.formalSpelling == port.names.front().second) {
+            assocp = &assoc;
+        }
+    }
+    if (!assocp || !assocp->actual) {
+        unsupportedError(flp, "unconstrained record port with no whole association");
+        return false;
+    }
+    VType actualType;
+    if (!typeOfDesignator(*assocp->actual, actualType)) {
+        AstNodeExpr* const valuep = lowerExpr(*assocp->actual, nullptr);
+        if (!valuep) return false;
+        actualType = typeOfDType(valuep->dtypep());
+        valuep->deleteTree();
+    }
+    if (actualType.kind != VType::RECORD) {
+        unsupportedError(assocp->flp, "actual of an unconstrained record port is not a record");
+        return false;
+    }
+    // The port's declared record fixes the element order the specialization must follow
+    VType baseType;
+    if (!resolveType(port.type, baseType) || baseType.kind != VType::RECORD) {
+        unsupportedError(port.flp, "unconstrained record port");
+        return false;
+    }
+    out.isRecord = true;
+    for (const VField& base : baseType.fields) {
+        const VField* actualp = nullptr;
+        for (const VField& f : actualType.fields) {
+            if (f.name == base.name) actualp = &f;
+        }
+        if (!actualp || !actualp->type || !actualp->type->isVector()) {
+            unsupportedError(assocp->flp,
+                             "unconstrained record port element has no vector actual");
+            return false;
+        }
+        out.memberNames.push_back(base.name);
+        out.memberLeft.push_back(actualp->type->left);
+        out.memberRight.push_back(actualp->type->right);
+        out.memberAscending.push_back(actualp->type->ascending);
+    }
+    return true;
+}
+
+AstModule* Lowering::specializePortsInstance(const Concurrent& conc, const EntityUnit& entity,
+                                             const PortBoundsMap& portBounds) {
+    FileLine* const flp = conc.flp;
+    std::string key = entity.name + "|ports";
+    for (const auto& entry : portBounds) {
+        const PortBounds& bounds = entry.second;
+        key += "|" + entry.first + "=";
+        if (bounds.isRecord) {
+            for (size_t i = 0; i < bounds.memberNames.size(); ++i) {
+                key += bounds.memberNames[i] + "(" + std::to_string(bounds.memberLeft[i]) + ":"
+                       + std::to_string(bounds.memberRight[i])
+                       + (bounds.memberAscending[i] ? "to" : "downto") + ")";
+            }
+        } else {
+            key += std::to_string(bounds.left) + ":" + std::to_string(bounds.right) + ":"
+                   + (bounds.ascending ? "to" : "downto");
+        }
+    }
+    auto& cache = m_designp->specializations;
+    const auto found = cache.find(key);
+    if (found != cache.end()) return found->second;
+    const auto archIt = m_designp->archs.find(entity.name);
+    if (archIt == m_designp->archs.end()) {
+        flp->v3error("VHDL: entity '" + entity.spelling
+                     + "' has no architecture to specialize for this instance");
+        cache[key] = nullptr;
+        return nullptr;
+    }
+    AstModule* const specp = new AstModule{
+        entity.flp, entity.spelling + "__Vport" + std::to_string(++m_designp->specSeq),
+        entity.libname};
+    specp->inLibrary(entity.inLibrary);
+    m_rootp->addModulesp(specp);
+    Lowering child{m_rootp, m_packagesp, m_modulesp, m_designp};
+    const bool ok = child.emit(entity, *archIt->second, specp, nullptr, &portBounds);
+    cache[key] = ok ? specp : nullptr;
+    return ok ? specp : nullptr;
+}
+
 //! An instantiation becomes an AstCell bound to the instantiated entity's module
 AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
@@ -5608,6 +6125,29 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     if (entityp && !entityp->generics.empty()) {
         modp = specializeInstance(conc, *entityp, modp);
         if (!modp) return nullptr;
+    }
+    if (entityp) {
+        PortBoundsMap portBounds;
+        for (const PortDecl& port : entityp->ports) {
+            const bool unconstrainedRange
+                = !port.type.hasRange && port.type.constraintMark.empty();
+            const bool isRecordPort = unconstrainedRange && !unconstrainedPort(port)
+                                      && m_designp->unconstrainedRecordMarks.count(port.type.mark);
+            if (!unconstrainedPort(port) && !isRecordPort) continue;
+            PortBounds bounds;
+            const bool ok = isRecordPort ? deriveRecordBounds(*entityp, conc, port, bounds)
+                                         : derivePortBounds(*entityp, conc, port, bounds);
+            if (!ok) return nullptr;
+            for (const auto& name : port.names) portBounds[name.first] = bounds;
+        }
+        if (!portBounds.empty()) {
+            if (!entityp->generics.empty()) {
+                unsupportedError(flp, "unconstrained ports on an entity with generics");
+                return nullptr;
+            }
+            modp = specializePortsInstance(conc, *entityp, portBounds);
+            if (!modp) return nullptr;
+        }
     }
     std::vector<AstVar*> ports;
     for (AstNode* const itemp : modp->stmtspList()) {
@@ -5644,9 +6184,25 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                 if (assoc.formalSpelling == portp->name()) assocs.push_back(&assoc);
             }
         }
+        const VType portType = typeOfDType(portp->dtypep());
         if (assocs.empty()) {
-            // Unassociated port: an open pin
-            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), nullptr};
+            // An unassociated input takes its declared default; otherwise it is open
+            AstNodeExpr* defaultp = nullptr;
+            if (entityp && portp->direction().isInput()) {
+                for (const PortDecl& port : entityp->ports) {
+                    if (!port.init) continue;
+                    const bool matches
+                        = std::any_of(port.names.begin(), port.names.end(),
+                                      [&](const std::pair<std::string, std::string>& name) {
+                                          return name.second == portp->name();
+                                      });
+                    if (!matches) continue;
+                    defaultp = lowerExpr(*port.init, &portType);
+                    if (defaultp) defaultp = resizeExpr(defaultp, portType, flp);
+                    break;
+                }
+            }
+            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), defaultp};
             pinp->modVarp(portp);
             pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
             continue;
@@ -5654,7 +6210,6 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         const bool partial
             = std::any_of(assocs.begin(), assocs.end(),
                           [](const PortAssoc* assocp) { return assocp->hasFormalRange; });
-        const VType portType = typeOfDType(portp->dtypep());
         AstNodeExpr* actualp = nullptr;
         if (!partial) {
             // The whole port connects to one actual
@@ -5999,16 +6554,103 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
 //######################################################################
 // Entry point
 
-void lowerPackages(const std::vector<PackageUnit>& packages, AstNetlist* rootp,
-                   PackageTable& table) {
+//! Elaborate a generic-package instance into the table under the instance name.
+void Lowering::instantiatePackage(const std::vector<PackageUnit>& packages,
+                                  const PackageInstance& inst, PackageTable::Impl& table) {
+    const PackageUnit* specp = nullptr;
+    const PackageUnit* bodyp = nullptr;
+    for (const PackageUnit& pkg : packages) {
+        if (pkg.name != inst.baseName) continue;
+        if (pkg.isBody)
+            bodyp = &pkg;
+        else
+            specp = &pkg;
+    }
+    if (!specp) {
+        unsupportedError(inst.flp, "package instantiation of unknown '" + inst.baseName + "'");
+        return;
+    }
+    GenericBindings bindings;
+    const auto freeBindings = [](GenericBindings& bs) {
+        for (auto& entry : bs) {
+            if (entry.second.valuep) entry.second.valuep->deleteTree();
+        }
+    };
+    // Flatten the generics so a positional map can be matched by declaration order
+    struct Item final {
+        const GenericDecl* declp;
+        std::string folded;
+    };
+    std::vector<Item> items;
+    for (const GenericDecl& gen : specp->generics)
+        for (const auto& name : gen.names) items.push_back({&gen, name.first});
+    const std::vector<PortAssoc>& assocs = inst.genericAssociations;
+    const bool positional = std::any_of(assocs.begin(), assocs.end(),
+                                        [](const PortAssoc& a) { return a.formal.empty(); });
+    for (size_t k = 0; k < items.size(); ++k) {
+        const GenericDecl& gen = *items[k].declp;
+        const PortAssoc* assocp = nullptr;
+        if (positional) {
+            if (k < assocs.size()) assocp = &assocs[k];
+        } else {
+            for (const PortAssoc& a : assocs)
+                if (a.formal == items[k].folded) assocp = &a;
+        }
+        if (!assocp) {
+            if (!gen.init) {
+                inst.flp->v3error("VHDL: package generic '" + items[k].folded + "' of '"
+                                  + inst.baseName + "' is not bound in instance '" + inst.spelling
+                                  + "'");
+                freeBindings(bindings);
+                return;
+            }
+            continue;  // The generic keeps its own default value
+        }
+        if (!assocp->actual) {
+            assocp->flp->v3error("VHDL: 'open' is not allowed on a package generic association");
+            freeBindings(bindings);
+            return;
+        }
+        if (gen.isSubprogram) {
+            // Packages are lowered without an instantiation scope, so the actual subprogram
+            // (which lives in the caller) cannot be resolved here
+            unsupportedError(assocp->flp, "generic subprogram parameter on a package");
+            freeBindings(bindings);
+            return;
+        }
+        GenericBinding binding;
+        if (gen.isType) {
+            binding.isType = true;
+            if (!resolveTypeActual(*assocp->actual, binding.typeValue)) {
+                unsupportedError(assocp->flp, "generic type actual");
+                freeBindings(bindings);
+                return;
+            }
+        } else if (!evalInt(*assocp->actual, binding.intValue)) {
+            unsupportedError(assocp->flp, "package generic actual that is not static");
+            freeBindings(bindings);
+            return;
+        } else {
+            binding.isInt = true;
+        }
+        bindings[items[k].folded] = binding;
+    }
+    // Publish the spec and body under the instance name, with the generics bound
+    emitPackage(*specp, table, &bindings, inst.name);
+    if (bodyp) emitPackage(*bodyp, table, &bindings, inst.name);
+    freeBindings(bindings);
+}
+
+void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable& table) {
     Lowering lowering{rootp};
-    // Specifications first: a body completes the constants its spec declared
-    for (const PackageUnit& pkg : packages) {
-        if (!pkg.isBody) lowering.emitPackage(pkg, table.impl());
-    }
-    for (const PackageUnit& pkg : packages) {
-        if (pkg.isBody) lowering.emitPackage(pkg, table.impl());
-    }
+    // A package that declares generics is a template: elaborate only its instances.
+    const auto isTemplate = [](const PackageUnit& pkg) { return !pkg.generics.empty(); };
+    for (const PackageUnit& pkg : library.packages)
+        if (!pkg.isBody && !isTemplate(pkg)) lowering.emitPackage(pkg, table.impl());
+    for (const PackageUnit& pkg : library.packages)
+        if (pkg.isBody && !isTemplate(pkg)) lowering.emitPackage(pkg, table.impl());
+    for (const PackageInstance& inst : library.packageInstances)
+        lowering.instantiatePackage(library.packages, inst, table.impl());
 }
 
 //! The netlist the modules belong to, for the dtype table
