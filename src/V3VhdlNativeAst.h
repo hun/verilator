@@ -147,6 +147,7 @@ struct Expr final {
         AGG_OTHERS,  // a=value
         AGG_POSITIONAL,  // args=element values, leftmost index first
         AGG_NAMED,  // args=values, choices=one choice list per value
+        UNAFFECTED,  // `unaffected`: a waveform that leaves the assignment target unchanged
     } kind;
     FileLine* flp = nullptr;
     std::string text;  // Name/operator, folded
@@ -189,6 +190,9 @@ struct Stmt final {
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/VAR_ASSIGN
     ExprP value;  // ASSIGN/VAR_ASSIGN/RETURN; CALL: the call expression
+    // ASSIGN/VAR_ASSIGN: a conditional waveform `v1 when c1 else ... vN`; empty for a
+    // plain assignment. (value, condition); a null condition marks the trailing else.
+    std::vector<std::pair<ExprP, ExprP>> alternatives;
     // IF: (condition, body); a null condition marks the final else
     std::vector<std::pair<ExprP, std::vector<StmtP>>> branches;
     ExprP selector;  // CASE: the case expression

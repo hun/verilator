@@ -233,6 +233,8 @@ class Parser final {
     void parseProcess(Architecture& arch, FileLine* flp);
     std::vector<StmtP> parseStmtList(bool stopAtElse);
     StmtP parseSequentialStatement();
+    ExprP parseWaveformValue();
+    bool parseConditionalTail(Stmt& stmt, bool allowUnaffected);
     StmtP parseIf(FileLine* flp);
     StmtP parseCase(FileLine* flp);
     StmtP parseFor(FileLine* flp);
@@ -2333,8 +2335,9 @@ StmtP Parser::parseSequentialStatement() {
         stmt->target = std::move(target);
         stmt->value = parseExpr();
         if (!stmt->value) return nullptr;
-        if (isId("when") || isId("after")) {
-            unsupported("conditional or delayed variable assignment");
+        if (isId("when") && !parseConditionalTail(*stmt, false)) return nullptr;
+        if (isId("after")) {
+            unsupported("delayed variable assignment ('after')");
             return nullptr;
         }
         expectSym(";");
@@ -2354,14 +2357,51 @@ StmtP Parser::parseSequentialStatement() {
     auto stmt = std::make_unique<Stmt>(Stmt::ASSIGN);
     stmt->flp = flp;
     stmt->target = std::move(target);
-    stmt->value = parseExpr();
+    stmt->value = parseWaveformValue();
     if (!stmt->value) return nullptr;
-    if (isId("after") || isId("when")) {
-        unsupported("conditional or delayed signal assignment in a process");
+    if (isId("when") && !parseConditionalTail(*stmt, true)) return nullptr;
+    if (isId("after")) {
+        unsupported("delayed signal assignment ('after')");
         return nullptr;
     }
     expectSym(";");
     return stmt;
+}
+
+ExprP Parser::parseWaveformValue() {
+    if (isId("unaffected")) {
+        auto expr = std::make_unique<Expr>(Expr::UNAFFECTED);
+        expr->flp = m_cur.flp;
+        advance();
+        return expr;
+    }
+    return parseExpr();
+}
+
+bool Parser::parseConditionalTail(Stmt& stmt, bool allowUnaffected) {
+    // stmt.value holds the first waveform value and m_cur is the following 'when'.
+    ExprP value = std::move(stmt.value);
+    std::vector<std::pair<ExprP, ExprP>> alternatives;
+    while (isId("when")) {
+        advance();
+        ExprP cond = parseExpr();
+        if (!cond) return false;
+        alternatives.emplace_back(std::move(value), std::move(cond));
+        if (acceptId("else")) {
+            value = allowUnaffected ? parseWaveformValue() : parseExpr();
+            if (!value) return false;
+            continue;
+        }
+        // With no trailing 'else', the target keeps its current value (`unaffected`)
+        auto keep = std::make_unique<Expr>(Expr::UNAFFECTED);
+        keep->flp = m_cur.flp;
+        value = std::move(keep);
+        break;
+    }
+    alternatives.emplace_back(std::move(value), nullptr);
+    stmt.alternatives = std::move(alternatives);
+    stmt.value = nullptr;
+    return true;
 }
 
 StmtP Parser::parseIf(FileLine* flp) {

@@ -599,10 +599,10 @@ class Lowering final {
                 basep = basep->a.get();
             }
             if (basep && basep->kind == Expr::NAME) {
-                if (stmt.target->kind == Expr::NAME) {
+                if (stmt.target->kind == Expr::NAME && stmt.value) {
                     m_varVals[basep->text] = substVars(*stmt.value);
                 } else {
-                    m_varVals.erase(basep->text);  // Partial write: the value is unknown
+                    m_varVals.erase(basep->text);  // Partial or conditional write: unknown
                 }
             }
             return;
@@ -751,6 +751,11 @@ class Lowering final {
     AstNode* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin, std::size_t end);
     AstNode* lowerIf(const Stmt& stmt);
     AstNode* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
+    //! A sequential conditional assignment `v1 when c1 else ... vN` as a value expression;
+    //! targetReadp supplies the value for an `unaffected` waveform (a read of the target)
+    AstNodeExpr* lowerConditionalChain(FileLine* flp,
+                                       const std::vector<std::pair<ExprP, ExprP>>& alternatives,
+                                       const VType& type, AstNodeExpr* targetReadp);
     //! Split `(a, b) <= value` into one assignment per target, leftmost most significant
     AstNode* lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
                                   bool variable, bool concurrentProc);
@@ -3893,6 +3898,10 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable || m_initial,
                                     m_concurrentProc);
     }
+    // A bare `x <= unaffected;` leaves the target unchanged, so emit nothing
+    if (stmt.alternatives.empty() && stmt.value && stmt.value->kind == Expr::UNAFFECTED) {
+        return nullptr;
+    }
     AstNodeExpr* lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return nullptr;
     if (!concurrent && !variable && writesInoutPort(lhsp)) {
@@ -3901,12 +3910,20 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         return nullptr;
     }
     const VType ltype = typeOfTarget(*stmt.target, lhsp);
-    AstNodeExpr* rhsp = lowerExpr(*stmt.value, &ltype);
+    AstNodeExpr* rhsp = nullptr;
+    if (!stmt.alternatives.empty()) {
+        // `unaffected` means the target's current value, so offer a read of the target
+        AstNodeExpr* const targetReadp = lowerDesignator(*stmt.target, false);
+        rhsp = lowerConditionalChain(stmt.flp, stmt.alternatives, ltype, targetReadp);
+        if (targetReadp) targetReadp->deleteTree();
+    } else {
+        rhsp = lowerExpr(*stmt.value, &ltype);
+        if (rhsp) rhsp = resizeExpr(rhsp, ltype, stmt.flp);
+    }
     if (!rhsp) {
         lhsp->deleteTree();
         return nullptr;
     }
-    rhsp = resizeExpr(rhsp, ltype, stmt.flp);
     // A concurrent procedure call drives its signal actuals as continuous assignments
     if (m_concurrentProc) {
         return new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
@@ -3915,6 +3932,54 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
     // Only variable assignments update immediately; a signal write is nonblocking
     if (variable || m_initial) return new AstAssign{stmt.flp, lhsp, rhsp};
     return new AstAssignDly{stmt.flp, lhsp, rhsp};
+}
+
+AstNodeExpr*
+Lowering::lowerConditionalChain(FileLine* flp,
+                                const std::vector<std::pair<ExprP, ExprP>>& alternatives,
+                                const VType& type, AstNodeExpr* targetReadp) {
+    AstNodeExpr* restp = nullptr;  // Value when no condition holds
+    for (std::size_t i = alternatives.size(); i-- > 0;) {
+        const auto& alt = alternatives[i];
+        AstNodeExpr* valuep = nullptr;
+        if (alt.first->kind == Expr::UNAFFECTED) {
+            if (!targetReadp) {
+                unsupportedError(flp, "'unaffected' assignment to a variable");
+                if (restp) restp->deleteTree();
+                return nullptr;
+            }
+            valuep = static_cast<AstNodeExpr*>(targetReadp->cloneTree(false));
+        } else {
+            valuep = lowerExpr(*alt.first, &type);
+            if (!valuep) {
+                if (restp) restp->deleteTree();
+                return nullptr;
+            }
+            valuep = resizeExpr(valuep, type, flp);
+        }
+        if (!alt.second) {
+            if (restp) restp->deleteTree();
+            restp = valuep;
+            continue;
+        }
+        AstNodeExpr* const condp = lowerExpr(*alt.second, nullptr);
+        if (!condp) {
+            valuep->deleteTree();
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        if (condp->width() != 1) {
+            condp->v3error("VHDL: condition is not a 1-bit value");
+            condp->deleteTree();
+            valuep->deleteTree();
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        AstCond* const condexprp = new AstCond{flp, condp, valuep, restp};
+        condexprp->dtypep(type.dtp);
+        restp = condexprp;
+    }
+    return restp;
 }
 
 AstNode* Lowering::lowerIf(const Stmt& stmt) {
@@ -4804,6 +4869,11 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
     for (std::size_t i = index; i < stmts.size(); ++i) {
         const Stmt& stmt = *stmts[i];
         FileLine* const flp = stmt.flp;
+        // A conditional waveform cannot be folded to a single value here; lower it at run time
+        if ((stmt.kind == Stmt::ASSIGN || stmt.kind == Stmt::VAR_ASSIGN)
+            && !stmt.alternatives.empty()) {
+            return nullptr;
+        }
         if (stmt.kind == Stmt::VAR_ASSIGN) {
             const Expr& target = *stmt.target;
             if (target.kind == Expr::NAME) {
