@@ -1780,6 +1780,23 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     const bool logical
         = op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor" || op == "xnor";
     if (logical) {
+        // IEEE 1164 and the predefined operators define and/or/xor/... between a vector and
+        // a single scalar bit, applying the scalar to every element: replicate it to width.
+        if (lt.isVector() != rt.isVector()) {
+            const bool lhsVector = lt.isVector();
+            AstNodeExpr*& scalarp = lhsVector ? rp : lp;
+            VType& scalarType = lhsVector ? rt : lt;
+            const VType& vecT = lhsVector ? lt : rt;
+            const bool scalarBit = scalarType.kind == VType::BIT;
+            const bool vectorBit = vecT.kwd == VBasicDTypeKwd::BIT;
+            if (scalarType.width == 1 && scalarBit == vectorBit) {
+                AstNodeExpr* const replp
+                    = new AstReplicate{flp, scalarp, static_cast<uint32_t>(vecT.width)};
+                replp->dtypep(vecT.dtp);
+                scalarp = replp;
+                scalarType = vecT;
+            }
+        }
         if (lt.width != rt.width || lt.kind != rt.kind) {
             unsupportedError(flp, "logical operation on operands of different types");
             lp->deleteTree();
