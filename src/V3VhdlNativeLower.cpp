@@ -2378,16 +2378,17 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         elemType.dtp = findBasic(flp, baseType.kwd);
     }
     const int elemWidth = baseType.elemWidth;
-    // An index expression that is an attribute ('range) names the prefix's own bounds
-    const Expr* rangep = nullptr;
-    if (expr.kind == Expr::INDEX && expr.args.size() == 1 && expr.args[0]->kind == Expr::ATTR) {
-        rangep = expr.args[0].get();
-    } else if (expr.kind == Expr::SLICE && expr.b && expr.b->kind == Expr::ATTR) {
-        rangep = expr.b.get();
-    }
+    // Only `prefix'range` is a slice by the prefix's own bounds. Any other attribute used
+    // as an index (`v(x'high)`) or slice bound (`v(x'high downto 0)`) lowers as an expression
+    const auto rangeAttr = [](const ExprP& e) -> const Expr* {
+        return e && e->kind == Expr::ATTR && e->text == "range" ? e.get() : nullptr;
+    };
+    const Expr* rangep = expr.kind == Expr::INDEX && expr.args.size() == 1
+                             ? rangeAttr(expr.args[0])
+                             : rangeAttr(expr.b);
     if (rangep) {
-        if (rangep->text != "range" || !rangep->a || rangep->a->kind != Expr::NAME) {
-            unsupportedError(flp, "attribute '" + rangep->text + "' as an index");
+        if (!rangep->a || rangep->a->kind != Expr::NAME) {
+            unsupportedError(flp, "'range of a non-name prefix");
             basep->deleteTree();
             return nullptr;
         }
