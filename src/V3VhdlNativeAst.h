@@ -127,6 +127,7 @@ struct Expr final {
     enum Kind : uint8_t {
         INT_LIT,  // intValue
         REAL_LIT,  // realValue
+        PHYS_LIT,  // intValue: a physical literal scaled to the type's step unit
         BITS_LIT,  // bits
         STRING_LIT,  // spelling: a string value that is not a bit-vector literal
         CHAR_LIT,  // charValue

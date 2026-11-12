@@ -268,6 +268,16 @@ class Lowering final {
         type.dtp = findBasic(flp, VBasicDTypeKwd::INT);
         return type;
     }
+    VType timeType(FileLine* flp) const {
+        // A physical type has no modelled delay here, so it is a 64-bit count of the step
+        // unit (femtoseconds for 'time'); 64 bits are needed for values like 2 sec = 2e15 fs
+        VType type;
+        type.kind = VType::INT;
+        type.width = 64;
+        type.kwd = VBasicDTypeKwd::LONGINT;
+        type.dtp = findBasic(flp, VBasicDTypeKwd::LONGINT);
+        return type;
+    }
     VType logicType(FileLine* flp) const {
         VType type;
         type.kind = VType::LOGIC;
@@ -284,7 +294,8 @@ class Lowering final {
             return type;
         }
         type.kwd = basicp->keyword();
-        if (basicp->keyword() == VBasicDTypeKwd::INT) {
+        if (basicp->keyword() == VBasicDTypeKwd::INT
+            || basicp->keyword() == VBasicDTypeKwd::LONGINT) {
             type.kind = VType::INT;
         } else if (basicp->isRanged()) {
             // A ranged width-1 dtype is a one-element vector, not a scalar
@@ -302,6 +313,14 @@ class Lowering final {
     AstConst* makeIntConst(FileLine* flp, int64_t value) const {
         const VType type = intType(flp);
         V3Number num{flp, type.width, static_cast<uint32_t>(value)};
+        AstConst* const constp = new AstConst{flp, num};
+        constp->dtypep(type.dtp);
+        return constp;
+    }
+    AstConst* makeTimeConst(FileLine* flp, int64_t value) const {
+        const VType type = timeType(flp);
+        V3Number num{flp, type.width, static_cast<uint32_t>(value)};
+        num.setQuad(static_cast<uint64_t>(value));
         AstConst* const constp = new AstConst{flp, num};
         constp->dtypep(type.dtp);
         return constp;
@@ -726,7 +745,8 @@ public:
 
 bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     switch (expr.kind) {
-    case Expr::INT_LIT: value = expr.intValue; return true;
+    case Expr::INT_LIT:
+    case Expr::PHYS_LIT: value = expr.intValue; return true;
     case Expr::REAL_LIT:
         // A universal_real in an integer context, IEEE 1800-2023 7.3.5
         if (std::isfinite(expr.realValue) && expr.realValue == std::floor(expr.realValue)) {
@@ -920,7 +940,8 @@ bool Lowering::staticIntFold(const ExprP& exprp, int64_t& value) {
 
 bool Lowering::evalReal(const Expr& expr, double& value) const {
     switch (expr.kind) {
-    case Expr::INT_LIT: value = static_cast<double>(expr.intValue); return true;
+    case Expr::INT_LIT:
+    case Expr::PHYS_LIT: value = static_cast<double>(expr.intValue); return true;
     case Expr::REAL_LIT: value = expr.realValue; return true;
     case Expr::NAME: {
         int64_t intValue = 0;
@@ -1333,6 +1354,10 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         out.intHigh = mark == "integer" ? 0x7fffffff : 0x7fffffff;
         return applyRange(spec, out);
     }
+    if (mark == "time") {
+        out = timeType(flp);
+        return true;
+    }
     const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
                             || mark == "bit_vector" || mark == "unsigned" || mark == "signed";
     if (!vectorMark) {
@@ -1379,6 +1404,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     switch (expr.kind) {
     case Expr::INT_LIT: return makeIntConst(flp, expr.intValue);
+    case Expr::PHYS_LIT: return makeTimeConst(flp, expr.intValue);
     case Expr::REAL_LIT: unsupportedError(flp, "real value in this context"); return nullptr;
     case Expr::TRUE_LIT: return bitConst(flp, '1');
     case Expr::FALSE_LIT: return bitConst(flp, '0');

@@ -28,6 +28,7 @@
 #include "V3Global.h"
 #include "V3VhdlNativeAst.h"
 
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -400,9 +401,29 @@ ExprP Parser::parsePrimary() {
         advance();
         if ((node->kind == Expr::INT_LIT || node->kind == Expr::REAL_LIT)
             && (isId("fs") || isId("ps") || isId("ns") || isId("us") || isId("ms")
-                || isId("sec"))) {  // IEEE 1800-2023 5.2.5 physical literal
-            unsupported("physical literal");
-            return nullptr;
+                || isId("sec"))) {  // a VHDL physical literal: <numeric> <unit>
+            // 'time''s step unit is femtoseconds, so the value is the numeric part scaled
+            // by the named unit; the result needs 64 bits (2 sec is 2e15 fs).
+            double scale = 0;
+            if (isId("fs")) {
+                scale = 1e0;
+            } else if (isId("ps")) {
+                scale = 1e3;
+            } else if (isId("ns")) {
+                scale = 1e6;
+            } else if (isId("us")) {
+                scale = 1e9;
+            } else if (isId("ms")) {
+                scale = 1e12;
+            } else {
+                scale = 1e15;  // sec
+            }
+            const double numeric
+                = node->kind == Expr::INT_LIT ? static_cast<double>(node->intValue)
+                                              : node->realValue;
+            node->kind = Expr::PHYS_LIT;
+            node->intValue = std::llround(numeric * scale);
+            advance();  // Consume the unit identifier
         }
         return node;
     }
