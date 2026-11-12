@@ -3537,6 +3537,16 @@ AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const
     return headp;
 }
 
+//! Whether an assignment target writes an entity inout port: synthesis models those
+//! only through V3Tristate/V3Inst, so a direct assignment reaches DFG as a non-read reference
+static bool writesInoutPort(AstNodeExpr* const lhsp) {
+    bool inoutPort = false;
+    lhsp->foreach([&](AstVarRef* const refp) {
+        if (refp->varp()->isIO() && refp->varp()->direction().isInout()) inoutPort = true;
+    });
+    return inoutPort;
+}
+
 AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
     if (stmt.target->kind == Expr::AGG_POSITIONAL || stmt.target->kind == Expr::AGG_NAMED) {
         return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable || m_initial,
@@ -3544,18 +3554,10 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
     }
     AstNodeExpr* lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return nullptr;
-    if (!concurrent && !variable) {
-        // V3Tristate/V3Inst model inout ports as continuously driven; a procedural
-        // assignment would reach DFG as a non-read reference
-        bool inoutPort = false;
-        lhsp->foreach([&](AstVarRef* refp) {
-            if (refp->varp()->isIO() && refp->varp()->direction().isInout()) inoutPort = true;
-        });
-        if (inoutPort) {
-            unsupportedError(stmt.flp, "procedural assignment to an inout port");
-            lhsp->deleteTree();
-            return nullptr;
-        }
+    if (!concurrent && !variable && writesInoutPort(lhsp)) {
+        unsupportedError(stmt.flp, "procedural assignment to an inout port");
+        lhsp->deleteTree();
+        return nullptr;
     }
     const VType ltype = typeOfTarget(*stmt.target, lhsp);
     AstNodeExpr* rhsp = lowerExpr(*stmt.value, &ltype);
@@ -6510,6 +6512,11 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
     }
     AstNodeExpr* const lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return;
+    if (writesInoutPort(lhsp)) {
+        unsupportedError(stmt.flp, "concurrent assignment to an inout port");
+        lhsp->deleteTree();
+        return;
+    }
     const VType ltype = typeOfTarget(*stmt.target, lhsp);
     if (stmt.kind == Concurrent::COND_ASSIGN && concHasEdge(stmt)) {
         // Register clocked by the edge the condition names

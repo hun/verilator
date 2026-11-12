@@ -11,7 +11,8 @@ entity top_inout is
   port (
     clk : in std_logic;
     d : in std_logic;
-    q : inout std_logic
+    q : inout std_logic;
+    q2 : inout std_logic
   );
 end;
 
@@ -24,4 +25,7 @@ begin
       q <= d;
     end if;
   end process;
+
+  -- Concurrently driving an inout port is likewise not modelled
+  q2 <= d;
 end;
