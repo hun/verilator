@@ -6491,11 +6491,32 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         // A generate loop is unrolled with its parameter bound as a constant
         int64_t left = 0;
         int64_t right = 0;
-        if (!staticInt(stmt.lo, left) || !staticInt(stmt.hi, right)) {
+        bool up = stmt.rangeAscending;
+        // `for i in obj'range generate` iterates the object's own bounds, which come from
+        // its type just as a `prefix'range` slice does
+        const Expr* const rangep = !stmt.hi && stmt.lo && stmt.lo->kind == Expr::ATTR
+                                           && (stmt.lo->text == "range"
+                                               || stmt.lo->text == "reverse_range")
+                                       ? stmt.lo.get()
+                                       : nullptr;
+        if (rangep) {
+            if (!rangep->a || rangep->a->kind != Expr::NAME) {
+                unsupportedError(stmt.flp, "generate over 'range of a non-name prefix");
+                return;
+            }
+            const VType* const rangeTypep = typeOfName(*rangep->a);
+            if (!rangeTypep) {
+                unsupportedError(stmt.flp, "generate over 'range of an unknown name");
+                return;
+            }
+            const bool reverse = rangep->text == "reverse_range";
+            left = reverse ? rangeTypep->right : rangeTypep->left;
+            right = reverse ? rangeTypep->left : rangeTypep->right;
+            up = reverse ? !rangeTypep->ascending : rangeTypep->ascending;
+        } else if (!staticInt(stmt.lo, left) || !staticInt(stmt.hi, right)) {
             unsupportedError(stmt.flp, "generate range that is not static");
             return;
         }
-        const bool up = stmt.rangeAscending;
         if (up ? right < left : right > left) return;  // Empty range
         if (std::llabs(right - left) > 4096) {
             unsupportedError(stmt.flp, "generate range with more than 4096 iterations");
