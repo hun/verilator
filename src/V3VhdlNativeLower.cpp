@@ -2785,6 +2785,7 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
     // The prefix is either a declared name or a type mark
     const VType* typep = typeOfName(*expr.a);
     bool typeMark = false;
+    VType resolved;
     if (!typep) {
         const auto typeIt = m_types.find(expr.a->text);
         if (typeIt != m_types.end()) {
@@ -2792,8 +2793,49 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
             typeMark = true;
         }
     }
+    if (!typep && expr.a->text == "character") {
+        // `character` is a predefined type the frontend models directly rather than
+        // as a declared entry in m_types; resolve it so its attributes reach below
+        TypeSpec spec;
+        spec.flp = flp;
+        spec.mark = expr.a->text;
+        if (resolveType(spec, resolved)) {
+            typep = &resolved;
+            typeMark = true;
+        }
+    }
     if (!typep) {
         unsupportedError(flp, "attribute '" + attribute + "' of an unresolved name");
+        return nullptr;
+    }
+    // Discrete-type attributes of the predefined `character` type. It is an 8-bit
+    // unsigned code, so a value's position and code coincide; succ/pred step the
+    // code and wrap at 255 back to 0.
+    if (typeMark && expr.a->text == "character") {
+        if (attribute == "pos" || attribute == "val" || attribute == "succ"
+            || attribute == "pred") {
+            if (expr.args.size() != 1) {
+                unsupportedError(flp,
+                                 "character attribute '" + attribute + "' without one argument");
+                return nullptr;
+            }
+            AstNodeExpr* const argp = lowerExpr(*expr.args[0], typep);
+            if (!argp) return nullptr;
+            if (attribute == "pos") return resizeExpr(argp, intType(flp), flp);
+            if (attribute == "val") return resizeExpr(argp, *typep, flp);
+            AstNodeExpr* const onep = makeVectorConst(flp, *typep, 1);
+            AstNodeExpr* const basep = resizeExpr(argp, *typep, flp);
+            AstNodeExpr* const resultp
+                = attribute == "succ" ? static_cast<AstNodeExpr*>(new AstAdd{flp, basep, onep})
+                                      : static_cast<AstNodeExpr*>(new AstSub{flp, basep, onep});
+            resultp->dtypep(typep->dtp);
+            return resultp;
+        }
+        if (attribute == "left" || attribute == "low") return makeIntConst(flp, 0);
+        if (attribute == "right" || attribute == "high") return makeIntConst(flp, 255);
+        if (attribute == "length") return makeIntConst(flp, 256);
+        if (attribute == "ascending") return bitConst(flp, '1');
+        unsupportedError(flp, "character attribute '" + attribute + "'");
         return nullptr;
     }
     if (typep->kind == VType::ENUM) {
