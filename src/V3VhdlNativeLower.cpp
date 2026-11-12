@@ -350,6 +350,25 @@ class Lowering final {
         constp->dtypep(type.dtp);
         return constp;
     }
+    //! Constant from a character string: an unsigned vector of 8-bit codes with the
+    //! first character in the most significant byte, matching a string generic's layout
+    AstConst* makeStringConst(FileLine* flp, const std::string& text) const {
+        const int length = static_cast<int>(text.size());
+        const int width = 8 * length;
+        AstNodeDType* const dtp
+            = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width);
+        V3Number num{flp, width, 0u};
+        for (int i = 0; i < length; ++i) {
+            const unsigned char code = static_cast<unsigned char>(text[static_cast<size_t>(i)]);
+            const int base = (length - 1 - i) * 8;
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((code >> bit) & 1U) num.setBit(base + bit, '1');
+            }
+        }
+        AstConst* const constp = new AstConst{flp, num};
+        constp->dtypep(dtp);
+        return constp;
+    }
     AstNodeExpr* bitConst(FileLine* flp, char bit) const {
         return makeBitsConst(flp, findBasic(flp, VBasicDTypeKwd::LOGIC), std::string(1, bit));
     }
@@ -1383,9 +1402,18 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         return true;
     }
     if (mark == "string") {
-        // An unconstrained array of character; a use supplies its range
-        out = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 0);
-        if (spec.hasRange) return applyRange(spec, out);
+        // A string is an array of 8-bit character; a use supplies the index range,
+        // which `applyRange` turns into an 8-bit-per-element packed vector
+        out.kind = VType::ARRAY;
+        out.elemp = std::make_shared<VType>(
+            vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
+        out.elemWidth = 8;
+        out.kwd = VBasicDTypeKwd::LOGIC;
+        out.signing = VSigning::UNSIGNED;
+        out.width = 0;
+        out.left = 0;
+        out.right = 0;
+        if (spec.hasRange || !spec.constraintMark.empty()) return applyRange(spec, out);
         return true;
     }
     if (mark == "std_logic" || mark == "std_ulogic" || mark == "bit" || mark == "boolean") {
@@ -1628,7 +1656,16 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         operandp->deleteTree();
         return nullptr;
     }
-    case Expr::STRING_LIT: unsupportedError(flp, "string value in an expression"); return nullptr;
+    case Expr::STRING_LIT: {
+        // A string literal is an array of character; pack it as an unsigned vector
+        // of 8-bit codes, first character most significant, matching a string
+        // generic so assignments and comparisons line up without a known target.
+        if (expr.spelling.empty()) {
+            unsupportedError(flp, "empty string literal");
+            return nullptr;
+        }
+        return makeStringConst(flp, expr.spelling);
+    }
     case Expr::BINARY: return lowerBinary(expr, context);
     case Expr::INDEX:
         if (expr.a && expr.a->kind == Expr::NAME) {
@@ -1702,9 +1739,28 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
 AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
-    AstNodeExpr* lp = lowerExpr(*expr.a, nullptr);
-    if (!lp) return nullptr;
-    AstNodeExpr* rp = lowerExpr(*expr.b, nullptr);
+    // Lower the side that is not a bare character literal first; a bare character
+    // literal in the other slot then adopts that operand's type, so `inp >= 'a'`
+    // compares character codes instead of mistaking `'a'` for a logic value.
+    AstNodeExpr* lp = nullptr;
+    AstNodeExpr* rp = nullptr;
+    const bool aChar = expr.a && expr.a->kind == Expr::CHAR_LIT;
+    const bool bChar = expr.b && expr.b->kind == Expr::CHAR_LIT;
+    if (bChar && !aChar) {
+        lp = lowerExpr(*expr.a, nullptr);
+        if (!lp) return nullptr;
+        const VType lctx = typeOfDType(lp->dtypep());
+        rp = lowerExpr(*expr.b, &lctx);
+    } else if (aChar && !bChar) {
+        rp = lowerExpr(*expr.b, nullptr);
+        if (!rp) return nullptr;
+        const VType rctx = typeOfDType(rp->dtypep());
+        lp = lowerExpr(*expr.a, &rctx);
+    } else {
+        lp = lowerExpr(*expr.a, nullptr);
+        if (!lp) return nullptr;
+        rp = lowerExpr(*expr.b, nullptr);
+    }
     if (!rp) {
         lp->deleteTree();
         return nullptr;
@@ -5428,17 +5484,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
         m_modp->addStmtsp(varp);
         m_scope[folded] = VarInfo{varp, type};
         m_variables.insert(folded);
-        V3Number num{flp, type.width, 0u};
-        const int length = static_cast<int>(text.size());
-        for (int i = 0; i < length; ++i) {
-            const unsigned char code = static_cast<unsigned char>(text[static_cast<size_t>(i)]);
-            const int base = (length - 1 - i) * 8;
-            for (int bit = 0; bit < 8; ++bit) {
-                if ((code >> bit) & 1U) num.setBit(base + bit, '1');
-            }
-        }
-        AstConst* const valuep = new AstConst{flp, num};
-        valuep->dtypep(type.dtp);
+        AstConst* const valuep = makeStringConst(flp, text);
         m_modp->addStmtsp(new AstInitialStatic{
             flp, new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, valuep}});
     };
