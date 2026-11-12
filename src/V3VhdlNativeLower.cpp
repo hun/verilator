@@ -192,6 +192,14 @@ class Lowering final {
     };
     std::vector<Edge> m_edges;  // Clock edges collected while lowering a process
     bool m_initial = false;  // Emitting the time-zero evaluation
+    //! The process has one sensitivity signal, so it runs on every event of that signal
+    //! and an edge call is that signal's level rather than a constant
+    bool m_edgeAsLevel = false;
+    //! The process has several sensitivity signals, so an edge call must compare the
+    //! signal with its value at the previous run of the process
+    bool m_edgeAsPrev = false;
+    std::map<AstVar*, AstVar*> m_edgePrevVars;  // Edge signal -> its previous value
+    int m_edgeSeq = 0;  // Disambiguates the previous-value variables
     //! Active loop, with the flags its exit/next conditions latch
     struct LoopFrame final {
         AstVar* exitp = nullptr;  // Set when an exit condition fired
@@ -591,6 +599,9 @@ class Lowering final {
     AstNode* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin, std::size_t end);
     AstNode* lowerIf(const Stmt& stmt);
     AstNode* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
+    //! Split `(a, b) <= value` into one assignment per target, leftmost most significant
+    AstNode* lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
+                                  bool variable, bool concurrentProc);
     void lowerProcess(const Process& process);
     void registerSubprograms(const std::vector<SubprogramDecl>& decls, int frame,
                              bool processLocal = false);
@@ -1877,12 +1888,49 @@ AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
         flp->v3error("VHDL: unknown signal '" + expr.args[0]->spelling + "' in an edge function");
         return nullptr;
     }
+    const bool rising = expr.a->text == "rising_edge";
     Edge edge;
     edge.varp = varp;
-    edge.type = expr.a->text == "rising_edge" ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
+    edge.type = rising ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
     m_edges.push_back(edge);
-    // The sensitivity item supplies the edge; at time zero no signal has had an event
-    return bitConst(flp, m_initial ? '0' : '1');
+    // At time zero no signal has had an event
+    if (m_initial) return bitConst(flp, '0');
+    // With one sensitivity signal the always is change sensitive and runs on both
+    // edges, so the edge call is the signal's level
+    if (m_edgeAsLevel) return edgeLevel(flp, varp, rising);
+    // With several sensitivity signals the always runs for any of them, so the edge
+    // call must check that this signal itself changed since the previous run
+    if (m_edgeAsPrev) return edgeFromChanged(flp, varp, rising);
+    // Otherwise the sensitivity item supplies the edge
+    return bitConst(flp, '1');
+}
+
+AstNodeExpr* Lowering::edgeLevel(FileLine* flp, AstVar* varp, bool rising) {
+    AstNodeExpr* const refp = new AstVarRef{flp, varp, VAccess::READ};
+    if (rising) return refp;
+    AstNot* const notp = new AstNot{flp, refp};
+    notp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    return notp;
+}
+
+AstNodeExpr* Lowering::edgeChanged(FileLine* flp, AstVar* varp) {
+    AstVar*& prevp = m_edgePrevVars[varp];
+    if (!prevp) {
+        const std::string name = "vhdledge_" + std::to_string(++m_edgeSeq) + "__" + varp->name();
+        prevp = new AstVar{flp, VVarType::VAR, name, varp->dtypep()};
+        m_modp->addStmtsp(prevp);
+    }
+    AstNodeExpr* const changedp = new AstNeq{flp, new AstVarRef{flp, varp, VAccess::READ},
+                                             new AstVarRef{flp, prevp, VAccess::READ}};
+    changedp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    return changedp;
+}
+
+AstNodeExpr* Lowering::edgeFromChanged(FileLine* flp, AstVar* varp, bool rising) {
+    AstNodeExpr* const andp
+        = new AstAnd{flp, edgeChanged(flp, varp), edgeLevel(flp, varp, rising)};
+    andp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    return andp;
 }
 
 //! The remainder operator, signed or unsigned
@@ -2399,7 +2447,10 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
             edge.varp = varp;
             edge.type = level == '1' ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE;
             m_edges.push_back(edge);
-            return bitConst(flp, m_initial ? '0' : '1');
+            if (m_initial) return bitConst(flp, '0');
+            if (m_edgeAsLevel) return edgeLevel(flp, varp, level == '1');
+            if (m_edgeAsPrev) return edgeChanged(flp, varp);
+            return bitConst(flp, '1');
         }
     }
     if (expr.kind == Expr::INDEX && expr.a && expr.a->kind == Expr::NAME
@@ -2813,6 +2864,33 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
         int width = 1;
         const Expr* exprp = nullptr;
     };
+    // Positional associations may each span several elements, e.g. `("01", "10")`
+    if (expr.kind == Expr::AGG_POSITIONAL && type.isVector() && !expr.args.empty()) {
+        int total = 0;
+        bool allBits = true;
+        for (const ExprP& argp : expr.args) {
+            if (!argp || argp->kind != Expr::BITS_LIT) {
+                allBits = false;
+                break;
+            }
+            total += static_cast<int>(argp->bits.size());
+        }
+        if (allBits && total == type.width
+            && total != static_cast<int>(expr.args.size()) * type.elemWidth) {
+            AstNodeExpr* resultp = nullptr;
+            for (const ExprP& argp : expr.args) {
+                AstNodeExpr* const valuep = lowerExpr(*argp, nullptr);
+                if (!valuep) {
+                    if (resultp) resultp->deleteTree();
+                    return nullptr;
+                }
+                resultp = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, resultp, valuep})
+                                  : valuep;
+            }
+            resultp->dtypep(type.dtp);
+            return resultp;
+        }
+    }
     std::vector<Segment> segments;
     const Expr* othersValuep = nullptr;  // Value of an `others` association
     if (type.kind == VType::RECORD) {
@@ -3297,7 +3375,73 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     return makeCase(flp, selectorp, itemsp);
 }
 
+AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
+                                        bool variable, bool concurrentProc) {
+    if (target.kind != Expr::AGG_POSITIONAL) {
+        unsupportedError(flp, "aggregate assignment target with choices");
+        return nullptr;
+    }
+    std::vector<AstNodeExpr*> lhsv;
+    int totalWidth = 0;
+    bool failed = false;
+    for (const ExprP& elementp : target.args) {
+        if (!elementp) continue;
+        if (elementp->kind == Expr::AGG_POSITIONAL || elementp->kind == Expr::AGG_NAMED) {
+            unsupportedError(flp, "nested aggregate assignment target");
+            failed = true;
+            break;
+        }
+        AstNodeExpr* const lhsp = lowerDesignator(*elementp, true);
+        if (!lhsp) {
+            failed = true;
+            break;
+        }
+        lhsv.push_back(lhsp);
+        totalWidth += lhsp->width();
+    }
+    if (failed || lhsv.empty() || totalWidth == 0) {
+        for (AstNodeExpr* const lhsp : lhsv) lhsp->deleteTree();
+        return nullptr;
+    }
+    const VType totalType = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, totalWidth);
+    AstNodeExpr* valuep = lowerExpr(value, &totalType);
+    if (!valuep) {
+        for (AstNodeExpr* const lhsp : lhsv) lhsp->deleteTree();
+        return nullptr;
+    }
+    valuep = resizeExpr(valuep, totalType, flp);
+    AstNode* headp = nullptr;
+    int offset = totalWidth;
+    for (AstNodeExpr* const lhsp : lhsv) {
+        const int width = lhsp->width();
+        offset -= width;
+        AstNodeExpr* partp = nullptr;
+        if (width == totalWidth) {
+            partp = valuep->cloneTree(false);
+        } else {
+            AstSel* const selp = new AstSel{flp, valuep->cloneTree(false), offset, width};
+            selp->dtypep(lhsp->dtypep());
+            partp = selp;
+        }
+        AstNode* assignp = nullptr;
+        if (variable || m_initial) {
+            assignp = new AstAssign{flp, lhsp, partp};
+        } else if (concurrentProc) {
+            assignp = new AstAssignW{flp, lhsp, partp};
+        } else {
+            assignp = new AstAssignDly{flp, lhsp, partp};
+        }
+        headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assignp) : assignp;
+    }
+    valuep->deleteTree();
+    return headp;
+}
+
 AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
+    if (stmt.target->kind == Expr::AGG_POSITIONAL || stmt.target->kind == Expr::AGG_NAMED) {
+        return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable || m_initial,
+                                    m_concurrentProc);
+    }
     AstNodeExpr* lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return nullptr;
     if (!concurrent && !variable) {
@@ -4773,6 +4917,9 @@ AstNode* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*
 }
 
 void Lowering::lowerProcess(const Process& process) {
+    m_edgeAsLevel = false;
+    m_edgeAsPrev = false;
+    m_edgePrevVars.clear();
     // Tracked variable values hold only within one process
     struct VarValsScope final {
         std::map<std::string, ExprP>& vals;
@@ -4808,22 +4955,48 @@ void Lowering::lowerProcess(const Process& process) {
         if (varNames.count(name) || m_variables.count(name)) continue;
         const auto it = m_scope.find(name);
         if (it == m_scope.end()) {
+            // process(all) collects read names including subprogram and type marks; only
+            // names that are actual signals sensitize the process
+            if (process.sensitivityAll) continue;
             process.flp->v3error("VHDL: unknown signal '" + name + "' in a sensitivity list");
             return;
         }
         sensVars.push_back(it->second.varp);
     }
+    // A process runs on every event of its sensitivity list, so an edge call must not
+    // become a constant. With one sensitivity signal the signal's level is its edge;
+    // with several, compare each edge signal with its previous value.
+    const bool hasEdges = stmtsContainEdge(process.body);
+    m_edgeAsLevel = hasEdges && sensVars.size() == 1;
+    m_edgeAsPrev = hasEdges && sensVars.size() > 1;
 
     m_edges.clear();
     m_initial = false;
     m_varVals.clear();
-    AstNode* const bodyp = lowerStmtList(process.body);
+    AstNode* bodyp = lowerStmtList(process.body);
     const std::vector<Edge> edges = m_edges;
     m_edges.clear();
+    // Record the current signal values for the next run's edge detection
+    AstNode* initPrevsp = nullptr;
+    for (const auto& entry : m_edgePrevVars) {
+        AstNodeExpr* const lhsp = new AstVarRef{process.flp, entry.second, VAccess::WRITE};
+        AstNodeExpr* const rhsp = new AstVarRef{process.flp, entry.first, VAccess::READ};
+        initPrevsp = initPrevsp ? AstNode::addNext<AstNode, AstNode>(
+                                      initPrevsp, new AstAssign{process.flp, lhsp, rhsp})
+                                : new AstAssign{process.flp, lhsp, rhsp};
+    }
+    if (m_edgeAsPrev && bodyp && initPrevsp) {
+        bodyp = AstNode::addNext(bodyp, initPrevsp->cloneTree(true));
+    }
     m_initial = true;
     m_varVals.clear();
-    AstNode* const initp = lowerStmtList(process.body);
+    AstNode* initp = lowerStmtList(process.body);
     m_initial = false;
+    if (m_edgeAsPrev && initp && initPrevsp) {
+        initp = AstNode::addNext(initp, initPrevsp);
+        initPrevsp = nullptr;
+    }
+    if (initPrevsp) initPrevsp->deleteTree();
 
     bool bad = false;
     for (const Edge& edge : edges) {
@@ -4841,8 +5014,10 @@ void Lowering::lowerProcess(const Process& process) {
     AstSenItem* itemsp = nullptr;
     for (AstVar* const varp : sensVars) {
         VEdgeType type = VEdgeType::ET_CHANGED;
-        for (const Edge& edge : edges) {
-            if (edge.varp == varp) type = edge.type;
+        if (!m_edgeAsLevel && !m_edgeAsPrev) {
+            for (const Edge& edge : edges) {
+                if (edge.varp == varp) type = edge.type;
+            }
         }
         AstSenItem* const itemp
             = new AstSenItem{process.flp, type, new AstVarRef{process.flp, varp, VAccess::READ}};
@@ -5747,6 +5922,18 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         AstNode* const casep = lowerSelected(stmt);
         if (!casep) return;
         m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, casep});
+        return;
+    }
+    if (stmt.target->kind == Expr::AGG_POSITIONAL || stmt.target->kind == Expr::AGG_NAMED) {
+        if (stmt.kind != Concurrent::ASSIGN) {
+            unsupportedError(stmt.flp, "aggregate target in a conditional or selected assignment");
+            return;
+        }
+        AstNode* const bodyp
+            = lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, false, true);
+        if (bodyp) {
+            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, bodyp});
+        }
         return;
     }
     AstNodeExpr* const lhsp = lowerDesignator(*stmt.target, true);

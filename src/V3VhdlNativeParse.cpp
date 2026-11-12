@@ -1766,11 +1766,17 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         unsupported("concurrent statement '" + m_cur.text + "'");
         return;
     }
-    if (m_cur.kind != Token::ID) {
+    ExprP target;
+    if (m_cur.kind == Token::ID) {
+        target = parseDesignator();
+    } else if (isSym("(")) {
+        // An aggregate assignment target, e.g. `(a, b) <= value`. Parse only the
+        // primary, so the following `<=` is not taken as a relational operator.
+        target = parsePrimary();
+    } else {
         error("expected a concurrent statement, got '" + m_cur.text + "'");
         return;
     }
-    ExprP target = parseDesignator();
     if (!target) return;
     if (acceptSym("<=")) {
         auto conc = std::make_unique<Concurrent>(Concurrent::ASSIGN);
@@ -1899,6 +1905,30 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
             expectSym(")");
         } else {
             for (;;) {
+                if (m_failed) return;
+                // A bare name is a sensitivity signal; any other item makes the process
+                // combinational over every signal it reads (IEEE 1800-2023 11.1.3)
+                const auto saved = m_lexer.state();
+                const Token item = m_cur;
+                const Token after = m_lexer.next();
+                m_lexer.restore(saved);
+                const bool simple = item.kind == Token::ID && after.kind == Token::SYM
+                                    && (after.text == "," || after.text == ")");
+                if (!simple) {
+                    process.sensitivityAll = true;
+                    process.sensitivity.clear();
+                    int depth = 0;
+                    while (m_cur.kind != Token::END) {
+                        if (isSym(")")) {
+                            if (depth == 0) break;
+                            --depth;
+                        } else if (isSym("(")) {
+                            ++depth;
+                        }
+                        advance();
+                    }
+                    break;
+                }
                 Token nameTok;
                 if (!takeId(nameTok)) return;
                 process.sensitivity.push_back(nameTok.text);
@@ -2117,11 +2147,17 @@ StmtP Parser::parseSequentialStatement() {
         expectSym(";");
         return nullptr;
     }
-    if (m_cur.kind != Token::ID) {
+    ExprP target;
+    if (m_cur.kind == Token::ID) {
+        target = parseDesignator();
+    } else if (isSym("(")) {
+        // An aggregate assignment target, e.g. `(a, b) := value`. Parse only the
+        // primary, so the following `:=` is not mistaken for part of an expression.
+        target = parsePrimary();
+    } else {
         error("expected a sequential statement, got '" + m_cur.text + "'");
         return nullptr;
     }
-    ExprP target = parseDesignator();
     if (!target) return nullptr;
     if (acceptSym(":=")) {
         auto stmt = std::make_unique<Stmt>(Stmt::VAR_ASSIGN);
