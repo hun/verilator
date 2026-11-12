@@ -1004,9 +1004,17 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
         decl.kind = TypeDecl::ENUM;
         advance();
         for (;;) {
-            Token literalTok;
-            if (!takeId(literalTok)) return;
-            addName(decl.literals, literalTok);
+            if (m_cur.kind == Token::CHAR) {
+                // A character enumeration literal such as 'z'; store a name that the
+                // lowering reproduces from the character value.
+                const std::string lit = std::string{"'"} + m_cur.charValue + "'";
+                decl.literals.emplace_back(lit, lit);
+                advance();
+            } else {
+                Token literalTok;
+                if (!takeId(literalTok)) return;
+                addName(decl.literals, literalTok);
+            }
             if (!acceptSym(",")) break;
         }
         expectSym(")");

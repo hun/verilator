@@ -1004,6 +1004,16 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
                          mark == "u_signed" ? VSigning::SIGNED : VSigning::UNSIGNED, 1);
         return applyRange(spec, out);
     }
+    if (mark == "character") {
+        out = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8);
+        return true;
+    }
+    if (mark == "string") {
+        // An unconstrained array of character; a use supplies its range
+        out = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 0);
+        if (spec.hasRange) return applyRange(spec, out);
+        return true;
+    }
     if (mark == "std_logic" || mark == "std_ulogic" || mark == "bit" || mark == "boolean") {
         if (spec.hasRange) {
             flp->v3error("VHDL: range constraint on scalar type '" + mark + "'");
@@ -1065,9 +1075,26 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     switch (expr.kind) {
     case Expr::INT_LIT: return makeIntConst(flp, expr.intValue);
+    case Expr::REAL_LIT: unsupportedError(flp, "real value in this context"); return nullptr;
     case Expr::TRUE_LIT: return bitConst(flp, '1');
     case Expr::FALSE_LIT: return bitConst(flp, '0');
     case Expr::CHAR_LIT: {
+        // A character can itself be an enumeration literal ('z'); resolve it to the
+        // enum value before treating it as a logic value or 8-bit character code.
+        if (context && context->kind == VType::ENUM) {
+            const std::string key = std::string{"'"} + expr.charValue + "'";
+            for (size_t i = 0; i < context->literals.size(); ++i) {
+                if (context->literals[i] != key) continue;
+                AstConst* const constp
+                    = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
+                constp->dtypep(context->dtp);
+                return constp;
+            }
+        }
+        // A character in an 8-bit character context is its code; otherwise a logic value
+        if (context && context->isVector() && context->width == 8) {
+            return makeVectorConst(flp, *context, static_cast<unsigned char>(expr.charValue));
+        }
         const char bit = vhdlLogicBit(expr.charValue);
         if (bit == 0) {
             unsupportedError(flp, std::string{"character literal '"} + expr.charValue
