@@ -214,6 +214,13 @@ struct TypeSpec final {
     bool ascending = false;  // "to", else "downto"
     std::string constraintMark;  // Index constraint that names a subtype, e.g. mark(constraint)
     ExprP left, right;
+    // A record subtype constraint names a discrete range per member: rec_t(x(3 downto 0), ...)
+    struct MemberConstraint final {
+        std::string name;  // Folded member name
+        bool ascending = false;  // "to", else "downto"
+        ExprP lo, hi;  // Bounds in written order, e.g. 3 downto 0 -> lo=3, hi=0
+    };
+    std::vector<MemberConstraint> memberConstraints;
 };
 
 struct PortDecl final {

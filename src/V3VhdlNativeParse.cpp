@@ -540,6 +540,13 @@ bool Parser::parseRange(TypeSpec& type) {
     } else if (isId("to")) {
         type.ascending = true;
         advance();
+    } else if (left->kind == Expr::ATTR
+               && (left->text == "range" || left->text == "reverse_range")) {
+        // A discrete range may be a range attribute of a prefix, e.g. `integer range
+        // mem_t'range`; it has no 'to'/'downto' and no right operand
+        type.left = std::move(left);
+        type.hasRange = true;
+        return true;
     } else {
         error("expected 'to' or 'downto' in a range");
         return false;
@@ -595,9 +602,62 @@ void Parser::parseTypeSpec(TypeSpec& type) {
                 expectSym(")");
                 return;
             }
+            // A record constraint's items are `name(range)`. A range constraint always carries a
+            // 'to'/'downto' at the outer parentheses' own level; a record constraint does not.
+            if (ahead.kind == Token::SYM && ahead.text == "(") {
+                bool sawTopRange = false;
+                int depth = 1;  // Inside the outer '('; m_cur is the first item's name
+                for (;;) {
+                    const Token t = m_lexer.next();
+                    if (t.kind == Token::END) break;
+                    if (t.kind == Token::SYM && t.text == "(") {
+                        ++depth;
+                    } else if (t.kind == Token::SYM && t.text == ")") {
+                        if (--depth == 0) break;
+                    } else if (depth == 1 && t.kind == Token::ID
+                               && (t.text == "to" || t.text == "downto")) {
+                        sawTopRange = true;
+                    }
+                }
+                m_lexer.restore(saved);
+                if (!sawTopRange) {
+                    for (;;) {
+                        if (m_failed) return;
+                        TypeSpec::MemberConstraint member;
+                        Token memberTok;
+                        if (!takeId(memberTok)) return;
+                        member.name = memberTok.text;
+                        expectSym("(");
+                        member.lo = parseExpr();
+                        if (!member.lo) return;
+                        if (isId("to")) {
+                            member.ascending = true;
+                            advance();
+                        } else if (isId("downto")) {
+                            advance();
+                        } else {
+                            error("expected 'to' or 'downto' in a range, got '" + m_cur.text
+                                  + "'");
+                            return;
+                        }
+                        member.hi = parseExpr();
+                        if (!member.hi) return;
+                        expectSym(")");
+                        type.memberConstraints.push_back(std::move(member));
+                        if (acceptSym(",")) continue;
+                        break;
+                    }
+                    expectSym(")");
+                    return;
+                }
+            }
         }
         if (!parseRange(type)) return;
         expectSym(")");
+    }
+    if (isSym("(")) {  // A second index constraint: unmodelled multi-dimensional array
+        unsupported("multi-dimensional array type");
+        return;
     }
 }
 

@@ -782,6 +782,124 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         }
         return true;
     }
+    case Expr::INDEX: {
+        if (!expr.a || expr.a->kind != Expr::NAME || expr.args.size() != 1) return false;
+        const std::string& fn = expr.a->text;
+        double real = 0.0;
+        if (!evalReal(*expr.args[0], real)) return false;
+        if (fn == "ceil") {
+            value = static_cast<int64_t>(std::ceil(real));
+        } else if (fn == "floor") {
+            value = static_cast<int64_t>(std::floor(real));
+        } else if (fn == "round" || fn == "natural" || fn == "positive" || fn == "integer") {
+            value = static_cast<int64_t>(std::llround(real));
+        } else if (fn == "trunc") {
+            value = static_cast<int64_t>(real);
+        } else {
+            return false;
+        }
+        return true;
+    }
+    default: return false;
+    }
+}
+
+bool Lowering::staticIntFold(const ExprP& exprp, int64_t& value) {
+    if (!exprp) return false;
+    if (evalInt(*exprp, value)) return true;
+    // A pure function call is static too; inline and fold it
+    AstNodeExpr* valuep = lowerExpr(*exprp, nullptr);
+    if (!valuep) return false;
+    valuep = V3Const::constifyEditCpp(valuep);
+    AstConst* const constp = foldToConst(valuep);
+    if (!constp) {
+        valuep->deleteTree();
+        return false;
+    }
+    value = constp->num().toSInt();
+    constp->deleteTree();
+    return true;
+}
+
+bool Lowering::evalReal(const Expr& expr, double& value) const {
+    switch (expr.kind) {
+    case Expr::INT_LIT: value = static_cast<double>(expr.intValue); return true;
+    case Expr::REAL_LIT: value = expr.realValue; return true;
+    case Expr::NAME: {
+        int64_t intValue = 0;
+        if (!evalInt(expr, intValue)) return false;
+        value = static_cast<double>(intValue);
+        return true;
+    }
+    case Expr::PAREN: return evalReal(*expr.a, value);
+    case Expr::UNARY: {
+        double operand = 0.0;
+        if (!evalReal(*expr.a, operand)) return false;
+        if (expr.text == "+") {
+            value = operand;
+        } else if (expr.text == "-") {
+            value = -operand;
+        } else if (expr.text == "abs") {
+            value = std::fabs(operand);
+        } else {
+            return false;
+        }
+        return true;
+    }
+    case Expr::BINARY: {
+        double lhs = 0.0;
+        double rhs = 0.0;
+        if (!evalReal(*expr.a, lhs) || !evalReal(*expr.b, rhs)) return false;
+        const std::string& op = expr.text;
+        if (op == "+") {
+            value = lhs + rhs;
+        } else if (op == "-") {
+            value = lhs - rhs;
+        } else if (op == "*") {
+            value = lhs * rhs;
+        } else if (op == "/") {
+            if (rhs == 0.0) return false;
+            value = lhs / rhs;
+        } else if (op == "**") {
+            value = std::pow(lhs, rhs);
+        } else {
+            return false;
+        }
+        return true;
+    }
+    case Expr::INDEX: {
+        if (!expr.a || expr.a->kind != Expr::NAME || expr.args.size() != 1) return false;
+        const std::string& fn = expr.a->text;
+        double operand = 0.0;
+        if (!evalReal(*expr.args[0], operand)) return false;
+        if (fn == "real") {
+            value = operand;
+        } else if (fn == "ceil") {
+            value = std::ceil(operand);
+        } else if (fn == "floor") {
+            value = std::floor(operand);
+        } else if (fn == "round") {
+            value = std::round(operand);
+        } else if (fn == "trunc") {
+            value = std::trunc(operand);
+        } else if (fn == "log2") {
+            if (operand <= 0.0) return false;
+            value = std::log2(operand);
+        } else if (fn == "log") {
+            if (operand <= 0.0) return false;
+            value = std::log(operand);
+        } else if (fn == "exp") {
+            value = std::exp(operand);
+        } else if (fn == "sqrt") {
+            if (operand < 0.0) return false;
+            value = std::sqrt(operand);
+        } else if (fn == "integer" || fn == "natural" || fn == "positive") {
+            value = static_cast<double>(static_cast<int64_t>(std::llround(operand)));
+        } else {
+            return false;
+        }
+        return true;
+    }
     default: return false;
     }
 }
@@ -868,7 +986,23 @@ void Lowering::registerType(const TypeDecl& decl) {
         std::vector<VField> fields;
         for (const TypeDecl::Member& member : decl.members) {
             VType memberType;
-            if (!resolveType(member.type, memberType)) return;
+            const std::string& mark = member.type.mark;
+            const bool unconstrainedMember
+                = (mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                   || mark == "bit_vector" || mark == "unsigned" || mark == "signed"
+                   || mark == "u_unsigned" || mark == "u_signed")
+                  && !member.type.hasRange && member.type.constraintMark.empty();
+            if (unconstrainedMember) {
+                // An unconstrained element: its width comes from a subtype or port binding
+                memberType.kind = VType::VECTOR;
+                memberType.kwd
+                    = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+                memberType.signing = (mark == "signed" || mark == "u_signed") ? VSigning::SIGNED
+                                                                              : VSigning::UNSIGNED;
+                memberType.width = 0;
+            } else if (!resolveType(member.type, memberType)) {
+                return;
+            }
             if (memberType.kwd == VBasicDTypeKwd::LOGIC) kwd = VBasicDTypeKwd::LOGIC;
             // `a, b : t` declares one record element per name, in order
             for (const auto& name : member.names) {
@@ -890,7 +1024,10 @@ void Lowering::registerType(const TypeDecl& decl) {
         type.width = total;
         type.kwd = kwd;
         type.fields = std::move(fields);
-        type.dtp = findVectorWidth(flp, kwd, VSigning::UNSIGNED, total);
+        // An unconstrained record (no fixed width) has no packed dtype until constrained
+        type.dtp = total > 0 ? findVectorWidth(flp, kwd, VSigning::UNSIGNED, total)
+                             : findBasic(flp, kwd == VBasicDTypeKwd::BIT ? VBasicDTypeKwd::BIT
+                                                                         : VBasicDTypeKwd::LOGIC);
         break;
     }
     }
@@ -902,7 +1039,7 @@ void Lowering::registerType(const TypeDecl& decl) {
 bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right,
                                 bool& ascending) {
     if (spec.right) {
-        if (!staticInt(spec.left, left) || !staticInt(spec.right, right)) return false;
+        if (!staticIntFold(spec.left, left) || !staticIntFold(spec.right, right)) return false;
         ascending = spec.ascending;
         return true;
     }
@@ -912,7 +1049,12 @@ bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& ri
         return false;
     }
     VType prefix;
-    if (!typeOfDesignator(*spec.left->a, prefix)) return false;
+    if (!typeOfDesignator(*spec.left->a, prefix)) {
+        // A range attribute's prefix may be a type mark rather than an object
+        const auto typeIt = m_types.find(spec.left->a->text);
+        if (typeIt == m_types.end()) return false;
+        prefix = typeIt->second;
+    }
     left = prefix.left;
     right = prefix.right;
     ascending = prefix.ascending;
@@ -985,6 +1127,70 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
     return true;
 }
 
+//! Constrain one record element to a fixed vector range, keeping its element keyword/signing
+void Lowering::setRecordField(FileLine* flp, VField& field, int left, int right, bool ascending) {
+    VType constrained;
+    constrained.kind = VType::VECTOR;
+    constrained.kwd = VBasicDTypeKwd::LOGIC;
+    constrained.signing = VSigning::UNSIGNED;
+    if (field.type) {
+        constrained.kwd = field.type->kwd;
+        constrained.signing = field.type->signing;
+    }
+    constrained.left = left;
+    constrained.right = right;
+    constrained.ascending = ascending;
+    constrained.width = std::abs(left - right) + 1;
+    constrained.dtp = findVector(flp, constrained.kwd, constrained.signing, constrained.left,
+                                 constrained.right, constrained.ascending);
+    field.type = std::make_shared<VType>(constrained);
+    field.width = constrained.width;
+}
+
+//! Recompute a record's total width, MSB-first element offsets and packed dtype
+void Lowering::finalizeRecordFields(FileLine* flp, VType& rec) {
+    int total = 0;
+    for (VField& f : rec.fields) total += f.width;
+    int offset = total;
+    for (VField& f : rec.fields) {
+        offset -= f.width;
+        f.offset = offset;
+    }
+    rec.width = total;
+    if (total > 0) rec.dtp = findVectorWidth(flp, rec.kwd, VSigning::UNSIGNED, total);
+}
+
+bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
+    FileLine* const flp = spec.flp;
+    if (out.kind != VType::RECORD) {
+        unsupportedError(flp, "constraint on a type that is not a record");
+        return false;
+    }
+    for (const TypeSpec::MemberConstraint& member : spec.memberConstraints) {
+        VField* fieldp = nullptr;
+        for (VField& f : out.fields) {
+            if (f.name == member.name) fieldp = &f;
+        }
+        if (!fieldp) {
+            flp->v3error("VHDL: record '" + spec.mark + "' has no element '" + member.name + "'");
+            return false;
+        }
+        if (fieldp->type && fieldp->type->kind == VType::RECORD) {
+            unsupportedError(flp, "constraint on a nested record element");
+            return false;
+        }
+        int64_t lo = 0;
+        int64_t hi = 0;
+        if (!staticIntFold(member.lo, lo) || !staticIntFold(member.hi, hi)) {
+            unsupportedError(flp, "non-static record element constraint");
+            return false;
+        }
+        setRecordField(flp, *fieldp, static_cast<int>(lo), static_cast<int>(hi), member.ascending);
+    }
+    finalizeRecordFields(flp, out);
+    return true;
+}
+
 bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     if (!flp) return false;
@@ -992,6 +1198,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     const auto declared = m_types.find(mark);
     if (declared != m_types.end()) {
         out = declared->second;
+        if (!spec.memberConstraints.empty() && !applyMemberConstraints(spec, out)) return false;
         return applyRange(spec, out);
     }
     if (mark == "u_unsigned" || mark == "u_signed") {
@@ -2968,7 +3175,8 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
             }
             continue;
         }
-        AstNodeExpr* const exprp = lowerExpr(*choicep, nullptr);
+        const VType choiceType = typeOfDType(dtp);
+        AstNodeExpr* const exprp = lowerExpr(*choicep, &choiceType);
         if (!exprp) return false;
         AstConst* const constp = VN_CAST(exprp, Const);
         if (!constp) {
@@ -5577,10 +5785,69 @@ void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
     }
 }
 
+//! Whether a record element's type is an unconstrained array (its width is set elsewhere)
+static bool memberTypeUnconstrained(const TypeSpec& type) {
+    const std::string& mark = type.mark;
+    const bool unconstrainedMark
+        = mark == "std_logic_vector" || mark == "std_ulogic_vector" || mark == "bit_vector"
+          || mark == "unsigned" || mark == "signed" || mark == "u_unsigned" || mark == "u_signed";
+    return unconstrainedMark && !type.hasRange && type.constraintMark.empty();
+}
+
+void collectUnconstrainedRecordMarks(const DesignLibrary& library, std::set<std::string>& out) {
+    const auto scan = [&](const std::vector<TypeDecl>& types) {
+        for (const TypeDecl& decl : types) {
+            if (decl.kind != TypeDecl::RECORD) continue;
+            for (const TypeDecl::Member& member : decl.members) {
+                if (memberTypeUnconstrained(member.type)) {
+                    out.insert(decl.name);
+                    break;
+                }
+            }
+        }
+    };
+    for (const PackageUnit& pkg : library.packages) scan(pkg.types);
+    for (const EntityUnit& entity : library.entities) scan(entity.types);
+}
+
+bool hasUnconstrainedPorts(const EntityUnit& entity,
+                           const std::set<std::string>& unconstrainedRecordMarks) {
+    for (const PortDecl& port : entity.ports) {
+        const std::string& mark = port.type.mark;
+        const bool unconstrainedMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                                       || mark == "bit_vector" || mark == "unsigned"
+                                       || mark == "signed";
+        if (unconstrainedMark && !port.type.hasRange && port.type.constraintMark.empty())
+            return true;
+        if (!port.type.hasRange && port.type.constraintMark.empty()
+            && unconstrainedRecordMarks.count(mark))
+            return true;
+    }
+    return false;
+}
+
+//! Report why an unconstrained-port entity with no instance cannot be modelled, at the
+//! offending port, matching the message a top-level use of the type would give
+void reportUnspecializedPorts(const EntityUnit& entity,
+                              const std::set<std::string>& unconstrainedRecordMarks) {
+    for (const PortDecl& port : entity.ports) {
+        const std::string& mark = port.type.mark;
+        const bool unconstrainedMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                                       || mark == "bit_vector" || mark == "unsigned"
+                                       || mark == "signed";
+        if ((!port.type.hasRange && port.type.constraintMark.empty()
+             && (unconstrainedMark || unconstrainedRecordMarks.count(mark)))) {
+            unsupportedError(port.flp, "unconstrained type '" + mark + "'");
+            return;
+        }
+    }
+}
+
 bool lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-           const PackageTable& table, const ModuleMap& modules, Design& design) {
+           const PackageTable& table, const ModuleMap& modules, Design& design,
+           const PortBoundsMap* portBounds) {
     Lowering lowering{rootpFromModules(modules), &table.impl(), &modules, &design};
-    return lowering.emit(entity, arch, modp);
+    return lowering.emit(entity, arch, modp, nullptr, portBounds);
 }
 
 }  // namespace vhdlnative
