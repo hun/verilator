@@ -1720,26 +1720,20 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             return ip;
         }
         if (lt.isInt() != rt.isInt()) {
-            // numeric_std compares a vector with an integer of the same value
-            const Expr& intExpr = lt.isInt() ? *expr.a : *expr.b;
+            // numeric_std/std_logic_arith compare a vector with an integer of the same
+            // value by converting the integer to the vector's type: fold a static integer
+            // to a constant, or resize a dynamic one exactly as the arithmetic path does
+            const bool lhsInt = lt.isInt();
+            const VType& vectorT = lhsInt ? rt : lt;
+            AstNodeExpr*& intOperand = lhsInt ? lp : rp;
             int64_t value = 0;
-            if (!evalInt(intExpr, value)) {
-                unsupportedError(flp, "comparison between an integer expression and a vector");
-                lp->deleteTree();
-                rp->deleteTree();
-                return nullptr;
-            }
-            const VType& vectorT = lt.isInt() ? rt : lt;
-            AstNodeExpr* const constp = makeVectorConst(flp, vectorT, value);
-            if (lt.isInt()) {
-                lp->deleteTree();
-                lp = constp;
-                lt = vectorT;
+            if (evalInt(lhsInt ? *expr.a : *expr.b, value)) {
+                intOperand->deleteTree();
+                intOperand = makeVectorConst(flp, vectorT, value);
             } else {
-                rp->deleteTree();
-                rp = constp;
-                rt = vectorT;
+                intOperand = resizeExpr(intOperand, vectorT, flp);
             }
+            (lhsInt ? lt : rt) = vectorT;
         }
         if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
             unsupportedError(flp, "comparison between signed and unsigned operands");
