@@ -5797,6 +5797,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_constValues.clear();
     m_constTypes.clear();
     m_enumConsts.clear();
+    m_preConsts.clear();
     m_ownedConsts.clear();
     m_imported.clear();
     m_scope.clear();
@@ -5804,6 +5805,10 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_subprograms.clear();
     // A generic package is emitted once per instance, with its generics already bound
     if (bindings) registerGenerics(pkg.generics, bindings, false);
+    // Integer constants are folded first so a type range (a record element, an array
+    // bound, an integer subtype) that names one resolves during type registration,
+    // exactly as an entity or architecture prescans before registering its types.
+    preScanIntConstants(pkg.decls);
     for (const TypeDecl& typeDecl : pkg.types) registerType(typeDecl);
     for (const AliasDecl& alias : pkg.aliases) registerAlias(alias);
     // Subprograms are visible to the declarative items below, including deferred constants
@@ -5825,6 +5830,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_constValues.clear();
     m_constTypes.clear();
     m_enumConsts.clear();
+    m_preConsts.clear();
     m_ownedConsts.clear();
     m_aliases.clear();
 
