@@ -57,7 +57,7 @@ struct VField final {
 
 //! VHDL type as it survives into the committed AST
 struct VType final {
-    enum Kind : uint8_t { LOGIC, BIT, BOOLEAN, INT, VECTOR, ARRAY, RECORD, ENUM } kind = LOGIC;
+    enum Kind : uint8_t { LOGIC, BIT, BOOLEAN, INT, VECTOR, ARRAY, RECORD, ENUM, REAL } kind = LOGIC;
     AstNodeDType* dtp = nullptr;
     int width = 1;
     VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
@@ -187,6 +187,8 @@ class Lowering final {
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
     //! Integer constants needed while registering types, before full declaration emission
     std::map<std::string, int64_t> m_preConsts;
+    //! Elaboration-time real constants (IEEE 1800 `real`) by folded name
+    std::map<std::string, double> m_realConsts;
     std::map<std::string, VType> m_types;  // Declared types by folded name
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
     std::map<std::string, VType> m_constTypes;  // Type of each typed constant
@@ -429,6 +431,8 @@ class Lowering final {
     bool evalInt(const Expr& expr, int64_t& value) const;
     //! Evaluate a locally static real-valued expression
     bool evalReal(const Expr& expr, double& value) const;
+    bool mentionsReal(const Expr& expr) const;
+    bool rejectRealObject(const VType& type, FileLine* flp);
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);
     }
@@ -1011,6 +1015,11 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
     case Expr::PHYS_LIT: value = static_cast<double>(expr.intValue); return true;
     case Expr::REAL_LIT: value = expr.realValue; return true;
     case Expr::NAME: {
+        const auto realIt = m_realConsts.find(expr.text);
+        if (realIt != m_realConsts.end()) {
+            value = realIt->second;
+            return true;
+        }
         int64_t intValue = 0;
         if (!evalInt(expr, intValue)) return false;
         value = static_cast<double>(intValue);
@@ -1078,6 +1087,23 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
         } else if (fn == "sqrt") {
             if (operand < 0.0) return false;
             value = std::sqrt(operand);
+        } else if (fn == "sin") {
+            value = std::sin(operand);
+        } else if (fn == "cos") {
+            value = std::cos(operand);
+        } else if (fn == "tan") {
+            value = std::tan(operand);
+        } else if (fn == "asin") {
+            if (operand < -1.0 || operand > 1.0) return false;
+            value = std::asin(operand);
+        } else if (fn == "acos") {
+            if (operand < -1.0 || operand > 1.0) return false;
+            value = std::acos(operand);
+        } else if (fn == "atan") {
+            value = std::atan(operand);
+        } else if (fn == "log10") {
+            if (operand <= 0.0) return false;
+            value = std::log10(operand);
         } else if (fn == "integer" || fn == "natural" || fn == "positive") {
             value = static_cast<double>(static_cast<int64_t>(std::llround(operand)));
         } else {
@@ -1087,6 +1113,34 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
     }
     default: return false;
     }
+}
+
+//! True when the expression tree has a real operand: a real literal or a name bound to
+//! an elaboration-time real constant. Gates the real comparison fold so integer-only
+//! comparisons are never routed through it.
+bool Lowering::mentionsReal(const Expr& expr) const {
+    switch (expr.kind) {
+    case Expr::REAL_LIT: return true;
+    case Expr::NAME: return m_realConsts.count(expr.text) != 0;
+    case Expr::PAREN: return expr.a && mentionsReal(*expr.a);
+    case Expr::UNARY: return expr.a && mentionsReal(*expr.a);
+    case Expr::BINARY:
+        return (expr.a && mentionsReal(*expr.a)) || (expr.b && mentionsReal(*expr.b));
+    case Expr::INDEX:
+        for (const ExprP& argp : expr.args)
+            if (argp && mentionsReal(*argp)) return true;
+        return false;
+    default: return false;
+    }
+}
+
+//! A real survives only as an elaboration-time constant; reject any object that would
+//! need a runtime floating type so it reports as unsupported instead of emitting a
+//! variable with no data type.
+bool Lowering::rejectRealObject(const VType& type, FileLine* flp) {
+    if (type.kind != VType::REAL) return false;
+    unsupportedError(flp, "real variable, signal, or port");
+    return true;
 }
 
 AstNodeDType* Lowering::enumDType(FileLine* flp, const TypeDecl& decl, int width) {
@@ -1440,6 +1494,18 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         out = timeType(flp);
         return true;
     }
+    if (mark == "real") {
+        // A scalar handled only at elaboration; it has no width, so any use that would
+        // need a runtime type (a variable, a port, ...) is rejected where it appears.
+        if (spec.hasRange || !spec.constraintMark.empty()) {
+            flp->v3error("VHDL: constraint on scalar type 'real'");
+            return false;
+        }
+        out = VType{};
+        out.kind = VType::REAL;
+        out.dtp = nullptr;
+        return true;
+    }
     const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
                             || mark == "bit_vector" || mark == "unsigned" || mark == "signed";
     if (!vectorMark) {
@@ -1744,6 +1810,38 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
 AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
+    // A relational operator whose static operands are reals folds to a bit before
+    // either operand is lowered, so a real generic/constant compared to a literal (as in
+    // a `when` condition, a generate, or `integer(x) = 8`) becomes a constant. It fires
+    // only when at least one operand transitively mentions a real, so ordinary integer
+    // or signal comparisons keep their existing path.
+    if (expr.a && expr.b) {
+        const std::string& rop = op[0] == '?' ? op.substr(1) : op;
+        if ((rop == "=" || rop == "/=" || rop == "<" || rop == "<=" || rop == ">" || rop == ">=")
+            && (mentionsReal(*expr.a) || mentionsReal(*expr.b))) {
+            double lhs = 0.0;
+            double rhs = 0.0;
+            if (evalReal(*expr.a, lhs) && evalReal(*expr.b, rhs)) {
+                bool result = false;
+                if (rop == "=") {
+                    result = lhs == rhs;
+                } else if (rop == "/=") {
+                    result = lhs != rhs;
+                } else if (rop == "<") {
+                    result = lhs < rhs;
+                } else if (rop == "<=") {
+                    result = lhs <= rhs;
+                } else if (rop == ">") {
+                    result = lhs > rhs;
+                } else {
+                    result = lhs >= rhs;
+                }
+                AstConst* const bitp = new AstConst{flp, V3Number{flp, 1, result ? 1 : 0}};
+                bitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+                return bitp;
+            }
+        }
+    }
     // Lower the side that is not a bare character literal first; a bare character
     // literal in the other slot then adopts that operand's type, so `inp >= 'a'`
     // compares character codes instead of mistaking `'a'` for a logic value.
@@ -5048,6 +5146,7 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
         }
         VType ltype;
         if (!resolveType(decl.type, ltype)) return fail(nullptr);
+        if (rejectRealObject(ltype, decl.flp)) return fail(nullptr);
         for (const auto& name : decl.names) {
             const std::string mangled
                 = "vhdlproc_" + std::to_string(++m_procVarSeq) + "__" + name.second;
@@ -5361,6 +5460,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
+        if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             // Mangle so the same variable name in two processes stays distinct
             const std::string mangled = "vhdlvar_" + std::to_string(++varSeq) + "__" + name.second;
@@ -5389,11 +5489,12 @@ bool Lowering::reserveName(const std::string& folded, const std::string& spellin
         m_constValues.erase(folded);
         m_constTypes.erase(folded);
         m_enumConsts.erase(folded);
+        m_realConsts.erase(folded);
         m_types.erase(folded);
         return true;
     }
     if (m_scope.count(folded) || m_consts.count(folded) || m_constValues.count(folded)
-        || m_enumConsts.count(folded) || m_types.count(folded)) {
+        || m_enumConsts.count(folded) || m_realConsts.count(folded) || m_types.count(folded)) {
         flp->v3error("VHDL: duplicate declaration of '" + spelling + "'");
         return false;
     }
@@ -5425,7 +5526,25 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
     }
     VType constType;
     bool intConstant = true;
-    if (type.flp && resolveType(type, constType)) intConstant = constType.isInt();
+    bool realConstant = false;
+    if (type.flp && resolveType(type, constType)) {
+        intConstant = constType.isInt();
+        realConstant = constType.kind == VType::REAL;
+    }
+    // A real survives only as an elaboration-time constant: fold it to a value that
+    // `evalReal` and real comparisons consume, so no floating type reaches the model.
+    if (realConstant) {
+        double realVal = 0.0;
+        if (!evalReal(*initp, realVal)) {
+            unsupportedError(flp, "real constant value that is not static");
+            return;
+        }
+        for (const auto& name : names) {
+            if (!reserveName(name.first, name.second, flp)) continue;
+            m_realConsts[name.first] = realVal;
+        }
+        return;
+    }
     if (intConstant) {
         int64_t value = 0;
         if (evalInt(*initp, value)) {
@@ -5725,6 +5844,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
+        if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             const std::string mangled
@@ -5779,6 +5899,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         } else if (!resolveType(port.type, type)) {
             continue;
         }
+        if (rejectRealObject(type, port.flp)) continue;
         for (const auto& name : port.names) {
             if (!m_scope.emplace(name.first, VarInfo{}).second) {
                 port.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
@@ -5803,6 +5924,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
+        if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.second, type.dtp};
@@ -6639,6 +6761,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
+        if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             const std::string mangled
