@@ -418,9 +418,9 @@ ExprP Parser::parsePrimary() {
             } else {
                 scale = 1e15;  // sec
             }
-            const double numeric
-                = node->kind == Expr::INT_LIT ? static_cast<double>(node->intValue)
-                                              : node->realValue;
+            const double numeric = node->kind == Expr::INT_LIT
+                                       ? static_cast<double>(node->intValue)
+                                       : node->realValue;
             node->kind = Expr::PHYS_LIT;
             node->intValue = std::llround(numeric * scale);
             advance();  // Consume the unit identifier
@@ -1508,9 +1508,16 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             if (!takeId(formalTok)) return;
             assoc.formal = formalTok.text;
             assoc.formalSpelling = formalTok.spelling;
-            if (isSym(".")) {  // Record-member association: port-member binding unmodelled
-                unsupported("record-member port association");
-                return;
+            if (isSym(".")) {  // A formal naming one element of a record port
+                advance();
+                Token memberTok;
+                if (!takeId(memberTok)) return;
+                assoc.formalMember = memberTok.text;
+                assoc.formalMemberSpelling = memberTok.spelling;
+                if (isSym(".")) {  // A nested record element is not modelled
+                    unsupported("nested record-member port association");
+                    return;
+                }
             }
             if (isSym("(")) {  // The association targets part of the port
                 advance();

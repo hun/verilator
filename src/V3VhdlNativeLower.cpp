@@ -6278,6 +6278,27 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         int width = 1;
         const PortAssoc* assocp = nullptr;
     };
+    //! The record type a port was declared with, if any, for member associations
+    auto recordPortType = [&](const AstVar* const portp) -> VType {
+        VType none;
+        if (!entityp) return none;
+        for (const PortDecl& port : entityp->ports) {
+            const bool match = std::any_of(port.names.begin(), port.names.end(),
+                                           [&](const std::pair<std::string, std::string>& name) {
+                                               return name.second == portp->name();
+                                           });
+            if (!match) continue;
+            VType vt;
+            if (resolveType(port.type, vt) && vt.kind == VType::RECORD) return vt;
+            return none;
+        }
+        return none;
+    };
+    auto recordField = [](const VType& rec, const std::string& member) -> const VField* {
+        for (const VField& field : rec.fields)
+            if (field.name == member) return &field;
+        return nullptr;
+    };
     AstPin* pinsp = nullptr;
     for (size_t portIndex = 0; portIndex < ports.size(); ++portIndex) {
         AstVar* const portp = ports[portIndex];
@@ -6316,8 +6337,79 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         const bool partial
             = std::any_of(assocs.begin(), assocs.end(),
                           [](const PortAssoc* assocp) { return assocp->hasFormalRange; });
+        const bool recordMember
+            = std::any_of(assocs.begin(), assocs.end(),
+                          [](const PortAssoc* assocp) { return !assocp->formalMember.empty(); });
         AstNodeExpr* actualp = nullptr;
-        if (!partial) {
+        if (recordMember) {
+            const VType recType = recordPortType(portp);
+            if (recType.kind != VType::RECORD) {
+                unsupportedError(flp, "record-member association on a non-record port");
+                return nullptr;
+            }
+            for (const PortAssoc* const assocp : assocs) {
+                if (assocp->formalMember.empty()) {
+                    unsupportedError(assocp->flp,
+                                     "mixing whole-port and record-member associations");
+                    return nullptr;
+                }
+            }
+            if (portp->direction().isOutput()) {
+                // Each member actual is driven from its element of a packed temp the instance
+                // writes, mirroring how the instance reads and writes record elements
+                AstVar* const tempVarp
+                    = new AstVar{flp, VVarType::VAR,
+                                 "vhdlind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
+                                 portp->dtypep()};
+                m_modp->addStmtsp(tempVarp);
+                AstNode* headp = nullptr;
+                for (const PortAssoc* const assocp : assocs) {
+                    if (!assocp->actual) continue;
+                    const VField* const fieldp = recordField(recType, assocp->formalMember);
+                    if (!fieldp) {
+                        assocp->flp->v3error("VHDL: record port '" + portp->name()
+                                             + "' has no element '" + assocp->formalMemberSpelling
+                                             + "'");
+                        if (headp) headp->deleteTree();
+                        return nullptr;
+                    }
+                    AstNodeExpr* const lhsp = lowerDesignator(*assocp->actual, true);
+                    if (!lhsp) {
+                        if (headp) headp->deleteTree();
+                        return nullptr;
+                    }
+                    AstSel* const rhsp
+                        = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
+                                     fieldp->offset, fieldp->width};
+                    rhsp->dtypep(fieldp->type->dtp);
+                    AstNode* const assp = new AstAssign{flp, lhsp, rhsp};
+                    headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assp) : assp;
+                }
+                if (headp) {
+                    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
+                }
+                actualp = new AstVarRef{flp, tempVarp, VAccess::WRITE};
+            } else {
+                // An input record packs its member actuals exactly like a record aggregate
+                Expr agg{Expr::AGG_NAMED};
+                agg.flp = flp;
+                for (const PortAssoc* const assocp : assocs) {
+                    if (!assocp->actual) {
+                        unsupportedError(assocp->flp, "open record-member port association");
+                        return nullptr;
+                    }
+                    ExprP choicep = std::make_unique<Expr>(Expr::NAME);
+                    choicep->flp = flp;
+                    choicep->text = assocp->formalMember;
+                    choicep->spelling = assocp->formalMemberSpelling;
+                    agg.choices.emplace_back();
+                    agg.choices.back().push_back(std::move(choicep));
+                    agg.args.push_back(cloneExpr(*assocp->actual));
+                }
+                actualp = lowerAggregate(agg, recType);
+                if (!actualp) return nullptr;
+            }
+        } else if (!partial) {
             // The whole port connects to one actual
             const PortAssoc& assoc = *assocs.front();
             if (assoc.actual) {
@@ -6494,11 +6586,11 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         bool up = stmt.rangeAscending;
         // `for i in obj'range generate` iterates the object's own bounds, which come from
         // its type just as a `prefix'range` slice does
-        const Expr* const rangep = !stmt.hi && stmt.lo && stmt.lo->kind == Expr::ATTR
-                                           && (stmt.lo->text == "range"
-                                               || stmt.lo->text == "reverse_range")
-                                       ? stmt.lo.get()
-                                       : nullptr;
+        const Expr* const rangep
+            = !stmt.hi && stmt.lo && stmt.lo->kind == Expr::ATTR
+                      && (stmt.lo->text == "range" || stmt.lo->text == "reverse_range")
+                  ? stmt.lo.get()
+                  : nullptr;
         if (rangep) {
             if (!rangep->a || rangep->a->kind != Expr::NAME) {
                 unsupportedError(stmt.flp, "generate over 'range of a non-name prefix");
