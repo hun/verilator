@@ -50,12 +50,13 @@ char vhdlLogicBit(char c);
 void unsupportedError(FileLine* flp, const std::string& what);
 
 struct Token final {
-    enum Kind : uint8_t { ID, INT, CHAR, BITS, STRING, SYM, END } kind = END;
-    std::string text;  // ID: folded identifier. SYM: operator. INT: spelling
+    enum Kind : uint8_t { ID, INT, REAL, CHAR, BITS, STRING, SYM, END } kind = END;
+    std::string text;  // ID: folded identifier. SYM: operator. INT/REAL: spelling
     std::string spelling;  // ID: identifier as written
     std::string bits;  // BITS: one character ('0'/'1'/'x'/'z') per bit, msb first
     char sym = 0;  // SYM: first character
     int64_t intValue = 0;  // INT
+    double realValue = 0;  // REAL
     char charValue = 0;  // CHAR
     FileLine* flp = nullptr;
 };
@@ -65,6 +66,7 @@ class Lexer final {
     const std::string m_text;  // File contents
     size_t m_pos = 0;  // Current offset
     int m_line = 1;  // Current line number
+    bool m_prevEndsDesignator = false;  // Last token can precede an attribute/qualification mark
 
     FileLine* newFileLine() const {
         FileLine* const flp = new FileLine{m_filename};
@@ -88,6 +90,7 @@ class Lexer final {
     void skipSpace();
     Token lexSymbol(FileLine* flp);
     Token lexBits(FileLine* flp, const std::string& baseText);
+    Token nextRaw();  // One token, before the designator-context update
 
 public:
     Lexer(std::string filename, std::string text)
@@ -96,10 +99,16 @@ public:
     ~Lexer() = default;
 
     //! Save/restore point for one-token lookahead
-    std::pair<size_t, int> state() const { return {m_pos, m_line}; }
-    void restore(const std::pair<size_t, int>& st) {
-        m_pos = st.first;
-        m_line = st.second;
+    struct State {
+        size_t pos;
+        int line;
+        bool prevEndsDesignator;
+    };
+    State state() const { return {m_pos, m_line, m_prevEndsDesignator}; }
+    void restore(const State& st) {
+        m_pos = st.pos;
+        m_line = st.line;
+        m_prevEndsDesignator = st.prevEndsDesignator;
     }
 
     Token next();
@@ -117,6 +126,7 @@ using ExprP = std::unique_ptr<Expr>;
 struct Expr final {
     enum Kind : uint8_t {
         INT_LIT,  // intValue
+        REAL_LIT,  // realValue
         BITS_LIT,  // bits
         STRING_LIT,  // spelling: a string value that is not a bit-vector literal
         CHAR_LIT,  // charValue
@@ -141,6 +151,7 @@ struct Expr final {
     std::string text;  // Name/operator, folded
     std::string spelling;  // Name as written
     int64_t intValue = 0;
+    double realValue = 0;
     char charValue = 0;
     std::string bits;
     ExprP a, b, c;

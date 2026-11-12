@@ -316,6 +316,12 @@ ExprP Parser::parsePrimary() {
         }
         node->flp = m_cur.flp;
         advance();
+        if ((node->kind == Expr::INT_LIT || node->kind == Expr::REAL_LIT)
+            && (isId("fs") || isId("ps") || isId("ns") || isId("us") || isId("ms")
+                || isId("sec"))) {  // IEEE 1800-2023 5.2.5 physical literal
+            unsupported("physical literal");
+            return nullptr;
+        }
         return node;
     }
     if (m_cur.kind == Token::STRING) {
@@ -413,9 +419,9 @@ ExprP Parser::parseDesignator() {
         if (isSym("'")) {
             advance();
             if (isSym("(")) {
-                // Type qualification: `type_mark'(expression)`; the operand is a
-                // parenthesized expression or aggregate with its own parentheses
-                ExprP operand = parseExpr();
+                // Type qualification: `type_mark'(expression)`; consume only the
+                // parenthesized operand, so a following operator is not absorbed
+                ExprP operand = parsePrimary();
                 if (!operand) return nullptr;
                 ExprP qual = std::make_unique<Expr>(Expr::QUAL);
                 qual->flp = node->flp;

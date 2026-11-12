@@ -45,6 +45,19 @@ int main(int argc, char** argv) {
                 std::printf("%%Error: a=%d w=%d expected %d\n", a, w, wExp);
                 ++fails;
             }
+            // Non-aggregate qualification operands evaluate to their value
+            if (static_cast<int>(topp->qc) != 1) {
+                std::printf("%%Error: qc=%d expected 1\n", static_cast<int>(topp->qc));
+                ++fails;
+            }
+            if (static_cast<int>(topp->qn) != 0xA) {
+                std::printf("%%Error: qn=%x expected a\n", static_cast<int>(topp->qn));
+                ++fails;
+            }
+            if (static_cast<int>(topp->qe) != 3) {
+                std::printf("%%Error: qe=%d expected 3\n", static_cast<int>(topp->qe));
+                ++fails;
+            }
         }
     }
 

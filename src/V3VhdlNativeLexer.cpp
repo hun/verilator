@@ -173,7 +173,7 @@ Token Lexer::lexBits(FileLine* flp, const std::string& baseText) {
     return tok;
 }
 
-Token Lexer::next() {
+Token Lexer::nextRaw() {
     skipSpace();
     Token tok;
     tok.flp = newFileLine();
@@ -201,6 +201,37 @@ Token Lexer::next() {
         }
         return tok;
     }
+    if (c == '\\') {
+        // Extended identifier: \name\ is case-sensitive and a backslash inside it is
+        // doubled. Keep the raw \...\ spelling as the identity so an extended
+        // identifier cannot collide with a simple name made of the same letters.
+        const size_t start = m_pos;
+        ++m_pos;  // The opening backslash
+        bool closed = false;
+        while (m_pos < m_text.size()) {
+            const char ch = m_text[m_pos];
+            if (ch == '\n') break;
+            if (ch == '\\') {
+                if (m_pos + 1 < m_text.size() && m_text[m_pos + 1] == '\\') {
+                    m_pos += 2;  // An escaped backslash stays inside the identifier
+                    continue;
+                }
+                ++m_pos;  // The closing backslash
+                closed = true;
+                break;
+            }
+            ++m_pos;
+        }
+        if (!closed) {
+            tok.flp->v3error("VHDL extended identifier is missing its closing '\\'");
+            tok.kind = Token::END;
+            return tok;
+        }
+        tok.kind = Token::ID;
+        tok.spelling = m_text.substr(start, m_pos - start);
+        tok.text = tok.spelling;
+        return tok;
+    }
     if (std::isdigit(static_cast<unsigned char>(c))) {
         const size_t start = m_pos;
         while (
@@ -209,6 +240,55 @@ Token Lexer::next() {
             ++m_pos;
         }
         const std::string first = m_text.substr(start, m_pos - start);
+        // A real literal with an exponent but no decimal point, e.g. 25e6
+        if (peek(0) == 'e' || peek(0) == 'E') {
+            const bool sign = peek(1) == '+' || peek(1) == '-';
+            const char after = sign ? peek(2) : peek(1);
+            if (std::isdigit(static_cast<unsigned char>(after))) {
+                m_pos += 1 + (sign ? 1 : 0);
+                while (m_pos < m_text.size()
+                       && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
+                           || m_text[m_pos] == '_')) {
+                    ++m_pos;
+                }
+                std::string clean;
+                for (size_t i = start; i < m_pos; ++i) {
+                    if (m_text[i] != '_') clean.push_back(m_text[i]);
+                }
+                tok.kind = Token::REAL;
+                tok.realValue = std::stod(clean);
+                tok.text = clean;
+                return tok;
+            }
+        }
+        if (peek(0) == '.' && std::isdigit(static_cast<unsigned char>(peek(1)))) {
+            ++m_pos;  // The '.'
+            while (m_pos < m_text.size()
+                   && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
+                       || m_text[m_pos] == '_')) {
+                ++m_pos;
+            }
+            if (peek(0) == 'e' || peek(0) == 'E') {
+                const bool sign = peek(1) == '+' || peek(1) == '-';
+                const char after = sign ? peek(2) : peek(1);
+                if (std::isdigit(static_cast<unsigned char>(after))) {
+                    m_pos += 1 + (sign ? 1 : 0);
+                    while (m_pos < m_text.size()
+                           && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
+                               || m_text[m_pos] == '_')) {
+                        ++m_pos;
+                    }
+                }
+            }
+            std::string clean;
+            for (size_t i = start; i < m_pos; ++i) {
+                if (m_text[i] != '_') clean.push_back(m_text[i]);
+            }
+            tok.kind = Token::REAL;
+            tok.realValue = std::stod(clean);
+            tok.text = clean;
+            return tok;
+        }
         int64_t value = 0;
         if (peek(0) == '#') {
             int64_t base = 0;
@@ -258,8 +338,11 @@ Token Lexer::next() {
         return tok;
     }
     if (c == '\'') {
-        // Character literal ('0'); anything else is an attribute mark
-        if (peek(1) != '\'' && peek(1) != '\n' && peek(2) == '\'') {
+        // Character literal ('0'); anything else is an attribute or qualification
+        // mark. A mark immediately followed by '(' after a name, e.g. the `'('` in
+        // std_logic'('1'), is a qualified expression, not the character literal '('.
+        if (peek(1) != '\'' && peek(1) != '\n' && peek(2) == '\''
+            && !(peek(1) == '(' && m_prevEndsDesignator)) {
             tok.kind = Token::CHAR;
             tok.charValue = peek(1);
             m_pos += 3;
@@ -287,12 +370,22 @@ Token Lexer::next() {
     }
     if (c == '(' || c == ')' || c == ';' || c == ':' || c == ',' || c == '.' || c == '='
         || c == '<' || c == '>' || c == '+' || c == '-' || c == '*' || c == '/' || c == '&'
-        || c == '|' || c == '#' || c == '?') {
+        || c == '|' || c == '#' || c == '?' || c == '{' || c == '}' || c == '[' || c == ']') {
         return lexSymbol(tok.flp);
     }
     unsupportedError(tok.flp, std::string{"character '"} + c + "'");
     ++m_pos;
     tok.kind = Token::END;
+    return tok;
+}
+
+Token Lexer::next() {
+    // Remember whether the token just handed back can precede an attribute or
+    // qualified-expression apostrophe, so nextRaw() can disambiguate the `'` above.
+    Token tok = nextRaw();
+    m_prevEndsDesignator = tok.kind == Token::ID || tok.kind == Token::CHAR
+                           || tok.kind == Token::STRING
+                           || (tok.kind == Token::SYM && (tok.sym == ')' || tok.sym == ']'));
     return tok;
 }
 }  // namespace vhdlnative

@@ -29,6 +29,7 @@
 #include "V3FileLine.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -634,6 +635,13 @@ public:
 bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     switch (expr.kind) {
     case Expr::INT_LIT: value = expr.intValue; return true;
+    case Expr::REAL_LIT:
+        // A universal_real in an integer context, IEEE 1800-2023 7.3.5
+        if (std::isfinite(expr.realValue) && expr.realValue == std::floor(expr.realValue)) {
+            value = static_cast<int64_t>(expr.realValue);
+            return true;
+        }
+        return false;
     case Expr::NAME: {
         const auto bindIt = activeEnv().find(expr.text);
         if (bindIt != activeEnv().end() && VN_IS(bindIt->second.exprp, Const)) {
