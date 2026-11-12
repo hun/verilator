@@ -1836,7 +1836,8 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
                 } else {
                     result = lhs >= rhs;
                 }
-                AstConst* const bitp = new AstConst{flp, V3Number{flp, 1, result ? 1 : 0}};
+                AstConst* const bitp
+                    = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(result)}};
                 bitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
                 return bitp;
             }
@@ -2939,11 +2940,39 @@ const VType* Lowering::typeOfName(const Expr& expr) const {
 
 AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
     FileLine* const flp = expr.flp;
+    const std::string& attribute = expr.text;
+    // `X(i)'event` is a transaction on one element of a signal. The whole-signal event
+    // shortcut would miss a bit that did not change, so compare the element with its
+    // previous value; sensitivity still comes from registering the base signal as an edge.
+    if (attribute == "event" && expr.a
+        && (expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)) {
+        const Expr* const basep = expr.a->a.get();
+        AstVar* const varp = basep && basep->kind == Expr::NAME ? lookupVar(*basep) : nullptr;
+        if (varp) {
+            m_edges.push_back({varp, VEdgeType::ET_CHANGED});
+            if (m_initial) return bitConst(flp, '0');
+            AstNodeExpr* const curp = lowerDesignator(*expr.a, false);
+            if (!curp) return nullptr;
+            AstVar*& prevp = m_edgePrevVars[varp];
+            if (!prevp) {
+                const std::string name
+                    = "vhdledge_" + std::to_string(++m_edgeSeq) + "__" + varp->name();
+                prevp = new AstVar{flp, VVarType::VAR, name, varp->dtypep()};
+                m_modp->addStmtsp(prevp);
+            }
+            AstNodeExpr* const prevExprp = curp->cloneTree(false);
+            prevExprp->foreach([&](AstVarRef* const refp) {  //
+                if (refp->varp() == varp) refp->varp(prevp);
+            });
+            AstNodeExpr* const changedp = new AstNeq{flp, curp, prevExprp};
+            changedp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            return changedp;
+        }
+    }
     if (!expr.a || expr.a->kind != Expr::NAME) {
         unsupportedError(flp, "attribute of a non-name prefix");
         return nullptr;
     }
-    const std::string& attribute = expr.text;
     if (attribute == "event") {
         // `X'event` is true when X had a transaction this cycle, i.e. its value differs
         // from the previous evaluation. Register X as a sensitivity edge so the enclosing
@@ -5379,8 +5408,9 @@ void Lowering::lowerProcess(const Process& process) {
         sensVars.push_back(it->second.varp);
     }
     // A process runs on every event of its sensitivity list, so an edge call must not
-    // become a constant. With one sensitivity signal the signal's level is its edge;
-    // with several, compare each edge signal with its previous value.
+    // become a constant. A whole-signal edge is the signal's level when it is the only
+    // sensitivity; a signal-element event and multi-sensitivity edges compare with the
+    // previous value, which needs the previous-value variables maintained below.
     const bool hasEdges = stmtsContainEdge(process.body);
     m_edgeAsLevel = hasEdges && sensVars.size() == 1;
     m_edgeAsPrev = hasEdges && sensVars.size() > 1;
@@ -5400,14 +5430,14 @@ void Lowering::lowerProcess(const Process& process) {
                                       initPrevsp, new AstAssign{process.flp, lhsp, rhsp})
                                 : new AstAssign{process.flp, lhsp, rhsp};
     }
-    if (m_edgeAsPrev && bodyp && initPrevsp) {
+    if (!m_edgePrevVars.empty() && bodyp && initPrevsp) {
         bodyp = AstNode::addNext(bodyp, initPrevsp->cloneTree(true));
     }
     m_initial = true;
     m_varVals.clear();
     AstNode* initp = lowerStmtList(process.body);
     m_initial = false;
-    if (m_edgeAsPrev && initp && initPrevsp) {
+    if (!m_edgePrevVars.empty() && initp && initPrevsp) {
         initp = AstNode::addNext(initp, initPrevsp);
         initPrevsp = nullptr;
     }
