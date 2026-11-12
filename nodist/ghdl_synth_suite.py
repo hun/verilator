@@ -50,6 +50,9 @@ GHDL_FLAGS_RE = re.compile(
 TOP_RE = re.compile(r'\b(?:synth_tb|synth_only|synth_analyze)\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_TOP_RE = re.compile(r'\bsynth\b[^\n]*?\s-e\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_FAIL_RE = re.compile(r'\bsynth_failure\b([^\n]*)')
+PACKAGE_RE = re.compile(
+    r'^\s*package\s+(?!body\b)([A-Za-z][A-Za-z0-9_]*)\b', re.IGNORECASE | re.MULTILINE)
+USE_WORK_RE = re.compile(r'\buse\s+work\.([A-Za-z][A-Za-z0-9_]*)', re.IGNORECASE)
 
 
 def script_tops(testdir):
@@ -121,6 +124,48 @@ def entity_names(path):
         return []
     # GHDL lowercases identifiers in its XML, and so does the emitted module name
     return [name.lower() for name in ENTITY_RE.findall(COMMENT_RE.sub('', text))]
+
+
+def expand_packages(testdir, files):
+    """Prepend sibling files declaring packages imported (directly or transitively) by
+    `files`, mirroring how the GHDL testsuite analyzes a design with the packages it
+    `use`s. A depended-upon package is emitted before its dependents so the frontend
+    can analyze the set in one run. Files that already appear in `files` are not added."""
+    def text_of(path):
+        try:
+            return COMMENT_RE.sub('', path.read_text(errors='replace'))
+        except OSError:
+            return ''
+
+    decl = {}
+    for path in sorted(testdir.glob('*.vhdl')):
+        if path.name.startswith(('tb_', 'syn_')):
+            continue
+        for pkg in PACKAGE_RE.findall(text_of(path)):
+            decl.setdefault(pkg.lower(), []).append(path)
+
+    originals = {path.resolve() for path in files}
+    order = []
+    added = set()
+    visiting = set()
+
+    def visit(pkg_file):
+        key = pkg_file.resolve()
+        if key in originals or key in added or key in visiting:
+            return
+        visiting.add(key)
+        for pkg in USE_WORK_RE.findall(text_of(pkg_file)):
+            for dep in decl.get(pkg.lower(), []):
+                visit(dep)
+        visiting.discard(key)
+        added.add(key)
+        order.append(pkg_file)
+
+    for path in files:
+        for pkg in USE_WORK_RE.findall(text_of(path)):
+            for dep in decl.get(pkg.lower(), []):
+                visit(dep)
+    return order + list(files)
 
 
 def classify(returncode, output):
@@ -304,6 +349,9 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
                 files = designs[:1] + [chosen]
             else:
                 files = [chosen]
+            # Add package files GHDL analyzes alongside the design but that a
+            # looped `synth -e $t` line hides from the file list.
+            files = expand_packages(testdir, files)
             jobs.append((args.suite, testdir, top, files, chosen.name in synth_failures, args))
 
     if args.list:
