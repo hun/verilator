@@ -2674,8 +2674,24 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         return nullptr;
     }
     const std::string& attribute = expr.text;
-    if (attribute == "event" || attribute == "stable" || attribute == "active"
-        || attribute == "last_event" || attribute == "last_active") {
+    if (attribute == "event") {
+        // `X'event` is true when X had a transaction this cycle, i.e. its value differs
+        // from the previous evaluation. Register X as a sensitivity edge so the enclosing
+        // process re-runs on it, then reduce like `lowerEdgeCall`: no event at time zero,
+        // the level under a single-sensitivity always, else compare with the previous value
+        AstVar* const varp = lookupVar(*expr.a);
+        if (!varp) {
+            unsupportedError(flp, "attribute 'event' on a non-signal prefix");
+            return nullptr;
+        }
+        m_edges.push_back({varp, VEdgeType::ET_CHANGED});
+        if (m_initial) return bitConst(flp, '0');
+        if (m_edgeAsLevel) return bitConst(flp, '1');
+        if (m_edgeAsPrev) return edgeChanged(flp, varp);
+        return bitConst(flp, '1');
+    }
+    if (attribute == "stable" || attribute == "active" || attribute == "last_event"
+        || attribute == "last_active") {
         unsupportedError(flp, "signal attribute '" + attribute + "'");
         return nullptr;
     }

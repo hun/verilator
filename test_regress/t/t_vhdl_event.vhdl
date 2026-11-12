@@ -21,7 +21,9 @@ entity t is
     qf : out std_logic;
     qr : out std_logic;
     qe : out std_logic;
-    qe2 : out std_logic
+    qe2 : out std_logic;
+    qen : out std_logic;
+    qer : out std_logic
   );
 end;
 
@@ -32,6 +34,8 @@ architecture rtl of t is
   constant EDGE : std_logic := '1';
   signal r : std_logic;
   signal r2 : std_logic;
+  signal r3 : std_logic;
+  signal r4 : std_logic;
 begin
   process (clk) is
   begin
@@ -105,4 +109,24 @@ begin
     end if;
   end process;
   qe2 <= r2;
+
+  -- Three-term clock enable: event attribute with a level and an enable in one conjunction
+  process (clk) is
+  begin
+    if clk'event and clk = '1' and en = '1' then
+      r3 <= d;
+    end if;
+  end process;
+  qen <= r3;
+
+  -- Parenthesized event conjunction as an elsif operand after an async reset
+  process (clk, rst) is
+  begin
+    if rst = '1' then
+      r4 <= '0';
+    elsif (clk'event and clk = '1') then
+      r4 <= d;
+    end if;
+  end process;
+  qer <= r4;
 end;
