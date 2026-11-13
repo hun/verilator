@@ -227,6 +227,9 @@ struct TypeSpec final {
         ExprP lo, hi;  // Bounds in written order, e.g. 3 downto 0 -> lo=3, hi=0
     };
     std::vector<MemberConstraint> memberConstraints;
+    // A nested-array subtype indication `t(r1)(r2, ...)` beyond the first index range
+    // (which lives in this spec's own hasRange/left/right), outermost first, innermost last
+    std::vector<TypeSpec> indexConstraints;
 };
 
 struct PortDecl final {

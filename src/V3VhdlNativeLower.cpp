@@ -421,6 +421,9 @@ class Lowering final {
     bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
     AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
     bool applyRange(const TypeSpec& spec, VType& type);
+    //! Constrain a nested-array subtype `t(r1)(r2, ...)` by descending one level per
+    //! constraint; a fresh copy, and any residual unconstrained level is rejected
+    bool applyIndexConstraints(const TypeSpec& spec, VType& out);
     //! Apply a record subtype's per-member ranges, widening each constrained element
     bool applyMemberConstraints(const TypeSpec& spec, VType& out);
     //! Constrain one record element to a fixed vector range
@@ -432,7 +435,7 @@ class Lowering final {
     //! Evaluate a locally static real-valued expression
     bool evalReal(const Expr& expr, double& value) const;
     bool mentionsReal(const Expr& expr) const;
-    bool rejectRealObject(const VType& type, FileLine* flp);
+    bool rejectRealObject(const VType& type, FileLine* flp, bool allowUnconstrained = false);
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);
     }
@@ -1141,11 +1144,18 @@ bool Lowering::mentionsReal(const Expr& expr) const {
 
 //! A real survives only as an elaboration-time constant; reject any object that would
 //! need a runtime floating type so it reports as unsupported instead of emitting a
-//! variable with no data type.
-bool Lowering::rejectRealObject(const VType& type, FileLine* flp) {
-    if (type.kind != VType::REAL) return false;
-    unsupportedError(flp, "real variable, signal, or port");
-    return true;
+//! variable with no data type. Likewise reject an object whose type stayed unconstrained
+//! (null data type); ports defer their width to a binding, so they opt out.
+bool Lowering::rejectRealObject(const VType& type, FileLine* flp, bool allowUnconstrained) {
+    if (type.kind == VType::REAL) {
+        unsupportedError(flp, "real variable, signal, or port");
+        return true;
+    }
+    if (!allowUnconstrained && !type.dtp) {
+        unsupportedError(flp, "object of an unconstrained array type");
+        return true;
+    }
+    return false;
 }
 
 AstNodeDType* Lowering::enumDType(FileLine* flp, const TypeDecl& decl, int width) {
@@ -1197,7 +1207,23 @@ void Lowering::registerType(const TypeDecl& decl) {
     }
     case TypeDecl::ARRAY: {
         VType elem;
-        if (!resolveType(decl.base, elem)) return;
+        const std::string& baseMark = decl.base.mark;
+        const bool unconstrainedVectorBase
+            = (baseMark == "std_logic_vector" || baseMark == "std_ulogic_vector"
+               || baseMark == "bit_vector" || baseMark == "unsigned" || baseMark == "signed"
+               || baseMark == "u_unsigned" || baseMark == "u_signed")
+              && !decl.base.hasRange && decl.base.constraintMark.empty();
+        if (unconstrainedVectorBase) {
+            // An array of an unconstrained vector; a use supplies the element's range
+            elem.kind = VType::VECTOR;
+            elem.kwd = baseMark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+            elem.signing = (baseMark == "signed" || baseMark == "u_signed") ? VSigning::SIGNED
+                                                                            : VSigning::UNSIGNED;
+            elem.width = 0;
+            elem.elemWidth = 1;
+        } else if (!resolveType(decl.base, elem)) {
+            return;
+        }
         if (!decl.index.hasRange) {
             unsupportedError(flp, "array type without an index constraint");
             return;
@@ -1331,6 +1357,52 @@ bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& ri
         left = prefix.right;
         right = prefix.left;
         ascending = !prefix.ascending;
+    }
+    return true;
+}
+
+//! Deep-copy the array element chain so a use-site constraint does not mutate the shared type
+static VType cloneArrayChain(const VType& type) {
+    VType copy = type;
+    if (type.kind == VType::ARRAY && type.elemp) {
+        copy.elemp = std::make_shared<VType>(cloneArrayChain(*type.elemp));
+    }
+    return copy;
+}
+
+bool Lowering::applyIndexConstraints(const TypeSpec& spec, VType& out) {
+    FileLine* const flp = spec.flp;
+    out = cloneArrayChain(out);  // The instance owns its levels
+    std::vector<const TypeSpec*> constraints;
+    constraints.push_back(&spec);
+    for (const TypeSpec& extra : spec.indexConstraints) constraints.push_back(&extra);
+    // Descend one array level per constraint; the innermost element may be a vector
+    std::vector<VType*> levels;
+    VType* levelp = &out;
+    for (size_t k = 0; k < constraints.size(); ++k) {
+        if (k > 0) {
+            if (levelp->kind != VType::ARRAY || !levelp->elemp) {
+                unsupportedError(flp, "too many index constraints for the array type");
+                return false;
+            }
+            levelp = levelp->elemp.get();
+        }
+        levels.push_back(levelp);
+    }
+    // Apply the innermost constraint first, so each outer level sees its element's width
+    for (size_t k = constraints.size(); k-- > 0;) {
+        VType& level = *levels[k];
+        if (level.kind == VType::ARRAY && level.elemp) level.elemWidth = level.elemp->width;
+        if (!level.isVector()) {
+            unsupportedError(flp, "index constraint on a non-array subtype element");
+            return false;
+        }
+        if (!applyRange(*constraints[k], level)) return false;
+    }
+    // A residual unconstrained level cannot be allocated as a variable
+    if (out.width == 0 || !out.dtp) {
+        unsupportedError(flp, "unconstrained nested array subtype");
+        return false;
     }
     return true;
 }
@@ -1473,6 +1545,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     if (declared != m_types.end()) {
         out = declared->second;
         if (!spec.memberConstraints.empty() && !applyMemberConstraints(spec, out)) return false;
+        if (!spec.indexConstraints.empty()) return applyIndexConstraints(spec, out);
         return applyRange(spec, out);
     }
     if (mark == "u_unsigned" || mark == "u_signed") {
@@ -2712,6 +2785,14 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         for (size_t ai = 0; ai < expr.args.size(); ++ai) {
             if (!levelType.isVector()) {
                 unsupportedError(flp, "index into a non-array value");
+                curp->deleteTree();
+                return nullptr;
+            }
+            // A second comma index would descend into a flat vector element. An array of
+            // vectors is one-dimensional, so `v(i, j)` has too many indices; the valid form
+            // is the chained `v(i)(j)`, which reaches here as separate single-index steps
+            if (ai > 0 && levelType.kind == VType::VECTOR) {
+                unsupportedError(flp, "multi-dimensional index on a vector element");
                 curp->deleteTree();
                 return nullptr;
             }
@@ -6070,7 +6151,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         } else if (!resolveType(port.type, type)) {
             continue;
         }
-        if (rejectRealObject(type, port.flp)) continue;
+        if (rejectRealObject(type, port.flp, /*allowUnconstrained:*/ true)) continue;
         for (const auto& name : port.names) {
             if (!m_scope.emplace(name.first, VarInfo{}).second) {
                 port.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");

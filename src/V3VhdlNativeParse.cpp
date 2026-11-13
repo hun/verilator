@@ -797,9 +797,32 @@ void Parser::parseTypeSpec(TypeSpec& type) {
         }
         expectSym(")");
     }
-    if (isSym("(")) {  // A second index constraint: unmodelled multi-dimensional array
-        unsupported("multi-dimensional array type");
-        return;
+    while (isSym("(")) {  // A further index range of a nested `t(r1)(r2)` subtype
+        // Only treat it as an index range if a 'to'/'downto' sits at this paren's own
+        // level; a `name(range)` here is a record/member constraint, not an index range
+        const auto saved = m_lexer.state();
+        bool sawTopRange = false;
+        for (int depth = 1;;) {  // m_cur is the '(', so the scan starts inside it
+            const Token t = m_lexer.next();
+            if (t.kind == Token::END) break;
+            if (t.kind == Token::SYM && t.text == "(") {
+                ++depth;
+            } else if (t.kind == Token::SYM && t.text == ")") {
+                if (--depth == 0) break;
+            } else if (depth == 1 && t.kind == Token::ID
+                       && (t.text == "to" || t.text == "downto")) {
+                sawTopRange = true;
+            }
+        }
+        m_lexer.restore(saved);
+        if (!sawTopRange) {
+            unsupported("multi-dimensional array type");
+            return;
+        }
+        advance();  // The '('
+        type.indexConstraints.emplace_back();
+        if (!parseRange(type.indexConstraints.back())) return;
+        expectSym(")");
     }
 }
 
