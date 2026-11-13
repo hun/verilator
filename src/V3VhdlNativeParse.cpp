@@ -791,6 +791,10 @@ void Parser::parseTypeSpec(TypeSpec& type) {
             }
         }
         if (!parseRange(type)) return;
+        if (isSym(",")) {  // A multi-dimensional subtype constraint `t(r1, r2)`
+            unsupported("multi-dimensional index constraint on a subtype");
+            return;
+        }
         expectSym(")");
     }
     if (isSym("(")) {  // A second index constraint: unmodelled multi-dimensional array
@@ -1304,9 +1308,10 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
         }
         parseIndexConstraint(decl.index);
         if (m_failed) return;
-        if (isSym(",")) {
-            unsupported("multi-dimensional array index constraint");
-            return;
+        while (acceptSym(",")) {
+            decl.indexes.emplace_back();
+            parseIndexConstraint(decl.indexes.back());
+            if (m_failed) return;
         }
         expectSym(")");
         if (!expectId("of")) return;

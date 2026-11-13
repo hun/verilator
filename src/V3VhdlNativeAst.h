@@ -275,6 +275,9 @@ struct TypeDecl final {
     std::vector<std::pair<std::string, std::string>> literals;  // ENUM: (folded, spelling)
     TypeSpec base;  // SUBTYPE: base mark and optional constraint; ARRAY: element type
     TypeSpec index;  // ARRAY: index constraint
+    // ARRAY: further index constraints of a multi-dimensional type `array (i1, i2, ...)`,
+    // outermost first; `index` holds the first
+    std::vector<TypeSpec> indexes;
     struct Member final {
         std::vector<std::pair<std::string, std::string>> names;
         TypeSpec type;

@@ -1203,25 +1203,49 @@ void Lowering::registerType(const TypeDecl& decl) {
             return;
         }
         type.kind = VType::ARRAY;
-        type.elemp = std::make_shared<VType>(elem);
-        type.elemWidth = elem.width;
-        type.kwd = elem.kwd;
         type.signing = VSigning::UNSIGNED;
-        int64_t left = 0;
-        int64_t right = 0;
-        bool ascending = false;
-        if (!constraintBounds(decl.index, left, right, ascending)) {
-            // Unconstrained array type: every use must supply the index constraint
+        // Fold the index constraints (outermost first) into a nested array of arrays, so a
+        // multi-dimensional array is a packed vector whose element is itself the inner array
+        std::vector<const TypeSpec*> specs;
+        specs.push_back(&decl.index);
+        for (const TypeSpec& extra : decl.indexes) specs.push_back(&extra);
+        std::vector<int64_t> lefts(specs.size());
+        std::vector<int64_t> rights(specs.size());
+        std::vector<char> ascends(specs.size());
+        bool constrained = true;
+        for (size_t k = 0; k < specs.size(); ++k) {
+            bool asc = false;
+            if (!constraintBounds(*specs[k], lefts[k], rights[k], asc)) {
+                constrained = false;  // Unconstrained: every use supplies the index constraint
+                break;
+            }
+            ascends[k] = asc;
+        }
+        if (!constrained) {
+            type.elemp = std::make_shared<VType>(elem);
+            type.elemWidth = elem.width;
+            type.kwd = elem.kwd;
             type.left = 0;
             type.right = 0;
             type.width = 0;
             break;
         }
-        type.left = static_cast<int>(left);
-        type.right = static_cast<int>(right);
-        type.ascending = ascending;
-        type.width = elem.width * type.length();
-        type.dtp = findVectorWidth(flp, elem.kwd, VSigning::UNSIGNED, type.width);
+        VType cur = elem;
+        for (size_t k = specs.size(); k-- > 0;) {
+            VType arr;
+            arr.kind = VType::ARRAY;
+            arr.elemp = std::make_shared<VType>(cur);
+            arr.elemWidth = cur.width;
+            arr.kwd = cur.kwd;
+            arr.signing = VSigning::UNSIGNED;
+            arr.left = static_cast<int>(lefts[k]);
+            arr.right = static_cast<int>(rights[k]);
+            arr.ascending = ascends[k];
+            arr.width = cur.width * arr.length();
+            arr.dtp = findVectorWidth(flp, arr.kwd, VSigning::UNSIGNED, arr.width);
+            cur = arr;
+        }
+        type = cur;  // The outermost array type
         break;
     }
     case TypeDecl::RECORD: {
@@ -2681,38 +2705,55 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         return sliceOf(flp, basep, baseType, elemWidth, hi, lo, prefixTypep->ascending);
     }
     if (expr.kind == Expr::INDEX) {
-        if (expr.args.size() != 1) {
-            unsupportedError(flp, "index with multiple arguments");
-            basep->deleteTree();
-            return nullptr;
+        // A multi-dimensional index `m(i, j)` descends one array level per argument; a
+        // nested `m(i)(j)` yields one single-argument INDEX per level and shares this path
+        AstNodeExpr* curp = basep;
+        VType levelType = baseType;
+        for (size_t ai = 0; ai < expr.args.size(); ++ai) {
+            if (!levelType.isVector()) {
+                unsupportedError(flp, "index into a non-array value");
+                curp->deleteTree();
+                return nullptr;
+            }
+            VType levelElem;
+            if (levelType.kind == VType::ARRAY && levelType.elemp) {
+                levelElem = *levelType.elemp;
+            } else {
+                levelElem.kind = levelType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+                levelElem.dtp = findBasic(flp, levelType.kwd);
+            }
+            const int levelWidth = levelType.elemWidth;
+            AstNodeExpr* indexp = lowerExpr(*expr.args[ai], nullptr);
+            if (!indexp) {
+                curp->deleteTree();
+                return nullptr;
+            }
+            if (!typeOfDType(indexp->dtypep()).isInt()) {
+                unsupportedError(flp, "non-integer index");
+                indexp->deleteTree();
+                curp->deleteTree();
+                return nullptr;
+            }
+            // The right bound is the least significant element in either direction
+            AstNodeExpr* offsetp = indexp;
+            if (levelType.ascending) {
+                offsetp = new AstSub{flp, makeIntConst(flp, levelType.right), indexp};
+            } else if (levelType.right != 0) {
+                offsetp = new AstSub{flp, indexp, makeIntConst(flp, levelType.right)};
+            }
+            offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+            if (levelWidth != 1) {
+                AstNodeExpr* const scaledp
+                    = new AstMul{flp, offsetp, makeIntConst(flp, levelWidth)};
+                scaledp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+                offsetp = scaledp;
+            }
+            AstSel* const selp = new AstSel{flp, curp, offsetp, levelWidth};
+            selp->dtypep(levelElem.dtp);
+            curp = selp;
+            levelType = levelElem;
         }
-        AstNodeExpr* indexp = lowerExpr(*expr.args[0], nullptr);
-        if (!indexp) {
-            basep->deleteTree();
-            return nullptr;
-        }
-        if (!typeOfDType(indexp->dtypep()).isInt()) {
-            unsupportedError(flp, "non-integer index");
-            indexp->deleteTree();
-            basep->deleteTree();
-            return nullptr;
-        }
-        // The right bound is the least significant element in either direction
-        AstNodeExpr* offsetp = indexp;
-        if (baseType.ascending) {
-            offsetp = new AstSub{flp, makeIntConst(flp, baseType.right), indexp};
-        } else if (baseType.right != 0) {
-            offsetp = new AstSub{flp, indexp, makeIntConst(flp, baseType.right)};
-        }
-        offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
-        if (elemWidth != 1) {
-            AstNodeExpr* const scaledp = new AstMul{flp, offsetp, makeIntConst(flp, elemWidth)};
-            scaledp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
-            offsetp = scaledp;
-        }
-        AstSel* const selp = new AstSel{flp, basep, offsetp, elemWidth};
-        selp->dtypep(elemType.dtp);
-        return selp;
+        return curp;
     }
     int64_t leftValue = 0;
     int64_t rightValue = 0;
