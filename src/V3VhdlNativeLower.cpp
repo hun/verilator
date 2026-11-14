@@ -3244,9 +3244,25 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         }
         return curp;
     }
+    // A bound may be an attribute of the sliced prefix itself, e.g. `s(s'left downto 1)`:
+    // the prefix's own type fixes it, so it needs no scope lookup of a record element
+    const auto boundValue = [&](const ExprP& bound, int64_t& out) -> bool {
+        if (staticInt(bound, out)) return true;
+        if (bound->kind != Expr::ATTR || !bound->a || bound->a->spelling != expr.a->spelling)
+            return false;
+        if (bound->text == "left") {
+            out = baseType.left;
+            return true;
+        }
+        if (bound->text == "right") {
+            out = baseType.right;
+            return true;
+        }
+        return false;
+    };
     int64_t leftValue = 0;
     int64_t rightValue = 0;
-    if (staticInt(expr.b, leftValue) && staticInt(expr.c, rightValue)) {
+    if (boundValue(expr.b, leftValue) && boundValue(expr.c, rightValue)) {
         int hi = 0;
         int lo = 0;
         if (expr.text == "downto") {
