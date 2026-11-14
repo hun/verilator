@@ -11,11 +11,14 @@ entity t is
 end entity t;
 
 architecture sim of t is
-  signal s : std_logic_vector(7 downto 0) := "10110010";
   signal o : std_logic_vector(3 downto 0);
+  signal s : std_logic_vector(7 downto 0) := "10110010";
+  signal p : std_logic_vector(2 downto 0);
 begin
   -- The bound is the prefix's own 'left, so the range needs no scope lookup
   o <= s(s'left downto 4);
+  -- A bound with arithmetic around the attribute folds the same way
+  p <= s(s'left-1 downto 4);
 
   check : process
   begin
@@ -24,6 +27,11 @@ begin
       report "o is 1011";
     else
       report "o is wrong";
+    end if;
+    if p = "011" then
+      report "p is 011";
+    else
+      report "p is wrong";
     end if;
     std.env.finish;
     wait;

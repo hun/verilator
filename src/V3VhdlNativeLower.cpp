@@ -757,6 +757,8 @@ class Lowering final {
     AstNodeExpr* lowerConversion(const Expr& expr);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
+    bool sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
+                    int64_t& out) const;
     AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
                          int hi, int lo, bool ascending);
 
@@ -3112,6 +3114,38 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
     unsupportedError(flp, "expression as an assignment target");
     return nullptr;
 }
+bool Lowering::sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
+                          int64_t& out) const {
+    if (staticInt(expr, out)) return true;
+    if (expr->kind == Expr::PAREN && expr->a) {
+        return sliceBound(expr->a, prefix, baseType, out);
+    }
+    if (expr->kind == Expr::ATTR && expr->a && expr->a->spelling == prefix) {
+        if (expr->text == "left") {
+            out = baseType.left;
+            return true;
+        }
+        if (expr->text == "right") {
+            out = baseType.right;
+            return true;
+        }
+        if (expr->text == "length") {
+            out = std::abs(baseType.left - baseType.right) + 1;
+            return true;
+        }
+        return false;
+    }
+    if (expr->kind == Expr::BINARY && (expr->text == "+" || expr->text == "-") && expr->a
+        && expr->b) {
+        int64_t lhs = 0;
+        int64_t rhs = 0;
+        if (!sliceBound(expr->a, prefix, baseType, lhs)) return false;
+        if (!staticInt(expr->b, rhs)) return false;
+        out = expr->text == "+" ? lhs + rhs : lhs - rhs;
+        return true;
+    }
+    return false;
+}
 
 AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType,
                                 bool write) {
@@ -3244,21 +3278,10 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         }
         return curp;
     }
-    // A bound may be an attribute of the sliced prefix itself, e.g. `s(s'left downto 1)`:
+    // A bound may be an attribute of the sliced prefix itself, e.g. `s(s'left-1 downto 1)`:
     // the prefix's own type fixes it, so it needs no scope lookup of a record element
     const auto boundValue = [&](const ExprP& bound, int64_t& out) -> bool {
-        if (staticInt(bound, out)) return true;
-        if (bound->kind != Expr::ATTR || !bound->a || bound->a->spelling != expr.a->spelling)
-            return false;
-        if (bound->text == "left") {
-            out = baseType.left;
-            return true;
-        }
-        if (bound->text == "right") {
-            out = baseType.right;
-            return true;
-        }
-        return false;
+        return sliceBound(bound, expr.a ? expr.a->spelling : std::string(), baseType, out);
     };
     int64_t leftValue = 0;
     int64_t rightValue = 0;
