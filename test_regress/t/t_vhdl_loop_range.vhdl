@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: a process loop range that reads a signal has to fold
+-- DESCRIPTION: Verilator: a process loop range that reads a signal runs at run time
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas

@@ -772,6 +772,7 @@ class Lowering final {
     void restoreScope(const ScopeSave& saved);
     void emitProcessDecls(const Process& process, std::set<std::string>& varNames);
     AstNode* lowerFor(const Stmt& stmt);
+    AstNode* lowerForRuntime(const Stmt& stmt);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
     static void collectExprNames(const Expr& expr, std::set<std::string>& names);
@@ -5038,8 +5039,9 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
         right = typep->right;
         up = typep->ascending;
     } else if (!staticInt(stmt.b, left) || !staticInt(stmt.c, right)) {
-        unsupportedError(flp, "loop range that is not static");
-        return nullptr;
+        // A sequential loop evaluates its bounds when it is reached, so they may read a
+        // signal: run the loop at run time instead of unrolling it
+        return lowerForRuntime(stmt);
     }
     if (up ? right < left : right > left) {
         // An empty range: the loop body never runs
@@ -5099,6 +5101,48 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
     if (boundSavep) activeEnv()[stmt.loopVar] = *boundSavep;
     m_loops.pop_back();
     return headp;
+}
+
+AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    // `exit` and `next` act on an iteration the unroller cannot see
+    if (usesExitNext(stmt.body)) {
+        unsupportedError(flp, "loop with 'exit' or 'next' whose range is not static");
+        return nullptr;
+    }
+    const bool up = stmt.rangeAscending;
+    VType intT = intType(flp);
+    int64_t left = 0;
+    int64_t right = 0;
+    AstNodeExpr* const initp
+        = staticInt(stmt.b, left) ? makeIntConst(flp, left) : lowerExpr(*stmt.b, &intT);
+    AstNodeExpr* const boundp
+        = staticInt(stmt.c, right) ? makeIntConst(flp, right) : lowerExpr(*stmt.c, &intT);
+    if (!initp || !boundp) return nullptr;
+    // The loop variable is an ordinary variable: the body reads and writes it through the
+    // scope, so its references lower to variable references rather than to constants
+    AstVar* const varp
+        = new AstVar{flp, VVarType::VAR, "vhdlfor_" + std::to_string(++m_loopSeq), intT.dtp};
+    m_modp->addStmtsp(varp);
+    const ScopeSave savedScope = saveScope();
+    m_scope.erase(stmt.loopVar);
+    m_scope[stmt.loopVar] = VarInfo{varp, intT};
+    AstLoop* const loopp = new AstLoop{flp};
+    AstNodeExpr* const testp
+        = up ? static_cast<AstNodeExpr*>(
+                   new AstLte{flp, new AstVarRef{flp, varp, VAccess::READ}, boundp})
+             : static_cast<AstNodeExpr*>(
+                   new AstGte{flp, new AstVarRef{flp, varp, VAccess::READ}, boundp});
+    testp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    loopp->addStmtsp(new AstLoopTest{flp, loopp, testp});
+    if (AstNode* const bodyp = lowerStmtList(stmt.body)) loopp->addStmtsp(bodyp);
+    AstNodeExpr* const stepp
+        = new AstAdd{flp, new AstVarRef{flp, varp, VAccess::READ}, new AstConst{flp, 1}};
+    stepp->dtypep(intT.dtp);
+    loopp->addStmtsp(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, stepp});
+    restoreScope(savedScope);
+    return AstNode::addNext<AstNode, AstNode>(
+        new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, initp}, loopp);
 }
 
 AstNode* Lowering::lowerWhile(const Stmt& stmt) {
