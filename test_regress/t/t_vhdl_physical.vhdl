@@ -11,7 +11,9 @@ entity t is
     q_ratio : out integer;  -- 200 ns / 8 ns
     q_half  : out integer;  -- (60 ns / 2) / 1 ns
     q_big   : out integer;  -- 1 sec / 1 ms, a time intermediate over int32
-    q_frac  : out integer   -- 27.777 us / 83.333 ns
+    q_frac  : out integer;  -- 27.777 us / 83.333 ns
+    q_min   : out integer;  -- 1 min / 1 sec
+    q_hr    : out integer   -- 1 hr / 1 min
   );
 end t;
 
@@ -28,4 +30,7 @@ begin
   q_big <= 1 sec / 1 ms;
   -- A fractional numeric part is scaled to the unit and rounded to whole steps
   q_frac <= 27.777 us / 83.333 ns;
+  -- The two larger predefined units scale the same way
+  q_min <= 1 min / 1 sec;
+  q_hr <= 1 hr / 1 min;
 end behav;

@@ -424,31 +424,29 @@ ExprP Parser::parsePrimary() {
         }
         node->flp = m_cur.flp;
         advance();
-        if ((node->kind == Expr::INT_LIT || node->kind == Expr::REAL_LIT)
-            && (isId("fs") || isId("ps") || isId("ns") || isId("us") || isId("ms")
-                || isId("sec"))) {  // a VHDL physical literal: <numeric> <unit>
-            // 'time''s step unit is femtoseconds, so the value is the numeric part scaled
-            // by the named unit; the result needs 64 bits (2 sec is 2e15 fs).
+        // A VHDL physical literal: <numeric> <unit>. 'time''s step unit is femtoseconds, so
+        // the value is the numeric part scaled by the named unit; the result needs 64 bits
+        // (2 sec is 2e15 fs). The names are the predefined units of `time`, VHDL-2008 set.
+        static const std::pair<const char*, double> timeUnits[]
+            = {{"fs", 1e0},    {"fsec", 1e0}, {"hr", 3.6e18}, {"min", 6e16}, {"ms", 1e12},
+               {"msec", 1e12}, {"ns", 1e6},   {"nsec", 1e6},  {"ps", 1e3},   {"psec", 1e3},
+               {"sec", 1e15},  {"us", 1e9},   {"usec", 1e9}};
+        if (node->kind == Expr::INT_LIT || node->kind == Expr::REAL_LIT) {
             double scale = 0;
-            if (isId("fs")) {
-                scale = 1e0;
-            } else if (isId("ps")) {
-                scale = 1e3;
-            } else if (isId("ns")) {
-                scale = 1e6;
-            } else if (isId("us")) {
-                scale = 1e9;
-            } else if (isId("ms")) {
-                scale = 1e12;
-            } else {
-                scale = 1e15;  // sec
+            for (const std::pair<const char*, double>& unit : timeUnits) {
+                if (m_cur.text == unit.first) {
+                    scale = unit.second;
+                    break;
+                }
             }
-            const double numeric = node->kind == Expr::INT_LIT
-                                       ? static_cast<double>(node->intValue)
-                                       : node->realValue;
-            node->kind = Expr::PHYS_LIT;
-            node->intValue = std::llround(numeric * scale);
-            advance();  // Consume the unit identifier
+            if (scale > 0) {
+                const double numeric = node->kind == Expr::INT_LIT
+                                           ? static_cast<double>(node->intValue)
+                                           : node->realValue;
+                node->kind = Expr::PHYS_LIT;
+                node->intValue = std::llround(numeric * scale);
+                advance();  // Consume the unit identifier
+            }
         }
         return node;
     }
