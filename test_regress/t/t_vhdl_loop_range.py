@@ -13,6 +13,8 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_loop_range.vhdl'
 
+vhdl_frontend.native_only(test)
+
 test.compile(make_top_shell=False,
              make_main=False,
              verilator_flags2=[
