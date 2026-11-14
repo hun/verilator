@@ -825,9 +825,10 @@ void Parser::parseTypeSpec(TypeSpec& type) {
             }
         }
         if (!parseRange(type)) return;
-        if (isSym(",")) {  // A multi-dimensional subtype constraint `t(r1, r2)`
-            unsupported("multi-dimensional index constraint on a subtype");
-            return;
+        // `t(r1, r2)` constrains the same nested array as the chained `t(r1)(r2)`
+        while (acceptSym(",")) {
+            type.indexConstraints.emplace_back();
+            if (!parseRange(type.indexConstraints.back())) return;
         }
         expectSym(")");
     }

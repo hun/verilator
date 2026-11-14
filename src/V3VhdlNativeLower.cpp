@@ -1505,12 +1505,19 @@ void Lowering::registerType(const TypeDecl& decl) {
             ascends[k] = asc;
         }
         if (!constrained) {
-            type.elemp = std::make_shared<VType>(elem);
-            type.elemWidth = elem.width;
-            type.kwd = elem.kwd;
-            type.left = 0;
-            type.right = 0;
-            type.width = 0;
+            // Every level survives, so a use supplies one index constraint per level
+            VType inner = elem;
+            for (size_t k = specs.size(); k-- > 0;) {
+                VType arr;
+                arr.kind = VType::ARRAY;
+                arr.elemp = std::make_shared<VType>(inner);
+                arr.elemWidth = inner.width;
+                arr.kwd = inner.kwd;
+                arr.signing = VSigning::UNSIGNED;
+                arr.width = 0;
+                inner = arr;
+            }
+            type = inner;
             break;
         }
         VType cur = elem;
