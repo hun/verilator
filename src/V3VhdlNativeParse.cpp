@@ -2070,6 +2070,19 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             conc->delay = parseExpr();
             if (!conc->delay) return;
         }
+        // A waveform list: further elements, each with its own delay (IEEE 1800-2023 10.6)
+        if (conc->kind == Concurrent::ASSIGN) {
+            while (acceptSym(",")) {
+                ExprP value = parseExpr();
+                if (!value) return;
+                ExprP delay;
+                if (acceptId("after")) {
+                    delay = parseExpr();
+                    if (!delay) return;
+                }
+                conc->waveform.emplace_back(std::move(value), std::move(delay));
+            }
+        }
         expectSym(";");
         arch.stmts.push_back(std::move(conc));
         return;

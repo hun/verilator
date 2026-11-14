@@ -398,6 +398,8 @@ struct Concurrent final {
     bool entityInstantiation = false;
     // ASSIGN/COND_ASSIGN: `after <delay>`
     ExprP delay;
+    // ASSIGN: further waveform elements of a list, each with its own `after` delay
+    std::vector<std::pair<ExprP, ExprP>> waveform;
     std::vector<PortAssoc> associations;
     // INSTANCE: the `generic map` associations, formal names the generic constant
     std::vector<PortAssoc> genericAssociations;

@@ -8183,6 +8183,41 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         lhsp->deleteTree();
         return;
     }
+    if (!stmt.waveform.empty()) {
+        // A waveform list repeats: each element after the first waits its own delay, and
+        // the last element's delay closes the period (IEEE 1800-2023 10.6)
+        AstNode* bodyp = new AstAssign{stmt.flp, lhsp, rhsp};
+        const Expr* lastDelayp = stmt.delay.get();
+        for (const auto& element : stmt.waveform) {
+            if (element.second) {
+                AstNode* const delayp = lowerDelay(*element.second, stmt.flp);
+                if (!delayp) {
+                    bodyp->deleteTree();
+                    return;
+                }
+                bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
+                lastDelayp = element.second.get();
+            }
+            AstNodeExpr* const elementp = lowerExpr(*element.first, &ltype);
+            if (!elementp) {
+                bodyp->deleteTree();
+                return;
+            }
+            bodyp = AstNode::addNext<AstNode, AstNode>(
+                bodyp, new AstAssign{stmt.flp, lhsp->cloneTree(false),
+                                     resizeExpr(elementp, ltype, stmt.flp)});
+        }
+        if (lastDelayp) {
+            AstNode* const delayp = lowerDelay(*lastDelayp, stmt.flp);
+            if (!delayp) {
+                bodyp->deleteTree();
+                return;
+            }
+            bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
+        }
+        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, bodyp});
+        return;
+    }
     if (stmt.delay) {
         // A concurrent delayed assignment repeats: it waits, then drives the target
         AstNode* const assignp = new AstAssign{stmt.flp, lhsp, rhsp};
