@@ -101,19 +101,58 @@ void Lexer::skipSpace() {
         } else if (std::isspace(static_cast<unsigned char>(c))) {
             ++m_pos;
         } else if (c == '-' && peek(1) == '-') {
+            const size_t start = m_pos + 2;  // Past the comment mark
             while (m_pos < m_text.size() && m_text[m_pos] != '\n') ++m_pos;
+            notePragma(pragmaDirection(start, m_pos));
         } else if (c == '/' && peek(1) == '*') {
             m_pos += 2;
+            const size_t start = m_pos;
             while (m_pos < m_text.size() && !(m_text[m_pos] == '*' && peek(1) == '/')) {
                 if (m_text[m_pos] == '\n') ++m_line;
                 ++m_pos;
             }
+            const size_t end = m_pos;
             if (m_pos < m_text.size()) m_pos += 2;
+            notePragma(pragmaDirection(start, end));
         } else {
             return;
         }
     }
 }
+
+//! Comment pragma named by the given span, which excludes the comment marks: +1 for
+//! translate_off, -1 for translate_on, 0 for any other comment. A tool writes the pragma
+//! with its own prefix (synopsys, synthesis, pragma), so the pragma word is what ends a
+//! directive comment -- prose that only mentions it names no region.
+int Lexer::pragmaDirection(size_t start, size_t end) const {
+    size_t at = start;
+    std::string lastWord;
+    for (;;) {
+        while (at < end && std::isspace(static_cast<unsigned char>(m_text[at]))) ++at;
+        if (at >= end) break;
+        std::string word;
+        while (at < end && (isIdChar(m_text[at]) || m_text[at] == '!')) {
+            word.push_back(
+                static_cast<char>(std::tolower(static_cast<unsigned char>(m_text[at]))));
+            ++at;
+        }
+        if (word.empty()) return 0;  // Punctuation: not a directive
+        lastWord = word;
+    }
+    if (lastWord == "translate_off") return 1;
+    if (lastWord == "translate_on") return -1;
+    return 0;
+}
+
+void Lexer::notePragma(const int direction) {
+    if (direction > 0) {
+        ++m_translateOff;
+    } else if (direction < 0 && m_translateOff > 0) {
+        // A translate_on without its translate_off closes nothing
+        --m_translateOff;
+    }
+}
+
 Token Lexer::lexSymbol(FileLine* flp) {
     static const char* const threech[] = {"?/=", "?<=", "?>="};
     static const char* const twoch[]
@@ -191,6 +230,14 @@ Token Lexer::lexBits(FileLine* flp, const std::string& baseText, int length) {
 }
 
 Token Lexer::nextRaw() {
+    Token tok = scanToken();
+    // A translate_off region is not part of the design, so its tokens are dropped; a region
+    // left open runs to the end of the file
+    while (m_translateOff > 0 && tok.kind != Token::END) tok = scanToken();
+    return tok;
+}
+
+Token Lexer::scanToken() {
     skipSpace();
     Token tok;
     tok.flp = newFileLine();

@@ -67,6 +67,7 @@ class Lexer final {
     size_t m_pos = 0;  // Current offset
     int m_line = 1;  // Current line number
     bool m_prevEndsDesignator = false;  // Last token can precede an attribute/qualification mark
+    int m_translateOff = 0;  // Comment pragma translate_off regions still open
 
     FileLine* newFileLine() const {
         FileLine* const flp = new FileLine{m_filename};
@@ -90,6 +91,9 @@ class Lexer final {
     void skipSpace();
     Token lexSymbol(FileLine* flp);
     Token lexBits(FileLine* flp, const std::string& baseText, int length = -1);
+    int pragmaDirection(size_t start, size_t end) const;  // Comment pragma in a source span
+    void notePragma(int direction);
+    Token scanToken();  // One token, translate_off regions included
     Token nextRaw();  // One token, before the designator-context update
 
 public:
@@ -103,12 +107,14 @@ public:
         size_t pos;
         int line;
         bool prevEndsDesignator;
+        int translateOff;
     };
-    State state() const { return {m_pos, m_line, m_prevEndsDesignator}; }
+    State state() const { return {m_pos, m_line, m_prevEndsDesignator, m_translateOff}; }
     void restore(const State& st) {
         m_pos = st.pos;
         m_line = st.line;
         m_prevEndsDesignator = st.prevEndsDesignator;
+        m_translateOff = st.translateOff;
     }
 
     Token next();
