@@ -1464,8 +1464,14 @@ void Lowering::registerType(const TypeDecl& decl) {
             return;
         }
         if (!decl.index.hasRange) {
-            unsupportedError(flp, "array type without an index constraint");
-            return;
+            // An index that is a type mark takes the mark's range: an enumeration's
+            // positions (IEEE 1800-2023 6.9)
+            const auto indexIt = m_types.find(decl.index.mark);
+            if (indexIt == m_types.end() || indexIt->second.kind != VType::ENUM
+                || indexIt->second.literals.empty()) {
+                unsupportedError(flp, "array type without an index constraint");
+                return;
+            }
         }
         type.kind = VType::ARRAY;
         type.signing = VSigning::UNSIGNED;
@@ -1479,6 +1485,15 @@ void Lowering::registerType(const TypeDecl& decl) {
         std::vector<char> ascends(specs.size());
         bool constrained = true;
         for (size_t k = 0; k < specs.size(); ++k) {
+            if (!specs[k]->hasRange) {
+                // An enumeration index runs over the positions of its literals
+                lefts[k] = 0;
+                rights[k]
+                    = static_cast<int64_t>(m_types.find(specs[k]->mark)->second.literals.size())
+                      - 1;
+                ascends[k] = true;
+                continue;
+            }
             bool asc = false;
             if (!constraintBounds(*specs[k], lefts[k], rights[k], asc)) {
                 constrained = false;  // Unconstrained: every use supplies the index constraint
@@ -3192,10 +3207,21 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
                 return nullptr;
             }
             if (!typeOfDType(indexp->dtypep()).isInt()) {
-                unsupportedError(flp, "non-integer index");
-                indexp->deleteTree();
-                curp->deleteTree();
-                return nullptr;
+                // An enumeration literal as an index is its position, which the literal
+                // already carries (IEEE 1800-2023 6.9)
+                const bool enumIndex = expr.args[ai]->kind == Expr::NAME
+                                       && m_enumConsts.count(expr.args[ai]->text) != 0;
+                if (!enumIndex) {
+                    unsupportedError(flp, "non-integer index");
+                    indexp->deleteTree();
+                    curp->deleteTree();
+                    return nullptr;
+                }
+                indexp = resizeExpr(indexp, intType(flp), flp);
+                if (!indexp) {
+                    curp->deleteTree();
+                    return nullptr;
+                }
             }
             // The right bound is the least significant element in either direction
             AstNodeExpr* offsetp = indexp;
