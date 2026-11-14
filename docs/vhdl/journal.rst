@@ -160,6 +160,79 @@ Both attempts were reverted rather than left in the tree, and the reproducer is
 kept as ``test_regress/t/t_vhdl_spec_top_repro.vhdl`` so the next attempt starts
 from a known case.
 
+_______________________________________
+Order of lowering, and folding a call
+_______________________________________
+
+A sweep of the 20 corpora's non-testbench sources gave the worklist, and the
+largest family was neo430's ``entity 'X' has no port 'Y'``, reported once per port
+across its cores. The cause was ordering rather than ports at all: entities were
+lowered in source order, so an architecture instantiating an entity written later
+read an empty port list and built cells with no pins -- a silent mis-wiring that
+the diagnostic happened to reveal. Lowering children first closed the family. The
+alternative considered, declaring the ports while the modules are created, needs
+the generic and type resolution that only exists once the architecture is lowered.
+GHDL's analysis rejects ``label : entity work.cell`` when the entity comes later,
+so the test writes a component declaration with a plain identifier, which both
+simulators accept and whose values could therefore be confirmed.
+
+A generate statement's declarative part went the same way: vendor attribute specs
+and a component declared inside an ``if`` generate were declarative items the
+concurrent parser had no case for. Skipping the specification forms and parsing
+the component away removed a 19-error family.
+
+Three further families fell to one idea, that a call can be worth a value. neo430
+writes ``constant hi_abb_c : natural := index_size_f(io_size_c) - 1;``, and
+``index_size_f`` loops ``for i in 0 to natural'high`` -- so a bound placed on the
+*range* refused a loop that returns after six iterations. Moving the bound to the
+iterations actually folded, which is also what a ``while`` fold needs, made the
+constant foldable, its uses resolvable, and 35 slice refusals went with it.
+potato's ``log2`` is a ``while`` loop, and with the loop folded its array ranges
+and its ``2 ** log2(N)`` exponents became static as well. Where a question of the
+form "is this static?" had been answered by walking the syntax, it now lowers the
+operand and folds it; one helper already did exactly that, and the exponent path
+calls it instead of repeating the fallback. Two refusals stay and both are pinned:
+a ``while`` whose condition follows a signal, and a loop past 4096 folded
+iterations.
+
+The fold also exposed two cascade faults. A message was built with ``VHDL `` twice
+in it, and a function whose fold had already been refused was then reported as not
+returning a value on all paths. The second is suppressed once any error has been
+reported, which is the idiom the rest of the file uses.
+
+______________________
+Two language surfaces
+______________________
+
+A bit-string literal may state its length, and the length is part of the value:
+zero padding is free, dropping a set bit is the truncation the standard forbids.
+Both simulators agree on where that line falls, and one case decided the direction
+of the check -- ``4o"17"`` fits 4 bits because the leading digit's zeros may go.
+The predefined units of ``time`` gained ``min`` and ``hr``, which hdl-modules
+writes as ``30 min``.
+
+Comment pragmas were the last surface. neorv32 keeps its textio console printing
+inside ``-- synthesis translate_off``, and the native frontend elaborated it as
+design code. The lexer now drops a region's tokens, with the pragmas nesting and
+any tool prefix counting, since the corpus writes ``synopsys``, ``synthesis`` and
+``pragma``. The first version matched the pragma word anywhere in a comment and
+silently deleted a design whose ``-- DESCRIPTION`` line merely mentioned
+``translate_off``; requiring the pragma word to end the comment is the shape the
+corpus actually has, all 338 occurrences of it.
+
+A two-dimensional array needed its levels kept: ``type T_SLM is array (natural
+range <>, natural range <>) of std_logic`` retained only its outer level while
+unconstrained, so ``T_SLM(PORTS - 1 downto 0, DATA_BITS - 1 downto 0)`` had
+nowhere to put the second constraint. Every level survives now, and the comma
+form feeds the nested constraints that the chained ``t(r1)(r2)`` already had.
+GHDL refuses a name that mixes a discrete name with a discrete range across two
+dimensions, so the test selects whole elements and leaves that form untested.
+
+patmos is the sweep's largest remaining count at 99, and it is not the frontend's:
+its argo wrappers import ``work.ocp`` and ``work.argo_types``, neither of which is
+in the repository, and its fpu reads ``IEEE.std_logic_misc``. Both are recorded as
+open (N51) rather than chased.
+
 _______
 Commits
 _______
@@ -193,3 +266,17 @@ _______
      - Drive a VHDL signal from a delayed concurrent assignment
    * - ``7a292ab``
      - Report the edge count the testbench actually sees
+   * - ``58a0fe0``
+     - Lower a VHDL entity after the entities that instantiate it
+   * - ``0252dad``
+     - Accept a component and attribute specs in a VHDL generate block
+   * - ``62a18dd``
+     - Accept every predefined VHDL time unit
+   * - ``6ff30f9``
+     - Keep every index level of a VHDL array type
+   * - ``9e974b8``
+     - Fold a VHDL function call that sets a slice bound or an exponent
+   * - ``d8802b7``
+     - Model the length a VHDL bit-string literal states
+   * - ``39435c7``
+     - Skip a VHDL comment pragma translate_off region

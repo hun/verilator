@@ -106,6 +106,47 @@ ______
        architecture already instantiates changes nothing; a component, missing
        instance or different entity is refused with a diagnostic
      - ``t_vhdl_config``, ``t_vhdl_config_comp_bad``
+  * - N41
+    - an entity instantiated by an architecture written before it has no ports
+    - entities are lowered children first, so a cell's pins exist when the cell is
+      built
+    - ``t_vhdl_inst_order``
+  * - N42
+    - a generate statement's declarative part refused
+    - an attribute, default or disconnect spec is skipped and a component
+      declaration is parsed and dropped
+    - ``t_vhdl_gen_decl``
+  * - N44
+    - a bit-string literal that states its length, e.g. ``6x"3f"``, refused
+    - the literal is padded to the length it states; a length that would drop a set
+      bit is refused as the truncation the standard forbids
+    - ``t_vhdl_bit_length``, ``t_vhdl_bit_len_bad``
+  * - N45
+    - ``min`` and ``hr`` refused after a numeric literal
+    - the predefined units of ``time``, VHDL-2008 set, became one table of scales
+    - ``t_vhdl_physical``
+  * - N46
+    - a ``while`` loop in a folded function, and a ``for`` range wider than the
+      loop that runs
+    - the fold re-tests the condition on every iteration as it does for a ``for``
+      loop, and the bound counts the iterations folded rather than the range's size
+    - ``t_vhdl_fn_loop``, ``t_vhdl_fn_loop_bad``
+  * - N47
+    - an exponent or a slice bound that is static only after lowering
+    - the static evaluator lowers the operand and folds it, so a call folded to a
+      constant answers the bound
+    - ``t_vhdl_fn_loop``
+  * - N48
+    - an unconstrained multi-dimensional array type kept only its outer level, and
+      a ``t(r1, r2)`` constraint refused
+    - every index level survives so a use constrains each one, and the comma form
+      feeds the nested constraints the chained ``t(r1)(r2)`` already used
+    - ``t_vhdl_2d_array``
+  * - N49
+    - a comment pragma ``translate_off`` region elaborated as design code
+    - the lexer drops a region's tokens; the pragmas nest, and any tool prefix
+      counts as long as the pragma word ends the comment
+    - ``t_vhdl_translate_off``
 
 ____
 Open
@@ -131,6 +172,22 @@ ____
      - an aggregate that does not cover every element of its target
      - the coverage rule (choices naming fewer elements than the target has, with
        no ``others``) is not modelled. This is poc-divider's last error.
+  * - N50
+    - a user-defined physical type: ``type FREQ is range ... units Hz; kHz = 1000
+      Hz; end units;``
+    - neither a user unit map nor the scaling of ``<numeric> <unit>`` for one is
+      modelled, so 12 poc files stop at a generic default written as a physical
+      literal (``poc/src/common/physical.vhdl``, ``poc/src/io/io_*.vhdl``). The
+      predefined ``time`` path does not extend to them: its units are a fixed table.
+  * - N51
+    - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
+    - no implementation of that vendor package is in the corpus and none is
+      modelled. patmos' fpu is its only user (9 errors), so this is a library
+      question rather than a frontend one.
+  * - N52
+    - a concurrent assignment to an ``inout`` port
+    - modelling two drivers needs bus arbitration, which the frontend has no notion
+      of. neo430's TWI, patmos' I2C and bit-serial each run into it (8 errors).
 
 ___________
 Verification
@@ -148,3 +205,16 @@ Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)
 whenever GHDL and the native frontend disagree. nvc settled the value of a toggle
 flip-flop sampled at 22 ns, which the frontend had initially gotten wrong by one
 clock edge.
+
+The corpus is also swept whole, not only through its ported testcases: every
+non-testbench VHDL of the 20 cores is linted at once and the refusals are
+histogrammed by message. Over this session the RTL refusals went from 251 to 201:
+neo430 45 to 4, poc 51 to 39, open-logic 7 to 2, potato 17 to 13, microwatt 3 to
+2. What remains of patmos' 99 is its argo wrappers, whose ``work.ocp`` and
+``work.argo_types`` packages are not in the repository at all, plus the
+``std_logic_misc`` gap above (N51). The sweep also names the constructs still
+refused in RTL that no core in the corpus happens to combine with a testbench,
+which is where the next finding comes from.
+
+The ported testcases were re-run after each change: 11 run scenarios and 4 cycle
+traces (395, 612, 615 and 5621 cycles) pass against the native frontend.
