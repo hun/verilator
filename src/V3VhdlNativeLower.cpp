@@ -4943,17 +4943,23 @@ void Lowering::lowerWaitProcess(const Process& process) {
     }
     const std::vector<StmtP>& bodyStmts = process.body;
     if (waitp->delay) {
-        // A timed wait: the statements before and after the delay run once, in order
+        // A timed wait suspends the process until the delay expires and the process then
+        // runs again from the top, so its whole body repeats
         AstNode* bodyp = lowerStmtRange(process.body, 0, waitIndex);
         AstNode* const delayp = lowerDelay(*waitp->delay, flp);
         if (!delayp) {
             restoreScope(saved);
             return;
         }
-        bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
-        AstNode* const postp = lowerStmtRange(process.body, waitIndex + 1, process.body.size());
-        bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, postp);
-        if (bodyp) m_modp->addStmtsp(new AstInitial{flp, bodyp});
+        bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, delayp) : delayp;
+        if (AstNode* const postp
+            = lowerStmtRange(process.body, waitIndex + 1, process.body.size())) {
+            bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, postp);
+        }
+        AstLoop* const loopp = new AstLoop{flp};
+        loopp->addStmtsp(new AstLoopTest{flp, loopp, new AstConst{flp, 1}});
+        if (bodyp) loopp->addStmtsp(bodyp);
+        m_modp->addStmtsp(new AstInitial{flp, loopp});
         restoreScope(saved);
         return;
     }

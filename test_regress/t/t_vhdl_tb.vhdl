@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: a VHDL testbench reports and ends the simulation by itself
+-- DESCRIPTION: Verilator: a VHDL testbench generates a clock and checks its design by itself
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
@@ -11,18 +11,33 @@ entity tb is
 end entity tb;
 
 architecture sim of tb is
-  signal x : std_logic := '1';
+  signal clk : std_logic := '0';
+  signal q   : std_logic := '0';
 begin
-  -- A testbench reports what it observed and ends the run, so no C++ driver is needed
+  -- A clock generator: the process repeats because its wait is a delay
+  clk_proc : process
+  begin
+    clk <= not clk;
+    wait for 5 ns;
+  end process clk_proc;
+
+  -- The design under test: a toggle flip-flop
+  dff : process (clk)
+  begin
+    if rising_edge(clk) then
+      q <= not q;
+    end if;
+  end process dff;
+
+  -- At 22 ns three rising edges have happened (at 0, 10 and 20 ns), so q is high
   check : process
   begin
-    wait for 5 ns;
-    if x = '1' then
-      report "x is high";
+    wait for 22 ns;
+    if q = '0' then
+      report "q is low after four edges";
     else
-      report "x is low";
+      report "q is high after four edges";
     end if;
-    report "tb done";
     std.env.finish;
     wait;
   end process check;
