@@ -341,8 +341,7 @@ Token Lexer::nextRaw() {
         // Character literal ('0'); anything else is an attribute or qualification
         // mark. A mark immediately followed by '(' after a name, e.g. the `'('` in
         // std_logic'('1'), is a qualified expression, not the character literal '('.
-        if (peek(1) != '\'' && peek(1) != '\n' && peek(2) == '\''
-            && !(peek(1) == '(' && m_prevEndsDesignator)) {
+        if (peek(1) != '\n' && peek(2) == '\'' && !(peek(1) == '(' && m_prevEndsDesignator)) {
             tok.kind = Token::CHAR;
             tok.charValue = peek(1);
             m_pos += 3;
