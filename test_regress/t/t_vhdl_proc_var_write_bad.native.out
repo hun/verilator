@@ -1,0 +1,10 @@
+%Warning-MULTIDRIVEN: t/t_vhdl_proc_var_write_bad.vhdl:29:1: Bits [3:0] of signal 't.vhdlproc_1__b_i' have multiple combinational drivers. This can cause performance degradation.
+                      t/t_vhdl_proc_var_write_bad.vhdl:33:1: ... Location of offending driver
+                      t/t_vhdl_proc_var_write_bad.vhdl:35:1: ... Location of offending driver
+                      ... For warning description see https://verilator.org/warn/MULTIDRIVEN?v=latest
+                      ... Use "/* verilator lint_off MULTIDRIVEN */" and lint_on around source to disable this message.
+%Warning-MULTIDRIVEN: t/t_vhdl_proc_var_write_bad.vhdl:29:1: Bits [2:0] of signal 't.vhdlproc_3__b_i' have multiple combinational drivers. This can cause performance degradation.
+                      t/t_vhdl_proc_var_write_bad.vhdl:33:1: ... Location of offending driver
+                      t/t_vhdl_proc_var_write_bad.vhdl:35:1: ... Location of offending driver
+%Error: Internal Error: t/t_vhdl_proc_var_write_bad.vhdl:29:1: ../V3Delayed.cpp:#: Write not in a process or function
+                        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.

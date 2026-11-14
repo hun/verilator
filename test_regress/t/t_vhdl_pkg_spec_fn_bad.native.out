@@ -1,0 +1,4 @@
+%Error: t/t_vhdl_pkg_spec_fn_bad.vhdl:8:1: VHDL call to subprogram 'first_length' whose body was not read is not supported yet
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_pkg_spec_fn_bad.vhdl:31:1: VHDL: unknown identifier 'picked'
+%Error: Exiting due to

@@ -1,0 +1,10 @@
+%Error: GHDL failed to analyze the VHDL sources (exit 1). Verilator uses GHDL as its VHDL frontend; install GHDL or set VERILATOR_GHDL to its executable.
+t/t_vhdl_slice_dir_bad.vhdl:25:9:error: direction of the range mismatch
+  o <= v(asc_range_t);
+        ^
+t/t_vhdl_slice_dir_bad.vhdl:25:8:warning: value constraints don't match target ones [-Wruntime-error]
+  o <= v(asc_range_t);
+       ^
+ghdl:error: xml dump failed due to compilation error
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

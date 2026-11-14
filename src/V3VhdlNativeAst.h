@@ -432,7 +432,6 @@ struct Architecture final {
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
     std::vector<AliasDecl> aliases;
-    std::vector<std::string> components;  // Declared component names, folded
     std::vector<SubprogramDecl> subprograms;
     std::vector<std::unique_ptr<Concurrent>> stmts;
     std::vector<std::pair<std::string, std::string>> uses;

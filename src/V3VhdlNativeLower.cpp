@@ -98,6 +98,7 @@ struct PackageInfo final {
     std::map<std::string, AstConst*> constValues;
     std::map<std::string, VType> constTypes;
     std::map<std::string, AstConst*> enumConsts;
+    std::map<std::string, double> realConsts;  // Elaboration-time reals, by folded name
     std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
     std::vector<const AliasDecl*> subprogramAliases;  // Synonyms, re-registered on import
     std::vector<std::unique_ptr<AstConst>> owned;  // Owns the constants above
@@ -435,6 +436,7 @@ class Lowering final {
     void finishDeferredTypes();
     static bool exprNamesAny(const Expr& expr, const std::set<std::string>& names);
     static bool typeDeclNamesAny(const TypeDecl& decl, const std::set<std::string>& names);
+    static bool typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string>& names);
     void importPackage(const std::string& name);
     //! Record integer constants that a type declaration may depend on
     void preScanIntConstants(const std::vector<Decl>& decls);
@@ -776,6 +778,7 @@ class Lowering final {
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
     AstNodeExpr* lowerAttr(const Expr& expr);
     AstNodeExpr* lowerAggregate(const Expr& expr, const VType& type);
+    bool deriveAggregateType(const Expr& expr, VType& out);
     AstConst* foldStatic(AstNodeExpr* exprp) const;
     AstNodeExpr* lowerSelectedExpr(const Expr& expr);
     const VType* typeOfName(const Expr& expr) const;
@@ -1424,6 +1427,27 @@ void Lowering::registerType(const TypeDecl& decl) {
                                                                             : VSigning::UNSIGNED;
             elem.width = 0;
             elem.elemWidth = 1;
+        } else if (baseMark == "integer_vector") {
+            // An IEEE unconstrained array of integer: the constraint gives the element's bounds
+            int64_t left = 0;
+            int64_t right = 0;
+            bool ascending = false;
+            if (!decl.base.hasRange || !constraintBounds(decl.base, left, right, ascending)) {
+                unsupportedError(flp, "non-static array range");
+                return;
+            }
+            const VType intElem = intType(flp);
+            elem.kind = VType::ARRAY;
+            elem.kwd = VBasicDTypeKwd::LOGIC;
+            elem.signing = VSigning::UNSIGNED;
+            elem.elemp = std::make_shared<VType>(intElem);
+            elem.elemWidth = intElem.width;
+            elem.left = static_cast<int>(left);
+            elem.right = static_cast<int>(right);
+            elem.ascending = ascending;
+            elem.width
+                = intElem.width * (std::abs(static_cast<int>(left) - static_cast<int>(right)) + 1);
+            elem.dtp = findVectorWidth(flp, elem.kwd, VSigning::UNSIGNED, elem.width);
         } else if (!resolveType(decl.base, elem)) {
             return;
         }
@@ -1567,8 +1591,29 @@ bool Lowering::typeDeclNamesAny(const TypeDecl& decl, const std::set<std::string
     return false;
 }
 
+//! Whether one of the type's own or members' marks names any of `names`
+bool Lowering::typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string>& names) {
+    const auto specMarks = [&names](const TypeSpec& spec) {
+        if (names.count(spec.mark) || names.count(spec.constraintMark)) return true;
+        for (const TypeSpec& nested : spec.indexConstraints) {
+            if (names.count(nested.mark) || names.count(nested.constraintMark)) return true;
+        }
+        return false;
+    };
+    std::vector<const TypeSpec*> specs;
+    specs.push_back(&decl.base);
+    specs.push_back(&decl.index);
+    for (const TypeSpec& extra : decl.indexes) specs.push_back(&extra);
+    for (const TypeDecl::Member& member : decl.members) specs.push_back(&member.type);
+    for (const TypeSpec* const specp : specs) {
+        if (specMarks(*specp)) return true;
+    }
+    return false;
+}
+
 void Lowering::registerTypes(const std::vector<TypeDecl>& types, const std::vector<Decl>& decls) {
     ++m_deferSeq;  // A part inlined while this one is emitted defers types of its own
+    std::set<std::string> deferredNames;
     for (const TypeDecl& typeDecl : types) {
         // The pre-scan published the constants of the part it could fold; a constraint
         // naming one of the rest has to wait for the value the emitter computes for it
@@ -1583,8 +1628,12 @@ void Lowering::registerTypes(const std::vector<TypeDecl>& types, const std::vect
                 unpublished.insert(name.first);
             }
         }
-        if (!unpublished.empty() && typeDeclNamesAny(typeDecl, unpublished)) {
+        // A type naming a type this part already deferred cannot be resolved either: the
+        // deferred one is registered only once the part's constants have values
+        if ((!unpublished.empty() && typeDeclNamesAny(typeDecl, unpublished))
+            || (!deferredNames.empty() && typeDeclMarksAny(typeDecl, deferredNames))) {
             m_deferredTypes[typeDecl.name] = DeferredType{&typeDecl, m_deferSeq};
+            deferredNames.insert(typeDecl.name);
             continue;
         }
         registerType(typeDecl);
@@ -2013,8 +2062,11 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     case Expr::AGG_POSITIONAL:
     case Expr::AGG_NAMED: {
         if (!context) {
-            unsupportedError(flp, "aggregate without a known target type");
-            return nullptr;
+            // The aggregate's own choices say how wide it is, which is all an operand of `&`
+            // needs; only an `others` association leaves the length open
+            VType derived;
+            if (!deriveAggregateType(expr, derived)) return nullptr;
+            return lowerAggregate(expr, derived);
         }
         return lowerAggregate(expr, *context);
     }
@@ -3076,6 +3128,11 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         // reversed, which `sliceOf` already handles.
         if (expr.args.size() == 1) {
             if (const VType* const markp = discreteRangeType(*expr.args[0])) {
+                if (markp->ascending != baseType.ascending) {
+                    flp->v3error("VHDL: slice direction does not match the array");
+                    basep->deleteTree();
+                    return nullptr;
+                }
                 const int hi = std::max(markp->left, markp->right);
                 const int lo = std::min(markp->left, markp->right);
                 return sliceOf(flp, basep, baseType, elemWidth, hi, lo, markp->ascending);
@@ -3156,6 +3213,8 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
             basep->deleteTree();
             return nullptr;
         }
+        // A literal range in the other direction stays the documented extension `t_vhdl_range`
+        // pins: its left bound is the most significant element
         return sliceOf(flp, basep, baseType, elemWidth, hi, lo, expr.text != "downto");
     }
     // A dynamic slice position keeps the width static and runs in the base's
@@ -3565,6 +3624,10 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         return nullptr;
     }
     if (!expr.args.empty()) {
+        // An attribute of a type mark with an argument folds statically, so a value path can
+        // use the same answer a constant gets
+        int64_t folded = 0;
+        if (evalInt(expr, folded)) return makeIntConst(flp, folded);
         unsupportedError(flp, "attribute '" + attribute + "' with arguments");
         return nullptr;
     }
@@ -3811,6 +3874,58 @@ AstConst* Lowering::foldStatic(AstNodeExpr* exprp) const {
         return result(num);
     }
     return nullptr;
+}
+//! Type of an aggregate with no target type: the element comes from its values and the bounds
+//! from its choices. Only a bit vector can be derived, since a wider element would need the
+//! array type its element names, which an operand position does not give
+bool Lowering::deriveAggregateType(const Expr& expr, VType& out) {
+    FileLine* const flp = expr.flp;
+    const auto refuse = [flp] {
+        unsupportedError(flp, "aggregate without a known target type");
+        return false;
+    };
+    if (expr.args.empty() || expr.kind == Expr::AGG_OTHERS) return refuse();
+    AstNodeExpr* const valuep = lowerExpr(*expr.args.front(), nullptr);
+    if (!valuep) return false;  // The value reported its own error
+    const VType elem = typeOfDType(valuep->dtypep());
+    valuep->deleteTree();
+    if (elem.kind != VType::LOGIC && elem.kind != VType::BIT) return refuse();
+    int64_t lo = 0;
+    int64_t hi = -1;
+    if (expr.kind == Expr::AGG_POSITIONAL) {
+        // Each positional association covers one element, or the bits of one literal
+        int count = 0;
+        for (const ExprP& argp : expr.args) {
+            count += (argp && argp->kind == Expr::BITS_LIT) ? static_cast<int>(argp->bits.size())
+                                                            : 1;
+        }
+        hi = count - 1;
+    } else {
+        for (size_t i = 0; i < expr.args.size(); ++i) {
+            for (const ExprP& choicep : expr.choices[i]) {
+                if (choicep->kind == Expr::SLICE) {
+                    if (!staticInt(choicep->b, lo) || !staticInt(choicep->c, hi)) return refuse();
+                    continue;
+                }
+                if (choicep->kind == Expr::NAME && choicep->text == "others") return refuse();
+                int64_t index = 0;
+                if (!staticInt(choicep, index)) return refuse();
+                if (hi < 0) {
+                    lo = hi = index;
+                } else {
+                    lo = std::min(lo, index);
+                    hi = std::max(hi, index);
+                }
+            }
+        }
+        if (hi < 0) return refuse();
+    }
+    out = vectorType(flp, elem.kwd, VSigning::UNSIGNED, static_cast<int>(hi - lo + 1));
+    out.left = static_cast<int>(lo);
+    out.right = static_cast<int>(hi);
+    out.ascending = true;
+    out.dtp = findVector(flp, elem.kwd, VSigning::UNSIGNED, out.left, out.right, true);
+    return true;
 }
 
 AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
@@ -6140,11 +6255,16 @@ AstNode* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
     }
     bool thenFalls = true;
     AstNode* const thensp = lowerProcChainWithTail(branch.second, tail, thenFalls);
-    AstNode* elsesp = nullptr;
+    if (!condp) {
+        // The final else has no condition, so its statements are appended as they are
+        fallsThroughp = thenFalls;
+        return thensp;
+    }
     bool elseFalls = true;
-    if (condp && branchIndex + 1 < stmt.branches.size()) {
+    AstNode* elsesp = nullptr;
+    if (branchIndex + 1 < stmt.branches.size()) {
         elsesp = lowerProcIf(stmt, branchIndex + 1, tail, elseFalls);
-    } else if (condp) {
+    } else {
         // A missing else falls through to the following statements
         elsesp = lowerProcChain(tail, 0, elseFalls);
     }
@@ -6613,6 +6733,11 @@ void Lowering::importPackage(const std::string& name) {
         if (m_constTypes.count(type.first)) continue;
         m_constTypes[type.first] = type.second;
     }
+    for (const auto& realConst : info.realConsts) {
+        if (m_realConsts.count(realConst.first)) continue;
+        m_realConsts[realConst.first] = realConst.second;
+        m_imported.insert(realConst.first);
+    }
     for (const auto& literal : info.enumConsts) {
         if (m_enumConsts.count(literal.first)) continue;
         m_ownedConsts.push_back(std::unique_ptr<AstConst>(literal.second->cloneTree(false)));
@@ -6682,6 +6807,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     info.constValues = std::move(m_constValues);
     info.constTypes = std::move(m_constTypes);
     info.enumConsts = std::move(m_enumConsts);
+    info.realConsts = std::move(m_realConsts);
     info.owned = std::move(m_ownedConsts);
     for (const SubprogramDecl& sub : pkg.subprograms) info.subprograms.push_back(&sub);
     for (const AliasDecl& alias : pkg.aliases) {
@@ -6692,6 +6818,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_constValues.clear();
     m_constTypes.clear();
     m_enumConsts.clear();
+    m_realConsts.clear();
     m_preConsts.clear();
     m_ownedConsts.clear();
     m_aliases.clear();
@@ -6709,6 +6836,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     for (const auto& value : info.constValues) dest.constValues[value.first] = value.second;
     for (const auto& type : info.constTypes) dest.constTypes[type.first] = type.second;
     for (const auto& literal : info.enumConsts) dest.enumConsts[literal.first] = literal.second;
+    for (const auto& realConst : info.realConsts) {
+        dest.realConsts[realConst.first] = realConst.second;
+    }
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
     for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
     for (const AliasDecl* const aliasp : info.subprogramAliases) {
@@ -6789,10 +6919,14 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     }
     finishDeferredTypes();
 
-    // The architecture's own types and aliases come after the entity's items, because a
-    // constraint may name one of the entity's constants and the loop above emits them
+    // The architecture's own types come after the entity's items, because a constraint may
+    // name one of the entity's constants and the loop above emits them
     registerTypes(arch.types, arch.decls);
-    for (const AliasDecl& alias : arch.aliases) registerAlias(alias);
+    // A subprogram alias has to exist before the declarations, whose initializers may call it
+    for (const AliasDecl& alias : arch.aliases) {
+        if (!alias.hasSignature) continue;
+        registerAlias(alias);
+    }
     // Preliminary snapshot: declarative items may already call subprograms
     m_moduleScope = saveScope();
 
@@ -6876,6 +7010,11 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         }
     }
     finishDeferredTypes();
+    // An object alias comes last: its mark may read a signal the loop above declares
+    for (const AliasDecl& alias : arch.aliases) {
+        if (alias.hasSignature) continue;
+        registerAlias(alias);
+    }
 
     // Subprograms of the declarative part capture the module scope as it stands here
     m_moduleScope = saveScope();

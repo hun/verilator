@@ -141,6 +141,14 @@ class Parser final {
         unsupported("declaration that reaches the end of the file");
     }
 
+    //! Consume a `file` declaration: a file has no synthesis meaning, so it is skipped
+    bool skipFileDecl() {
+        if (!isId("file")) return false;
+        advance();
+        skipToSemicolon();
+        return true;
+    }
+
     //! Consume up to and including the next balanced { ... } block (PSL directive bodies)
     void skipToBraceBlock() {
         while (m_cur.kind != Token::END && !isSym("{")) advance();
@@ -233,7 +241,7 @@ class Parser final {
     void parsePackageInstanceTail(FileLine* flp, const std::string& name,
                                   const std::string& spelling);
     void parseAssocList(std::vector<PortAssoc>& out, const char* what);
-    void parseComponentDecl(Architecture& arch);
+    void parseComponentDecl();
     void parseInterfaceList(std::vector<FormalDecl>& formals);
     void parseSubprogramInto(std::vector<SubprogramDecl>& out);
     bool parseSubprogramSpec(SubprogramDecl& sub);
@@ -1058,6 +1066,12 @@ void Parser::parseEntity(FileLine* flp) {
             skipToBraceBlock();
             continue;
         }
+        if (isId("component")) {
+            advance();
+            parseComponentDecl();
+            continue;
+        }
+        if (skipFileDecl()) continue;
         error("unsupported entity declaration item '" + m_cur.text + "'");
         return;
     }
@@ -1227,6 +1241,7 @@ void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
             parseSubprogramInto(sub.subprograms);
             continue;
         }
+        if (skipFileDecl()) continue;
         unsupported("subprogram declarative item '" + m_cur.text + "'");
         return;
     }
@@ -1427,7 +1442,9 @@ void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
 }
 
 //! `component name [is] [generic (...);] [port (...);] end component [name];`
-void Parser::parseComponentDecl(Architecture& arch) {
+//! The declaration is dropped: a named instantiation binds to the entity of that name, and
+//! the interface list only shapes the association check this frontend does not model.
+void Parser::parseComponentDecl() {
     Token nameTok;
     if (!takeId(nameTok)) return;
     (void)acceptId("is");
@@ -1454,7 +1471,6 @@ void Parser::parseComponentDecl(Architecture& arch) {
     if (!expectId("component")) return;
     if (m_cur.kind == Token::ID) advance();  // Optional end name
     if (!acceptSym(";")) error("expected ';' after 'end component'");
-    arch.components.push_back(nameTok.text);
 }
 
 //! `[entity] name [generic map (...)] [port map (...)];`
@@ -1692,7 +1708,7 @@ void Parser::parseArchitecture(FileLine* flp) {
         }
         if (isId("component")) {
             advance();
-            parseComponentDecl(arch);
+            parseComponentDecl();
             continue;
         }
         if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
@@ -1713,6 +1729,7 @@ void Parser::parseArchitecture(FileLine* flp) {
             skipToSemicolon();
             continue;
         }
+        if (skipFileDecl()) continue;
         error("unexpected architecture declaration '" + m_cur.text + "'");
         return;
     }
@@ -1802,7 +1819,9 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             return;
         }
     }
-    if (isId("entity")) {
+    if (isId("entity") || isId("component")) {
+        // `entity NAME` and the `component NAME` spelling of an instantiation both name the
+        // entity to instantiate
         advance();
         parseInstance(arch, flp, label, true);
         return;
@@ -1960,6 +1979,12 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
                 parseSubprogramInto(block->subprograms);
                 continue;
             }
+            if (isId("component")) {
+                advance();
+                parseComponentDecl();
+                continue;
+            }
+            if (skipFileDecl()) continue;
             unsupported("block declarative item '" + m_cur.text + "'");
             return;
         }
@@ -2213,6 +2238,7 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
             parseSubprogramInto(process.subprograms);
             continue;
         }
+        if (skipFileDecl()) continue;
         unsupported("process declarative item '" + m_cur.text + "'");
         return;
     }
@@ -2594,8 +2620,13 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             skipToBraceBlock();
             continue;
         }
-        if (isId("component") || isId("signal") || isId("shared") || isId("variable")
-            || isId("file") || isId("group")) {
+        if (isId("component")) {
+            advance();
+            parseComponentDecl();
+            continue;
+        }
+        if (skipFileDecl()) continue;
+        if (isId("signal") || isId("shared") || isId("variable") || isId("group")) {
             unsupported("package declarative item '" + m_cur.text + "'");
             return;
         }
