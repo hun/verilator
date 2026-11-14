@@ -193,6 +193,15 @@ class Lowering final {
     std::map<std::string, int64_t> m_preConsts;
     //! Elaboration-time real constants (IEEE 1800 `real`) by folded name
     std::map<std::string, double> m_realConsts;
+    //! A package specification constant whose initializer calls a subprogram with no body
+    //! yet: the body's pass completes it
+    struct DeferredConst final {
+        std::vector<std::pair<std::string, std::string>> names;
+        const TypeSpec* typep = nullptr;
+        const Expr* initp = nullptr;
+        FileLine* flp = nullptr;
+    };
+    std::vector<DeferredConst> m_deferredConsts;
     //! A pure function call the elaboration-time folders are evaluating: its formals
     //! bound to the values of the actuals, plus the declaration to stop a body folding
     //! into itself. Only the innermost frame is in scope and every actual is already
@@ -6556,6 +6565,25 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
             }
             return;
         }
+        // A call whose body this pass cannot read: the body's pass completes the constant
+        // rather than reporting the call (IEEE 1800-2023 6.6.1). A name with arguments
+        // parses as an indexed name and becomes a call once the prefix names a subprogram.
+        std::string callName;
+        if (initp->kind == Expr::CALL) {
+            callName = initp->text;
+        } else if (initp->kind == Expr::INDEX && initp->a) {
+            callName = initp->a->text;
+        }
+        if (deferredOk && !callName.empty()) {
+            const auto refs = visibleSubprograms(callName);
+            const bool anyBody
+                = std::any_of(refs.begin(), refs.end(),
+                              [](const SubprogramDecl* const subp) { return subp->hasBody; });
+            if (!refs.empty() && !anyBody) {
+                m_deferredConsts.push_back(DeferredConst{names, &type, initp, flp});
+                return;
+            }
+        }
         // A call to a declared function is static as well: lower and fold it below
         if (!constType.dtp) constType = intType(flp);
     }
@@ -6796,6 +6824,10 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // Preliminary snapshot: a constant's value may already call a subprogram, whose body
     // evaluates against this scope and not against whatever the caller has
     m_moduleScope = saveScope();
+    // A specification constant whose call had no body is completed now that they are read
+    for (const DeferredConst& deferred : std::exchange(m_deferredConsts, {})) {
+        emitConstant(deferred.names, *deferred.typep, deferred.initp, deferred.flp, true);
+    }
     for (const Decl& decl : pkg.decls)
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
     finishDeferredTypes();
