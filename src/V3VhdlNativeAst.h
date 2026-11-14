@@ -201,6 +201,8 @@ struct Stmt final {
     // WAIT: value holds the `until` condition; an empty one suspends forever
     std::vector<std::string> waitNames;  // WAIT: `on` sensitivity names
     bool waitForever = false;  // WAIT without `until` or `on`
+    // WAIT: `for <delay>`
+    ExprP delay;
     // FOR: loop variable over b..c, ascending when rangeAscending
     std::string loopVar;
     bool rangeAscending = true;

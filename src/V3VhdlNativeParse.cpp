@@ -2364,8 +2364,9 @@ StmtP Parser::parseSequentialStatement() {
                 if (!acceptSym(",")) break;
             }
         } else if (isId("for")) {
-            unsupported("wait for a delay");
-            return nullptr;
+            advance();
+            stmt->delay = parseExpr();
+            if (!stmt->delay) return nullptr;
         } else {
             stmt->waitForever = true;
         }

@@ -774,6 +774,7 @@ class Lowering final {
     AstNode* lowerFor(const Stmt& stmt);
     AstNode* lowerForRuntime(const Stmt& stmt);
     AstNode* lowerReport(const Stmt& stmt);
+    AstNode* lowerDelay(const Expr& expr, FileLine* flp);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
     static void collectExprNames(const Expr& expr, std::set<std::string>& names);
@@ -4941,6 +4942,21 @@ void Lowering::lowerWaitProcess(const Process& process) {
         break;
     }
     const std::vector<StmtP>& bodyStmts = process.body;
+    if (waitp->delay) {
+        // A timed wait: the statements before and after the delay run once, in order
+        AstNode* bodyp = lowerStmtRange(process.body, 0, waitIndex);
+        AstNode* const delayp = lowerDelay(*waitp->delay, flp);
+        if (!delayp) {
+            restoreScope(saved);
+            return;
+        }
+        bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
+        AstNode* const postp = lowerStmtRange(process.body, waitIndex + 1, process.body.size());
+        bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, postp);
+        if (bodyp) m_modp->addStmtsp(new AstInitial{flp, bodyp});
+        restoreScope(saved);
+        return;
+    }
     // The statements before the wait run once at time zero
     m_initial = true;
     AstNode* const preInitp = lowerStmtRange(bodyStmts, 0, waitIndex);
@@ -5168,6 +5184,26 @@ AstNode* Lowering::lowerReport(const Stmt& stmt) {
         return nullptr;
     }
     return new AstDisplay{flp, VDisplayType::DT_DISPLAY, text, nullptr, nullptr, 'd'};
+}
+
+AstNode* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
+    int64_t fs = 0;
+    if (!evalInt(expr, fs)) {
+        unsupportedError(flp, "delay that is not static");
+        return nullptr;
+    }
+    VTimescale unit = m_modp->timeunit();
+    if (unit.isNone()) unit = VTimescale{VTimescale::TS_1PS};
+    const double seconds = unit.multiplier();
+    if (seconds <= 0) {
+        unsupportedError(flp, "delay without a timescale");
+        return nullptr;
+    }
+    AstDelay* const delayp = new AstDelay{
+        flp, new AstConst{flp, static_cast<uint32_t>(static_cast<double>(fs) * 1e-15 / seconds)},
+        false};
+    delayp->timeunit(unit);
+    return delayp;
 }
 
 AstNode* Lowering::lowerWhile(const Stmt& stmt) {

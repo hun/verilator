@@ -16,6 +16,7 @@ begin
   -- A testbench reports what it observed and ends the run, so no C++ driver is needed
   check : process
   begin
+    wait for 5 ns;
     if x = '1' then
       report "x is high";
     else
