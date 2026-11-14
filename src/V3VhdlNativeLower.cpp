@@ -4001,18 +4001,28 @@ bool Lowering::deriveAggregateType(const Expr& expr, VType& out) {
     } else {
         for (size_t i = 0; i < expr.args.size(); ++i) {
             for (const ExprP& choicep : expr.choices[i]) {
+                int64_t low = 0;
+                int64_t high = 0;
                 if (choicep->kind == Expr::SLICE) {
-                    if (!staticInt(choicep->b, lo) || !staticInt(choicep->c, hi)) return refuse();
-                    continue;
-                }
-                if (choicep->kind == Expr::NAME && choicep->text == "others") return refuse();
-                int64_t index = 0;
-                if (!staticInt(choicep, index)) return refuse();
-                if (hi < 0) {
-                    lo = hi = index;
+                    if (!staticInt(choicep->b, low) || !staticInt(choicep->c, high)) {
+                        return refuse();
+                    }
+                    // A choice names its bounds in its own direction: `7 downto 4` covers
+                    // the same elements as `4 to 7`, so only the span fixes the width
+                    if (low > high) std::swap(low, high);
+                } else if (choicep->kind == Expr::NAME && choicep->text == "others") {
+                    return refuse();
+                } else if (!staticInt(choicep, high)) {
+                    return refuse();
                 } else {
-                    lo = std::min(lo, index);
-                    hi = std::max(hi, index);
+                    low = high;
+                }
+                if (hi < 0) {
+                    lo = low;
+                    hi = high;
+                } else {
+                    lo = std::min(lo, low);
+                    hi = std::max(hi, high);
                 }
             }
         }
