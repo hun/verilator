@@ -16,7 +16,9 @@
 //
 // Lowers one analyzed entity/architecture pair into the committed (post-width)
 // Verilator AST: the node shapes, dtype canonicalization and re-entry contract
-// match what V3VhdlLink expects.
+// match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
+// is emitted under its folded (lowercase) form -- the spelling as written stays
+// available for diagnostics only.
 //
 //*************************************************************************
 
@@ -24,7 +26,6 @@
 
 #include "V3VhdlNativeLower.h"
 
-#include "V3Const.h"
 #include "V3Error.h"
 #include "V3FileLine.h"
 
@@ -98,6 +99,7 @@ struct PackageInfo final {
     std::map<std::string, VType> constTypes;
     std::map<std::string, AstConst*> enumConsts;
     std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
+    std::vector<const AliasDecl*> subprogramAliases;  // Synonyms, re-registered on import
     std::vector<std::unique_ptr<AstConst>> owned;  // Owns the constants above
 };
 
@@ -138,6 +140,7 @@ class Lowering final {
     struct ScopeSave final {
         std::map<std::string, VarInfo> scope;
         std::map<std::string, int64_t> consts;
+        std::map<std::string, int64_t> preConsts;
         std::map<std::string, VType> types;
         std::map<std::string, AstConst*> constValues;
         std::map<std::string, VType> constTypes;
@@ -189,7 +192,26 @@ class Lowering final {
     std::map<std::string, int64_t> m_preConsts;
     //! Elaboration-time real constants (IEEE 1800 `real`) by folded name
     std::map<std::string, double> m_realConsts;
+    //! A pure function call the elaboration-time folders are evaluating: its formals
+    //! bound to the values of the actuals, plus the declaration to stop a body folding
+    //! into itself. Only the innermost frame is in scope and every actual is already
+    //! valued, so an evaluation over a body cannot re-enter itself. Pushed and popped
+    //! around one evaluation, so this is empty outside a fold.
+    struct PureCall final {
+        std::map<std::string, ExprP> args;
+        const SubprogramDecl* subp = nullptr;
+    };
+    mutable std::vector<PureCall> m_pureCalls;
     std::map<std::string, VType> m_types;  // Declared types by folded name
+    //! A type the declarative part deferred, with the sequence number of the part that
+    //! deferred it: `resolveType` registers one at its first use, once the emitter has
+    //! computed the constant its constraint names, and only its own part may finish it
+    struct DeferredType final {
+        const TypeDecl* declp;
+        size_t seq;
+    };
+    std::map<std::string, DeferredType> m_deferredTypes;
+    size_t m_deferSeq = 0;  // Sequence number of the part being registered
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
     std::map<std::string, VType> m_constTypes;  // Type of each typed constant
     std::map<std::string, AstConst*> m_enumConsts;  // Enumeration literals by folded name
@@ -268,6 +290,21 @@ class Lowering final {
         type.width = 32;
         type.dtp = findBasic(flp, VBasicDTypeKwd::INT);
         return type;
+    }
+
+    //! The predefined integer types, modeled directly rather than as a declared entry in
+    //! m_types, so a discrete attribute of one needs their bounds here. All three ascend
+    //! from -2^31, 0 and 1 to the high bound of the 32-bit signed model of intType
+    static bool isPredefinedIntegerMark(const std::string& mark) {
+        return mark == "integer" || mark == "natural" || mark == "positive";
+    }
+    bool predefinedIntegerType(FileLine* flp, const std::string& mark, VType& out) const {
+        if (!isPredefinedIntegerMark(mark)) return false;
+        out = intType(flp);
+        out.left = mark == "integer" ? -0x80000000 : (mark == "natural" ? 0 : 1);
+        out.right = 0x7fffffff;
+        out.ascending = true;
+        return true;
     }
     VType timeType(FileLine* flp) const {
         // A physical type has no modelled delay here, so it is a 64-bit count of the step
@@ -390,6 +427,14 @@ class Lowering final {
     bool resolveType(const TypeSpec& spec, VType& out);
     void registerType(const TypeDecl& decl);
     void emitPackage(const PackageUnit& pkg);
+    //! Register a declarative part's types, deferring one whose constraint names a constant
+    //! of the same part written above it that the pre-scan did not fold: the part's
+    //! constants are emitted after all of its types, so only a first use can see the value
+    void registerTypes(const std::vector<TypeDecl>& types, const std::vector<Decl>& decls);
+    //! Register the deferred types, reporting one whose constraint still cannot resolve
+    void finishDeferredTypes();
+    static bool exprNamesAny(const Expr& expr, const std::set<std::string>& names);
+    static bool typeDeclNamesAny(const TypeDecl& decl, const std::set<std::string>& names);
     void importPackage(const std::string& name);
     //! Record integer constants that a type declaration may depend on
     void preScanIntConstants(const std::vector<Decl>& decls);
@@ -398,7 +443,7 @@ class Lowering final {
     bool registerGenerics(const std::vector<GenericDecl>& generics,
                           const GenericBindings* bindings, bool probe);
     AstModule* specializeInstance(const Concurrent& conc, const EntityUnit& entity,
-                                  AstModule* basep);
+                                  AstModule* basep, const PortBoundsMap& portBounds);
     //! Whether a port's index range comes from the instance rather than the entity
     static bool unconstrainedPort(const PortDecl& port) {
         const std::string& mark = port.type.mark;
@@ -415,9 +460,6 @@ class Lowering final {
                             PortBounds& out);
     //! Resolve a generic type association such as `std_logic_vector(3 downto 0)`
     bool resolveTypeActual(const Expr& actual, VType& out);
-    //! Create and cache a module with this instance's unconstrained port ranges
-    AstModule* specializePortsInstance(const Concurrent& conc, const EntityUnit& entity,
-                                       const PortBoundsMap& portBounds);
     bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
     AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
     bool applyRange(const TypeSpec& spec, VType& type);
@@ -441,6 +483,11 @@ class Lowering final {
     }
     //! Static integer value, also folding a call to a pure function
     bool staticIntFold(const ExprP& exprp, int64_t& value);
+    bool pushPureCall(const Expr& call, const Expr*& returnp) const;
+    //! Whether every name a pure body's return expression holds is a literal, a formal or
+    //! a type mark, so the value is closed over the call
+    bool closedOverFormals(const Expr& expr, const std::map<std::string, ExprP>& args) const;
+    void popPureCall() const;
     //! Deep copy of a frontend expression, for a synthesized type constraint
     static ExprP cloneExpr(const Expr& expr) {
         ExprP out = std::make_unique<Expr>(expr.kind);
@@ -729,13 +776,15 @@ class Lowering final {
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
     AstNodeExpr* lowerAttr(const Expr& expr);
     AstNodeExpr* lowerAggregate(const Expr& expr, const VType& type);
-    AstConst* foldToConst(AstNodeExpr* exprp);
+    AstConst* foldStatic(AstNodeExpr* exprp) const;
     AstNodeExpr* lowerSelectedExpr(const Expr& expr);
     const VType* typeOfName(const Expr& expr) const;
+    const VType* discreteRangeType(const Expr& expr) const;
     bool typeOfDesignator(const Expr& expr, VType& out) const;
     bool packageNameOf(const Expr& prefix, std::string& name) const;
     AstNodeExpr* lowerAlias(const Expr& nameExpr, bool write);
     void registerAlias(const AliasDecl& alias);
+    void registerSubprogramAlias(const AliasDecl& alias);
     AstNodeExpr* lowerPackageMember(const Expr& expr, const std::string& pkgName);
     VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
@@ -767,6 +816,12 @@ class Lowering final {
                              bool processLocal = false);
     void setScope(const ScopeSave& saved);
     bool subprogramMatches(const Expr& call, const SubprogramDecl& sub, std::string& why) const;
+    static std::vector<std::pair<const FormalDecl*, std::string>>
+    formalSlots(const SubprogramDecl& sub);
+    bool markKind(const std::string& mark, VType::Kind& out) const;
+    bool actualKind(const Expr& expr, VType::Kind& out) const;
+    static bool kindAccepts(VType::Kind formal, VType::Kind actual);
+    bool formalsAccept(const Expr& call, const SubprogramDecl& sub) const;
     std::vector<const SubprogramDecl*> visibleSubprograms(const std::string& name) const;
     const SubprogramDecl* resolveCall(const Expr& call, bool function,
                                       const SubprogramRef** foundpp = nullptr);
@@ -822,6 +877,43 @@ public:
 //######################################################################
 // Lowering
 
+//! True when every value reference in `expr` is one of `args`, the formals of the
+//! function being folded. The folders resolve a name in the caller's scope, so a body
+//! mentioning one of its own package's names could fold to the wrong value; a closed
+//! term is scope-independent. An index callee is not a value reference: the folders only
+//! compute the builtin conversions and real functions, so anything else there fails to
+//! fold instead of being guessed at.
+bool Lowering::closedOverFormals(const Expr& expr,
+                                 const std::map<std::string, ExprP>& args) const {
+    switch (expr.kind) {
+    case Expr::INT_LIT:
+    case Expr::PHYS_LIT:
+    case Expr::REAL_LIT:
+    case Expr::BITS_LIT:
+    case Expr::CHAR_LIT:
+    case Expr::STRING_LIT: return true;
+    case Expr::NAME: return args.count(expr.text) != 0;
+    case Expr::PAREN:
+    case Expr::UNARY: return expr.a && closedOverFormals(*expr.a, args);
+    case Expr::BINARY:
+        return expr.a && expr.b && closedOverFormals(*expr.a, args)
+               && closedOverFormals(*expr.b, args);
+    case Expr::INDEX:
+        for (const ExprP& argp : expr.args) {
+            if (!argp || !closedOverFormals(*argp, args)) return false;
+        }
+        return true;
+    case Expr::ATTR:
+        // An attribute of a type mark is closed over the formals; one of an object is
+        // not, because the folders take an object's bounds from the scope
+        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        if (args.count(expr.a->text)) return false;
+        if (typeOfName(*expr.a)) return false;
+        return m_types.count(expr.a->text) || isPredefinedIntegerMark(expr.a->text);
+    default: return false;
+    }
+}
+
 bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     switch (expr.kind) {
     case Expr::INT_LIT:
@@ -834,6 +926,10 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         }
         return false;
     case Expr::NAME: {
+        if (!m_pureCalls.empty()) {
+            const auto argIt = m_pureCalls.back().args.find(expr.text);
+            if (argIt != m_pureCalls.back().args.end()) return evalInt(*argIt->second, value);
+        }
         const auto bindIt = activeEnv().find(expr.text);
         if (bindIt != activeEnv().end() && VN_IS(bindIt->second.exprp, Const)) {
             value = static_cast<int64_t>(VN_AS(bindIt->second.exprp, Const)->num().toSInt());
@@ -864,16 +960,29 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
                 return true;
             }
         }
+        // A function without a formal may be named without parentheses
+        const Expr* returnp = nullptr;
+        if (pushPureCall(expr, returnp)) {
+            const bool folded = evalInt(*returnp, value);
+            popPureCall();
+            return folded;
+        }
         return false;
     }
     case Expr::ATTR: {
         // Attributes of a type mark or name whose value is known statically
         if (!expr.a || expr.a->kind != Expr::NAME) return false;
         const VType* typep = typeOfName(*expr.a);
+        VType predefined;
         if (!typep) {
             const auto typeIt = m_types.find(expr.a->text);
-            if (typeIt == m_types.end()) return false;
-            typep = &typeIt->second;
+            if (typeIt != m_types.end()) {
+                typep = &typeIt->second;
+            } else if (predefinedIntegerType(expr.flp, expr.a->text, predefined)) {
+                typep = &predefined;
+            } else {
+                return false;
+            }
         }
         const std::string& attribute = expr.text;
         if (attribute == "length") {
@@ -979,7 +1088,14 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         return true;
     }
     case Expr::INDEX: {
-        if (!expr.a || expr.a->kind != Expr::NAME || expr.args.size() != 1) return false;
+        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        const Expr* returnp = nullptr;
+        if (pushPureCall(expr, returnp)) {
+            const bool folded = evalInt(*returnp, value);
+            popPureCall();
+            if (folded) return true;
+        }
+        if (expr.args.size() != 1) return false;
         const std::string& fn = expr.a->text;
         double real = 0.0;
         if (!evalReal(*expr.args[0], real)) return false;
@@ -1006,16 +1122,85 @@ bool Lowering::staticIntFold(const ExprP& exprp, int64_t& value) {
     // A pure function call is static too; inline and fold it
     AstNodeExpr* valuep = lowerExpr(*exprp, nullptr);
     if (!valuep) return false;
-    valuep = V3Const::constifyEditCpp(valuep);
-    AstConst* const constp = foldToConst(valuep);
-    if (!constp) {
-        valuep->deleteTree();
-        return false;
-    }
+    AstConst* const constp = foldStatic(valuep);
+    valuep->deleteTree();
+    if (!constp) return false;
     value = constp->num().toSInt();
     constp->deleteTree();
     return true;
 }
+
+//! Bind `call`'s actuals to the formals of a pure function whose returned expression the
+//! folders can evaluate, so that expression becomes a closed term. Only a body that is a
+//! single return qualifies: anything else may compute effects the folders cannot model.
+//! A call is left unfolded when no single visible declaration fits, rather than guessing
+//! between overloads. On success the caller pops with popPureCall().
+bool Lowering::pushPureCall(const Expr& call, const Expr*& returnp) const {
+    returnp = nullptr;
+    // A call is written `name(...)`, except a function without a formal, which may also
+    // be written as the bare name
+    const std::string* namep = nullptr;
+    if (call.kind == Expr::NAME) {
+        namep = &call.text;
+    } else if (call.a && call.a->kind == Expr::NAME) {
+        namep = &call.a->text;
+    } else {
+        return false;
+    }
+    const SubprogramDecl* candidate = nullptr;
+    for (const SubprogramDecl* const subp : visibleSubprograms(*namep)) {
+        if (subp->kind != SubprogramDecl::FUNCTION || subp->impure || !subp->hasBody) continue;
+        if (std::any_of(m_pureCalls.cbegin(), m_pureCalls.cend(),
+                        [=](const PureCall& frame) { return frame.subp == subp; })) {
+            continue;
+        }
+        if (subp->body.size() != 1 || !subp->body[0] || subp->body[0]->kind != Stmt::RETURN
+            || !subp->body[0]->value)
+            continue;
+        std::size_t slots = 0;
+        for (const FormalDecl& formal : subp->formals) slots += formal.names.size();
+        if (slots != call.args.size()) continue;
+        bool positional = true;
+        for (std::size_t i = 0; i < call.args.size(); ++i) {
+            if (!call.args[i]) positional = false;
+            if (i < call.formalNames.size() && !call.formalNames[i].empty()) positional = false;
+        }
+        if (!positional) continue;
+        if (!formalsAccept(call, *subp)) continue;
+        if (candidate) return false;
+        candidate = subp;
+    }
+    if (!candidate) return false;
+    PureCall frame;
+    std::size_t slot = 0;
+    for (const FormalDecl& formal : candidate->formals) {
+        for (const auto& name : formal.names) {
+            // Value the actual here, in the caller's scope: the body is then evaluated
+            // over literals only, so no name of the caller can leak into it.
+            const Expr& actual = *call.args[slot++];
+            auto valuep = std::make_unique<Expr>(Expr::INT_LIT);
+            valuep->flp = actual.flp;
+            int64_t intValue = 0;
+            double realValue = 0.0;
+            if (evalInt(actual, intValue)) {
+                valuep->intValue = intValue;
+            } else if (evalReal(actual, realValue)) {
+                valuep->kind = Expr::REAL_LIT;
+                valuep->realValue = realValue;
+            } else {
+                return false;
+            }
+            frame.args[name.first] = std::move(valuep);
+        }
+    }
+    if (!closedOverFormals(*candidate->body[0]->value, frame.args)) return false;
+    frame.subp = candidate;
+    returnp = candidate->body[0]->value.get();
+    m_pureCalls.push_back(std::move(frame));
+    return true;
+}
+
+void Lowering::popPureCall() const { m_pureCalls.pop_back(); }
 
 bool Lowering::evalReal(const Expr& expr, double& value) const {
     switch (expr.kind) {
@@ -1023,11 +1208,22 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
     case Expr::PHYS_LIT: value = static_cast<double>(expr.intValue); return true;
     case Expr::REAL_LIT: value = expr.realValue; return true;
     case Expr::NAME: {
+        if (!m_pureCalls.empty()) {
+            const auto argIt = m_pureCalls.back().args.find(expr.text);
+            if (argIt != m_pureCalls.back().args.end()) return evalReal(*argIt->second, value);
+        }
         const auto realIt = m_realConsts.find(expr.text);
         if (realIt != m_realConsts.end()) {
             value = realIt->second;
             return true;
         }
+        int64_t intValue = 0;
+        if (!evalInt(expr, intValue)) return false;
+        value = static_cast<double>(intValue);
+        return true;
+    }
+    case Expr::ATTR: {
+        // An attribute of a discrete type or name is an integer
         int64_t intValue = 0;
         if (!evalInt(expr, intValue)) return false;
         value = static_cast<double>(intValue);
@@ -1070,7 +1266,14 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
         return true;
     }
     case Expr::INDEX: {
-        if (!expr.a || expr.a->kind != Expr::NAME || expr.args.size() != 1) return false;
+        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        const Expr* returnp = nullptr;
+        if (pushPureCall(expr, returnp)) {
+            const bool folded = evalReal(*returnp, value);
+            popPureCall();
+            if (folded) return true;
+        }
+        if (expr.args.size() != 1) return false;
         const std::string& fn = expr.a->text;
         double operand = 0.0;
         if (!evalReal(*expr.args[0], operand)) return false;
@@ -1328,6 +1531,79 @@ void Lowering::registerType(const TypeDecl& decl) {
     m_types[decl.name] = type;
 }
 
+//! Whether `expr` names any of `names` anywhere in it
+bool Lowering::exprNamesAny(const Expr& expr, const std::set<std::string>& names) {
+    if (expr.kind == Expr::NAME && names.count(expr.text)) return true;
+    if (expr.a && exprNamesAny(*expr.a, names)) return true;
+    if (expr.b && exprNamesAny(*expr.b, names)) return true;
+    for (const ExprP& argp : expr.args) {
+        if (argp && exprNamesAny(*argp, names)) return true;
+    }
+    return false;
+}
+
+//! Whether one of the type's own or members' constraints names any of `names`
+bool Lowering::typeDeclNamesAny(const TypeDecl& decl, const std::set<std::string>& names) {
+    const auto specNames = [&names](const TypeSpec& spec) {
+        if (spec.left && exprNamesAny(*spec.left, names)) return true;
+        if (spec.right && exprNamesAny(*spec.right, names)) return true;
+        for (const TypeSpec::MemberConstraint& member : spec.memberConstraints) {
+            if (member.lo && exprNamesAny(*member.lo, names)) return true;
+            if (member.hi && exprNamesAny(*member.hi, names)) return true;
+        }
+        return false;
+    };
+    std::vector<const TypeSpec*> specs;
+    specs.push_back(&decl.base);
+    specs.push_back(&decl.index);
+    for (const TypeSpec& extra : decl.indexes) specs.push_back(&extra);
+    for (const TypeDecl::Member& member : decl.members) specs.push_back(&member.type);
+    for (const TypeSpec* const specp : specs) {
+        if (specNames(*specp)) return true;
+        for (const TypeSpec& nested : specp->indexConstraints) {
+            if (specNames(nested)) return true;
+        }
+    }
+    return false;
+}
+
+void Lowering::registerTypes(const std::vector<TypeDecl>& types, const std::vector<Decl>& decls) {
+    ++m_deferSeq;  // A part inlined while this one is emitted defers types of its own
+    for (const TypeDecl& typeDecl : types) {
+        // The pre-scan published the constants of the part it could fold; a constraint
+        // naming one of the rest has to wait for the value the emitter computes for it
+        std::set<std::string> unpublished;
+        for (const Decl& decl : decls) {
+            if (decl.kind != Decl::CONSTANT || decl.flp->lineno() > typeDecl.flp->lineno())
+                continue;
+            for (const auto& name : decl.names) {
+                if (m_consts.count(name.first) || m_preConsts.count(name.first)
+                    || m_constValues.count(name.first))
+                    continue;
+                unpublished.insert(name.first);
+            }
+        }
+        if (!unpublished.empty() && typeDeclNamesAny(typeDecl, unpublished)) {
+            m_deferredTypes[typeDecl.name] = DeferredType{&typeDecl, m_deferSeq};
+            continue;
+        }
+        registerType(typeDecl);
+    }
+}
+
+void Lowering::finishDeferredTypes() {
+    for (auto it = m_deferredTypes.begin(); it != m_deferredTypes.end();) {
+        if (it->second.seq != m_deferSeq) {
+            ++it;
+            continue;
+        }
+        const TypeDecl* const declp = it->second.declp;
+        it = m_deferredTypes.erase(it);
+        registerType(*declp);
+    }
+    --m_deferSeq;
+}
+
 //! Bounds of an index constraint; a discrete range attribute such as `sig'range`
 //! contributes the bounds and direction of its prefix
 bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right,
@@ -1534,8 +1810,26 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
 bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     if (!flp) return false;
+    if (!spec.objectName.empty()) {  // `name'subtype`: the object's own subtype
+        Expr prefix{Expr::NAME};
+        prefix.flp = flp;
+        prefix.text = spec.objectName;
+        prefix.spelling = spec.objectName;
+        return typeOfDesignator(prefix, out);
+    }
     const std::string& mark = spec.mark;
     auto declared = m_types.find(mark);
+    if (declared == m_types.end() && m_inlineFrames.empty()) {
+        // The part deferred this type because its constraint named a constant with no value
+        // yet; at a use outside an inlining the part's items are all visible
+        const auto deferred = m_deferredTypes.find(mark);
+        if (deferred != m_deferredTypes.end() && deferred->second.seq == m_deferSeq) {
+            const TypeDecl* const declp = deferred->second.declp;
+            m_deferredTypes.erase(deferred);
+            registerType(*declp);
+            declared = m_types.find(mark);
+        }
+    }
     if (declared == m_types.end() && !spec.pkg.empty()) {
         // A qualified reference such as `work.defs.rec` may name a package the unit
         // never imported with a `use` clause; import it so the mark resolves
@@ -1597,12 +1891,9 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         return true;
     }
     if (mark == "real") {
-        // A scalar handled only at elaboration; it has no width, so any use that would
-        // need a runtime type (a variable, a port, ...) is rejected where it appears.
-        if (spec.hasRange || !spec.constraintMark.empty()) {
-            flp->v3error("VHDL: constraint on scalar type 'real'");
-            return false;
-        }
+        // A scalar handled only at elaboration: it has no width for a constraint to
+        // bound, and any use that would need a runtime type (a variable, a port, ...)
+        // is rejected where it appears -- see rejectRealObject.
         out = VType{};
         out.kind = VType::REAL;
         out.dtp = nullptr;
@@ -2778,6 +3069,18 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         return sliceOf(flp, basep, baseType, elemWidth, hi, lo, prefixTypep->ascending);
     }
     if (expr.kind == Expr::INDEX) {
+        // A single name argument that denotes a declared subtype is a discrete range
+        // rather than a value: `v(some_range_t)` selects the elements those bounds denote
+        // (IEEE 1800-2023 9.5.4). An object name is not a discrete range, so `v(i)` still
+        // indexes; the subtype's direction decides whether the selected elements come out
+        // reversed, which `sliceOf` already handles.
+        if (expr.args.size() == 1) {
+            if (const VType* const markp = discreteRangeType(*expr.args[0])) {
+                const int hi = std::max(markp->left, markp->right);
+                const int lo = std::min(markp->left, markp->right);
+                return sliceOf(flp, basep, baseType, elemWidth, hi, lo, markp->ascending);
+            }
+        }
         // A multi-dimensional index `m(i, j)` descends one array level per argument; a
         // nested `m(i)(j)` yields one single-argument INDEX per level and shares this path
         AstNodeExpr* curp = basep;
@@ -2998,7 +3301,8 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
         VType prefixType;
         if (!expr.a || !typeOfDesignator(*expr.a, prefixType)) return false;
         if (!prefixType.isVector()) return false;
-        // An attribute range selects a slice: `a'range` or `a(a'range)`
+        // A slice comes from an attribute range or from a subtype mark: `a'range`,
+        // `a(a'range)`, `a(some_range_t)`
         const Expr* rangep = nullptr;
         if (expr.kind == Expr::INDEX && expr.args.size() == 1 && expr.args[0]->kind == Expr::ATTR
             && expr.args[0]->text == "range") {
@@ -3007,7 +3311,10 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
                    && expr.b->text == "range") {
             rangep = expr.b.get();
         }
-        if (expr.kind == Expr::INDEX && !rangep) {
+        const VType* const markp = expr.kind == Expr::INDEX && expr.args.size() == 1
+                                       ? discreteRangeType(*expr.args[0])
+                                       : nullptr;
+        if (expr.kind == Expr::INDEX && !rangep && !markp) {
             if (prefixType.kind == VType::ARRAY && prefixType.elemp) {
                 out = *prefixType.elemp;
             } else {
@@ -3028,6 +3335,10 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
             left = prefixTypep->left;
             right = prefixTypep->right;
             ascending = prefixTypep->ascending;
+        } else if (markp) {
+            left = markp->left;
+            right = markp->right;
+            ascending = markp->ascending;
         } else {
             if (!expr.b || !expr.c) return false;
             if (!staticInt(expr.b, left) || !staticInt(expr.c, right)) return false;
@@ -3063,6 +3374,15 @@ const VType* Lowering::typeOfName(const Expr& expr) const {
     const auto constIt = m_constTypes.find(expr.text);
     if (constIt != m_constTypes.end()) return &constIt->second;
     return nullptr;
+}
+
+//! Bounds a name denotes when it is used as a discrete range rather than a value, as in
+//! `v(some_range_t)`. Null for an object name, so an ordinary index still resolves.
+const VType* Lowering::discreteRangeType(const Expr& expr) const {
+    if (expr.kind != Expr::NAME) return nullptr;
+    const auto typeIt = m_types.find(expr.text);
+    if (typeIt == m_types.end() || !typeIt->second.isInt()) return nullptr;
+    return &typeIt->second;
 }
 
 AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
@@ -3131,6 +3451,11 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
             typep = &typeIt->second;
             typeMark = true;
         }
+    }
+    VType predefined;
+    if (!typep && predefinedIntegerType(flp, expr.a->text, predefined)) {
+        typep = &predefined;
+        typeMark = true;
     }
     if (!typep && expr.a->text == "character") {
         // `character` is a predefined type the frontend models directly rather than
@@ -3313,13 +3638,43 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
     return slicep;
 }
 
-//! An alias takes the index bounds its mark declares; the bits come from the designator
+//! An alias takes the index bounds its mark declares; the bits come from the designator.
+//! An alias with a signature renames a subprogram instead, so it is registered as one.
 void Lowering::registerAlias(const AliasDecl& alias) {
     if (!alias.designator) return;
+    if (alias.hasSignature) {
+        registerSubprogramAlias(alias);
+        return;
+    }
     AliasInfo info;
     info.designatorp = alias.designator.get();
     if (alias.mark.flp && resolveType(alias.mark, info.type)) info.hasType = true;
     m_aliases[alias.name] = info;
+}
+
+//! `alias name is pkg.designator[signature];` is a synonym: it takes the designator's
+//! declarations, so calls of the alias resolve like calls of the designator. All its
+//! overloads come along: picking the one the signature names would reject the legal alias
+//! that writes a subtype's name for the same type, and the call site already resolves the
+//! overload from the actuals.
+void Lowering::registerSubprogramAlias(const AliasDecl& alias) {
+    const Expr& designator = *alias.designator;
+    if (designator.kind == Expr::SELECTED && designator.a) {
+        std::string pkg;
+        if (packageNameOf(*designator.a, pkg)) importPackage(pkg);
+    }
+    const auto it = m_subprograms.find(designator.text);
+    if (it == m_subprograms.end()) return;  // A standard-package name has no declaration
+    std::vector<SubprogramRef>& refs = m_subprograms[alias.name];
+    if (&refs == &it->second) return;  // An alias may not rename its own designator
+    for (const SubprogramRef& ref : it->second) {
+        const bool known = std::any_of(refs.begin(), refs.end(), [=](const SubprogramRef& r) {
+            return r.declp == ref.declp;
+        });
+        if (known) continue;
+        refs.push_back(ref);
+        m_imported.insert(alias.name);
+    }
 }
 
 //! Lower a use of an alias by lowering the designator it renames
@@ -3397,27 +3752,65 @@ AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
     return nullptr;
 }
 
-//! Fold an expression built only from constants into one AstConst, or return null
-AstConst* Lowering::foldToConst(AstNodeExpr* exprp) {
+//! Value of a lowered expression that has no run-time input, or null when one operand is
+//! not known. The expression is left as it is, so a caller that needs a value keeps the
+//! run-time form. This is the frontend's own fold: VHDL is lowered while
+//! V3Global::readFiles holds the user4 slot V3Const claims, and a nested claim aborts.
+AstConst* Lowering::foldStatic(AstNodeExpr* exprp) const {
     if (!exprp) return nullptr;
-    if (AstConst* const constp = VN_CAST(exprp, Const)) return constp;
-    AstConcat* const concatp = VN_CAST(exprp, Concat);
-    if (!concatp) return nullptr;
-    AstConst* const lhp = foldToConst(concatp->lhsp()->unlinkFrBack());
-    AstConst* const rhp = foldToConst(concatp->rhsp()->unlinkFrBack());
-    if (!lhp || !rhp) {
-        if (lhp) lhp->deleteTree();
-        if (rhp) rhp->deleteTree();
-        return nullptr;
+    const auto result = [&](const V3Number& num) {
+        AstConst* const constp = new AstConst{exprp->fileline(), num};
+        constp->dtypep(exprp->dtypep());
+        return constp;
+    };
+    if (AstConst* const constp = VN_CAST(exprp, Const)) { return constp->cloneTree(false); }
+    if (exprp->dtypep() && exprp->dtypep()->isDouble()) return nullptr;
+    V3Number lhs{exprp, 1};
+    V3Number rhs{exprp, 1};
+    const auto operand = [&](AstNodeExpr* operandp, V3Number& out) {
+        AstConst* const constp = foldStatic(operandp);
+        if (!constp) return false;
+        out = constp->num();
+        constp->deleteTree();
+        return true;
+    };
+    if (AstNodeUniop* const nodep = VN_CAST(exprp, NodeUniop)) {
+        if (!operand(nodep->lhsp(), lhs) || lhs.isDouble()) return nullptr;
+        V3Number num{nodep, nodep->width()};
+        nodep->numberOperate(num, lhs);
+        return result(num);
     }
-    V3Number num{exprp->fileline(), lhp->num().width() + rhp->num().width(), 0u};
-    num.opConcat(lhp->num(), rhp->num());
-    AstConst* const constp = new AstConst{exprp->fileline(), num};
-    constp->dtypep(exprp->dtypep());
-    lhp->deleteTree();
-    rhp->deleteTree();
-    VL_DO_DANGLING(exprp->deleteTree(), exprp);
-    return constp;
+    if (AstNodeBiop* const nodep = VN_CAST(exprp, NodeBiop)) {
+        if (!operand(nodep->lhsp(), lhs) || !operand(nodep->rhsp(), rhs)) return nullptr;
+        if (lhs.isDouble() || rhs.isDouble()) return nullptr;
+        V3Number num{nodep, nodep->width()};
+        nodep->numberOperate(num, lhs, rhs);
+        return result(num);
+    }
+    if (AstCond* const nodep = VN_CAST(exprp, Cond)) {
+        // A condition that is known picks the arm, as the run-time form would
+        AstConst* const testp = foldStatic(nodep->condp());
+        if (!testp) return nullptr;
+        const bool taken = testp->num().isTrue();
+        testp->deleteTree();
+        return foldStatic(taken ? nodep->thenp() : nodep->elsep());
+    }
+    if (AstSel* const nodep = VN_CAST(exprp, Sel)) {
+        AstConst* const basep = foldStatic(nodep->fromp());
+        AstConst* const lsbp = foldStatic(nodep->lsbp());
+        if (!basep || !lsbp) {
+            if (basep) basep->deleteTree();
+            if (lsbp) lsbp->deleteTree();
+            return nullptr;
+        }
+        const int lsb = lsbp->num().toSInt();
+        lsbp->deleteTree();
+        V3Number num{nodep, nodep->width()};
+        num.opSel(basep->num(), lsb + nodep->widthConst() - 1, lsb);
+        basep->deleteTree();
+        return result(num);
+    }
+    return nullptr;
 }
 
 AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
@@ -3656,8 +4049,9 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
     }
     if (allConst) {
         // Fold an aggregate of constants down to a single constant
-        if (AstConst* const constp = foldToConst(resultp)) {
+        if (AstConst* const constp = foldStatic(resultp)) {
             constp->dtypep(type.dtp);
+            resultp->deleteTree();
             return constp;
         }
     }
@@ -4634,9 +5028,7 @@ std::vector<const SubprogramDecl*> Lowering::visibleSubprograms(const std::strin
 bool Lowering::subprogramMatches(const Expr& call, const SubprogramDecl& sub,
                                  std::string& why) const {
     // A formal declaration can declare several names; positional actuals fill them in order
-    std::vector<std::pair<const FormalDecl*, std::string>> slots;
-    for (const FormalDecl& formal : sub.formals)
-        for (const auto& name : formal.names) slots.emplace_back(&formal, name.first);
+    const std::vector<std::pair<const FormalDecl*, std::string>> slots = formalSlots(sub);
     std::vector<bool> given(slots.size(), false);
     std::size_t positional = 0;
     for (std::size_t i = 0; i < call.args.size(); ++i) {
@@ -4705,6 +5097,7 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
     std::string firstWhy;
     bool withoutBody = false;
     bool impureSeen = false;
+    std::vector<const SubprogramRef*> matching;
     for (const SubprogramRef* const refp : refs) {
         const SubprogramDecl& sub = *refp->declp;
         if ((sub.kind == SubprogramDecl::FUNCTION) != function) continue;
@@ -4721,8 +5114,25 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
             if (firstWhy.empty()) firstWhy = why;
             continue;
         }
-        if (foundpp) *foundpp = refp;
-        return &sub;
+        matching.push_back(refp);
+    }
+    if (matching.size() > 1) {
+        // Several declarations take this many actuals, so the actuals' categories decide
+        // which one is called (IEEE 1800-2023 6.5.6.2). A single declaration is not a
+        // choice and keeps the acceptance `subprogramMatches` gave it.
+        std::vector<const SubprogramRef*> fitting;
+        for (const SubprogramRef* const refp : matching) {
+            if (formalsAccept(call, *refp->declp)) fitting.push_back(refp);
+        }
+        if (fitting.empty()) {
+            unsupportedError(call.flp, "no declaration of '" + name + "' accepts the actuals");
+            return nullptr;
+        }
+        matching = std::move(fitting);
+    }
+    if (!matching.empty()) {
+        if (foundpp) *foundpp = matching[0];
+        return matching[0]->declp;
     }
     if (withoutBody) {
         unsupportedError(call.flp, "call to subprogram '" + name + "' whose body was not read");
@@ -4739,6 +5149,173 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
 static bool isUnconstrainedMark(const std::string& mark) {
     return mark == "std_logic_vector" || mark == "std_ulogic_vector" || mark == "bit_vector"
            || mark == "unsigned" || mark == "signed" || mark == "string";
+}
+
+//! A vector or an array: one category for overload matching, as only the element type
+//! separates them and that is not compared here
+static bool isVectorKind(const VType::Kind kind) {
+    return kind == VType::VECTOR || kind == VType::ARRAY;
+}
+
+//! The formal slots of a declaration, one per formal name, in the order positional actuals
+//! fill them
+std::vector<std::pair<const FormalDecl*, std::string>>
+Lowering::formalSlots(const SubprogramDecl& sub) {
+    std::vector<std::pair<const FormalDecl*, std::string>> slots;
+    for (const FormalDecl& formal : sub.formals)
+        for (const auto& name : formal.names) slots.emplace_back(&formal, name.first);
+    return slots;
+}
+
+//! The category a type mark names, without resolving a constraint: an unconstrained formal
+//! array has none to resolve to. False for a mark the frontend gives no category.
+bool Lowering::markKind(const std::string& mark, VType::Kind& out) const {
+    const auto declared = m_types.find(mark);
+    if (declared != m_types.end()) {
+        out = declared->second.kind;
+        return true;
+    }
+    if (mark == "integer" || mark == "natural" || mark == "positive") {
+        out = VType::INT;
+        return true;
+    }
+    if (mark == "real") {
+        out = VType::REAL;
+        return true;
+    }
+    if (mark == "boolean" || mark == "std_logic" || mark == "std_ulogic") {
+        out = VType::LOGIC;
+        return true;
+    }
+    if (mark == "bit") {
+        out = VType::BIT;
+        return true;
+    }
+    if (isUnconstrainedMark(mark) || mark == "u_unsigned" || mark == "u_signed") {
+        out = VType::VECTOR;
+        return true;
+    }
+    return false;
+}
+
+//! The category an actual presents to a formal: what its literal, or what the static tables
+//! know of the name. False when nothing is known, and an actual of unknown category fits any
+//! declaration, as the choice only excludes what it can tell apart.
+bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
+    switch (expr.kind) {
+    case Expr::INT_LIT:
+    case Expr::PHYS_LIT: out = VType::INT; return true;
+    case Expr::REAL_LIT: out = VType::REAL; return true;
+    case Expr::TRUE_LIT:
+    case Expr::FALSE_LIT: out = VType::LOGIC; return true;
+    case Expr::BITS_LIT: out = VType::VECTOR; return true;
+    case Expr::STRING_LIT: out = VType::ARRAY; return true;
+    case Expr::QUAL: return markKind(expr.text, out);
+    case Expr::PAREN: return expr.a && actualKind(*expr.a, out);
+    case Expr::UNARY: return expr.a && actualKind(*expr.a, out);
+    case Expr::NAME:
+    case Expr::SELECTED:
+    case Expr::INDEX:
+    case Expr::SLICE: {
+        VType type;
+        if (typeOfDesignator(expr, type)) {
+            out = type.kind;
+            return true;
+        }
+        if (expr.kind != Expr::NAME) return false;
+        // A constant the pre-scan folded has a value but no type entry of its own
+        if (m_consts.count(expr.text) || m_preConsts.count(expr.text)) {
+            out = VType::INT;
+            return true;
+        }
+        if (m_realConsts.count(expr.text)) {
+            out = VType::REAL;
+            return true;
+        }
+        if (m_enumConsts.count(expr.text)) {
+            out = VType::ENUM;
+            return true;
+        }
+        return false;
+    }
+    case Expr::ATTR:
+        if (expr.text == "high" || expr.text == "low" || expr.text == "left"
+            || expr.text == "right" || expr.text == "length" || expr.text == "pos"
+            || expr.text == "to_integer") {
+            out = VType::INT;
+            return true;
+        }
+        return false;
+    case Expr::BINARY:
+        if (expr.text == "=" || expr.text == "/=" || expr.text == "<" || expr.text == ">"
+            || expr.text == "<=" || expr.text == ">=") {
+            out = VType::LOGIC;  // The frontend models BOOLEAN as one logic bit
+            return true;
+        }
+        if (!expr.a || !expr.b) return false;
+        VType::Kind aKind;
+        VType::Kind bKind;
+        if (!actualKind(*expr.a, aKind) || !actualKind(*expr.b, bKind)) return false;
+        if (aKind == bKind) {
+            out = aKind;
+            return true;
+        }
+        if (isVectorKind(aKind) && bKind == VType::INT) {
+            out = aKind;  // A shift keeps its vector
+            return true;
+        }
+        if (aKind == VType::INT && isVectorKind(bKind)) {
+            out = bKind;
+            return true;
+        }
+        if ((aKind == VType::INT || aKind == VType::REAL)
+            && (bKind == VType::INT || bKind == VType::REAL)) {
+            out = VType::REAL;  // Mixed-mode numeric arithmetic yields REAL
+            return true;
+        }
+        return false;
+    default: return false;
+    }
+}
+
+//! Whether an actual of `actual` category may be associated with a formal of `formal`
+//! category (IEEE 1800-2023 6.5.6.2). The frontend models no conversion except the numeric
+//! literals' universal type, so the categories have to agree.
+bool Lowering::kindAccepts(VType::Kind formal, VType::Kind actual) {
+    if (formal == actual) return true;
+    if (isVectorKind(formal) && isVectorKind(actual)) return true;
+    if ((formal == VType::INT || formal == VType::REAL)
+        && (actual == VType::INT || actual == VType::REAL)) {
+        return true;
+    }
+    return false;
+}
+
+//! Whether every actual of a call can be associated with the formal it fills. A caller asks
+//! only to choose between declarations that already accept the actuals' count and names.
+bool Lowering::formalsAccept(const Expr& call, const SubprogramDecl& sub) const {
+    const std::vector<std::pair<const FormalDecl*, std::string>> slots = formalSlots(sub);
+    std::size_t positional = 0;
+    for (std::size_t i = 0; i < call.args.size(); ++i) {
+        const Expr* const actualp = call.args[i].get();
+        if (!actualp) return true;
+        const std::string formal = i < call.formalNames.size() ? call.formalNames[i] : "";
+        const FormalDecl* formalp = nullptr;
+        if (formal.empty()) {
+            if (positional >= slots.size()) return true;
+            formalp = slots[positional++].first;
+        } else {
+            for (const auto& slot : slots) {
+                if (slot.second == formal) formalp = slot.first;
+            }
+            if (!formalp) return true;
+        }
+        VType::Kind aKind;
+        VType::Kind fKind;
+        if (!actualKind(*actualp, aKind) || !markKind(formalp->type.mark, fKind)) continue;
+        if (!kindAccepts(fKind, aKind)) return false;
+    }
+    return true;
 }
 
 void Lowering::captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const {
@@ -4838,7 +5415,11 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         AstNodeExpr* actualp = asLvalue ? lowerDesignator(actual, true) : lowerExpr(actual, ctxp);
         if (!actualp) return false;
         InlineBinding binding{actualp, asLvalue, true};
-        binding.type = typeOfDType(actualp->dtypep());
+        // The actual's VHDL type first: an array's element width and index bounds are gone
+        // from its data type, and a formal indexing the actual needs both
+        if (!typeOfDesignator(actual, binding.type)) {
+            binding.type = typeOfDType(actualp->dtypep());
+        }
         if (asLvalue && formalp->mode == PortMode::OUT && formalp->cls == FormalDecl::SIGNAL) {
             // Reading an out signal formal before return would see the actual's old value
             binding.readable = false;
@@ -4910,9 +5491,15 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context)
 
     for (const TypeDecl& typeDecl : subp->types) registerType(typeDecl);
     registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
-    // An alias denotes its designator; its subtype mark gives it bounds of its own
+    // An alias denotes its designator; its subtype mark gives it bounds of its own. An
+    // alias with a signature renames a subprogram, so it is registered as one instead of
+    // being valued like an object alias would be
     for (const AliasDecl& alias : subp->aliases) {
         if (!alias.designator) continue;
+        if (alias.hasSignature) {
+            registerSubprogramAlias(alias);
+            continue;
+        }
         AstNodeExpr* const valuep = lowerExpr(*alias.designator, nullptr);
         if (!valuep) return fail(nullptr);
         InlineBinding binding{valuep, false, true};
@@ -5137,6 +5724,23 @@ AstNodeExpr* Lowering::evalFuncBranches(const Stmt& stmt, std::size_t branchInde
     }
     AstNodeExpr* const condp = lowerCond(*branch.first);
     if (!condp) return nullptr;
+    // A condition that folds to a constant selects the path taken, so the one not taken
+    // needs no value -- which is what lets a body return from inside a static loop
+    if (AstConst* const foldedp = foldStatic(condp)) {
+        const bool taken = foldedp->num().isTrue();
+        foldedp->deleteTree();
+        condp->deleteTree();
+        if (taken) {
+            InlineEnv thenEnv = cloneInlineEnv(activeEnv());
+            AstNodeExpr* const takenp
+                = evalFuncBlock(branch.second, 0, thenEnv, cont, exitContp, depth);
+            deleteInlineEnv(thenEnv);
+            return takenp;
+        }
+        return branchIndex + 1 < stmt.branches.size()
+                   ? evalFuncBranches(stmt, branchIndex + 1, cont, exitContp, depth)
+                   : evalFuncBlock({}, 0, activeEnv(), cont, exitContp, depth);
+    }
     InlineEnv thenEnv = cloneInlineEnv(activeEnv());
     AstNodeExpr* thenp = evalFuncBlock(branch.second, 0, thenEnv, cont, exitContp, depth);
     AstNodeExpr* elsep = branchIndex + 1 < stmt.branches.size()
@@ -5165,6 +5769,10 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
                                     const InlineCont* exitContp, int depth) {
     AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
     if (!selectorp) return nullptr;
+    // A selector that folds to a constant picks which arm runs, so the others need no value
+    AstConst* const selConstp = foldStatic(selectorp);
+    const bool known = selConstp && !selConstp->num().isFourState();
+    bool kept = false;
     struct Branch final {
         AstNodeExpr* condp = nullptr;  // null for the "others" alternative
         AstNodeExpr* resultp = nullptr;
@@ -5183,14 +5791,30 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         std::vector<AstConst*> cops;
         if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
             for (AstConst* const cop : cops) cop->deleteTree();
+            if (selConstp) selConstp->deleteTree();
             cleanup();
             selectorp->deleteTree();
             return nullptr;
         }
+        if (known && kept) {
+            for (AstConst* const cop : cops) cop->deleteTree();
+            continue;  // The first matching choice wins
+        }
+        bool matches = !known || cops.empty();
+        for (AstConst* const cop : cops) {
+            if (known && cop->num().isCaseEq(selConstp->num())) matches = true;
+        }
+        if (!matches) {
+            for (AstConst* const cop : cops) cop->deleteTree();
+            continue;
+        }
+        kept = true;
         Branch branch;
         branch.env = cloneInlineEnv(activeEnv());
         branch.resultp = evalFuncBlock(item.second, 0, branch.env, cont, exitContp, depth);
-        if (!cops.empty()) {
+        if (known) {
+            for (AstConst* const cop : cops) cop->deleteTree();
+        } else if (!cops.empty()) {
             AstNodeExpr* condp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[0]};
             condp->dtypep(bitdtp);
             for (std::size_t i = 1; i < cops.size(); ++i) {
@@ -5204,6 +5828,8 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         }
         branches.push_back(std::move(branch));
     }
+    if (selConstp) selConstp->deleteTree();
+    if (known && branches.empty()) return cont(activeEnv());  // No choice matched, no 'others'
     AstNodeExpr* resultp = nullptr;
     for (Branch& branch : branches) {
         if (branch.condp) continue;
@@ -5212,6 +5838,11 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         break;
     }
     if (!resultp) {
+        if (known) {
+            cleanup();
+            selectorp->deleteTree();
+            return nullptr;  // The arm that runs has no value on its path
+        }
         unsupportedError(stmt.flp, "case without 'others' in an inlined VHDL function body");
         cleanup();
         selectorp->deleteTree();
@@ -5379,8 +6010,8 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
     };
 
     for (const TypeDecl& typeDecl : subp->types) registerType(typeDecl);
-    for (const AliasDecl& alias : subp->aliases) registerAlias(alias);
     registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
+    for (const AliasDecl& alias : subp->aliases) registerAlias(alias);
 
     // Locals are real module variables reinitialized on every call, like automatics
     AstNode* initsp = nullptr;
@@ -5394,7 +6025,7 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
         if (rejectRealObject(ltype, decl.flp)) return fail(nullptr);
         for (const auto& name : decl.names) {
             const std::string mangled
-                = "vhdlproc_" + std::to_string(++m_procVarSeq) + "__" + name.second;
+                = "vhdlproc_" + std::to_string(++m_procVarSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, ltype.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, ltype};
@@ -5676,6 +6307,7 @@ Lowering::ScopeSave Lowering::saveScope() const {
     ScopeSave saved;
     saved.scope = m_scope;
     saved.consts = m_consts;
+    saved.preConsts = m_preConsts;
     saved.types = m_types;
     saved.constValues = m_constValues;
     saved.constTypes = m_constTypes;
@@ -5687,6 +6319,7 @@ Lowering::ScopeSave Lowering::saveScope() const {
 void Lowering::restoreScope(const ScopeSave& saved) {
     m_scope = saved.scope;
     m_consts = saved.consts;
+    m_preConsts = saved.preConsts;
     m_types = saved.types;
     m_constValues = saved.constValues;
     m_constTypes = saved.constTypes;
@@ -5697,7 +6330,9 @@ void Lowering::restoreScope(const ScopeSave& saved) {
 //! Declare the types, constants and variables of a process declarative part
 void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& varNames) {
     int varSeq = 0;
-    for (const TypeDecl& typeDecl : process.types) registerType(typeDecl);
+    // A type or subtype in the same declarative part may name a constant declared there
+    preScanIntConstants(process.decls);
+    registerTypes(process.types, process.decls);
     registerSubprograms(process.subprograms, -1, true);
     for (const Decl& decl : process.decls) {
         if (decl.kind == Decl::CONSTANT) {
@@ -5709,7 +6344,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
         if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             // Mangle so the same variable name in two processes stays distinct
-            const std::string mangled = "vhdlvar_" + std::to_string(++varSeq) + "__" + name.second;
+            const std::string mangled = "vhdlvar_" + std::to_string(++varSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
@@ -5726,6 +6361,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
             m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
         }
     }
+    finishDeferredTypes();
 }
 
 //! Register a declared name; a local declaration hides a name from a used package
@@ -5805,8 +6441,10 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
     }
     AstNodeExpr* valuep = lowerExpr(*initp, &constType);
     if (!valuep) return;
-    valuep = V3Const::constifyEditCpp(valuep);
-    if (AstConst* const foldedp = foldToConst(valuep)) valuep = foldedp;
+    if (AstConst* const foldedp = foldStatic(valuep)) {
+        valuep->deleteTree();
+        valuep = foldedp;
+    }
     AstConst* const constp = VN_CAST(valuep, Const);
     if (!constp) {
         unsupportedError(flp, "constant value that is not static");
@@ -5830,6 +6468,7 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
 bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                                 const GenericBindings* bindings, bool probe) {
     bool ok = true;
+    bool unbound = false;  // A generic here has neither a binding nor a default
     const auto registerString = [&](FileLine* flp, const std::string& folded,
                                     const std::string& text) {
         if (text.empty()) {
@@ -5858,6 +6497,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
     };
     for (const GenericDecl& gen : generics) {
         for (const auto& name : gen.names) {
+            if (unbound) continue;  // An earlier generic has no value, so nothing can elaborate
             if (gen.isType) {
                 if (bindings) {
                     const auto it = bindings->find(name.first);
@@ -5869,7 +6509,10 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                         continue;
                     }
                 }
-                if (!probe) ok = false;  // A type generic has no elaboratable default
+                if (!probe) {
+                    ok = false;  // A type generic has no elaboratable default
+                    unbound = true;
+                }
                 continue;
             }
             if (gen.isSubprogram) {
@@ -5884,7 +6527,10 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                         continue;
                     }
                 }
-                if (!probe) ok = false;  // A subprogram generic has no elaboratable default
+                if (!probe) {
+                    ok = false;  // A subprogram generic has no elaboratable default
+                    unbound = true;
+                }
                 continue;
             }
             if (gen.type.mark == "string") {
@@ -5902,6 +6548,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                     if (!probe) registerString(gen.flp, name.first, actualp->spelling);
                 } else if (!probe) {
                     ok = false;  // No default, so only a binding can elaborate the base
+                    unbound = true;
                 }
                 continue;
             }
@@ -5922,6 +6569,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
             }
             if (!gen.init) {
                 ok = false;
+                unbound = true;
                 continue;
             }
             if (probe) {
@@ -5979,11 +6627,15 @@ void Lowering::importPackage(const std::string& name) {
         refs.push_back(SubprogramRef{subp, false, -1});
         m_imported.insert(subp->name);
     }
+    // A synonym is resolved here, where the subprogram it designates is visible too
+    for (const AliasDecl* const aliasp : info.subprogramAliases) registerSubprogramAlias(*aliasp);
 }
 
 void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
                            const GenericBindings* bindings, const std::string& publishName) {
-    // A package sees only its own declarations
+    const std::string& pubName = publishName.empty() ? pkg.name : publishName;
+
+    // A package sees its own declarations and the packages its `use` clauses name
     m_types.clear();
     m_consts.clear();
     m_constValues.clear();
@@ -5995,18 +6647,33 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_scope.clear();
     m_aliases.clear();
     m_subprograms.clear();
+    // The packages named by the unit's `use` clauses are visible here as well, as they
+    // are in an entity or an architecture. What the package declares itself wins: those
+    // registrations overwrite, and `importPackage` never replaces a name it finds.
+    for (const auto& use : pkg.uses) importPackage(use.second);
+    // A body is nested in its specification, so what the specification declares, and what
+    // its own `use` clauses made visible to it, is visible in the body too. The
+    // specification is always published first: lowerPackages runs a pass over the
+    // specifications before any body, and an instance emits its specification directly
+    // before its body.
+    if (pkg.isBody) importPackage(pubName);
     // A generic package is emitted once per instance, with its generics already bound
     if (bindings) registerGenerics(pkg.generics, bindings, false);
     // Integer constants are folded first so a type range (a record element, an array
     // bound, an integer subtype) that names one resolves during type registration,
     // exactly as an entity or architecture prescans before registering its types.
     preScanIntConstants(pkg.decls);
-    for (const TypeDecl& typeDecl : pkg.types) registerType(typeDecl);
-    for (const AliasDecl& alias : pkg.aliases) registerAlias(alias);
-    // Subprograms are visible to the declarative items below, including deferred constants
+    registerTypes(pkg.types, pkg.decls);
+    // Subprograms are visible to the declarative items below, including deferred
+    // constants, and to an alias renaming one of them
     registerSubprograms(pkg.subprograms, -1);
+    for (const AliasDecl& alias : pkg.aliases) registerAlias(alias);
+    // Preliminary snapshot: a constant's value may already call a subprogram, whose body
+    // evaluates against this scope and not against whatever the caller has
+    m_moduleScope = saveScope();
     for (const Decl& decl : pkg.decls)
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
+    finishDeferredTypes();
 
     PackageInfo info;
     info.aliases = m_aliases;
@@ -6017,6 +6684,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     info.enumConsts = std::move(m_enumConsts);
     info.owned = std::move(m_ownedConsts);
     for (const SubprogramDecl& sub : pkg.subprograms) info.subprograms.push_back(&sub);
+    for (const AliasDecl& alias : pkg.aliases) {
+        if (alias.hasSignature) info.subprogramAliases.push_back(&alias);
+    }
     m_types.clear();
     m_consts.clear();
     m_constValues.clear();
@@ -6026,7 +6696,6 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_ownedConsts.clear();
     m_aliases.clear();
 
-    const std::string& pubName = publishName.empty() ? pkg.name : publishName;
     const auto existing = table.packages.find(pubName);
     if (existing == table.packages.end()) {
         table.packages.emplace(pubName, std::move(info));
@@ -6042,6 +6711,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     for (const auto& literal : info.enumConsts) dest.enumConsts[literal.first] = literal.second;
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
     for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
+    for (const AliasDecl* const aliasp : info.subprogramAliases) {
+        dest.subprogramAliases.push_back(aliasp);
+    }
 }
 
 bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
@@ -6056,12 +6728,16 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     // before registering any type
     registerSubprograms(entity.subprograms, -1);
     registerSubprograms(arch.subprograms, -1);
+    // The scope an inlined body evaluates against, taken before the first item that may
+    // call a subprogram -- a type's range or a generic default -- and taken again below
+    // once the generics and the architecture's types are registered as well
+    m_moduleScope = saveScope();
 
     // Types are visible to the whole declarative part. A type's range may depend on
     // an integer constant, which may in turn depend on a generic, so register the
     // pieces in dependency order.
     preScanIntConstants(entity.decls);
-    for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
+    registerTypes(entity.types, entity.decls);
 
     // Generics are constants visible to the port clause and the architecture
     if (!registerGenerics(entity.generics, bindings, false)) {
@@ -6073,6 +6749,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         m_enumConsts.clear();
         m_ownedConsts.clear();
         m_types.clear();
+        m_deferredTypes.clear();
         m_preConsts.clear();
         return false;
     }
@@ -6080,12 +6757,6 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     // With generics bound, integer constants can size the architecture's types
     preScanIntConstants(entity.decls);
     preScanIntConstants(arch.decls);
-    for (const TypeDecl& archType : arch.types) registerType(archType);
-
-    for (const AliasDecl& alias : arch.aliases) registerAlias(alias);
-
-    // Preliminary snapshot: declarative items may already call subprograms
-    m_moduleScope = saveScope();
 
     // Entity declarative items are visible to every architecture of the entity
     int entityVarSeq = 0;
@@ -6100,7 +6771,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             const std::string mangled
-                = "vhdlext_" + std::to_string(++entityVarSeq) + "__" + name.second;
+                = "vhdlext_" + std::to_string(++entityVarSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
@@ -6116,6 +6787,14 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
         }
     }
+    finishDeferredTypes();
+
+    // The architecture's own types and aliases come after the entity's items, because a
+    // constraint may name one of the entity's constants and the loop above emits them
+    registerTypes(arch.types, arch.decls);
+    for (const AliasDecl& alias : arch.aliases) registerAlias(alias);
+    // Preliminary snapshot: declarative items may already call subprograms
+    m_moduleScope = saveScope();
 
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
@@ -6157,7 +6836,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
                 port.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
                 continue;
             }
-            AstVar* const varp = new AstVar{port.flp, VVarType::PORT, name.second, type.dtp};
+            AstVar* const varp = new AstVar{port.flp, VVarType::PORT, name.first, type.dtp};
             varp->direction(port.dir == PortMode::IN    ? VDirection::INPUT
                             : port.dir == PortMode::OUT ? VDirection::OUTPUT
                                                         : VDirection::INOUT);
@@ -6179,7 +6858,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
-            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.second, type.dtp};
+            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.first, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
@@ -6196,6 +6875,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             }
         }
     }
+    finishDeferredTypes();
 
     // Subprograms of the declarative part capture the module scope as it stands here
     m_moduleScope = saveScope();
@@ -6225,9 +6905,10 @@ static bool isBuiltinGenericMark(const std::string& mark) {
     return false;
 }
 
-//! Bind an instance's generics and return the module specialized for that binding
+//! Bind an instance's generics and its unconstrained port ranges, and return the module
+//! specialized for that binding; the base module when there is nothing to bind
 AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit& entity,
-                                        AstModule* basep) {
+                                        AstModule* basep, const PortBoundsMap& portBounds) {
     FileLine* const flp = conc.flp;
     struct Item final {
         const GenericDecl* declp;
@@ -6339,6 +7020,9 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         for (const auto& use : entity.uses) importPackage(use.second);
         for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
         registerGenerics(entity.generics, &bindings, true);
+        // The declared type may itself call a function, whose body evaluates against the
+        // module scope, so take it with this instance's bindings and the entity's packages
+        m_moduleScope = saveScope();
         VType declared;
         const bool haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
                               && resolveType(gen.type, declared);
@@ -6362,8 +7046,9 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         }
         if (!bound) {
             AstNodeExpr* const valuep = lowerExpr(*assocp->actual, &declared);
-            AstConst* const foldedp = valuep ? foldToConst(valuep) : nullptr;
+            AstConst* const foldedp = valuep ? foldStatic(valuep) : nullptr;
             if (foldedp) {
+                valuep->deleteTree();
                 binding.valuep = foldedp;
                 bound = true;
             } else {
@@ -6377,8 +7062,27 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         }
         bindings[items[k].folded] = binding;
     }
-    if (bindings.empty()) return basep;  // Every generic keeps its default
+    if (bindings.empty() && portBounds.empty()) return basep;  // Nothing to bind
     std::string key = entity.name;
+    // The port-bounds part leads the key: V3VhdlNative.cpp looks for the prefix
+    // "<entity>|ports" to tell that an unconstrained-port entity was specialized
+    if (!portBounds.empty()) {
+        key += "|ports";
+        for (const auto& entry : portBounds) {
+            const PortBounds& bounds = entry.second;
+            key += "|" + entry.first + "=";
+            if (bounds.isRecord) {
+                for (size_t i = 0; i < bounds.memberNames.size(); ++i) {
+                    key += bounds.memberNames[i] + "(" + std::to_string(bounds.memberLeft[i]) + ":"
+                           + std::to_string(bounds.memberRight[i])
+                           + (bounds.memberAscending[i] ? "to" : "downto") + ")";
+                }
+            } else {
+                key += std::to_string(bounds.left) + ":" + std::to_string(bounds.right) + ":"
+                       + (bounds.ascending ? "to" : "downto");
+            }
+        }
+    }
     for (const auto& entry : bindings) {
         key += "|" + entry.first + "=";
         if (entry.second.isType) {
@@ -6418,13 +7122,15 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         freeBindings(bindings);
         return nullptr;
     }
-    AstModule* const specp = new AstModule{
-        entity.flp, entity.spelling + "__Vgen" + std::to_string(++m_designp->specSeq),
-        entity.libname};
+    AstModule* const specp
+        = new AstModule{entity.flp, entity.name + "__Vspec" + std::to_string(++m_designp->specSeq),
+                        entity.libname};
     specp->inLibrary(entity.inLibrary);
     m_rootp->addModulesp(specp);
     Lowering child{m_rootp, m_packagesp, m_modulesp, m_designp};
-    const bool ok = child.emit(entity, *archIt->second, specp, &bindings);
+    const bool ok
+        = child.emit(entity, *archIt->second, specp, bindings.empty() ? nullptr : &bindings,
+                     portBounds.empty() ? nullptr : &portBounds);
     --m_designp->specDepth;
     freeBindings(bindings);
     cache[key] = ok ? specp : nullptr;
@@ -6469,7 +7175,7 @@ bool Lowering::derivePortBounds(const EntityUnit& entity, const Concurrent& conc
     for (size_t i = 0; i < conc.associations.size(); ++i) {
         const PortAssoc& assoc = conc.associations[i];
         if (positional ? static_cast<int>(i) == targetIndex
-                       : assoc.formalSpelling == port.names.front().second) {
+                       : assoc.formal == port.names.front().first) {
             assocs.push_back(&assoc);
         }
     }
@@ -6585,7 +7291,7 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
     for (size_t i = 0; i < conc.associations.size(); ++i) {
         const PortAssoc& assoc = conc.associations[i];
         if (positional ? static_cast<int>(i) == targetIndex
-                       : assoc.formalSpelling == port.names.front().second) {
+                       : assoc.formal == port.names.front().first) {
             assocp = &assoc;
         }
     }
@@ -6629,45 +7335,6 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
     return true;
 }
 
-AstModule* Lowering::specializePortsInstance(const Concurrent& conc, const EntityUnit& entity,
-                                             const PortBoundsMap& portBounds) {
-    FileLine* const flp = conc.flp;
-    std::string key = entity.name + "|ports";
-    for (const auto& entry : portBounds) {
-        const PortBounds& bounds = entry.second;
-        key += "|" + entry.first + "=";
-        if (bounds.isRecord) {
-            for (size_t i = 0; i < bounds.memberNames.size(); ++i) {
-                key += bounds.memberNames[i] + "(" + std::to_string(bounds.memberLeft[i]) + ":"
-                       + std::to_string(bounds.memberRight[i])
-                       + (bounds.memberAscending[i] ? "to" : "downto") + ")";
-            }
-        } else {
-            key += std::to_string(bounds.left) + ":" + std::to_string(bounds.right) + ":"
-                   + (bounds.ascending ? "to" : "downto");
-        }
-    }
-    auto& cache = m_designp->specializations;
-    const auto found = cache.find(key);
-    if (found != cache.end()) return found->second;
-    const auto archIt = m_designp->archs.find(entity.name);
-    if (archIt == m_designp->archs.end()) {
-        flp->v3error("VHDL: entity '" + entity.spelling
-                     + "' has no architecture to specialize for this instance");
-        cache[key] = nullptr;
-        return nullptr;
-    }
-    AstModule* const specp = new AstModule{
-        entity.flp, entity.spelling + "__Vport" + std::to_string(++m_designp->specSeq),
-        entity.libname};
-    specp->inLibrary(entity.inLibrary);
-    m_rootp->addModulesp(specp);
-    Lowering child{m_rootp, m_packagesp, m_modulesp, m_designp};
-    const bool ok = child.emit(entity, *archIt->second, specp, nullptr, &portBounds);
-    cache[key] = ok ? specp : nullptr;
-    return ok ? specp : nullptr;
-}
-
 //! An instantiation becomes an AstCell bound to the instantiated entity's module
 AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
@@ -6693,12 +7360,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                      + conc.instanceName + "', which has no generics");
         return nullptr;
     }
-    if (entityp && !entityp->generics.empty()) {
-        modp = specializeInstance(conc, *entityp, modp);
-        if (!modp) return nullptr;
-    }
+    PortBoundsMap portBounds;
     if (entityp) {
-        PortBoundsMap portBounds;
         for (const PortDecl& port : entityp->ports) {
             const bool unconstrainedRange
                 = !port.type.hasRange && port.type.constraintMark.empty();
@@ -6711,12 +7374,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             if (!ok) return nullptr;
             for (const auto& name : port.names) portBounds[name.first] = bounds;
         }
-        if (!portBounds.empty()) {
-            if (!entityp->generics.empty()) {
-                unsupportedError(flp, "unconstrained ports on an entity with generics");
-                return nullptr;
-            }
-            modp = specializePortsInstance(conc, *entityp, portBounds);
+        if (!entityp->generics.empty() || !portBounds.empty()) {
+            modp = specializeInstance(conc, *entityp, modp, portBounds);
             if (!modp) return nullptr;
         }
     }
@@ -6750,7 +7409,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         for (const PortDecl& port : entityp->ports) {
             const bool match = std::any_of(port.names.begin(), port.names.end(),
                                            [&](const std::pair<std::string, std::string>& name) {
-                                               return name.second == portp->name();
+                                               return name.first == portp->name();
                                            });
             if (!match) continue;
             VType vt;
@@ -6773,7 +7432,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                 assocs.push_back(&conc.associations[portIndex]);
         } else {
             for (const PortAssoc& assoc : conc.associations) {
-                if (assoc.formalSpelling == portp->name()) assocs.push_back(&assoc);
+                if (assoc.formal == portp->name()) assocs.push_back(&assoc);
             }
         }
         const VType portType = typeOfDType(portp->dtypep());
@@ -6786,7 +7445,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                     const bool matches
                         = std::any_of(port.names.begin(), port.names.end(),
                                       [&](const std::pair<std::string, std::string>& name) {
-                                          return name.second == portp->name();
+                                          return name.first == portp->name();
                                       });
                     if (!matches) continue;
                     defaultp = lowerExpr(*port.init, &portType);
@@ -6989,7 +7648,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     if (!positional) {
         for (const PortAssoc& assoc : conc.associations) {
             const bool known = std::any_of(ports.begin(), ports.end(), [&](const AstVar* portp) {
-                return portp->name() == assoc.formalSpelling;
+                return portp->name() == assoc.formal;
             });
             if (!known) {
                 flp->v3error("VHDL: entity '" + conc.instanceName + "' has no port '"
@@ -7005,7 +7664,9 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
 //! Declare the own signals, variables, constants and types of a block or generate
 void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<TypeDecl>& types,
                               const char* prefix) {
-    for (const TypeDecl& typeDecl : types) registerType(typeDecl);
+    // A type or subtype in the same declarative part may name a constant declared there
+    preScanIntConstants(decls);
+    registerTypes(types, decls);
     for (const Decl& decl : decls) {
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
@@ -7017,7 +7678,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             const std::string mangled
-                = std::string{prefix} + std::to_string(++m_loopSeq) + "__" + name.second;
+                = std::string{prefix} + std::to_string(++m_loopSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
@@ -7033,6 +7694,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
             m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
         }
     }
+    finishDeferredTypes();
 }
 
 void Lowering::emitConcurrent(const Concurrent& conc) {
@@ -7115,13 +7777,15 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
                 break;
             }
             AstNodeExpr* const condp = lowerCond(*branch.cond);
-            AstConst* const foldedp
-                = condp ? foldToConst(V3Const::constifyEditCpp(condp)) : nullptr;
+            AstConst* const foldedp = condp ? foldStatic(condp) : nullptr;
+            if (condp) condp->deleteTree();
             if (!foldedp) {
                 unsupportedError(stmt.flp, "generate condition that is not static");
                 return;
             }
-            if (foldedp->num().mostSetBitP1() == 1 && foldedp->num().toUInt()) {
+            const bool taken = foldedp->num().isTrue();
+            foldedp->deleteTree();
+            if (taken) {
                 takenp = &branch;
                 break;
             }
@@ -7332,7 +7996,9 @@ void Lowering::instantiatePackage(const std::vector<PackageUnit>& packages,
 }
 
 void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable& table) {
-    Lowering lowering{rootp};
+    // The table under construction is also what a package may import: a package's `use`
+    // clause names the packages elaborated before it, as for an entity or architecture
+    Lowering lowering{rootp, &table.impl()};
     // A package that declares generics is a template: elaborate only its instances.
     const auto isTemplate = [](const PackageUnit& pkg) { return !pkg.generics.empty(); };
     for (const PackageUnit& pkg : library.packages)
@@ -7353,7 +8019,7 @@ void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
                    ModuleMap& modules) {
     for (const EntityUnit& entity : entities) {
         if (modules.count(entity.name)) continue;
-        AstModule* const modp = new AstModule{entity.flp, entity.spelling, entity.libname};
+        AstModule* const modp = new AstModule{entity.flp, entity.name, entity.libname};
         modp->inLibrary(entity.inLibrary);
         rootp->addModulesp(modp);
         modules[entity.name] = modp;

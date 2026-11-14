@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+# DESCRIPTION: Verilator: VHDL subprogram formal of an unconstrained array type
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of either the GNU Lesser General Public License Version 3
+# or the Perl Artistic License Version 2.0.
+# SPDX-FileCopyrightText: 2026 Hannes Klas
+# SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+import vltest_bootstrap
+import vhdl_frontend
+
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_formal_vec.vhdl'
+
+# The GHDL XML path indexes only vectors, so it refuses an element of an array formal, an
+# element assignment in an inlined function, and a function whose body loops
+vhdl_frontend.native_only(test)
+
+vhdl_frontend.require_frontend(test)
+
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=[
+                 *vhdl_frontend.flags(), '--language', 'vhdl', '--exe', test.pli_filename])
+
+test.execute()
+
+test.passes()

@@ -1,0 +1,51 @@
+// -*- mode: C++; c-file-style: "cc-mode" -*-
+//
+// DESCRIPTION: Verilator: VHDL generic depending on an earlier generic test
+//
+// This file ONLY is placed under the Creative Commons Public Domain.
+// SPDX-FileCopyrightText: 2026 Hannes Klas
+// SPDX-License-Identifier: CC0-1.0
+
+#include <verilated.h>
+
+#include VM_PREFIX_INCLUDE
+
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    Verilated::commandArgs(argc, argv);
+    VM_PREFIX* const topp = new VM_PREFIX;
+
+    int fails = 0;
+    for (int en = 0; en <= 1; ++en) {
+        topp->i_a = en;
+        topp->eval();
+        // u1 saw depth => 8 and left almost_full_level at its default, which names that
+        // bound generic; u2 bound both
+        const struct {
+            const char* name;
+            int got;
+            int want;
+        } checks[] = {{"o_l1", static_cast<int>(topp->o_l1), en ? 8 : 0},
+                      {"o_a1", static_cast<int>(topp->o_a1), en ? 8 : 0},
+                      {"o_l2", static_cast<int>(topp->o_l2), en ? 4 : 0},
+                      {"o_a2", static_cast<int>(topp->o_a2), en ? 2 : 0}};
+        for (const auto& check : checks) {
+            if (check.got != check.want) {
+                std::printf("%%Error: i_a=%d: %s=%d expected %d\n", en, check.name, check.got,
+                            check.want);
+                ++fails;
+            }
+        }
+    }
+
+    topp->final();
+    delete topp;
+
+    if (fails) {
+        std::printf("%%Error: %d failures\n", fails);
+        return 1;
+    }
+    std::printf("*-* All Finished *-*\n");
+    return 0;
+}

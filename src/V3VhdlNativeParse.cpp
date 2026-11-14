@@ -96,6 +96,18 @@ class Parser final {
         advance();
         return true;
     }
+    //! A subprogram may be named by an operator symbol, which the lexer reports as a
+    //! string token. Only a subprogram may: a keyword can never be an identifier, so
+    //! every other designator stays a plain ID.
+    bool takeDesignator(Token& out) {
+        if (m_cur.kind != Token::ID && m_cur.kind != Token::STRING) {
+            error("expected a subprogram name, got '" + m_cur.text + "'");
+            return false;
+        }
+        out = m_cur;
+        advance();
+        return true;
+    }
     bool expectId(const char* expected) {
         if (acceptId(expected)) return true;
         error(std::string{"expected '"} + expected + "', got '" + m_cur.text + "'");
@@ -699,6 +711,19 @@ void Parser::parseTypeSpec(TypeSpec& type) {
     }
     type.mark = markTok.text;
     type.pkg = pkg;
+    // `name'subtype` is a subtype indication that takes the object's own subtype
+    if (isSym("'")) {
+        const auto saved = m_lexer.state();
+        const Token ahead = m_lexer.next();
+        m_lexer.restore(saved);
+        if (ahead.kind == Token::ID && ahead.text == "subtype") {
+            advance();  // The apostrophe
+            advance();  // The attribute name
+            type.objectName = markTok.text;
+            type.mark.clear();
+            return;
+        }
+    }
     if (markTok.text == "view") {  // IEEE 1800-2023 ch.17 interface view
         unsupported("interface view");
         return;
@@ -1141,7 +1166,7 @@ bool Parser::parseSubprogramSpec(SubprogramDecl& sub) {
     sub.impure = impure;
     advance();  // 'function' / 'procedure'
     Token nameTok;
-    if (!takeId(nameTok)) return false;
+    if (!takeDesignator(nameTok)) return false;
     sub.flp = nameTok.flp;
     sub.name = nameTok.text;
     sub.spelling = nameTok.spelling;
@@ -1216,9 +1241,9 @@ void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
     } else {
         (void)acceptId("procedure");
     }
-    if (m_cur.kind == Token::ID) {
+    if (m_cur.kind == Token::ID || m_cur.kind == Token::STRING) {
         Token endTok;
-        if (!takeId(endTok)) return;
+        if (!takeDesignator(endTok)) return;
         if (endTok.text != sub.name) {
             error(sub.flp, "subprogram end name '" + endTok.spelling + "' does not match '"
                                + sub.spelling + "'");
@@ -1370,7 +1395,7 @@ void Parser::parseSubtypeInto(std::vector<TypeDecl>& types) {
     types.push_back(std::move(decl));
 }
 
-//! Parse `alias name [: mark] is designator;`
+//! Parse `alias name [: mark] is designator [ signature ];`
 void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
     Token nameTok;
     if (!takeId(nameTok)) return;
@@ -1382,6 +1407,18 @@ void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
     if (!expectId("is")) return;
     alias.designator = parseDesignator();
     if (!alias.designator) return;
+    if (acceptSym("[")) {  // Signature naming one of the designator's overloads
+        alias.hasSignature = true;
+        int depth = 1;
+        while (depth > 0 && m_cur.kind != Token::END) {
+            if (isSym("[")) {
+                ++depth;
+            } else if (isSym("]")) {
+                --depth;
+            }
+            advance();
+        }
+    }
     if (!acceptSym(";")) {
         error("expected ';' after an alias declaration");
         return;
@@ -1676,10 +1713,6 @@ void Parser::parseArchitecture(FileLine* flp) {
             skipToSemicolon();
             continue;
         }
-        if (isId("attribute")) {
-            unsupported("architecture declarative item '" + m_cur.text + "'");
-            return;
-        }
         error("unexpected architecture declaration '" + m_cur.text + "'");
         return;
     }
@@ -1915,6 +1948,11 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
                 continue;
             }
             if (isId("use")) {
+                skipContextClause();
+                continue;
+            }
+            if (isId("attribute") || isId("disconnect")) {
+                // Attribute and disconnection specifications have no synthesis meaning
                 skipContextClause();
                 continue;
             }
@@ -2501,6 +2539,7 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
     pkg.libname = m_libname;
     pkg.inLibrary = m_inLibrary;
     pkg.isBody = isBody;
+    pkg.uses = m_uses;
     if (!expectId("is")) return;
     if (isId("new")) {  // `package X is new G ...;` generic-package instance
         parsePackageInstanceTail(flp, pkg.name, pkg.spelling);
@@ -2510,7 +2549,7 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
         if (m_failed) return;
         if (isId("end")) break;
         if (isId("use")) {
-            parseUseClause();
+            parseUseClauseInto(pkg.uses);
             continue;
         }
         if (isId("constant")) {

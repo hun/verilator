@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+# DESCRIPTION: Verilator: VHDL unconstrained ports with generics
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of either the GNU Lesser General Public License Version 3
+# or the Perl Artistic License Version 2.0.
+# SPDX-FileCopyrightText: 2026 Hannes Klas
+# SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+import vltest_bootstrap
+import vhdl_frontend
+
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_gen_unconst.vhdl'
+
+vhdl_frontend.require_frontend(test)
+
+# The child entity is instantiated, so --top-module keeps the wrapper as the only top
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=[
+                 *vhdl_frontend.flags(), '--language', 'vhdl', '--top-module', 't', '--exe',
+                 test.pli_filename])
+
+test.execute()
+
+test.passes()

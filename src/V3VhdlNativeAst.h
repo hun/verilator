@@ -215,6 +215,7 @@ struct Stmt final {
 struct TypeSpec final {
     std::string mark;  // Folded type mark
     std::string pkg;  // Package qualifier of a `work.pkg.mark` reference, if any
+    std::string objectName;  // A `name'subtype` indication: the mark above is an object
     FileLine* flp = nullptr;
     bool hasRange = false;
     bool ascending = false;  // "to", else "downto"
@@ -260,13 +261,15 @@ struct GenericDecl final {
     ExprP init;
 };
 
-//! `alias name [: subtype_mark] is designator;` renames an existing object
+//! `alias name [: subtype_mark] is designator [ signature ];` renames an existing
+//! object, slice or subprogram
 struct AliasDecl final {
     FileLine* flp = nullptr;
     std::string name;  // Folded
     std::string spelling;
+    bool hasSignature = false;  // `[ ... ]`: the designator denotes a subprogram
     TypeSpec mark;  // Optional subtype indication, which fixes the alias's index bounds
-    ExprP designator;  // The aliased object or slice
+    ExprP designator;  // The aliased object, slice or subprogram
 };
 
 //! A type, subtype or alias declaration
@@ -447,6 +450,8 @@ struct PackageUnit final {
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
     std::vector<AliasDecl> aliases;
+    // Packages made visible by the use clauses: (library, package)
+    std::vector<std::pair<std::string, std::string>> uses;
     std::vector<SubprogramDecl> subprograms;  // Prototypes in a spec, bodies in a body
 };
 //! `package NAME is new BASE [generic map (...)];` instantiates a generic package
