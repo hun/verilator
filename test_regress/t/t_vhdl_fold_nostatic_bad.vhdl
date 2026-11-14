@@ -1,7 +1,5 @@
--- DESCRIPTION: Verilator: N32 a pure call whose actual is not static folds forever (87 GB before the OOM killer)
+-- DESCRIPTION: Verilator: a call in a constant whose actual is not static is refused
 --
--- Reproducer, not a suite test: the finding is unbounded memory, so running it in the suite would kill the host -- never lint it without a ulimit. Lint it by hand with
---   bin/verilator --language vhdl --vhdl-frontend native --lint-only --top-module <top> <file>
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
 -- SPDX-License-Identifier: CC0-1.0
