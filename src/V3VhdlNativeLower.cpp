@@ -241,6 +241,7 @@ class Lowering final {
     bool m_edgeAsPrev = false;
     std::map<AstVar*, AstVar*> m_edgePrevVars;  // Edge signal -> its previous value
     int m_edgeSeq = 0;  // Disambiguates the previous-value variables
+    int m_varSeq = 0;  // Disambiguates a process's own variables module-wide
     //! Active loop, with the flags its exit/next conditions latch
     struct LoopFrame final {
         AstVar* exitp = nullptr;  // Set when an exit condition fired
@@ -6654,7 +6655,6 @@ void Lowering::restoreScope(const ScopeSave& saved) {
 
 //! Declare the types, constants and variables of a process declarative part
 void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& varNames) {
-    int varSeq = 0;
     // A type or subtype in the same declarative part may name a constant declared there
     preScanIntConstants(process.decls);
     registerTypes(process.types, process.decls);
@@ -6669,7 +6669,8 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
         if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             // Mangle so the same variable name in two processes stays distinct
-            const std::string mangled = "vhdlvar_" + std::to_string(++varSeq) + "__" + name.first;
+            const std::string mangled
+                = "vhdlvar_" + std::to_string(++m_varSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};

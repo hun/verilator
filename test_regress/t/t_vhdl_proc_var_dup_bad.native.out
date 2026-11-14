@@ -1,5 +1,0 @@
-%Error: t/t_vhdl_proc_var_dup_bad.vhdl:28:1: Duplicate declaration of VARSCOPE 't.vhdlvar_1__r': 'vhdlvar_1__r'
-                                           : ... note: In instance 't'
-        t/t_vhdl_proc_var_dup_bad.vhdl:21:1: ... Location of original declaration
-        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: Exiting due to

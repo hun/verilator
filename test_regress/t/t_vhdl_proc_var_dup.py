@@ -10,14 +10,11 @@
 import vltest_bootstrap
 import vhdl_frontend
 
-test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_proc_var_dup_bad.vhdl'
+test.scenarios('simulator')
+test.top_filename = 't/t_vhdl_proc_var_dup.vhdl'
 
-# GHDL accepts this source, so only the native frontend can pin the gap
-vhdl_frontend.native_only(test)
+test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--binary'])
 
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+test.execute()
 
 test.passes()
