@@ -2150,6 +2150,18 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
             parseSubprogramInto(*subprograms);
             continue;
         }
+        if (isId("attribute") || isId("default") || isId("disconnect")) {
+            // An attribute specification, like a verification directive, has no synthesis
+            // meaning; a vendor tool reads it from the source, the netlist does not change
+            skipContextClause();
+            continue;
+        }
+        if (isId("component")) {
+            // Dropped: an instantiation naming this component binds the entity of the name
+            advance();
+            parseComponentDecl();
+            continue;
+        }
         if (decls && isId("alias")) {
             advance();
             parseAliasInto(scratch.aliases);
