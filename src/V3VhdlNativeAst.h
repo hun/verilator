@@ -396,6 +396,8 @@ struct Concurrent final {
     std::string instanceName;  // Folded entity or component name
     // True for a direct `entity work.X`; false when the instantiation names a component
     bool entityInstantiation = false;
+    // ASSIGN/COND_ASSIGN: `after <delay>`
+    ExprP delay;
     std::vector<PortAssoc> associations;
     // INSTANCE: the `generic map` associations, formal names the generic constant
     std::vector<PortAssoc> genericAssociations;

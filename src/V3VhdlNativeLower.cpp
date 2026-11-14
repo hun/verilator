@@ -8183,6 +8183,18 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         lhsp->deleteTree();
         return;
     }
+    if (stmt.delay) {
+        // A concurrent delayed assignment repeats: it waits, then drives the target
+        AstNode* const assignp = new AstAssign{stmt.flp, lhsp, rhsp};
+        AstNode* const delayp = lowerDelay(*stmt.delay, stmt.flp);
+        if (!delayp) {
+            assignp->deleteTree();
+            return;
+        }
+        AstNode* const bodyp = AstNode::addNext<AstNode, AstNode>(delayp, assignp);
+        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, bodyp});
+        return;
+    }
     m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
                                     new AstAssignW{stmt.flp, lhsp, rhsp}});
 }

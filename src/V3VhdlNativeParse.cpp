@@ -2065,9 +2065,10 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
                 conc->alternatives.emplace_back(std::move(value), nullptr);
             }
         }
-        if (isId("after")) {
-            unsupported("delayed signal assignment ('after')");
-            return;
+        if (isId("after")) {  // A delayed concurrent assignment drives the target in time
+            advance();
+            conc->delay = parseExpr();
+            if (!conc->delay) return;
         }
         expectSym(";");
         arch.stmts.push_back(std::move(conc));
