@@ -392,6 +392,8 @@ struct Concurrent final {
     // INSTANCE: the instantiated entity and its port associations
     std::string instanceLabel;
     std::string instanceName;  // Folded entity or component name
+    // True for a direct `entity work.X`; false when the instantiation names a component
+    bool entityInstantiation = false;
     std::vector<PortAssoc> associations;
     // INSTANCE: the `generic map` associations, formal names the generic constant
     std::vector<PortAssoc> genericAssociations;
@@ -464,12 +466,34 @@ struct PackageInstance final {
     std::vector<PortAssoc> genericAssociations;
 };
 
+//! One component binding of a configuration: `for <instances> : <comp> use entity <lib>.<ent>;`
+struct ConfigBinding final {
+    std::string instances;  // Folded instance labels, comma separated as written
+    std::string component;  // Folded component name
+    std::string libname;
+    std::string entity;  // Folded entity name the `use entity` clause binds
+    FileLine* flp = nullptr;
+};
+
+//! A configuration design unit: binds the component specifications of one architecture
+struct ConfigurationUnit final {
+    std::string name;  // Folded
+    std::string spelling;
+    std::string libname;
+    bool inLibrary = false;
+    FileLine* flp = nullptr;
+    std::string entityName;  // Folded entity the configuration configures
+    std::string archName;  // Folded architecture of that entity
+    std::vector<ConfigBinding> bindings;
+};
+
 //! Design units parsed from all source files, in source order
 struct DesignLibrary final {
     std::vector<EntityUnit> entities;
     std::vector<Architecture> archs;
     std::vector<PackageUnit> packages;  // Specs and bodies, in source order
     std::vector<PackageInstance> packageInstances;  // Generic-package instances
+    std::vector<ConfigurationUnit> configurations;
 };
 
 //! Parse one design file and append its design units to the library

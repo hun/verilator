@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: a configuration design unit
+# DESCRIPTION: Verilator: a configuration that binds a component instantiation is refused
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -11,9 +11,8 @@ import vltest_bootstrap
 import vhdl_frontend
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_config_bad.vhdl'
+test.top_filename = 't/t_vhdl_config_comp_bad.vhdl'
 
-# GHDL accepts this source, so only the native frontend can pin the gap
 vhdl_frontend.native_only(test)
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],

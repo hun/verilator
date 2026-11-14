@@ -50,6 +50,7 @@ class Parser final {
     std::string m_libname;  // Library of the current file
     bool m_inLibrary = false;  // Current file came from a library
     std::vector<EntityUnit> m_entities;  // Parsed design units
+    std::vector<ConfigurationUnit> m_configurations;  // Parsed configurations
     std::vector<Architecture> m_archs;
     std::vector<PackageUnit> m_packages;  // Parsed package specs and bodies
     std::vector<PackageInstance> m_packageInstances;  // Parsed generic-package instances
@@ -233,6 +234,7 @@ class Parser final {
     void parseRecordBody(TypeDecl& decl);
     void parseIndexConstraint(TypeSpec& type);
     void parseArchitecture(FileLine* flp);
+    void parseConfiguration(FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
     ExprP parseChoice();
     bool parseChoices(std::vector<ExprP>& choices);
@@ -272,6 +274,7 @@ public:
     std::vector<Architecture>& archs() { return m_archs; }
     std::vector<PackageUnit>& packages() { return m_packages; }
     std::vector<PackageInstance>& packageInstances() { return m_packageInstances; }
+    std::vector<ConfigurationUnit>& configurations() { return m_configurations; }
 };
 
 //######################################################################
@@ -1498,7 +1501,7 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
         }
         expectSym(")");
     }
-    (void)direct;
+    inst->entityInstantiation = direct;
     for (;;) {
         if (isId("generic")) {
             advance();
@@ -2722,6 +2725,84 @@ bool Parser::parseLoopEnd(const char* what) {
     return true;
 }
 
+//! `configuration name of entity is for arch (for insts : comp use entity lib.ent;) end for; end
+//! configuration;`
+void Parser::parseConfiguration(FileLine* flp) {
+    ConfigurationUnit unit;
+    unit.flp = flp;
+    unit.libname = m_libname;
+    unit.inLibrary = m_inLibrary;
+    Token nameTok;
+    if (!takeId(nameTok)) return;
+    unit.name = nameTok.text;
+    unit.spelling = nameTok.spelling;
+    if (!expectId("of")) return;
+    Token entityTok;
+    if (!takeId(entityTok)) return;
+    unit.entityName = entityTok.text;
+    while (acceptSym(".")) {  // `work.t`: the library is not modelled
+        Token partTok;
+        if (!takeId(partTok)) return;
+        unit.entityName = partTok.text;
+    }
+    if (!expectId("is")) return;
+    if (!expectId("for")) return;
+    Token archTok;
+    if (!takeId(archTok)) return;
+    unit.archName = archTok.text;
+    for (;;) {
+        if (m_failed) return;
+        if (isId("end")) break;
+        if (!isId("for")) {
+            // A `use` clause of the configuration only makes declarations visible
+            unsupported("configuration item '" + m_cur.text + "'");
+            return;
+        }
+        advance();
+        ConfigBinding binding;
+        binding.flp = flp;
+        for (;;) {  // The instantiation list, comma separated
+            Token instTok;
+            if (!takeId(instTok)) return;
+            if (!binding.instances.empty()) binding.instances += ",";
+            binding.instances += instTok.text;
+            if (!acceptSym(",")) break;
+        }
+        expectSym(":");
+        Token compTok;
+        if (!takeId(compTok)) return;
+        binding.component = compTok.text;
+        if (!expectId("use")) return;
+        if (!expectId("entity")) return;
+        Token libTok;
+        if (!takeId(libTok)) return;
+        binding.libname = libTok.text;
+        expectSym(".");
+        Token entTok;
+        if (!takeId(entTok)) return;
+        binding.entity = entTok.text;
+        while (acceptSym(".")) {  // An architecture selection is not modelled
+            Token partTok;
+            if (!takeId(partTok)) return;
+            binding.entity = partTok.text;
+        }
+        expectSym(";");
+        if (!expectId("end")) return;
+        if (!expectId("for")) return;
+        if (!acceptSym(";")) error("expected ';' after 'end for'");
+        unit.bindings.push_back(std::move(binding));
+    }
+    // The architecture's own `end for`
+    if (!expectId("end")) return;
+    if (!expectId("for")) return;
+    if (!acceptSym(";")) error("expected ';' after the architecture's 'end for'");
+    if (!expectId("end")) return;
+    if (!expectId("configuration")) return;
+    if (m_cur.kind == Token::ID) advance();  // Optional end name
+    if (!acceptSym(";")) error("expected ';' after 'end configuration'");
+    if (!m_failed) m_configurations.push_back(std::move(unit));
+}
+
 void Parser::parseDesignFile() {
     advance();
     while (!m_failed && m_cur.kind != Token::END) {
@@ -2769,9 +2850,11 @@ void Parser::parseDesignFile() {
             skipToBraceBlock();
             continue;
         }
-        if (isId("configuration")) {
-            unsupported("design unit '" + m_cur.text + "'");
-            return;
+        if (isId("configuration")) {  // IEEE 1800-2023 11.3 configuration design unit
+            FileLine* const flp = m_cur.flp;
+            advance();
+            parseConfiguration(flp);
+            continue;
         }
         error("unexpected token '" + m_cur.text + "' at design-unit level");
         return;
@@ -2794,6 +2877,9 @@ void parseFile(const V3VhdlNativeFile& file, DesignLibrary& library) {
     for (EntityUnit& entity : parser.entities()) library.entities.push_back(std::move(entity));
     for (Architecture& arch : parser.archs()) library.archs.push_back(std::move(arch));
     for (PackageUnit& pkg : parser.packages()) library.packages.push_back(std::move(pkg));
+    for (ConfigurationUnit& config : parser.configurations()) {
+        library.configurations.push_back(std::move(config));
+    }
     for (PackageInstance& inst : parser.packageInstances()) {
         library.packageInstances.push_back(std::move(inst));
     }

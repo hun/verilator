@@ -68,6 +68,40 @@ void unsupportedError(FileLine* flp, const std::string& what) {
 //######################################################################
 // V3VhdlNative
 
+namespace {
+
+//! The labels of a comma separated instantiation list
+std::vector<std::string> splitLabels(const std::string& list) {
+    std::vector<std::string> out;
+    std::size_t begin = 0;
+    for (;;) {
+        const std::size_t comma = list.find(',', begin);
+        const std::size_t end = comma == std::string::npos ? list.size() : comma;
+        if (end > begin) out.push_back(list.substr(begin, end - begin));
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+    return out;
+}
+
+//! The instance of the given label, searching a statement list and its nested bodies
+const vhdlnative::Concurrent*
+findInstance(const std::vector<std::unique_ptr<vhdlnative::Concurrent>>& stmts,
+             const std::string& label) {
+    for (const std::unique_ptr<vhdlnative::Concurrent>& statement : stmts) {
+        if (!statement) continue;
+        if (statement->kind == vhdlnative::Concurrent::INSTANCE
+            && statement->instanceLabel == label) {
+            return statement.get();
+        }
+        const vhdlnative::Concurrent* const foundp = findInstance(statement->body, label);
+        if (foundp) return foundp;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
 void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& files) {
     const int errorsBefore = V3Error::errorCount();
     vhdlnative::DesignLibrary library;
@@ -80,6 +114,41 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     std::map<std::string, const vhdlnative::Architecture*> archByEntity;
     for (const vhdlnative::Architecture& arch : library.archs) {
         archByEntity[arch.entityName] = &arch;
+    }
+    // A configuration binds component specifications; it changes nothing when each binding
+    // names the entity the architecture already instantiates directly
+    for (const vhdlnative::ConfigurationUnit& config : library.configurations) {
+        const auto archIt = archByEntity.find(config.entityName);
+        if (archIt == archByEntity.end()) {
+            config.flp->v3error("VHDL configuration '" + config.spelling + "' configures entity '"
+                                + config.entityName + "', which has no architecture");
+            continue;
+        }
+        if (archIt->second->name != config.archName) {
+            config.flp->v3error("VHDL configuration '" + config.spelling + "' names architecture '"
+                                + config.archName + "', but the analyzed one is '"
+                                + archIt->second->name + "'");
+            continue;
+        }
+        for (const vhdlnative::ConfigBinding& binding : config.bindings) {
+            for (const std::string& label : splitLabels(binding.instances)) {
+                const vhdlnative::Concurrent* instp = findInstance(archIt->second->stmts, label);
+                if (!instp) {
+                    binding.flp->v3error("VHDL configuration '" + config.spelling
+                                         + "' binds instance '" + label
+                                         + "', which the architecture does not instantiate");
+                } else if (!instp->entityInstantiation) {
+                    binding.flp->v3error("VHDL configuration '" + config.spelling
+                                         + "' binds component '" + binding.component
+                                         + "'; component instantiation is not supported yet");
+                } else if (instp->instanceName != binding.entity) {
+                    binding.flp->v3error("VHDL configuration '" + config.spelling
+                                         + "' rebinds instance '" + label + "' to entity '"
+                                         + binding.entity + "', not to the '" + instp->instanceName
+                                         + "' it instantiates");
+                }
+            }
+        }
     }
 
     vhdlnative::PackageTable packages;
