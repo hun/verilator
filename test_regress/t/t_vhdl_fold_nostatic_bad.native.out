@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_fold_nostatic_bad.vhdl:19:1: VHDL this statement form in an inlined VHDL function body is not supported yet
+%Error: t/t_vhdl_fold_nostatic_bad.vhdl:19:1: VHDL function while loop whose condition is not static is not supported yet
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: t/t_vhdl_fold_nostatic_bad.vhdl:44:1: VHDL: unknown identifier 'd_c'
 %Error: Exiting due to

@@ -759,7 +759,7 @@ class Lowering final {
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
     bool sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
-                    int64_t& out) const;
+                    int64_t& out);
     AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
                          int hi, int lo, bool ascending);
 
@@ -857,6 +857,7 @@ class Lowering final {
     AstNodeExpr* evalFuncCase(const Stmt& stmt, const InlineCont& cont,
                               const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth);
+    AstNodeExpr* evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth);
     AstNodeExpr* updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
                                     AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width);
     AstNode* lowerProcedureCall(const Expr& callExpr, bool concurrent);
@@ -2591,7 +2592,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     if (op == "**") {
         // A static exponent unrolls into a chain of multiplications
         int64_t exponent = 0;
-        if (!staticInt(expr.b, exponent) || exponent < 0 || exponent > 64) {
+        if (!staticIntFold(expr.b, exponent) || exponent < 0 || exponent > 64) {
             unsupportedError(flp, "non-static exponent");
             lp->deleteTree();
             rp->deleteTree();
@@ -3123,8 +3124,10 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
     return nullptr;
 }
 bool Lowering::sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
-                          int64_t& out) const {
-    if (staticInt(expr, out)) return true;
+                          int64_t& out) {
+    // A bound can name a constant whose value only a folded call provides, e.g. a slice of
+    // a fixed number of address bits next to a base address
+    if (staticIntFold(expr, out)) return true;
     if (expr->kind == Expr::PAREN && expr->a) {
         return sliceBound(expr->a, prefix, baseType, out);
     }
@@ -3148,7 +3151,7 @@ bool Lowering::sliceBound(const ExprP& expr, const std::string& prefix, const VT
         int64_t lhs = 0;
         int64_t rhs = 0;
         if (!sliceBound(expr->a, prefix, baseType, lhs)) return false;
-        if (!staticInt(expr->b, rhs)) return false;
+        if (!staticIntFold(expr->b, rhs)) return false;
         out = expr->text == "+" ? lhs + rhs : lhs - rhs;
         return true;
     }
@@ -5982,7 +5985,8 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             }
             return lowerExpr(*stmt.value, m_funcRetp);
         }
-        if (stmt.kind == Stmt::IF || stmt.kind == Stmt::CASE || stmt.kind == Stmt::FOR) {
+        if (stmt.kind == Stmt::IF || stmt.kind == Stmt::CASE || stmt.kind == Stmt::FOR
+            || stmt.kind == Stmt::WHILE) {
             // Control statements continue with the rest of this statement list
             const InlineCont restCont = [&](InlineEnv& restEnv) -> AstNodeExpr* {
                 return evalFuncBlock(stmts, i + 1, restEnv, cont, exitContp, depth);
@@ -5991,6 +5995,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 return evalFuncBranches(stmt, 0, restCont, exitContp, depth + 1);
             }
             if (stmt.kind == Stmt::CASE) return evalFuncCase(stmt, restCont, exitContp, depth + 1);
+            if (stmt.kind == Stmt::WHILE) return evalFuncWhile(stmt, restCont, depth + 1);
             return evalFuncFor(stmt, restCont, depth + 1);
         }
         if (stmt.kind == Stmt::EXIT || stmt.kind == Stmt::NEXT) {
@@ -6045,9 +6050,11 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
         return nullptr;
     }
     AstNodeExpr* const resultp = cont(activeEnv());
-    if (!resultp) {
+    // Only a body that really has no value on some path is a missing return; a null from a
+    // nested fold already has its own diagnostic
+    if (!resultp && !V3Error::errorCount()) {
         unsupportedError(m_inlineFrames.back().declp->flp,
-                         "VHDL function does not return a value on all paths");
+                         "function does not return a value on all paths");
     }
     return resultp;
 }
@@ -6086,7 +6093,9 @@ AstNodeExpr* Lowering::evalFuncBranches(const Stmt& stmt, std::size_t branchInde
                              : evalFuncBlock({}, 0, activeEnv(), cont, exitContp, depth);
     deleteInlineEnv(thenEnv);
     if (!thenp || !elsep) {
-        unsupportedError(stmt.flp, "VHDL function does not return a value on all paths");
+        if (!V3Error::errorCount()) {
+            unsupportedError(stmt.flp, "function does not return a value on all paths");
+        }
         if (thenp) thenp->deleteTree();
         if (elsep) elsep->deleteTree();
         return nullptr;
@@ -6244,14 +6253,16 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
         return nullptr;
     }
     if (up ? right < left : right > left) return postCont(activeEnv());  // Empty range
-    if (std::llabs(right - left) > 4096) {
-        unsupportedError(flp, "function loop with more than 4096 iterations");
-        return nullptr;
-    }
     const int64_t step = up ? 1 : -1;
     // Each iteration becomes a continuation frame; the body's continuation is the next
     std::function<AstNodeExpr*(int64_t, InlineEnv&)> evalIteration;
     evalIteration = [&](int64_t value, InlineEnv& inEnv) -> AstNodeExpr* {
+        // The cap is on the iterations actually folded: a body that returns leaves the rest
+        // of the range unevaluated, so a wide range can still be a short loop
+        if (std::llabs(value - left) >= 4096) {
+            unsupportedError(flp, "function loop with more than 4096 iterations");
+            return nullptr;
+        }
         InlineEnv iterEnv = cloneInlineEnv(inEnv);
         InlineBinding loopBinding{makeIntConst(flp, value), false, true};
         loopBinding.type = intType(flp);
@@ -6273,6 +6284,48 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
         return resultp;
     };
     return evalIteration(left, activeEnv());
+}
+
+AstNodeExpr* Lowering::evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth) {
+    FileLine* const flp = stmt.flp;
+    // One frame per iteration, like a for loop; the difference is that the trip count comes
+    // from repeatedly evaluating the condition
+    std::function<AstNodeExpr*(int, InlineEnv&)> evalIteration;
+    evalIteration = [&](int iteration, InlineEnv& inEnv) -> AstNodeExpr* {
+        AstNodeExpr* const condp = lowerCond(*stmt.value);
+        if (!condp) return nullptr;
+        // The condition has to say whether the loop runs at all, or the fold cannot know
+        // how many times the body is applied
+        AstConst* const foldedp = foldStatic(condp);
+        if (!foldedp) {
+            condp->deleteTree();
+            unsupportedError(flp, "function while loop whose condition is not static");
+            return nullptr;
+        }
+        const bool taken = foldedp->num().isTrue();
+        foldedp->deleteTree();
+        condp->deleteTree();
+        if (!taken) return postCont(inEnv);
+        if (iteration >= 4096) {
+            unsupportedError(flp, "function while loop with more than 4096 iterations");
+            return nullptr;
+        }
+        InlineEnv bodyEnv = cloneInlineEnv(inEnv);
+        // Running to the end of the body re-tests the condition; `exit` leaves the loop
+        const InlineCont bodyCont = [&](InlineEnv& nextEnv) -> AstNodeExpr* {
+            return evalIteration(iteration + 1, nextEnv);
+        };
+        const InlineCont exitCont
+            = [&](InlineEnv& exitEnv) -> AstNodeExpr* { return postCont(exitEnv); };
+        // The continuations live in this iteration's frame, as for a for loop
+        m_funcLoopTargets.push_back(FuncLoopTarget{stmt.loopLabel, &bodyCont, &exitCont});
+        AstNodeExpr* const resultp
+            = evalFuncBlock(stmt.body, 0, bodyEnv, bodyCont, &exitCont, depth);
+        m_funcLoopTargets.pop_back();
+        deleteInlineEnv(bodyEnv);
+        return resultp;
+    };
+    return evalIteration(0, activeEnv());
 }
 
 //! Value of a vector-bound local after replacing one element or slice

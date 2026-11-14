@@ -1,0 +1,4 @@
+%Error: t/t_vhdl_fn_loop_bad.vhdl:20:1: VHDL function loop with more than 4096 iterations is not supported yet
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_fn_loop_bad.vhdl:30:1: VHDL function while loop with more than 4096 iterations is not supported yet
+%Error: Exiting due to
