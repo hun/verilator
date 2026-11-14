@@ -2204,6 +2204,16 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, context);
             if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
             if (isConversion(expr.a->text)) return lowerConversion(expr);
+            // A predefined scalar type mark applied to a value is the identity conversion
+            if (expr.a->text == "boolean" || expr.a->text == "bit" || expr.a->text == "std_logic"
+                || expr.a->text == "std_ulogic") {
+                if (expr.args.size() != 1) {
+                    unsupportedError(flp, "type conversion with "
+                                              + std::to_string(expr.args.size()) + " arguments");
+                    return nullptr;
+                }
+                return lowerExpr(*expr.args[0], nullptr);
+            }
             // A declared type mark applied to a value is a type conversion
             const auto typeIt = m_types.find(expr.a->text);
             if (typeIt != m_types.end()) {
