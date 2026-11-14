@@ -34,9 +34,9 @@ begin
   begin
     wait for 22 ns;
     if q = '0' then
-      report "q is low after four edges";
+      report "q is low after three edges";
     else
-      report "q is high after four edges";
+      report "q is high after three edges";
     end if;
     std.env.finish;
     wait;
