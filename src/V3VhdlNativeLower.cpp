@@ -773,6 +773,7 @@ class Lowering final {
     void emitProcessDecls(const Process& process, std::set<std::string>& varNames);
     AstNode* lowerFor(const Stmt& stmt);
     AstNode* lowerForRuntime(const Stmt& stmt);
+    AstNode* lowerReport(const Stmt& stmt);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
     static void collectExprNames(const Expr& expr, std::set<std::string>& names);
@@ -4661,8 +4662,15 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::VAR_ASSIGN) return lowerAssign(stmt, false, true);
     if (stmt.kind == Stmt::IF) return lowerIf(stmt);
     if (stmt.kind == Stmt::CASE) return lowerCase(stmt);
-    if (stmt.kind == Stmt::REPORT) return nullptr;  // Only its syntax matters
-    if (stmt.kind == Stmt::CALL) return lowerProcedureCall(*stmt.value, m_concurrentProc > 0);
+    if (stmt.kind == Stmt::REPORT) return lowerReport(stmt);
+    if (stmt.kind == Stmt::CALL) {
+        // `std.env.finish` ends the simulation
+        if (stmt.value && stmt.value->kind == Expr::SELECTED && stmt.value->text == "finish"
+            && !m_subprograms.count("finish")) {
+            return new AstFinish{stmt.flp};
+        }
+        return lowerProcedureCall(*stmt.value, m_concurrentProc > 0);
+    }
     if (stmt.kind == Stmt::RETURN) {
         unsupportedError(stmt.flp, "return outside a subprogram body");
         return nullptr;
@@ -5143,6 +5151,23 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     restoreScope(savedScope);
     return AstNode::addNext<AstNode, AstNode>(
         new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, initp}, loopp);
+}
+
+AstNode* Lowering::lowerReport(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    std::string text;
+    if (!stmt.value) {
+        text = "";
+    } else if (stmt.value->kind == Expr::STRING_LIT) {
+        text = stmt.value->spelling;
+        if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+            text = text.substr(1, text.size() - 2);
+        }
+    } else {
+        // A computed message is not modelled yet: only a literal reaches the model
+        return nullptr;
+    }
+    return new AstDisplay{flp, VDisplayType::DT_DISPLAY, text, nullptr, nullptr, 'd'};
 }
 
 AstNode* Lowering::lowerWhile(const Stmt& stmt) {
