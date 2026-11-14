@@ -100,6 +100,40 @@ findInstance(const std::vector<std::unique_ptr<vhdlnative::Concurrent>>& stmts,
     return nullptr;
 }
 
+//! The entity names an architecture instantiates, searching nested statement bodies
+void collectInstances(const std::vector<std::unique_ptr<vhdlnative::Concurrent>>& stmts,
+                      std::set<std::string>& out) {
+    for (const std::unique_ptr<vhdlnative::Concurrent>& statement : stmts) {
+        if (!statement) continue;
+        if (statement->kind == vhdlnative::Concurrent::INSTANCE)
+            out.insert(statement->instanceName);
+        collectInstances(statement->body, out);
+        for (const vhdlnative::GenBranch& branch : statement->branches) {
+            collectInstances(branch.stmts, out);
+        }
+    }
+}
+
+//! Visit the entities the named one instantiates, then the named one itself, so no entity is
+//! elaborated before a child it instantiates. `visiting` breaks a cycle, which VHDL forbids
+//! and the frontend then reports as an instance whose child has no port.
+void orderVisit(const std::string& name,
+                const std::map<std::string, const vhdlnative::EntityUnit*>& byName,
+                const std::map<std::string, std::set<std::string>>& instantiatedBy,
+                std::set<std::string>& done, std::set<std::string>& visiting,
+                std::vector<const vhdlnative::EntityUnit*>& order) {
+    if (!done.insert(name).second || !visiting.insert(name).second) return;
+    const auto childIt = instantiatedBy.find(name);
+    if (childIt != instantiatedBy.end()) {
+        for (const std::string& child : childIt->second) {
+            orderVisit(child, byName, instantiatedBy, done, visiting, order);
+        }
+    }
+    visiting.erase(name);
+    const auto entityIt = byName.find(name);
+    if (entityIt != byName.end()) order.push_back(entityIt->second);
+}
+
 }  // namespace
 
 void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& files) {
@@ -165,10 +199,37 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     // Record ports whose element widths come from the actual, like unconstrained arrays
     vhdlnative::collectUnconstrainedRecordMarks(library, design.unconstrainedRecordMarks);
 
+    // Elaborate every entity after the entities its architecture instantiates: an instance
+    // binds the ports its child's own elaboration declares, so in source order a user written
+    // first would bind a module whose ports are not there yet.
+    std::map<std::string, const vhdlnative::EntityUnit*> entityByName;
+    std::map<std::string, std::set<std::string>> instantiatedBy;
+    for (const vhdlnative::EntityUnit& entity : library.entities) {
+        entityByName.emplace(entity.name, &entity);
+        const auto archIt = archByEntity.find(entity.name);
+        if (archIt != archByEntity.end()) {
+            collectInstances(archIt->second->stmts, instantiatedBy[entity.name]);
+        }
+    }
+    std::vector<const vhdlnative::EntityUnit*> order;
+    {
+        std::set<std::string> done;
+        std::set<std::string> visiting;
+        for (const vhdlnative::EntityUnit& entity : library.entities) {
+            if (entityByName[entity.name] != &entity) {
+                order.push_back(&entity);  // A second entity of this name; reported below
+                continue;
+            }
+            if (!done.count(entity.name)) {
+                orderVisit(entity.name, entityByName, instantiatedBy, done, visiting, order);
+            }
+        }
+    }
     std::set<std::string> entityNames;
     std::vector<const vhdlnative::EntityUnit*> unelaborated;
     std::vector<const vhdlnative::EntityUnit*> portUnelaborated;
-    for (const vhdlnative::EntityUnit& entity : library.entities) {
+    for (const vhdlnative::EntityUnit* const entryp : order) {
+        const vhdlnative::EntityUnit& entity = *entryp;
         if (!entityNames.insert(entity.name).second) {
             entity.flp->v3error("Duplicate VHDL entity: '" + entity.spelling + "'");
             continue;
