@@ -142,7 +142,7 @@ Token Lexer::lexSymbol(FileLine* flp) {
     ++m_pos;
     return tok;
 }
-Token Lexer::lexBits(FileLine* flp, const std::string& baseText) {
+Token Lexer::lexBits(FileLine* flp, const std::string& baseText, int length) {
     // Caller has verified the next character is '"'
     const int base = baseText == "b" ? 2 : baseText == "o" ? 8 : baseText == "d" ? 10 : 16;
     ++m_pos;  // Opening quote
@@ -169,6 +169,23 @@ Token Lexer::lexBits(FileLine* flp, const std::string& baseText) {
     if (!bitsFromDigits(digits, base, tok.bits)) {
         flp->v3error("Malformed VHDL bit-string literal");
         tok.kind = Token::END;
+        return tok;
+    }
+    // The length is part of the literal's value: zero padding is free, dropping a set bit
+    // would change it, which is the truncation the standard forbids
+    if (length >= 0) {
+        const int excess = static_cast<int>(tok.bits.size()) - length;
+        if (excess > 0) {
+            for (int i = 0; i < excess; ++i) {
+                if (tok.bits[i] != '0') {
+                    flp->v3error("VHDL bit-string literal does not fit its length");
+                    break;
+                }
+            }
+            tok.bits.erase(0, excess);
+        } else if (excess < 0) {
+            tok.bits.insert(0, -excess, '0');
+        }
     }
     return tok;
 }
@@ -260,6 +277,19 @@ Token Lexer::nextRaw() {
                 tok.text = clean;
                 return tok;
             }
+        }
+        // A bit-string literal may state its length before the base, e.g. 6x"3f"
+        const char baseChar = static_cast<char>(std::tolower(static_cast<unsigned char>(peek(0))));
+        if ((baseChar == 'b' || baseChar == 'o' || baseChar == 'x' || baseChar == 'd')
+            && peek(1) == '"') {
+            ++m_pos;  // The base letter
+            int64_t bitLength = 0;
+            if (!decimalValue(first, bitLength)) {
+                tok.flp->v3error("Malformed VHDL bit-string length");
+                tok.kind = Token::END;
+                return tok;
+            }
+            return lexBits(tok.flp, std::string(1, baseChar), static_cast<int>(bitLength));
         }
         if (peek(0) == '.' && std::isdigit(static_cast<unsigned char>(peek(1)))) {
             ++m_pos;  // The '.'

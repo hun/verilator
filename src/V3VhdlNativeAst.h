@@ -89,7 +89,7 @@ class Lexer final {
 
     void skipSpace();
     Token lexSymbol(FileLine* flp);
-    Token lexBits(FileLine* flp, const std::string& baseText);
+    Token lexBits(FileLine* flp, const std::string& baseText, int length = -1);
     Token nextRaw();  // One token, before the designator-context update
 
 public:
