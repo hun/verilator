@@ -32,6 +32,7 @@ Verilator User's Guide
    :caption: Reference Guide
 
    languages.rst
+   ../vhdl/index
    extensions.rst
    control.rst
    executables.rst
