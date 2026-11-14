@@ -3562,9 +3562,21 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
             return changedp;
         }
     }
-    if (!expr.a || expr.a->kind != Expr::NAME) {
+    const VType* typep = nullptr;
+    bool typeMark = false;
+    VType resolved;
+    if (!expr.a) {
         unsupportedError(flp, "attribute of a non-name prefix");
         return nullptr;
+    }
+    if (expr.a->kind != Expr::NAME) {
+        // A designator prefix such as a record element has no name to look up, but its
+        // declared type fixes every static attribute, so resolve the type instead
+        if (!typeOfDesignator(*expr.a, resolved)) {
+            unsupportedError(flp, "attribute of a non-name prefix");
+            return nullptr;
+        }
+        typep = &resolved;
     }
     if (attribute == "event") {
         // `X'event` is true when X had a transaction this cycle, i.e. its value differs
@@ -3587,10 +3599,8 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         unsupportedError(flp, "signal attribute '" + attribute + "'");
         return nullptr;
     }
-    // The prefix is either a declared name or a type mark
-    const VType* typep = typeOfName(*expr.a);
-    bool typeMark = false;
-    VType resolved;
+    // Otherwise the prefix is either a declared name or a type mark
+    if (!typep) typep = typeOfName(*expr.a);
     if (!typep) {
         const auto typeIt = m_types.find(expr.a->text);
         if (typeIt != m_types.end()) {
