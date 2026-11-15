@@ -3349,6 +3349,12 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         elemType.dtp = findBasic(flp, baseType.kwd);
     }
     const int elemWidth = baseType.elemWidth;
+    if (elemWidth <= 0) {
+        // An array of unconstrained elements has no element width to select
+        unsupportedError(flp, "index of an array with an unconstrained element");
+        basep->deleteTree();
+        return nullptr;
+    }
     // Only `prefix'range` is a slice by the prefix's own bounds. Any other attribute used
     // as an index (`v(x'high)`) or slice bound (`v(x'high downto 0)`) lowers as an expression
     const auto rangeAttr = [](const ExprP& e) -> const Expr* {
