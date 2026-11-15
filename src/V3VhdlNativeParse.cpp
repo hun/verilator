@@ -2113,6 +2113,21 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         gen->flp = flp;
         for (;;) {
             GenBranch branch;
+            // A condition may carry a label, `if name: condition generate`. The label is a
+            // name and nothing else, and GHDL and nvc both take the expression after it as
+            // the condition, so the label itself is dropped
+            if (m_cur.kind == Token::ID) {
+                const auto saved = m_lexer.state();
+                const Token nameTok = m_cur;
+                advance();
+                const bool labelled = isSym(":");
+                m_cur = nameTok;
+                m_lexer.restore(saved);
+                if (labelled) {
+                    advance();  // The label's name
+                    advance();  // The colon
+                }
+            }
             branch.cond = parseExpr();
             if (!branch.cond) return;
             if (!expectId("generate")) return;
