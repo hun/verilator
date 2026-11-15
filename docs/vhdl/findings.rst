@@ -214,6 +214,12 @@ ______
       dropped; a longer delay inside a process needs a scheduled update and is
       reported. A concurrent assignment keeps its delay, which lowers to a wait
     - ``t_vhdl_after``, ``t_vhdl_delay_unsup``
+  * - N60
+    - one element of a function result whose element type is an unconstrained vector
+    - the element has no width to select, so the select reached the emitter with
+      zero width and faulted; the index is reported instead. A function returning a
+      plain ``std_logic_vector`` still selects one bit, which is what its type says
+    - ``t_vhdl_elem_unsup``
 
 ____
 Open

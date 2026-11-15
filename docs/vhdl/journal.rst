@@ -347,6 +347,13 @@ un-delayed one and the delay is dropped; anything longer inside a process
 needs a scheduled update and is reported. bit-serial then stops at a textio
 debug procedure, which is not synthesizable.
 
+The per-core sweep turned up one crash: indexing an array a function returns,
+where the element is an unconstrained vector. The element has no width, so the
+select was built with width zero and the emitter faulted. The index is reported
+now. A function returning a plain `std_logic_vector` still selects one bit,
+which is what its type says, so the rule is the element width and not the
+return type.
+
 _______
 Commits
 _______
@@ -412,3 +419,5 @@ _______
      - Select an element of an array a VHDL function returns
    * - ``9d69226``
      - Accept a VHDL signal assignment with a zero delay
+   * - ``ff84036``
+     - Report an index of an array whose element has no width
