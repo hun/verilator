@@ -190,6 +190,7 @@ struct Stmt final {
         NEXT,
         WAIT,
         REPORT,
+        ASSERT,  // `assert`; the condition is value, the message is message
         RETURN,  // Subprogram return; value is the function result, null for a procedure
         CALL,  // Procedure call statement; value is the call
     } kind;
@@ -208,7 +209,10 @@ struct Stmt final {
     std::vector<std::string> waitNames;  // WAIT: `on` sensitivity names
     bool waitForever = false;  // WAIT without `until` or `on`
     // WAIT: `for <delay>`
-    ExprP delay;
+    ExprP delay;  // WAIT: `for <delay>`; ASSIGN: `after <time>`, only zero is a delta
+    ExprP message;  // ASSERT: the `report` text, null for the default
+    //! Severity of a report or an assert, which decides whether the run continues
+    enum Severity : uint8_t { SEV_NOTE, SEV_WARNING, SEV_ERROR, SEV_FAILURE } severity = SEV_NOTE;
     // FOR: loop variable over b..c, ascending when rangeAscending
     std::string loopVar;
     bool rangeAscending = true;

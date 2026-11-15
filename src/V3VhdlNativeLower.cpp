@@ -853,6 +853,8 @@ class Lowering final {
     AstNode* lowerFor(const Stmt& stmt);
     AstNode* lowerForRuntime(const Stmt& stmt);
     AstNode* lowerReport(const Stmt& stmt);
+    //! A failing assertion reports, and `severity failure` ends the run
+    AstNode* lowerAssert(const Stmt& stmt);
     AstNode* lowerDelay(const Expr& expr, FileLine* flp);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
@@ -4972,6 +4974,7 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::IF) return lowerIf(stmt);
     if (stmt.kind == Stmt::CASE) return lowerCase(stmt);
     if (stmt.kind == Stmt::REPORT) return lowerReport(stmt);
+    if (stmt.kind == Stmt::ASSERT) return lowerAssert(stmt);
     if (stmt.kind == Stmt::CALL) {
         // `std.env.finish` ends the simulation
         if (stmt.value && stmt.value->kind == Expr::SELECTED && stmt.value->text == "finish"
@@ -5488,21 +5491,41 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
         new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, initp}, loopp);
 }
 
-AstNode* Lowering::lowerReport(const Stmt& stmt) {
-    FileLine* const flp = stmt.flp;
-    std::string text;
-    if (!stmt.value) {
-        text = "";
-    } else if (stmt.value->kind == Expr::STRING_LIT) {
-        text = stmt.value->spelling;
-        if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
-            text = text.substr(1, text.size() - 2);
-        }
-    } else {
-        // A computed message is not modelled yet: only a literal reaches the model
-        return nullptr;
+//! The text of a literal report message, or a default when there is none
+static std::string reportText(const ExprP& exprp, const char* fallback) {
+    if (!exprp) return fallback;
+    if (exprp->kind != Expr::STRING_LIT) return fallback;
+    std::string text = exprp->spelling;
+    if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+        text = text.substr(1, text.size() - 2);
     }
-    return new AstDisplay{flp, VDisplayType::DT_DISPLAY, text, nullptr, nullptr, 'd'};
+    return text;
+}
+
+AstNode* Lowering::lowerReport(const Stmt& stmt) {
+    // A computed message is not modelled yet: only a literal reaches the model
+    if (stmt.value && stmt.value->kind != Expr::STRING_LIT) return nullptr;
+    return new AstDisplay{
+        stmt.flp, VDisplayType::DT_DISPLAY, reportText(stmt.value, ""), nullptr, nullptr, 'd'};
+}
+
+AstNode* Lowering::lowerAssert(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    AstNodeExpr* const condp = lowerCond(*stmt.value);
+    if (!condp) return nullptr;
+    // A failing assertion reports, and `severity failure` ends the run (IEEE 1076-2008 8.3)
+    AstNodeExpr* const failp = new AstNot{flp, condp};
+    failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    AstNode* bodyp = new AstDisplay{flp,
+                                    VDisplayType::DT_DISPLAY,
+                                    reportText(stmt.message, "Assertion failed"),
+                                    nullptr,
+                                    nullptr,
+                                    'd'};
+    if (stmt.severity == Stmt::SEV_FAILURE) {
+        bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, new AstFinish{flp});
+    }
+    return new AstIf{flp, failp, bodyp, nullptr};
 }
 
 AstNode* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
@@ -6213,7 +6236,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             it->second.exprp = updatedp;
             continue;
         }
-        if (stmt.kind == Stmt::REPORT) continue;
+        if (stmt.kind == Stmt::REPORT || stmt.kind == Stmt::ASSERT) continue;
         if (stmt.kind == Stmt::RETURN) {
             if (!stmt.value) {
                 unsupportedError(flp, "return without a value in a VHDL function body");

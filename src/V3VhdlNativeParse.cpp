@@ -379,6 +379,8 @@ class Parser final {
     ExprP parsePrimary();
     ExprP parseDesignator();
     bool parseRange(TypeSpec& type);
+    //! Consume `severity <note|warning|error|failure>`, which decides if the run stops
+    void parseSeverity(Stmt& stmt);
     void parseTypeSpec(TypeSpec& type);
     //! The `name(range)` list of a record constraint
     bool parseMemberConstraints(TypeSpec& type);
@@ -826,6 +828,20 @@ ExprP Parser::parseDesignator() {
         }
     }
     return node;
+}
+
+//! Consume `severity <note|warning|error|failure>`; only failure ends the run
+void Parser::parseSeverity(Stmt& stmt) {
+    if (!acceptId("severity")) return;
+    Token severityTok;
+    if (!takeId(severityTok)) return;
+    if (severityTok.text == "warning") {
+        stmt.severity = Stmt::SEV_WARNING;
+    } else if (severityTok.text == "error") {
+        stmt.severity = Stmt::SEV_ERROR;
+    } else if (severityTok.text == "failure") {
+        stmt.severity = Stmt::SEV_FAILURE;
+    }
 }
 
 bool Parser::parseRange(TypeSpec& type) {
@@ -2624,23 +2640,23 @@ StmtP Parser::parseSequentialStatement() {
         advance();
         auto stmt = std::make_unique<Stmt>(Stmt::REPORT);
         stmt->flp = flp;
-        stmt->value = parseExpr();  // The report message; only its syntax matters
+        stmt->value = parseExpr();  // The message
         if (!stmt->value) return nullptr;
-        if (acceptId("severity")) { advance(); }
+        parseSeverity(*stmt);
         expectSym(";");
         return stmt;
     }
     if (isId("assert")) {
         advance();
-        auto stmt = std::make_unique<Stmt>(Stmt::REPORT);
+        auto stmt = std::make_unique<Stmt>(Stmt::ASSERT);
         stmt->flp = flp;
-        stmt->value = parseExpr();
+        stmt->value = parseExpr();  // The condition
         if (!stmt->value) return nullptr;
         if (acceptId("report")) {
-            ExprP message = parseExpr();
-            if (!message) return nullptr;
+            stmt->message = parseExpr();
+            if (!stmt->message) return nullptr;
         }
-        if (acceptId("severity")) advance();
+        parseSeverity(*stmt);
         expectSym(";");
         return stmt;
     }
