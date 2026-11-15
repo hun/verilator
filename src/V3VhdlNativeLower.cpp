@@ -7074,6 +7074,12 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         intConstant = constType.isInt();
         realConstant = constType.kind == VType::REAL;
     }
+    // A packed constant of that many bits is copied once per write into it, so a memory
+    // image is reported rather than folded
+    if (constType.width > (1 << 20)) {
+        unsupportedError(flp, "constant value that is too wide to fold");
+        return;
+    }
     // A real survives only as an elaboration-time constant: fold it to a value that
     // `evalReal` and real comparisons consume, so no floating type reaches the model.
     if (realConstant) {
