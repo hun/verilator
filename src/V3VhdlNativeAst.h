@@ -396,9 +396,11 @@ struct Concurrent final {
         GEN_IF,
         BLOCK,
         INSTANCE,
-        ASSERT,  // `assert`; synthesis ignores assertions, only the syntax matters
+        ASSERT,  // `assert`; the condition is target, the message is value
         CALL,  // Concurrent procedure call; value is the call
     } kind;
+    //! Severity of a concurrent assertion, which decides whether the run continues
+    Stmt::Severity severity = Stmt::SEV_NOTE;
     FileLine* flp = nullptr;
     ExprP target;  // ASSIGN/COND_ASSIGN/SEL_ASSIGN
     ExprP value;  // ASSIGN/SEL_ASSIGN
@@ -450,6 +452,8 @@ struct EntityUnit final {
     // Generic constants, visible in the port clause and every architecture
     std::vector<GenericDecl> generics;
     std::vector<SubprogramDecl> subprograms;
+    // The entity statement part: concurrent assertions and passive processes
+    std::vector<std::unique_ptr<Concurrent>> stmts;
 };
 
 struct Architecture final {

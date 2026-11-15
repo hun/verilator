@@ -855,6 +855,8 @@ class Lowering final {
     AstNode* lowerReport(const Stmt& stmt);
     //! A failing assertion reports, and `severity failure` ends the run
     AstNode* lowerAssert(const Stmt& stmt);
+    AstNode* assertBody(FileLine* flp, const Expr& condition, const Expr* message,
+                        Stmt::Severity severity);
     AstNode* lowerDelay(const Expr& expr, FileLine* flp);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
@@ -5492,7 +5494,7 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
 }
 
 //! The text of a literal report message, or a default when there is none
-static std::string reportText(const ExprP& exprp, const char* fallback) {
+static std::string reportText(const Expr* exprp, const char* fallback) {
     if (!exprp) return fallback;
     if (exprp->kind != Expr::STRING_LIT) return fallback;
     std::string text = exprp->spelling;
@@ -5506,23 +5508,25 @@ AstNode* Lowering::lowerReport(const Stmt& stmt) {
     // A computed message is not modelled yet: only a literal reaches the model
     if (stmt.value && stmt.value->kind != Expr::STRING_LIT) return nullptr;
     return new AstDisplay{
-        stmt.flp, VDisplayType::DT_DISPLAY, reportText(stmt.value, ""), nullptr, nullptr, 'd'};
+        stmt.flp, VDisplayType::DT_DISPLAY, reportText(stmt.value.get(), ""), nullptr, nullptr,
+        'd'};
 }
 
 AstNode* Lowering::lowerAssert(const Stmt& stmt) {
-    FileLine* const flp = stmt.flp;
-    AstNodeExpr* const condp = lowerCond(*stmt.value);
+    return assertBody(stmt.flp, *stmt.value, stmt.message.get(), stmt.severity);
+}
+
+AstNode* Lowering::assertBody(FileLine* flp, const Expr& condition, const Expr* message,
+                              Stmt::Severity severity) {
+    AstNodeExpr* const condp = lowerCond(condition);
     if (!condp) return nullptr;
     // A failing assertion reports, and `severity failure` ends the run (IEEE 1076-2008 8.3)
     AstNodeExpr* const failp = new AstNot{flp, condp};
     failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-    AstNode* bodyp = new AstDisplay{flp,
-                                    VDisplayType::DT_DISPLAY,
-                                    reportText(stmt.message, "Assertion failed"),
-                                    nullptr,
-                                    nullptr,
-                                    'd'};
-    if (stmt.severity == Stmt::SEV_FAILURE) {
+    AstNode* bodyp = new AstDisplay{
+        flp, VDisplayType::DT_DISPLAY, reportText(message, "Assertion failed"), nullptr, nullptr,
+        'd'};
+    if (severity == Stmt::SEV_FAILURE) {
         bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, new AstFinish{flp});
     }
     return new AstIf{flp, failp, bodyp, nullptr};
@@ -7588,6 +7592,8 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
 
     // Subprograms of the declarative part capture the module scope as it stands here
     m_moduleScope = saveScope();
+    // The entity's own statement part drives the module as well
+    for (const auto& stmtp : entity.stmts) emitConcurrent(*stmtp);
     for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
 
     m_modp = nullptr;
@@ -8408,7 +8414,14 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
 
 void Lowering::emitConcurrent(const Concurrent& conc) {
     const Concurrent& stmt = conc;
-    if (stmt.kind == Concurrent::ASSERT) return;  // Synthesis ignores assertions
+    if (stmt.kind == Concurrent::ASSERT) {
+        // A concurrent assertion reports on every evaluation, and failure ends the run
+        AstNode* const assertp
+            = assertBody(stmt.flp, *stmt.target, stmt.value.get(), stmt.severity);
+        if (assertp)
+            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, assertp});
+        return;
+    }
     if (stmt.kind == Concurrent::CALL) {
         // A concurrent procedure call is lowered with continuous assignments
         ++m_concurrentProc;

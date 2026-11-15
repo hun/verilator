@@ -380,6 +380,7 @@ class Parser final {
     ExprP parseDesignator();
     bool parseRange(TypeSpec& type);
     //! Consume `severity <note|warning|error|failure>`, which decides if the run stops
+    Stmt::Severity parseSeverityValue();
     void parseSeverity(Stmt& stmt);
     void parseTypeSpec(TypeSpec& type);
     //! The `name(range)` list of a record constraint
@@ -831,18 +832,18 @@ ExprP Parser::parseDesignator() {
 }
 
 //! Consume `severity <note|warning|error|failure>`; only failure ends the run
-void Parser::parseSeverity(Stmt& stmt) {
-    if (!acceptId("severity")) return;
+Stmt::Severity Parser::parseSeverityValue() {
+    if (!acceptId("severity")) return Stmt::SEV_NOTE;
     Token severityTok;
-    if (!takeId(severityTok)) return;
-    if (severityTok.text == "warning") {
-        stmt.severity = Stmt::SEV_WARNING;
-    } else if (severityTok.text == "error") {
-        stmt.severity = Stmt::SEV_ERROR;
-    } else if (severityTok.text == "failure") {
-        stmt.severity = Stmt::SEV_FAILURE;
-    }
+    if (!takeId(severityTok)) return Stmt::SEV_NOTE;
+    if (severityTok.text == "warning") return Stmt::SEV_WARNING;
+    if (severityTok.text == "error") return Stmt::SEV_ERROR;
+    if (severityTok.text == "failure") return Stmt::SEV_FAILURE;
+    return Stmt::SEV_NOTE;
 }
+
+//! Consume the severity of a report or an assert, if it has one
+void Parser::parseSeverity(Stmt& stmt) { stmt.severity = parseSeverityValue(); }
 
 bool Parser::parseRange(TypeSpec& type) {
     if (!type.flp) type.flp = m_cur.flp;  // An index constraint has no mark to take one from
@@ -1222,9 +1223,11 @@ void Parser::parseEntity(FileLine* flp) {
             parseGenericClauseInto(entity.generics);
             continue;
         }
-        if (isId("begin")) {
-            unsupported("entity statement part");
-            return;
+        if (acceptId("begin")) {
+            // The statement part holds concurrent assertions and passive processes
+            parseConcurrentList(entity.stmts);
+            if (m_failed) return;
+            break;
         }
         if (isId("end")) break;
         if (isId("package")) {
@@ -2254,11 +2257,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             conc->value = parseExpr();
             if (!conc->value) return;
         }
-        if (acceptId("severity")) {
-            Token sevTok;
-            if (!takeId(sevTok)) return;
-            (void)sevTok;  // Synthesis ignores the severity
-        }
+        conc->severity = parseSeverityValue();
         if (!acceptSym(";")) error("expected ';' after 'assert'");
         arch.stmts.push_back(std::move(conc));
         return;
