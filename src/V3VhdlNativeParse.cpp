@@ -39,6 +39,136 @@
 
 namespace vhdlnative {
 
+namespace {
+
+//! The VHDL reserved words, IEEE 1076-2008 15.10. A physical literal writes its unit as an
+//! identifier, and nothing else in the grammar puts an identifier directly after an abstract
+//! literal, so a reserved word in that position -- `1 to 10`, `0 sec then`, `5 mod 2` -- names
+//! no unit. The predefined names (min, now, ...) are not reserved and may name a unit.
+bool isReservedWord(const std::string& folded) {
+    static const char* const words[] = {"abs",
+                                        "access",
+                                        "after",
+                                        "alias",
+                                        "all",
+                                        "and",
+                                        "architecture",
+                                        "array",
+                                        "assert",
+                                        "assume",
+                                        "assume_guarantee",
+                                        "attribute",
+                                        "begin",
+                                        "block",
+                                        "body",
+                                        "buffer",
+                                        "bus",
+                                        "case",
+                                        "component",
+                                        "configuration",
+                                        "constant",
+                                        "context",
+                                        "cover",
+                                        "default",
+                                        "disconnect",
+                                        "downto",
+                                        "else",
+                                        "elsif",
+                                        "end",
+                                        "entity",
+                                        "exit",
+                                        "fairness",
+                                        "file",
+                                        "for",
+                                        "force",
+                                        "function",
+                                        "generate",
+                                        "generic",
+                                        "group",
+                                        "guarded",
+                                        "if",
+                                        "impure",
+                                        "in",
+                                        "inertial",
+                                        "inout",
+                                        "is",
+                                        "label",
+                                        "library",
+                                        "linkage",
+                                        "literal",
+                                        "loop",
+                                        "map",
+                                        "mod",
+                                        "nand",
+                                        "new",
+                                        "next",
+                                        "nor",
+                                        "not",
+                                        "null",
+                                        "of",
+                                        "on",
+                                        "open",
+                                        "or",
+                                        "others",
+                                        "out",
+                                        "package",
+                                        "parameter",
+                                        "port",
+                                        "postponed",
+                                        "procedure",
+                                        "process",
+                                        "property",
+                                        "protected",
+                                        "pure",
+                                        "range",
+                                        "record",
+                                        "register",
+                                        "reject",
+                                        "release",
+                                        "rem",
+                                        "report",
+                                        "restrict",
+                                        "restrict_guarantee",
+                                        "return",
+                                        "rol",
+                                        "ror",
+                                        "select",
+                                        "sequence",
+                                        "severity",
+                                        "shared",
+                                        "signal",
+                                        "sla",
+                                        "sll",
+                                        "sra",
+                                        "srl",
+                                        "strong",
+                                        "subtype",
+                                        "then",
+                                        "to",
+                                        "transport",
+                                        "type",
+                                        "unaffected",
+                                        "units",
+                                        "until",
+                                        "use",
+                                        "variable",
+                                        "vmode",
+                                        "vprop",
+                                        "vunit",
+                                        "wait",
+                                        "when",
+                                        "while",
+                                        "with",
+                                        "xnor",
+                                        "xor"};
+    for (const char* const word : words) {
+        if (folded == word) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 //######################################################################
 // Parser
 
@@ -424,29 +554,17 @@ ExprP Parser::parsePrimary() {
         }
         node->flp = m_cur.flp;
         advance();
-        // A VHDL physical literal: <numeric> <unit>. 'time''s step unit is femtoseconds, so
-        // the value is the numeric part scaled by the named unit; the result needs 64 bits
-        // (2 sec is 2e15 fs). The names are the predefined units of `time`, VHDL-2008 set.
-        static const std::pair<const char*, double> timeUnits[]
-            = {{"fs", 1e0},    {"fsec", 1e0}, {"hr", 3.6e18}, {"min", 6e16}, {"ms", 1e12},
-               {"msec", 1e12}, {"ns", 1e6},   {"nsec", 1e6},  {"ps", 1e3},   {"psec", 1e3},
-               {"sec", 1e15},  {"us", 1e9},   {"usec", 1e9}};
-        if (node->kind == Expr::INT_LIT || node->kind == Expr::REAL_LIT) {
-            double scale = 0;
-            for (const std::pair<const char*, double>& unit : timeUnits) {
-                if (m_cur.text == unit.first) {
-                    scale = unit.second;
-                    break;
-                }
-            }
-            if (scale > 0) {
-                const double numeric = node->kind == Expr::INT_LIT
-                                           ? static_cast<double>(node->intValue)
-                                           : node->realValue;
-                node->kind = Expr::PHYS_LIT;
-                node->intValue = std::llround(numeric * scale);
-                advance();  // Consume the unit identifier
-            }
+        if ((node->kind == Expr::INT_LIT || node->kind == Expr::REAL_LIT)
+            && m_cur.kind == Token::ID && !isReservedWord(m_cur.text)) {
+            // A VHDL physical literal: <abstract literal> <unit_name>, IEEE 1076-2008 9.4.
+            // Which physical type the unit belongs to is not known until the literal reaches
+            // its use, so the abstract literal is kept unscaled and takes the unit's factor
+            // during lowering.
+            node->text = m_cur.text;
+            node->spelling = m_cur.spelling;
+            if (node->kind == Expr::INT_LIT) node->realValue = static_cast<double>(node->intValue);
+            node->kind = Expr::PHYS_LIT;
+            advance();  // The unit name
         }
         return node;
     }
@@ -1382,6 +1500,36 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
         if (!expectId("of")) return;
         parseTypeSpec(decl.base);
         if (m_failed) return;
+    } else if (isId("range")) {  // A physical type definition, IEEE 1076-2008 3.2.2.1
+        advance();
+        if (!parseRange(decl.base)) return;
+        if (!isId("units")) {
+            // An integer type definition starts the same way and is not modelled
+            unsupported("type definition 'range'");
+            return;
+        }
+        decl.kind = TypeDecl::PHYSICAL;
+        advance();
+        for (;;) {
+            if (m_failed) return;
+            if (isId("end")) break;
+            TypeDecl::Unit unit;
+            Token unitTok;
+            if (!takeId(unitTok)) return;
+            unit.name = unitTok.text;
+            unit.spelling = unitTok.spelling;
+            if (acceptSym("=")) {
+                unit.value = parsePrimary();
+                if (m_failed) return;
+            }
+            if (!acceptSym(";")) {
+                error("expected ';' after a unit declaration");
+                return;
+            }
+            decl.units.push_back(std::move(unit));
+        }
+        if (!expectId("end")) return;
+        if (!expectId("units")) return;
     } else {
         unsupported("type definition '" + m_cur.text + "'");
         return;

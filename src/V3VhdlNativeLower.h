@@ -67,9 +67,11 @@ private:
     std::unique_ptr<Impl> m_implp;
 };
 
+struct Design;
+
 //! Elaborate the declarative parts of all packages
-void lowerPackages(const DesignLibrary& library, AstNetlist* rootp,
-                   PackageTable& table) VL_MT_DISABLED;
+void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable& table,
+                   Design& design) VL_MT_DISABLED;
 
 //! Create the module of every entity, so an instance can bind before it is lowered
 void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
@@ -82,6 +84,10 @@ struct Design final {
     std::map<std::string, const Architecture*> archs;  // Folded entity name -> architecture
     std::map<std::string, AstModule*> specializations;  // Generic binding key -> module
     std::set<std::string> unconstrainedRecordMarks;  // Record marks with an unconstrained member
+    // Physical unit name -> multiple of its type's step unit, and the names two physical
+    // types give different multiples to, which no literal can name without its type
+    std::map<std::string, int64_t> unitFactors;
+    std::set<std::string> ambiguousUnits;
     int specSeq = 0;  // Disambiguates the specialized module names
     int specDepth = 0;  // Generic specialization recursion depth
 };
@@ -97,6 +103,9 @@ void reportUnspecializedPorts(const EntityUnit& entity,
 //! Record type marks whose declaration has an element of an unconstrained array type
 void collectUnconstrainedRecordMarks(const DesignLibrary& library,
                                      std::set<std::string>& out) VL_MT_DISABLED;
+
+//! Record the physical unit names declared by the packages and entities of the library
+void collectPhysicalUnits(const DesignLibrary& library, Design& design) VL_MT_DISABLED;
 
 //! Lower one entity/architecture pair into the module created for its entity. False
 //! if the entity's generics have no defaults to elaborate, and no binding supplied

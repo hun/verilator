@@ -124,6 +124,72 @@ struct GenericBinding final {
     const SubprogramDecl* subp = nullptr;  // The actual of a generic subprogram parameter
 };
 using GenericBindings = std::map<std::string, GenericBinding>;
+
+//! The multiple of the step unit that a predefined unit of `time' stands for, or false for
+//! any other name. A physical type's own unit of the same name shadows the predefined one.
+static bool predefinedUnit(const std::string& unit, int64_t& out) {
+    // The step unit of `time' is the femtosecond, so 2 sec is 2e15 and needs 64 bits
+    static const std::pair<const char*, int64_t> timeUnits[] = {{"fs", 1},
+                                                                {"fsec", 1},
+                                                                {"ps", 1000},
+                                                                {"psec", 1000},
+                                                                {"ns", 1000000},
+                                                                {"nsec", 1000000},
+                                                                {"us", 1000000000},
+                                                                {"usec", 1000000000},
+                                                                {"ms", 1000000000000},
+                                                                {"msec", 1000000000000},
+                                                                {"sec", 1000000000000000},
+                                                                {"min", 60000000000000000},
+                                                                {"hr", 3600000000000000000}};
+    for (const std::pair<const char*, int64_t>& timeUnit : timeUnits) {
+        if (unit == timeUnit.first) {
+            out = timeUnit.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+//! Value of a physical literal: the abstract literal scaled to its type's step unit. The
+//! literal names its unit but not its type, so the name is looked up in the table every
+//! physical type's declaration adds to, which spans the design.
+static bool physicalValue(const Design& design, const Expr& expr, int64_t& out) {
+    if (design.ambiguousUnits.count(expr.text)) {
+        unsupportedError(expr.flp, "physical unit '" + expr.spelling + "' of two types");
+        return false;
+    }
+    int64_t factor = 1;  // An abstract literal written without a unit names the step unit
+    if (!expr.text.empty()) {
+        const auto it = design.unitFactors.find(expr.text);
+        if (it != design.unitFactors.end()) {
+            factor = it->second;
+        } else if (!predefinedUnit(expr.text, factor)) {
+            expr.flp->v3error("Unknown VHDL physical unit: '" + expr.spelling + "'");
+            return false;
+        }
+    }
+    out = std::llround(expr.realValue * static_cast<double>(factor));
+    return true;
+}
+
+//! Record one physical type's unit names and their multiples of the step unit. The first
+//! declaration sets the step; each later one names an earlier unit of any physical type, or
+//! a predefined one.
+static void addPhysicalUnits(const TypeDecl& decl, Design& design) {
+    int64_t factor = 1;
+    for (const TypeDecl::Unit& unit : decl.units) {
+        if (unit.value && !physicalValue(design, *unit.value, factor)) return;
+        const auto seen = design.unitFactors.find(unit.name);
+        // Two physical types that are not each other's scope may give one name a different
+        // multiple; only the expected type tells a literal which one it means
+        if (seen != design.unitFactors.end() && seen->second != factor) {
+            design.ambiguousUnits.insert(unit.name);
+        }
+        design.unitFactors[unit.name] = factor;
+    }
+}
+
 class Lowering final {
     AstNetlist* const m_rootp;  // Netlist to emit into
     AstModule* m_modp = nullptr;  // Module being emitted
@@ -935,8 +1001,8 @@ bool Lowering::closedOverFormals(const Expr& expr,
 
 bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     switch (expr.kind) {
-    case Expr::INT_LIT:
-    case Expr::PHYS_LIT: value = expr.intValue; return true;
+    case Expr::INT_LIT: value = expr.intValue; return true;
+    case Expr::PHYS_LIT: return physicalValue(*m_designp, expr, value);
     case Expr::REAL_LIT:
         // A universal_real in an integer context, IEEE 1800-2023 7.3.5
         if (std::isfinite(expr.realValue) && expr.realValue == std::floor(expr.realValue)) {
@@ -1223,8 +1289,13 @@ void Lowering::popPureCall() const { m_pureCalls.pop_back(); }
 
 bool Lowering::evalReal(const Expr& expr, double& value) const {
     switch (expr.kind) {
-    case Expr::INT_LIT:
-    case Expr::PHYS_LIT: value = static_cast<double>(expr.intValue); return true;
+    case Expr::INT_LIT: value = static_cast<double>(expr.intValue); return true;
+    case Expr::PHYS_LIT: {
+        int64_t scaled = 0;
+        if (!physicalValue(*m_designp, expr, scaled)) return false;
+        value = static_cast<double>(scaled);
+        return true;
+    }
     case Expr::REAL_LIT: value = expr.realValue; return true;
     case Expr::NAME: {
         if (!m_pureCalls.empty()) {
@@ -1411,6 +1482,12 @@ void Lowering::registerType(const TypeDecl& decl) {
     switch (decl.kind) {
     case TypeDecl::SUBTYPE:
         if (!resolveType(decl.base, type)) return;
+        break;
+    case TypeDecl::PHYSICAL:
+        // Like the predefined `time', a physical value is a count of the step unit, so the
+        // type is a plain 64-bit integer and only the literals carry the units
+        type = timeType(flp);
+        addPhysicalUnits(decl, *m_designp);
         break;
     case TypeDecl::ENUM: {
         int width = 1;
@@ -2032,7 +2109,11 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     switch (expr.kind) {
     case Expr::INT_LIT: return makeIntConst(flp, expr.intValue);
-    case Expr::PHYS_LIT: return makeTimeConst(flp, expr.intValue);
+    case Expr::PHYS_LIT: {
+        int64_t scaled = 0;
+        if (!physicalValue(*m_designp, expr, scaled)) return nullptr;
+        return makeTimeConst(flp, scaled);
+    }
     case Expr::REAL_LIT: unsupportedError(flp, "real value in this context"); return nullptr;
     case Expr::TRUE_LIT: return bitConst(flp, '1');
     case Expr::FALSE_LIT: return bitConst(flp, '0');
@@ -8480,10 +8561,11 @@ void Lowering::instantiatePackage(const std::vector<PackageUnit>& packages,
     freeBindings(bindings);
 }
 
-void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable& table) {
+void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable& table,
+                   Design& design) {
     // The table under construction is also what a package may import: a package's `use`
     // clause names the packages elaborated before it, as for an entity or architecture
-    Lowering lowering{rootp, &table.impl()};
+    Lowering lowering{rootp, &table.impl(), nullptr, &design};
     // A package that declares generics is a template: elaborate only its instances.
     const auto isTemplate = [](const PackageUnit& pkg) { return !pkg.generics.empty(); };
     for (const PackageUnit& pkg : library.packages)
@@ -8530,6 +8612,19 @@ void collectUnconstrainedRecordMarks(const DesignLibrary& library, std::set<std:
                     break;
                 }
             }
+        }
+    };
+    for (const PackageUnit& pkg : library.packages) scan(pkg.types);
+    for (const EntityUnit& entity : library.entities) scan(entity.types);
+}
+
+//! Record the physical unit names of every package and entity, each with the multiple of
+//! its type's step unit. A generic default is lowered before the declarations of the unit
+//! that owns it, so a literal's unit has to be findable among types not elaborated yet.
+void collectPhysicalUnits(const DesignLibrary& library, Design& design) {
+    const auto scan = [&design](const std::vector<TypeDecl>& types) {
+        for (const TypeDecl& decl : types) {
+            if (decl.kind == TypeDecl::PHYSICAL) addPhysicalUnits(decl, design);
         }
     };
     for (const PackageUnit& pkg : library.packages) scan(pkg.types);

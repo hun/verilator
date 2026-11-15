@@ -133,7 +133,7 @@ struct Expr final {
     enum Kind : uint8_t {
         INT_LIT,  // intValue
         REAL_LIT,  // realValue
-        PHYS_LIT,  // intValue: a physical literal scaled to the type's step unit
+        PHYS_LIT,  // text/spelling: unit name, realValue: the abstract literal unscaled
         BITS_LIT,  // bits
         STRING_LIT,  // spelling: a string value that is not a bit-vector literal
         CHAR_LIT,  // charValue
@@ -282,7 +282,7 @@ struct AliasDecl final {
 
 //! A type, subtype or alias declaration
 struct TypeDecl final {
-    enum Kind : uint8_t { ENUM, ARRAY, RECORD, SUBTYPE } kind;
+    enum Kind : uint8_t { ENUM, ARRAY, RECORD, SUBTYPE, PHYSICAL } kind;
     FileLine* flp = nullptr;
     std::string name;  // Folded
     std::string spelling;
@@ -297,6 +297,15 @@ struct TypeDecl final {
         TypeSpec type;
     };
     std::vector<Member> members;  // RECORD
+
+    // PHYSICAL: one `unit_name [= <numeric> <unit_name>]` line; the value names an earlier
+    // unit of the same type, or a predefined unit of `time'
+    struct Unit final {
+        std::string name;  // Folded
+        std::string spelling;
+        ExprP value;
+    };
+    std::vector<Unit> units;  // PHYSICAL, in declaration order; the first sets the step unit
 
     explicit TypeDecl(Kind kind_)
         : kind{kind_} {}

@@ -185,13 +185,17 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         }
     }
 
+    // A physical literal names its unit but not its type, and a generic default lowers
+    // before the declarations around it, so the unit names are read from the library first
+    vhdlnative::Design design;
+    vhdlnative::collectPhysicalUnits(library, design);
+
     vhdlnative::PackageTable packages;
-    vhdlnative::lowerPackages(library, rootp, packages);
+    vhdlnative::lowerPackages(library, rootp, packages, design);
 
     // Create the module of every entity first, so instances can bind to any of them
     vhdlnative::ModuleMap modules;
     vhdlnative::createModules(library.entities, rootp, modules);
-    vhdlnative::Design design;
     for (const vhdlnative::EntityUnit& entity : library.entities) {
         design.entities[entity.name] = &entity;
     }
