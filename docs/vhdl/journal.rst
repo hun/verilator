@@ -321,6 +321,15 @@ disconnect specifications, so the declaration is only looked for where the
 clause really starts with `context` -- the first version read
 `default clocking is ...` as one and ate the next process.
 
+A generate condition with a label was the last thing between poc's ocrom ROMs
+and a clean parse: `gen: if gInfer: (VENDOR = VENDOR_GENERIC) or ... generate`.
+Neither the 1076-2008 grammar nor the obvious reading explains the colon, so the
+value was settled by simulation: GHDL and nvc both take the expression *after*
+the label as the condition, and both reject a label that is not a plain name.
+The frontend follows them and drops the label. The ROMs then stop at a generic
+with no default value and no instance to bind it, which is a sweep artifact
+rather than a frontend gap.
+
 _______
 Commits
 _______
@@ -380,3 +389,5 @@ _______
      - Support a VHDL 'element type mark
    * - ``6de3383``
      - Skip a VHDL context declaration
+   * - ``12d75c8``
+     - Accept a VHDL generate condition with a label

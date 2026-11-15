@@ -192,6 +192,13 @@ ______
       is what poc's common.vhdl needs to parse. A context *clause* elsewhere still
       imports nothing, so a reference is only as good as the use clauses next to it
     - ``t_vhdl_context_decl``
+  * - N58
+    - an if-generate condition with a label: ``gen: if gInfer: (VENDOR = ...) or
+      ... generate``
+    - the label is a name and nothing else; GHDL and nvc both take the expression
+      after it as the condition, which is what poc's ocrom ROMs rely on, so the
+      label is dropped and the rest parsed as the condition
+    - ``t_vhdl_labelled_cond``
 
 ____
 Open
