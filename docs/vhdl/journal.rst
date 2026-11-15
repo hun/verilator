@@ -354,6 +354,14 @@ now. A function returning a plain `std_logic_vector` still selects one bit,
 which is what its type says, so the rule is the element width and not the
 return type.
 
+The timing comparison turned up a testbench bug rather than a frontend one:
+`assert false report "x" severity failure;` did not end the run, so a VHDL
+testbench had no way to stop. The parser had been dropping both the message
+and the severity and handing the statement to the report path, which printed
+nothing and continued. The statement now keeps all three: note, warning and
+error report and carry on, and failure reports and finishes. The concurrent
+form is still ignored, as it was before.
+
 _______
 Commits
 _______
@@ -421,3 +429,5 @@ _______
      - Accept a VHDL signal assignment with a zero delay
    * - ``ff84036``
      - Report an index of an array whose element has no width
+   * - ``a0a00b7``
+     - End a VHDL run on an assertion with severity failure

@@ -220,6 +220,14 @@ ______
       zero width and faulted; the index is reported instead. A function returning a
       plain ``std_logic_vector`` still selects one bit, which is what its type says
     - ``t_vhdl_elem_unsup``
+  * - N62
+    - a sequential ``assert`` never ended the run: the parser dropped both the
+      message and the severity, and the statement reached the model as a report
+    - the statement keeps its condition, message and severity. Severity note,
+      warning and error report and carry on; ``severity failure`` reports and
+      ends the run (IEEE 1076-2008 8.3), which is what a testbench needs to
+      stop on a failed check. A concurrent assertion is still ignored, as before
+    - ``t_vhdl_assert_severity``, ``t_vhdl_assert_finish``
   * - N61
     - the file-I/O subset: a ``line`` variable of ``ieee.std_logic_textio`` in a debug
       procedure (bit-serial), and poc's ``protected`` type definition
