@@ -2022,7 +2022,28 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
 bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     if (!flp) return false;
-    if (!spec.objectName.empty()) {  // `name'subtype`: the object's own subtype
+    if (!spec.objectName.empty()) {  // `name'subtype` or `name'element`
+        // `name'element` names the element of an array, which the name may denote either
+        // as a type or as an object
+        if (spec.elementMark) {
+            VType base;
+            const auto typeIt = m_types.find(spec.objectName);
+            if (typeIt != m_types.end()) {
+                base = typeIt->second;
+            } else {
+                Expr prefix{Expr::NAME};
+                prefix.flp = flp;
+                prefix.text = spec.objectName;
+                prefix.spelling = spec.objectName;
+                if (!typeOfDesignator(prefix, base)) return false;
+            }
+            if (!base.isVector() || !base.elemp) {
+                unsupportedError(flp, "'element of a type that is not an array");
+                return false;
+            }
+            out = *base.elemp;
+            return true;
+        }
         Expr prefix{Expr::NAME};
         prefix.flp = flp;
         prefix.text = spec.objectName;

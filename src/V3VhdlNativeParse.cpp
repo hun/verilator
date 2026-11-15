@@ -881,15 +881,17 @@ void Parser::parseTypeSpec(TypeSpec& type) {
     }
     type.mark = markTok.text;
     type.pkg = pkg;
-    // `name'subtype` is a subtype indication that takes the object's own subtype
+    // `name'subtype` takes the object's own subtype, `name'element` the element type of
+    // an array; which of the two the name is, is only known when it is resolved
     if (isSym("'")) {
         const auto saved = m_lexer.state();
         const Token ahead = m_lexer.next();
         m_lexer.restore(saved);
-        if (ahead.kind == Token::ID && ahead.text == "subtype") {
+        if (ahead.kind == Token::ID && (ahead.text == "subtype" || ahead.text == "element")) {
             advance();  // The apostrophe
             advance();  // The attribute name
             type.objectName = markTok.text;
+            type.elementMark = ahead.text == "element";
             type.mark.clear();
             return;
         }
