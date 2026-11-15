@@ -245,6 +245,8 @@ class Lowering final {
     std::deque<InlineFrame> m_inlineFrames;
     std::vector<FuncLoopTarget> m_funcLoopTargets;
     std::set<const SubprogramDecl*> m_inlineBodies;  // Recursion guard
+    //! Cost of the element writes folded into one inlined body; each rebuilds the local value
+    int64_t m_funcWriteCost = 0;
     std::map<std::string, std::vector<SubprogramRef>> m_subprograms;  // Visible, by name
     std::vector<const Stmt*> m_procTail;  // Statements after the current procedure return
     int m_concurrentProc = 0;  // Lowering a concurrent procedure call body
@@ -1808,14 +1810,15 @@ bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& ri
         return true;
     }
     if (!spec.left || spec.left->kind != Expr::ATTR
-        || (spec.left->text != "range" && spec.left->text != "reverse_range") || !spec.left->a
-        || spec.left->a->kind != Expr::NAME) {
+        || (spec.left->text != "range" && spec.left->text != "reverse_range") || !spec.left->a) {
         return false;
     }
     VType prefix;
     if (!typeOfDesignator(*spec.left->a, prefix)) {
-        // A range attribute's prefix may be a type mark rather than an object
-        const auto typeIt = m_types.find(spec.left->a->text);
+        // A range attribute's prefix may be a type mark rather than an object, which only a
+        // plain name can name
+        const auto typeIt
+            = spec.left->a->kind == Expr::NAME ? m_types.find(spec.left->a->text) : m_types.end();
         if (typeIt == m_types.end()) return false;
         prefix = typeIt->second;
     }
@@ -1871,11 +1874,6 @@ bool Lowering::applyIndexConstraints(const TypeSpec& spec, VType& out) {
         }
         if (!applyRange(*constraints[k], level)) return false;
     }
-    // A residual unconstrained level cannot be allocated as a variable
-    if (out.width == 0 || !out.dtp) {
-        unsupportedError(flp, "unconstrained nested array subtype");
-        return false;
-    }
     return true;
 }
 
@@ -1910,6 +1908,8 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
         return true;
     }
     if (!spec.constraintMark.empty()) {
+        // `t(open)` leaves the index range to the use site, which supplies the bounds
+        if (spec.constraintMark == "open") return true;
         const auto it = m_types.find(spec.constraintMark);
         if (it == m_types.end()) {
             flp->v3error("VHDL: unknown subtype '" + spec.constraintMark + "'");
@@ -5940,6 +5940,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context)
         unsupportedError(call.flp, "recursive call of function '" + subp->spelling + "'");
         return nullptr;
     }
+    m_funcWriteCost = 0;  // This call's own fold budget
     InlineEnv env;
     AstNode* unusedPrologsp = nullptr;  // A function has no out mode formal
     // The captured environment supplies enclosing names; formals bind on top of them
@@ -6098,6 +6099,14 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             const auto it = activeEnv().find(basep->text);
             if (it == activeEnv().end()) {
                 unsupportedError(flp, "assignment to an element outside the inlined subprogram");
+                return nullptr;
+            }
+            // Each element write rebuilds the local's whole value, so the fold is bounded by
+            // what it copies: a wide value costs its width per write, and the rebuilt tree
+            // grows with every write
+            m_funcWriteCost += 64 + it->second.exprp->width() / 64;
+            if (m_funcWriteCost > (1 << 18)) {
+                unsupportedError(flp, "function body with too many element assignments");
                 return nullptr;
             }
             AstNodeExpr* const readp = lowerDesignator(target, false);
@@ -6532,6 +6541,7 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
         unsupportedError(callExpr.flp, "recursive call of procedure '" + subp->spelling + "'");
         return nullptr;
     }
+    m_funcWriteCost = 0;  // This call's own fold budget
     InlineEnv env;
     AstNode* prologsp = nullptr;  // Out-parameter initializations
     // The captured environment supplies enclosing names; formals bind on top of them

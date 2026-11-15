@@ -794,6 +794,7 @@ ExprP Parser::parseDesignator() {
 }
 
 bool Parser::parseRange(TypeSpec& type) {
+    if (!type.flp) type.flp = m_cur.flp;  // An index constraint has no mark to take one from
     ExprP left = parseExpr();
     if (!left) return false;
     if (isId("downto")) {
@@ -860,47 +861,21 @@ void Parser::parseTypeSpec(TypeSpec& type) {
         parseRange(type);
     } else if (isSym("(")) {
         advance();
+        bool markOnly = false;  // `t(open)`: every index range stays unconstrained
         if (m_cur.kind == Token::ID) {
             const auto saved = m_lexer.state();
             const Token ahead = m_lexer.next();
-            const Token second = m_lexer.next();
             m_lexer.restore(saved);
             if (ahead.kind == Token::SYM && ahead.text == ")") {
                 Token markTok2;
                 if (!takeId(markTok2)) return;
                 type.constraintMark = markTok2.text;
                 expectSym(")");
-                return;
-            }
-            if (ahead.kind == Token::SYM && ahead.text == "'" && second.kind == Token::ID
-                && (second.text == "range" || second.text == "reverse_range")) {
-                // Discrete range attribute, e.g. std_logic_vector(signal'range)
-                Token nameTok;
-                if (!takeId(nameTok)) return;
-                advance();  // The apostrophe
-                advance();  // The attribute name
-                ExprP nameExpr = std::make_unique<Expr>(Expr::NAME);
-                nameExpr->flp = nameTok.flp;
-                nameExpr->text = nameTok.text;
-                nameExpr->spelling = nameTok.spelling;
-                ExprP attr = std::make_unique<Expr>(Expr::ATTR);
-                attr->flp = nameTok.flp;
-                attr->text = second.text;
-                attr->a = std::move(nameExpr);
-                if (acceptSym("(")) {  // Which index range the attribute names, `'range(2)'
-                    ExprP index = parseExpr();
-                    if (!index) return;
-                    attr->args.push_back(std::move(index));
-                    expectSym(")");
-                }
-                type.left = std::move(attr);  // A null right marks the attribute form
-                type.hasRange = true;
-                expectSym(")");
-                return;
+                markOnly = true;  // A chained group may still constrain an element
             }
             // A record constraint's items are `name(range)`. A range constraint always carries a
             // 'to'/'downto' at the outer parentheses' own level; a record constraint does not.
-            if (ahead.kind == Token::SYM && ahead.text == "(") {
+            if (!markOnly && ahead.kind == Token::SYM && ahead.text == "(") {
                 bool sawTopRange = false;
                 int depth = 1;  // Inside the outer '('; m_cur is the first item's name
                 for (;;) {
@@ -948,19 +923,24 @@ void Parser::parseTypeSpec(TypeSpec& type) {
                 }
             }
         }
-        if (!parseRange(type)) return;
-        // `t(r1, r2)` constrains the same nested array as the chained `t(r1)(r2)`
-        while (acceptSym(",")) {
-            type.indexConstraints.emplace_back();
-            if (!parseRange(type.indexConstraints.back())) return;
+        if (!markOnly) {
+            if (!parseRange(type)) return;
+            // `t(r1, r2)` constrains the same nested array as the chained `t(r1)(r2)`
+            while (acceptSym(",")) {
+                type.indexConstraints.emplace_back();
+                if (!parseRange(type.indexConstraints.back())) return;
+            }
+            expectSym(")");
         }
-        expectSym(")");
     }
     while (isSym("(")) {  // A further index range of a nested `t(r1)(r2)` subtype
-        // Only treat it as an index range if a 'to'/'downto' sits at this paren's own
-        // level; a `name(range)` here is a record/member constraint, not an index range
+        // Only treat it as an index range if it holds one range: a `name(range)` list here is
+        // a record/member constraint, not an index range. An attribute at this level, as in
+        // `t(v'range)(v(v'low)'range)`, marks the range form just as 'to'/'downto' does.
         const auto saved = m_lexer.state();
         bool sawTopRange = false;
+        bool sawTopAttribute = false;
+        bool sawTopComma = false;
         for (int depth = 1;;) {  // m_cur is the '(', so the scan starts inside it
             const Token t = m_lexer.next();
             if (t.kind == Token::END) break;
@@ -971,10 +951,14 @@ void Parser::parseTypeSpec(TypeSpec& type) {
             } else if (depth == 1 && t.kind == Token::ID
                        && (t.text == "to" || t.text == "downto")) {
                 sawTopRange = true;
+            } else if (depth == 1 && t.kind == Token::SYM && t.text == "'") {
+                sawTopAttribute = true;
+            } else if (depth == 1 && t.kind == Token::SYM && t.text == ",") {
+                sawTopComma = true;
             }
         }
         m_lexer.restore(saved);
-        if (!sawTopRange) {
+        if (sawTopComma || (!sawTopRange && !sawTopAttribute)) {
             unsupported("multi-dimensional array type");
             return;
         }
