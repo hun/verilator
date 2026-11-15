@@ -551,6 +551,9 @@ class Lowering final {
     //! Recompute a record's total width, MSB-first offsets and packed dtype
     void finalizeRecordFields(FileLine* flp, VType& rec);
     bool constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right, bool& ascending);
+    //! The index range an array attribute names: `A'HIGH(2)` is the second one, and an
+    //! attribute written without an index is the first, IEEE 1076-2008 16.2.3
+    const VType* indexRangeLevel(const Expr& expr, const VType& type) const;
     bool evalInt(const Expr& expr, int64_t& value) const;
     //! Evaluate a locally static real-valued expression
     bool evalReal(const Expr& expr, double& value) const;
@@ -999,6 +1002,30 @@ bool Lowering::closedOverFormals(const Expr& expr,
     }
 }
 
+//! Whether an attribute names one index range of an array, which a bracketed index selects:
+//! A'LEFT(N), A'RIGHT(N), A'HIGH(N), A'LOW(N), A'RANGE(N), A'REVERSE_RANGE(N), A'LENGTH(N)
+//! and A'ASCENDING(N) of IEEE 1076-2008 16.2.3. The attributes that take a *value*, like
+//! `T'pos(red)`, are not among them.
+static bool isIndexRangeAttribute(const std::string& attribute) {
+    return attribute == "range" || attribute == "reverse_range" || attribute == "left"
+           || attribute == "right" || attribute == "high" || attribute == "low"
+           || attribute == "length" || attribute == "ascending";
+}
+
+//! The index range an array attribute refers to: one element level per unit above the index
+//! it names. Null when the index is not static or exceeds the type's dimensionality.
+const VType* Lowering::indexRangeLevel(const Expr& expr, const VType& type) const {
+    const VType* levelp = &type;
+    if (!isIndexRangeAttribute(expr.text)) return levelp;
+    int64_t index = 1;
+    if (!expr.args.empty() && (!staticInt(expr.args[0], index) || index < 1)) return nullptr;
+    for (int64_t i = 1; i < index; ++i) {
+        if (levelp->kind != VType::ARRAY || !levelp->elemp) return nullptr;
+        levelp = levelp->elemp.get();
+    }
+    return levelp;
+}
+
 bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     switch (expr.kind) {
     case Expr::INT_LIT: value = expr.intValue; return true;
@@ -1070,6 +1097,9 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
             }
         }
         const std::string& attribute = expr.text;
+        // Fold to the index range the attribute names, which a bracketed index selects
+        typep = indexRangeLevel(expr, *typep);
+        if (!typep) return false;
         if (attribute == "length") {
             value = typep->length();
             return true;
@@ -1789,14 +1819,16 @@ bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& ri
         if (typeIt == m_types.end()) return false;
         prefix = typeIt->second;
     }
-    left = prefix.left;
-    right = prefix.right;
-    ascending = prefix.ascending;
+    const VType* const levelp = indexRangeLevel(*spec.left, prefix);
+    if (!levelp) return false;
+    left = levelp->left;
+    right = levelp->right;
+    ascending = levelp->ascending;
     if (spec.left->text == "reverse_range") {
         // The same bounds in the opposite direction
-        left = prefix.right;
-        right = prefix.left;
-        ascending = !prefix.ascending;
+        left = levelp->right;
+        right = levelp->left;
+        ascending = !levelp->ascending;
     }
     return true;
 }
@@ -3278,10 +3310,17 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
             basep->deleteTree();
             return nullptr;
         }
-        int hi = prefixTypep->ascending ? prefixTypep->right : prefixTypep->left;
-        int lo = prefixTypep->ascending ? prefixTypep->left : prefixTypep->right;
+        // The attribute's own index selects which of the prefix's ranges is meant
+        const VType* const levelp = indexRangeLevel(*rangep, *prefixTypep);
+        if (!levelp) {
+            unsupportedError(flp, "index of attribute 'range'");
+            basep->deleteTree();
+            return nullptr;
+        }
+        int hi = levelp->ascending ? levelp->right : levelp->left;
+        int lo = levelp->ascending ? levelp->left : levelp->right;
         if (hi < lo) std::swap(hi, lo);
-        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, prefixTypep->ascending);
+        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, levelp->ascending);
     }
     if (expr.kind == Expr::INDEX) {
         // A single name argument that denotes a declared subtype is a discrete range
@@ -3812,7 +3851,17 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         unsupportedError(flp, "enumeration attribute '" + attribute + "'");
         return nullptr;
     }
-    if (!expr.args.empty()) {
+    const bool indexRange = isIndexRangeAttribute(attribute);
+    if (indexRange) {
+        // The bracketed index selects one index range of the prefix, not a value argument
+        const VType* const levelp = indexRangeLevel(expr, *typep);
+        if (!levelp) {
+            unsupportedError(flp, "index of attribute '" + attribute + "'");
+            return nullptr;
+        }
+        typep = levelp;
+    }
+    if (!expr.args.empty() && !indexRange) {
         // An attribute of a type mark with an argument folds statically, so a value path can
         // use the same answer a constant gets
         int64_t folded = 0;
@@ -5252,9 +5301,14 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
             unsupportedError(flp, "loop range of an unresolved name");
             return nullptr;
         }
-        left = typep->left;
-        right = typep->right;
-        up = typep->ascending;
+        const VType* const levelp = indexRangeLevel(*stmt.b, *typep);
+        if (!levelp) {
+            unsupportedError(flp, "loop range of an unknown index");
+            return nullptr;
+        }
+        left = levelp->left;
+        right = levelp->right;
+        up = levelp->ascending;
     } else if (!staticInt(stmt.b, left) || !staticInt(stmt.c, right)) {
         // A sequential loop evaluates its bounds when it is reached, so they may read a
         // signal: run the loop at run time instead of unrolling it
@@ -6024,9 +6078,18 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             }
             // Locals are bound to values: rebuild the whole value around the element update
             const Expr* basep = nullptr;
-            if ((target.kind == Expr::INDEX || target.kind == Expr::SLICE) && target.a
-                && target.a->kind == Expr::NAME) {
-                basep = target.a.get();
+            for (const Expr* prefixp = &target;;) {
+                if (prefixp->kind == Expr::NAME) {
+                    basep = prefixp;
+                    break;
+                }
+                // A designator's own parts nest the same way the lowered selects do
+                if ((prefixp->kind != Expr::INDEX && prefixp->kind != Expr::SLICE
+                     && prefixp->kind != Expr::SELECTED)
+                    || !prefixp->a) {
+                    break;
+                }
+                prefixp = prefixp->a.get();
             }
             if (!basep) {
                 unsupportedError(flp, "assignment target form in an inlined function body");
@@ -6044,15 +6107,26 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 unsupportedError(flp, "assignment to an element of a non-vector value");
                 return nullptr;
             }
+            // A nested target selects inside a select, so its offset in the local's value is
+            // the sum of the levels: `v(i)(j)` and `r.field(j)` land inside `v` and `r`
+            AstNodeExpr* offsetp = selp->lsbp()->cloneTree(false);
+            for (AstSel* subjectp = VN_CAST(selp->fromp(), Sel); subjectp;
+                 subjectp = VN_CAST(subjectp->fromp(), Sel)) {
+                AstNodeExpr* const summed
+                    = new AstAdd{flp, offsetp, subjectp->lsbp()->cloneTree(false)};
+                summed->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+                offsetp = summed;
+            }
             const VType elemType = typeOfDType(selp->dtypep());
             AstNodeExpr* valuep = lowerExpr(*stmt.value, &elemType);
             if (!valuep) {
                 readp->deleteTree();
+                offsetp->deleteTree();
                 return nullptr;
             }
-            AstNodeExpr* const updatedp = updateLocalElement(
-                flp, it->second.exprp->cloneTree(false), valuep, selp->dtypep(),
-                selp->lsbp()->cloneTree(false), selp->widthConst());
+            AstNodeExpr* const updatedp
+                = updateLocalElement(flp, it->second.exprp->cloneTree(false), valuep,
+                                     selp->dtypep(), offsetp, selp->widthConst());
             readp->deleteTree();
             it->second.exprp->deleteTree();
             it->second.exprp = updatedp;
@@ -6322,9 +6396,14 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
             unsupportedError(flp, "function loop range of an unresolved name");
             return nullptr;
         }
-        left = bounds.left;
-        right = bounds.right;
-        up = bounds.ascending;
+        const VType* const levelp = indexRangeLevel(*rangep, bounds);
+        if (!levelp) {
+            unsupportedError(flp, "function loop range of an unknown index");
+            return nullptr;
+        }
+        left = levelp->left;
+        right = levelp->right;
+        up = levelp->ascending;
         if (rangep->text == "reverse_range") {
             std::swap(left, right);
             up = !up;

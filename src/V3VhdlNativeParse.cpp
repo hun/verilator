@@ -887,6 +887,12 @@ void Parser::parseTypeSpec(TypeSpec& type) {
                 attr->flp = nameTok.flp;
                 attr->text = second.text;
                 attr->a = std::move(nameExpr);
+                if (acceptSym("(")) {  // Which index range the attribute names, `'range(2)'
+                    ExprP index = parseExpr();
+                    if (!index) return;
+                    attr->args.push_back(std::move(index));
+                    expectSym(")");
+                }
                 type.left = std::move(attr);  // A null right marks the attribute form
                 type.hasRange = true;
                 expectSym(")");
