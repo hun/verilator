@@ -177,6 +177,14 @@ ______
       ranges. A record with unconstrained elements is what makes the constraint
       legal, so the ``open`` and record forms are what poc's AXI4 packages use
     - ``t_vhdl_record_constraint``
+  * - N56
+    - ``T'element`` as a type mark: a register declared ``BCDDigits'element``,
+      naming a port
+    - the attribute names the element type of an array, and the name before it
+      may be a type or an object; the mark is resolved either way, so poc's
+      generate block can give a pipeline register the element type of the bus
+      it drives
+    - ``t_vhdl_element_type``
 
 ____
 Open

@@ -305,6 +305,14 @@ member's own parentheses -- ``t(v'range)(v(v'low)'range)`` has none, and stays
 two index ranges. poc's ``axi4stream.pkg`` lints clean on its own now, and the
 other AXI packages stop at names their sibling packages declare.
 
+``T'element`` was the last shape in the same file. A generate block in poc's
+Binary-to-BCD converter declares a pipeline register as ``BCDDigits'element``,
+naming an output port, and the attribute is the element type of the array that
+port has. The name before it may be a type or an object, so the mark is
+resolved both ways: a declared type is looked up, and anything else has to be
+a designator whose type is an array. That closed the last declaration error in
+the file; the converter stops at the packages' own names now.
+
 _______
 Commits
 _______
@@ -360,3 +368,5 @@ _______
      - Support a VHDL index constraint list and bound a folded body
    * - ``e5e3fc6``
      - Support a VHDL record constraint on a nested element
+   * - ``3289c0b``
+     - Support a VHDL 'element type mark
