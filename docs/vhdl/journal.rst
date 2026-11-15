@@ -313,6 +313,14 @@ resolved both ways: a declared type is looked up, and anything else has to be
 a designator whose type is an array. That closed the last declaration error in
 the file; the converter stops at the packages' own names now.
 
+A context declaration was the last parse error in poc's common.vhdl.
+`context c is` bundles library and use clauses under a name, and the file has
+nothing else in it; the declaration is skipped whole, and the units after it
+parse. The helper that skips a context clause also skips attribute and
+disconnect specifications, so the declaration is only looked for where the
+clause really starts with `context` -- the first version read
+`default clocking is ...` as one and ate the next process.
+
 _______
 Commits
 _______
@@ -370,3 +378,5 @@ _______
      - Support a VHDL record constraint on a nested element
    * - ``3289c0b``
      - Support a VHDL 'element type mark
+   * - ``6de3383``
+     - Skip a VHDL context declaration

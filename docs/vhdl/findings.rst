@@ -185,6 +185,13 @@ ______
       generate block can give a pipeline register the element type of the bus
       it drives
     - ``t_vhdl_element_type``
+  * - N57
+    - a context declaration: ``context common is ... end context;``, a bundle of
+      library and use clauses under a name
+    - the declaration has no design unit of its own, so it is skipped whole, which
+      is what poc's common.vhdl needs to parse. A context *clause* elsewhere still
+      imports nothing, so a reference is only as good as the use clauses next to it
+    - ``t_vhdl_context_decl``
 
 ____
 Open
