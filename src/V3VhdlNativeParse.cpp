@@ -2503,6 +2503,11 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
             parseSubprogramInto(process.subprograms);
             continue;
         }
+        if (isId("alias")) {
+            advance();
+            parseAliasInto(process.aliases);
+            continue;
+        }
         if (skipFileDecl()) continue;
         unsupported("process declarative item '" + m_cur.text + "'");
         return;

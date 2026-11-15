@@ -356,6 +356,7 @@ struct Process final {
     std::vector<Decl> decls;  // Variables of the process declarative part
     std::vector<TypeDecl> types;  // Types declared by the process
     std::vector<SubprogramDecl> subprograms;  // Procedures and functions of the process
+    std::vector<AliasDecl> aliases;  // Aliases of the process declarative part
     std::vector<StmtP> body;
 };
 

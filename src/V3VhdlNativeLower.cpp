@@ -7009,6 +7009,10 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
     preScanIntConstants(process.decls);
     registerTypes(process.types, process.decls);
     registerSubprograms(process.subprograms, -1, true);
+    // An alias names a designator, which may be a signal the loop below declares
+    for (const AliasDecl& alias : process.aliases) {
+        if (!alias.hasSignature) registerAlias(alias);
+    }
     for (const Decl& decl : process.decls) {
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
