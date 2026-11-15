@@ -2055,12 +2055,20 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         return;
     }
     if (m_cur.kind == Token::ID) {
-        // `label : child port map (...)`: a component or entity instantiation
+        // `label : child [generic map] port map (...)`: a component or entity instantiation.
+        // The entity may be selected: `work.pkg.child`
         const auto saved = m_lexer.state();
-        const Token ahead = m_lexer.next();
+        const Token nameTok = m_cur;
+        advance();
+        while (isSym(".")) {
+            advance();
+            if (m_cur.kind != Token::ID) break;
+            advance();
+        }
+        const bool mapped = (isId("port") || isId("generic")) && m_cur.text != "process";
+        m_cur = nameTok;
         m_lexer.restore(saved);
-        if (ahead.kind == Token::ID && (ahead.text == "port" || ahead.text == "generic")
-            && m_cur.text != "process") {
+        if (mapped) {
             parseInstance(arch, flp, label, false);
             return;
         }
