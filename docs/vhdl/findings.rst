@@ -288,12 +288,13 @@ ____
      - the coverage rule (choices naming fewer elements than the target has, with
        no ``others``) is not modelled. This is poc-divider's last error.
   * - N67
-    - the file-I/O subset: a ``line`` variable of ``ieee.std_logic_textio`` in a debug
-      procedure (bit-serial), and poc's ``protected`` type definition
-    - both are for simulation and have no synthesizable meaning: an access type with
-      file operations, and a semaphore built for shared variables. A cycle model
-      cannot represent them, so the refusal is deliberate; a design that only uses
-      them for a debug procedure keeps everything else
+    - the simulation-only subset: a ``line`` variable of ``ieee.std_logic_textio``
+      in a debug procedure (bit-serial), poc's ``protected`` type definition, and
+      neorv32's trace file name ``"neorv32_trace" & natural'image(HART_ID) & ".log"``
+    - none of them has a synthesizable meaning: an access type with file operations,
+      a semaphore built for shared variables, and a string constant feeding a trace
+      logger. A cycle model cannot represent them, so the refusal is deliberate; a
+      design that only uses them in a simulation branch keeps everything else
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
     - no implementation of that vendor package is in the corpus and none is
