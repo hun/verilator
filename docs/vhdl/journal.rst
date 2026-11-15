@@ -294,6 +294,17 @@ exhausting the machine. poc's sortnet and stat cores parse again; the
 histogram's RTL count is 175, and the record constraints
 ``t(open)(Field(r), ...)`` of the AXI4 packages are the next family.
 
+The record constraints took the same idea one level down. A record with
+unconstrained elements is constrained where it is used, one range per member:
+``rec_t(f(3 downto 0), g(x'range))``. A member's range may be written out or
+named by an attribute of another object, which is how poc's ``AddressResize``
+gives a bus record a new address width, and the whole list may sit behind
+``open``: ``t_arr(open)(f(r))`` constrains the element and leaves the index to
+the signal. Telling that list from an index range needs the range inside the
+member's own parentheses -- ``t(v'range)(v(v'low)'range)`` has none, and stays
+two index ranges. poc's ``axi4stream.pkg`` lints clean on its own now, and the
+other AXI packages stop at names their sibling packages declare.
+
 _______
 Commits
 _______
@@ -347,3 +358,5 @@ _______
      - Support a VHDL attribute naming one index range
    * - ``177c45d``
      - Support a VHDL index constraint list and bound a folded body
+   * - ``e5e3fc6``
+     - Support a VHDL record constraint on a nested element

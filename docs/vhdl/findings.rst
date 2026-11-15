@@ -166,6 +166,17 @@ ______
       element level has to be concrete. A designator may prefix a range
       attribute, as in ``v(v'low)'range``
     - ``t_vhdl_array_attr_index``, ``t_vhdl_index_constraints``
+  * - N55
+    - a record constraint whose member takes its range from an attribute:
+      ``rec_t(f(3 downto 0), g(x'range))``, and the same list chained after
+      ``open``: ``t_arr(open)(f(r))``
+    - a member's range is either written out or named by an attribute, which
+      the lowering resolves like any other range attribute. A chained list is
+      told apart from an index range by the range inside the member's own
+      parentheses, so ``t(v'range)(v(v'low)'range)`` still parses as two index
+      ranges. A record with unconstrained elements is what makes the constraint
+      legal, so the ``open`` and record forms are what poc's AXI4 packages use
+    - ``t_vhdl_record_constraint``
 
 ____
 Open
@@ -229,8 +240,9 @@ The corpus is also swept whole, not only through its ported testcases: every
 non-testbench VHDL of the 20 cores is linted at once and the refusals are
 histogrammed by message. Over these sessions the RTL refusals went from 251 to
 175, measured after the index-range attributes landed: neo430 45 to 4, poc 51 to
-19, open-logic 7 to 2, potato 17 to 7, microwatt 3 to 2. The constraint work
-cleared one more poc file (``vectors.vhdl``, 18 by the same per-file count).
+19, open-logic 7 to 2, potato 17 to 7, microwatt 3 to 2. The constraint and
+record work cleared two more poc files (``vectors.vhdl``, ``axi4stream.pkg``,
+17 by the same per-file count).
 Physical literals in generic clauses were one parse-level family in that
 histogram: 15 poc refusals, all gone once a user-declared physical type is read.
 Index-range attributes and index constraint lists were the next: the sortnet and
