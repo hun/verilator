@@ -248,8 +248,41 @@ class Parser final {
         names.emplace_back(tok.text, tok.spelling);
     }
 
-    //! Record a `use lib.pkg.all` clause so the unit can see the package
+    //! Skip a context clause `context work.c;`, or a whole context declaration
+    //! `context c is ... end context;` whose items only matter where it is referenced
     void skipContextClause() {
+        // The helper also skips attribute, default and disconnect specifications, so the
+        // declaration form is only looked for where the clause really starts with `context`
+        if (isId("context")) {
+            const auto saved = m_lexer.state();
+            const Token contextTok = m_cur;
+            advance();  // `context`
+            if (m_cur.kind == Token::ID) {  // The name, or a selected `lib.name`
+                advance();
+                while (acceptSym(".")) {
+                    if (m_cur.kind != Token::ID) break;
+                    advance();
+                }
+            }
+            if (isId("is")) {  // A declaration: the clauses are its body
+                for (;;) {
+                    if (m_cur.kind == Token::END) {
+                        unsupported("context declaration that reaches the end of the file");
+                        return;
+                    }
+                    if (isId("end")) {
+                        advance();
+                        if (!expectId("context")) return;
+                        if (m_cur.kind == Token::ID) advance();  // Optional end name
+                        expectSym(";");
+                        return;
+                    }
+                    advance();
+                }
+            }
+            m_cur = contextTok;
+            m_lexer.restore(saved);
+        }
         int parens = 0;
         while (m_cur.kind != Token::END) {
             if (isSym("(")) ++parens;
