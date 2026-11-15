@@ -207,6 +207,13 @@ ______
       since an unconstrained ``std_logic_vector`` return has no element width to
       give; a conversion keeps selecting a bit
     - ``t_vhdl_func_result_index``
+  * - N59
+    - a signal assignment with a delay: ``q <= d after delay;``, as a gate-level netlist
+      writes it
+    - a delay of zero is a delta, which a cycle model already has, so it is parsed and
+      dropped; a longer delay inside a process needs a scheduled update and is
+      reported. A concurrent assignment keeps its delay, which lowers to a wait
+    - ``t_vhdl_after``, ``t_vhdl_delay_unsup``
 
 ____
 Open

@@ -338,6 +338,15 @@ element width to give, and taking one from it turned a wrong value into an
 error for `t_vhdl_slice`. A conversion still selects a bit, which is what it
 means.
 
+A sweep of the whole corpus with the native frontend, run per core rather than
+per file, leaves two refusals on the design alone. One is a top whose ports are
+unconstrained vectors, which cannot be sized without an instance. The other
+was a gate-level style assignment with a delay: `q <= d after delay`, where the
+delay is a generic. Zero of it is a delta, so the assignment behaves like an
+un-delayed one and the delay is dropped; anything longer inside a process
+needs a scheduled update and is reported. bit-serial then stops at a textio
+debug procedure, which is not synthesizable.
+
 _______
 Commits
 _______
@@ -401,3 +410,5 @@ _______
      - Accept a VHDL generate condition with a label
    * - ``13e5936``
      - Select an element of an array a VHDL function returns
+   * - ``9d69226``
+     - Accept a VHDL signal assignment with a zero delay
