@@ -6453,10 +6453,16 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
             selectorp->deleteTree();
             return nullptr;  // The arm that runs has no value on its path
         }
-        unsupportedError(stmt.flp, "case without 'others' in an inlined VHDL function body");
-        cleanup();
-        selectorp->deleteTree();
-        return nullptr;
+        // No `others` arm: a selector that matches nothing leaves the rest of the body to
+        // run with the values it had before the case (IEEE 1076-2008 10.9)
+        InlineEnv preEnv = cloneInlineEnv(activeEnv());
+        resultp = cont(preEnv);
+        deleteInlineEnv(preEnv);
+        if (!resultp) {
+            cleanup();
+            selectorp->deleteTree();
+            return nullptr;
+        }
     }
     for (std::size_t i = branches.size(); i-- > 0;) {
         Branch& branch = branches[i];
