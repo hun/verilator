@@ -566,6 +566,11 @@ class Lowering final {
     }
     //! Static integer value, also folding a call to a pure function
     bool staticIntFold(const ExprP& exprp, int64_t& value);
+    //! Whether a delay expression is a static zero, which a cycle model already has
+    bool staticZeroDelay(const ExprP& delayp) {
+        int64_t value = 0;
+        return delayp && staticIntFold(delayp, value) && value == 0;
+    }
     bool pushPureCall(const Expr& call, const Expr*& returnp) const;
     //! Whether every name a pure body's return expression holds is a literal, a formal or
     //! a type mark, so the value is closed over the call
@@ -4828,6 +4833,12 @@ static bool writesInoutPort(AstNodeExpr* const lhsp) {
 }
 
 AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
+    // A delay of zero is a delta, which a cycle model already has; a longer one needs a
+    // scheduled update, which a process body has no notion of
+    if (stmt.delay && !staticZeroDelay(stmt.delay)) {
+        unsupportedError(stmt.flp, "signal assignment with a delay");
+        return nullptr;
+    }
     if (stmt.target->kind == Expr::AGG_POSITIONAL || stmt.target->kind == Expr::AGG_NAMED) {
         return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable || m_initial,
                                     m_concurrentProc);
@@ -8599,7 +8610,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, bodyp});
         return;
     }
-    if (stmt.delay) {
+    if (stmt.delay && !staticZeroDelay(stmt.delay)) {
         // A concurrent delayed assignment repeats: it waits, then drives the target
         AstNode* const assignp = new AstAssign{stmt.flp, lhsp, rhsp};
         AstNode* const delayp = lowerDelay(*stmt.delay, stmt.flp);

@@ -2703,9 +2703,10 @@ StmtP Parser::parseSequentialStatement() {
     stmt->value = parseWaveformValue();
     if (!stmt->value) return nullptr;
     if (isId("when") && !parseConditionalTail(*stmt, true)) return nullptr;
-    if (isId("after")) {
-        unsupported("delayed signal assignment ('after')");
-        return nullptr;
+    if (isId("after")) {  // A zero delay is a delta; anything else needs a timed update
+        advance();
+        stmt->delay = parseExpr();
+        if (!stmt->delay) return nullptr;
     }
     expectSym(";");
     return stmt;
