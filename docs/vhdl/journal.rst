@@ -362,6 +362,18 @@ nothing and continued. The statement now keeps all three: note, warning and
 error report and carry on, and failure reports and finishes. The concurrent
 form is still ignored, as it was before.
 
+Five more RTL shapes fell, all found by linting whole cores instead of files.
+An entity may state its own assertions: f32c's DDR2 input writes its generic checks
+there, and the statement part is now parsed, emitted into the module, and shares the
+assertion body the sequential form uses. A case in a folded function body that
+covers every value of its selector no longer needs an `others` arm -- a selector
+that matches nothing leaves the values the body had before the case. A selected
+assignment's choice may be an expression of constants, as rpu's ALU writes it, and
+is folded before it is compared. A process may declare an alias, as microwatt's
+sim_jtag does. And an instantiation may name its entity with a selected name:
+bit-serial's UART instantiates `work.uart_pkg.uart_fifo`, and the lookahead that
+tells an instantiation from a procedure call only looked one token ahead.
+
 _______
 Commits
 _______
@@ -431,3 +443,13 @@ _______
      - Report an index of an array whose element has no width
    * - ``a0a00b7``
      - End a VHDL run on an assertion with severity failure
+   * - ``154fa50``
+     - Accept a VHDL entity statement part
+   * - ``948ea8a``
+     - Fold a VHDL case that leaves no value on some path
+   * - ``d23a826``
+     - Fold a VHDL choice that is an expression of constants
+   * - ``ccab6d4``
+     - Accept a VHDL alias in a process declarative part
+   * - ``bc37b5f``
+     - Accept a selected entity name in a VHDL instantiation

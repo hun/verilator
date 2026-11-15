@@ -166,6 +166,14 @@ ______
       element level has to be concrete. A designator may prefix a range
       attribute, as in ``v(v'low)'range``
     - ``t_vhdl_array_attr_index``, ``t_vhdl_index_constraints``
+  * - N54
+    - one element of an array a function returns: ``f(x)(0)``
+    - a call's declared return type now types the designator, so the element comes
+      from the array and not from the returned value's flat data type. The
+      resolution is only made for a type mark that names a declared array type,
+      since an unconstrained ``std_logic_vector`` return has no element width to
+      give; a conversion keeps selecting a bit
+    - ``t_vhdl_func_result_index``
   * - N55
     - a record constraint whose member takes its range from an attribute:
       ``rec_t(f(3 downto 0), g(x'range))``, and the same list chained after
@@ -199,14 +207,6 @@ ______
       after it as the condition, which is what poc's ocrom ROMs rely on, so the
       label is dropped and the rest parsed as the condition
     - ``t_vhdl_labelled_cond``
-  * - N54
-    - one element of an array a function returns: ``f(x)(0)``
-    - a call's declared return type now types the designator, so the element comes
-      from the array and not from the returned value's flat data type. The
-      resolution is only made for a type mark that names a declared array type,
-      since an unconstrained ``std_logic_vector`` return has no element width to
-      give; a conversion keeps selecting a bit
-    - ``t_vhdl_func_result_index``
   * - N59
     - a signal assignment with a delay: ``q <= d after delay;``, as a gate-level netlist
       writes it
@@ -220,7 +220,7 @@ ______
       zero width and faulted; the index is reported instead. A function returning a
       plain ``std_logic_vector`` still selects one bit, which is what its type says
     - ``t_vhdl_elem_unsup``
-  * - N62
+  * - N61
     - a sequential ``assert`` never ended the run: the parser dropped both the
       message and the severity, and the statement reached the model as a report
     - the statement keeps its condition, message and severity. Severity note,
@@ -228,13 +228,40 @@ ______
       ends the run (IEEE 1076-2008 8.3), which is what a testbench needs to
       stop on a failed check. A concurrent assertion is still ignored, as before
     - ``t_vhdl_assert_severity``, ``t_vhdl_assert_finish``
-  * - N61
-    - the file-I/O subset: a ``line`` variable of ``ieee.std_logic_textio`` in a debug
-      procedure (bit-serial), and poc's ``protected`` type definition
-    - both are for simulation and have no synthesizable meaning: an access type with
-      file operations, and a semaphore built for shared variables. A cycle model
-      cannot represent them, so the refusal is deliberate; a design that only uses
-      them in a debug procedure keeps everything else
+  * - N62
+    - an entity with a statement part: ``entity e is ... begin assert ...; end``,
+      as f32c's DDR2 input writes its generic checks
+    - the statement part is parsed into the entity and emitted into the module, and
+      a concurrent assertion reports on every evaluation and ends the run on
+      ``severity failure``, sharing the body the sequential form uses
+    - ``t_vhdl_entity_assert``
+  * - N63
+    - a case in a folded function body that covers every value of a selector with
+      no ``others`` arm, as potato's context-to-vector conversion does
+    - the fold evaluated each arm and then refused, because the chain had no default.
+      A selector that matches nothing now leaves the values the body had before the
+      case (IEEE 1076-2008 10.9); a case that cannot return on that path reports
+      that
+    - ``t_vhdl_case_cover``, ``t_vhdl_fn_case_bad``
+  * - N64
+    - a selected assignment whose choice is an expression of constants:
+      ``when F7_OP_ADD & F3_OP_ADD =>``, as rpu's ALU writes it
+    - the choice is folded to a value before it is compared, instead of having to be a
+      literal
+    - ``t_vhdl_choice_expr``
+  * - N65
+    - an alias in a process declarative part: ``alias j : glob_jtag_t is glob_jtag;``,
+      as microwatt's sim_jtag writes it
+    - the alias is parsed and registered with the process's other declarative items, so
+      it denotes the same designator as an architecture-level alias
+    - ``t_vhdl_proc_alias``
+  * - N66
+    - an instantiation whose entity is a selected name: ``u : work.pkg.child generic
+      map (...) port map (...)``, as bit-serial's UART instantiates its FIFO
+    - the instantiation lookahead only looked one token ahead, so a qualified entity
+      name reached the parser as a procedure call; the lookahead now walks the
+      selected name
+    - ``t_vhdl_selected_inst``
 
 ____
 Open
@@ -260,7 +287,7 @@ ____
      - an aggregate that does not cover every element of its target
      - the coverage rule (choices naming fewer elements than the target has, with
        no ``others``) is not modelled. This is poc-divider's last error.
-  * - N61
+  * - N67
     - the file-I/O subset: a ``line`` variable of ``ieee.std_logic_textio`` in a debug
       procedure (bit-serial), and poc's ``protected`` type definition
     - both are for simulation and have no synthesizable meaning: an access type with
