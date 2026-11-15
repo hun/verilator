@@ -4707,11 +4707,16 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
         const VType choiceType = typeOfDType(dtp);
         AstNodeExpr* const exprp = lowerExpr(*choicep, &choiceType);
         if (!exprp) return false;
-        AstConst* const constp = VN_CAST(exprp, Const);
+        AstConst* constp = VN_CAST(exprp, Const);
         if (!constp) {
-            unsupportedError(choicep->flp, "non-static selected-assignment choice");
+            // A choice may be an expression of constants: `f(6 downto 4) & f(2 downto 0)`
+            AstConst* const foldedp = foldStatic(exprp);
             exprp->deleteTree();
-            return false;
+            if (!foldedp) {
+                unsupportedError(choicep->flp, "non-static selected-assignment choice");
+                return false;
+            }
+            constp = foldedp;
         }
         if (constp->dtypep()->width() != dtp->width()) constp->dtypep(dtp);
         cops.push_back(constp);
