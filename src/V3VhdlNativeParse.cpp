@@ -347,6 +347,8 @@ class Parser final {
     ExprP parseDesignator();
     bool parseRange(TypeSpec& type);
     void parseTypeSpec(TypeSpec& type);
+    //! The `name(range)` list of a record constraint
+    bool parseMemberConstraints(TypeSpec& type);
     void parsePortClause(EntityUnit& entity);
     void parseEntity(FileLine* flp);
     void parseNameList(std::vector<std::pair<std::string, std::string>>& names);
@@ -822,6 +824,46 @@ bool Parser::parseRange(TypeSpec& type) {
     return true;
 }
 
+//! The `name(range)` list of a record constraint, e.g. `rec_t(f(3 downto 0), g(x'range))`.
+//! A member's range is either written out or named by a range attribute.
+bool Parser::parseMemberConstraints(TypeSpec& type) {
+    if (!type.flp) type.flp = m_cur.flp;
+    for (;;) {
+        if (m_failed) return false;
+        TypeSpec::MemberConstraint member;
+        Token memberTok;
+        if (!takeId(memberTok)) return false;
+        if (!type.flp) type.flp = memberTok.flp;
+        member.name = memberTok.text;
+        expectSym("(");
+        member.lo = parseExpr();
+        if (!member.lo) return false;
+        if (isId("to")) {
+            member.ascending = true;
+            advance();
+        } else if (isId("downto")) {
+            advance();
+        } else if (member.lo->kind == Expr::ATTR) {
+            // The member takes the range of another object, `rec_t(f(sig'range))`
+            member.range = std::move(member.lo);
+            member.lo = nullptr;
+            expectSym(")");
+            type.memberConstraints.push_back(std::move(member));
+            if (acceptSym(",")) continue;
+            return true;
+        } else {
+            error("expected 'to' or 'downto' in a range, got '" + m_cur.text + "'");
+            return false;
+        }
+        member.hi = parseExpr();
+        if (!member.hi) return false;
+        expectSym(")");
+        type.memberConstraints.push_back(std::move(member));
+        if (acceptSym(",")) continue;
+        return true;
+    }
+}
+
 void Parser::parseTypeSpec(TypeSpec& type) {
     Token markTok;
     if (!takeId(markTok)) return;
@@ -892,32 +934,7 @@ void Parser::parseTypeSpec(TypeSpec& type) {
                 }
                 m_lexer.restore(saved);
                 if (!sawTopRange) {
-                    for (;;) {
-                        if (m_failed) return;
-                        TypeSpec::MemberConstraint member;
-                        Token memberTok;
-                        if (!takeId(memberTok)) return;
-                        member.name = memberTok.text;
-                        expectSym("(");
-                        member.lo = parseExpr();
-                        if (!member.lo) return;
-                        if (isId("to")) {
-                            member.ascending = true;
-                            advance();
-                        } else if (isId("downto")) {
-                            advance();
-                        } else {
-                            error("expected 'to' or 'downto' in a range, got '" + m_cur.text
-                                  + "'");
-                            return;
-                        }
-                        member.hi = parseExpr();
-                        if (!member.hi) return;
-                        expectSym(")");
-                        type.memberConstraints.push_back(std::move(member));
-                        if (acceptSym(",")) continue;
-                        break;
-                    }
+                    if (!parseMemberConstraints(type)) return;
                     expectSym(")");
                     return;
                 }
@@ -934,13 +951,15 @@ void Parser::parseTypeSpec(TypeSpec& type) {
         }
     }
     while (isSym("(")) {  // A further index range of a nested `t(r1)(r2)` subtype
-        // Only treat it as an index range if it holds one range: a `name(range)` list here is
-        // a record/member constraint, not an index range. An attribute at this level, as in
+        // A `name(range)` list is a record constraint on this level, not an index range, and
+        // it may hold a single member: `t(open)(f(r))`. An attribute at this level, as in
         // `t(v'range)(v(v'low)'range)`, marks the range form just as 'to'/'downto' does.
         const auto saved = m_lexer.state();
         bool sawTopRange = false;
         bool sawTopAttribute = false;
         bool sawTopComma = false;
+        bool sawMemberRange = false;  // A range inside the first member's own parentheses
+        bool tick = false;  // The previous token was an apostrophe at that depth
         for (int depth = 1;;) {  // m_cur is the '(', so the scan starts inside it
             const Token t = m_lexer.next();
             if (t.kind == Token::END) break;
@@ -955,10 +974,25 @@ void Parser::parseTypeSpec(TypeSpec& type) {
                 sawTopAttribute = true;
             } else if (depth == 1 && t.kind == Token::SYM && t.text == ",") {
                 sawTopComma = true;
+            } else if (depth == 2 && t.kind == Token::ID
+                       && (t.text == "to" || t.text == "downto")) {
+                sawMemberRange = true;
+            } else if (depth == 2 && tick && t.kind == Token::ID
+                       && (t.text == "range" || t.text == "reverse_range")) {
+                sawMemberRange = true;
             }
+            tick = depth == 2 && t.kind == Token::SYM && t.text == "'";
         }
         m_lexer.restore(saved);
-        if (sawTopComma || (!sawTopRange && !sawTopAttribute)) {
+        if (sawTopComma || sawMemberRange) {  // A record constraint on this level
+            advance();  // The '('
+            type.indexConstraints.emplace_back();
+            type.indexConstraints.back().mark = type.mark;  // For the message if a name is wrong
+            if (!parseMemberConstraints(type.indexConstraints.back())) return;
+            expectSym(")");
+            continue;
+        }
+        if (!sawTopRange && !sawTopAttribute) {
             unsupported("multi-dimensional array type");
             return;
         }

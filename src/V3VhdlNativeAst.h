@@ -234,6 +234,7 @@ struct TypeSpec final {
         std::string name;  // Folded member name
         bool ascending = false;  // "to", else "downto"
         ExprP lo, hi;  // Bounds in written order, e.g. 3 downto 0 -> lo=3, hi=0
+        ExprP range;  // A range attribute instead: rec_t(x(sig'range)), IEEE 1076-2008 6.3
     };
     std::vector<MemberConstraint> memberConstraints;
     // A nested-array subtype indication `t(r1)(r2, ...)` beyond the first index range

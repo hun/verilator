@@ -1848,25 +1848,30 @@ static VType cloneArrayChain(const VType& type) {
 bool Lowering::applyIndexConstraints(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     out = cloneArrayChain(out);  // The instance owns its levels
+    // Descend one array level per index constraint; the innermost element may be a vector
     std::vector<const TypeSpec*> constraints;
-    constraints.push_back(&spec);
-    for (const TypeSpec& extra : spec.indexConstraints) constraints.push_back(&extra);
-    // Descend one array level per constraint; the innermost element may be a vector
     std::vector<VType*> levels;
     VType* levelp = &out;
-    for (size_t k = 0; k < constraints.size(); ++k) {
-        if (k > 0) {
-            if (levelp->kind != VType::ARRAY || !levelp->elemp) {
-                unsupportedError(flp, "too many index constraints for the array type");
-                return false;
-            }
-            levelp = levelp->elemp.get();
+    constraints.push_back(&spec);
+    levels.push_back(levelp);
+    for (const TypeSpec& extra : spec.indexConstraints) {
+        // A record constraint applies to the element this level holds, like a range does
+        if (levelp->kind != VType::ARRAY || !levelp->elemp) {
+            unsupportedError(flp, "too many index constraints for the array type");
+            return false;
         }
+        levelp = levelp->elemp.get();
+        constraints.push_back(&extra);
         levels.push_back(levelp);
     }
     // Apply the innermost constraint first, so each outer level sees its element's width
     for (size_t k = constraints.size(); k-- > 0;) {
         VType& level = *levels[k];
+        if (!constraints[k]->memberConstraints.empty()) {
+            // A record constraint on this level: `t(open)(f(r), g(r))`
+            if (!applyMemberConstraints(*constraints[k], level)) return false;
+            continue;
+        }
         if (level.kind == VType::ARRAY && level.elemp) level.elemWidth = level.elemp->width;
         if (!level.isVector()) {
             unsupportedError(flp, "index constraint on a non-array subtype element");
@@ -1993,11 +1998,22 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
         }
         int64_t lo = 0;
         int64_t hi = 0;
-        if (!staticIntFold(member.lo, lo) || !staticIntFold(member.hi, hi)) {
+        bool ascending = member.ascending;
+        if (member.range) {
+            // The member takes its range from another object: `rec_t(f(sig'range))`
+            TypeSpec range;
+            range.flp = member.range->flp;
+            range.left = cloneExpr(*member.range);
+            range.hasRange = true;
+            if (!constraintBounds(range, lo, hi, ascending)) {
+                unsupportedError(flp, "non-static record element constraint");
+                return false;
+            }
+        } else if (!staticIntFold(member.lo, lo) || !staticIntFold(member.hi, hi)) {
             unsupportedError(flp, "non-static record element constraint");
             return false;
         }
-        setRecordField(flp, *fieldp, static_cast<int>(lo), static_cast<int>(hi), member.ascending);
+        setRecordField(flp, *fieldp, static_cast<int>(lo), static_cast<int>(hi), ascending);
     }
     finalizeRecordFields(flp, out);
     return true;
