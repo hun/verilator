@@ -3249,7 +3249,25 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         if (!basep) return nullptr;
         // Prefer the declared type: it keeps the element width of an array type
         VType baseType;
-        if (!typeOfDesignator(*expr.a, baseType)) baseType = typeOfDType(basep->dtypep());
+        if (!typeOfDesignator(*expr.a, baseType)) {
+            // An array a function returns is typed by its declared return type, which the
+            // returned value's own data type no longer carries: `f(x)(0)` selects an
+            // element, not a bit. A call with arguments reaches here as an index whose
+            // prefix is the name
+            const bool callPrefix
+                = expr.a->kind == Expr::CALL
+                  || (expr.a->kind == Expr::INDEX && expr.a->a && expr.a->a->kind == Expr::NAME
+                      && m_subprograms.count(expr.a->a->text));
+            const SubprogramDecl* const subp
+                = callPrefix ? resolveCall(*expr.a, true, nullptr) : nullptr;
+            const auto typeIt = subp ? m_types.find(subp->returnType.mark) : m_types.end();
+            if (subp && typeIt != m_types.end() && typeIt->second.kind == VType::ARRAY
+                && !subp->returnType.hasRange && subp->returnType.constraintMark.empty()) {
+                baseType = typeIt->second;  // The element width survives only in the type
+            } else {
+                baseType = typeOfDType(basep->dtypep());
+            }
+        }
         return lowerSel(expr, basep, baseType, write);
     }
     if (expr.kind == Expr::SELECTED) {
