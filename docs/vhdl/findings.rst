@@ -157,6 +157,15 @@ ______
       only the expected type could tell them apart
     - ``t_vhdl_physical_units``, ``t_vhdl_physical_units_bad``,
       ``t_vhdl_physical_units_unsup``
+  * - N53
+    - one index of a multi-dimensional object: ``T'LEFT(2)``, ``T'RANGE(1)``, a
+      constraint list ``t(v'range, n - 1 downto 0)`` and ``t(open)(1 downto 0)``
+    - the level index is read once, in a helper every consumer shares, so a
+      constraint, a slice, a subtype and a loop range all name the same range.
+      ``open`` leaves an index to the object that names the subtype, so only the
+      element level has to be concrete. A designator may prefix a range
+      attribute, as in ``v(v'low)'range``
+    - ``t_vhdl_array_attr_index``, ``t_vhdl_index_constraints``
 
 ____
 Open
@@ -191,6 +200,13 @@ ____
     - a concurrent assignment to an ``inout`` port
     - modelling two drivers needs bus arbitration, which the frontend has no notion
       of. neo430's TWI, patmos' I2C and bit-serial each run into it (8 errors).
+  * - N54
+    - one element of an array a function returns: ``f(x)(0)``
+    - a call's declared return type is not visible to a designator, so the
+      element is taken from the returned value's data type and one bit is
+      selected instead of one element. Silent, not refused: poc's sortnet
+      indexes a call result. ``t_vhdl_array_attr_index`` stops one level short of
+      it, indexing the local inside the folded body instead.
 
 ___________
 Verification
@@ -211,15 +227,21 @@ clock edge.
 
 The corpus is also swept whole, not only through its ported testcases: every
 non-testbench VHDL of the 20 cores is linted at once and the refusals are
-histogrammed by message. Over this session the RTL refusals went from 251 to 182:
-neo430 45 to 4, poc 51 to 20, open-logic 7 to 2, potato 17 to 13, microwatt 3 to
-2. Physical literals in generic clauses were the last parse-level family in that
+histogrammed by message. Over these sessions the RTL refusals went from 251 to
+175, measured after the index-range attributes landed: neo430 45 to 4, poc 51 to
+19, open-logic 7 to 2, potato 17 to 7, microwatt 3 to 2. The constraint work
+cleared one more poc file (``vectors.vhdl``, 18 by the same per-file count).
+Physical literals in generic clauses were one parse-level family in that
 histogram: 15 poc refusals, all gone once a user-declared physical type is read.
-What remains of patmos' 99 is its argo wrappers, whose ``work.ocp`` and
-``work.argo_types`` packages are not in the repository at all, plus the
-``std_logic_misc`` gap above (N51). The sweep also names the constructs still
-refused in RTL that no core in the corpus happens to combine with a testbench,
-which is where the next finding comes from.
+Index-range attributes and index constraint lists were the next: the sortnet and
+stat cores now parse, and poc's remaining refusals are the record constraints
+``t(open)(Field(r), ...)`` of the AXI4 packages, the ``protected`` type, a
+``context`` declaration and the packages' own unresolved names. What remains of
+patmos' 99 is its argo wrappers, whose ``work.ocp`` and ``work.argo_types``
+packages are not in the repository at all, plus the ``std_logic_misc`` gap above
+(N51). The sweep also names the constructs still refused in RTL that no core in
+the corpus happens to combine with a testbench, which is where the next finding
+comes from.
 
 The ported testcases were re-run after each change: 11 run scenarios and 4 cycle
 traces (395, 612, 615 and 5621 cycles) pass against the native frontend.

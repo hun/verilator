@@ -265,6 +265,35 @@ expressions of the new test, from ``2 MHz + 500 kHz`` through a 1024-step
 ``MEMORY`` type to a fractional ``1.5 kHz``. poc's RTL refusals went from 39 to
 20, and the sweep's whole RTL count from 201 to 182.
 
+_________________
+Index ranges by level
+_________________
+
+``T'LEFT(2)`` names the second index range of a matrix, and the corpus writes
+it everywhere: as a subtype's bounds, as a slice, as a loop range and inside a
+constraint. The bracketed index was read at each of those sites before, and
+only the first level was ever used, so a two-dimensional object quietly
+answered with its outer range. One helper now resolves the level and every
+consumer calls it, which is what makes ``slm'range(1)`` and ``slm'high(2)``
+agree.
+
+The constraint side needed three shapes. A constraint list
+``t(v'range, n - 1 downto 0)`` is the same nested array as the chained
+``t(v'range)(n - 1 downto 0)``, so both feed one list of levels. ``open``
+leaves an index to the object that names the subtype: ``subtype S is T(open)(1
+downto 0)`` constrains only the element, and the outer range arrives with the
+signal. A designator may prefix a range attribute too, as in
+``v(v'low)'range``.
+
+One fold would not terminate. A function body that writes elements binds its
+locals to values, so each write rebuilds the whole value, and a loop over a
+65536-entry memory multiplied that into 90 GB before the frontend answered. The
+fold is now bounded by what it copies -- a wide value costs its width per write
+and the rebuilt tree grows with every write -- and reports the body instead of
+exhausting the machine. poc's sortnet and stat cores parse again; the
+histogram's RTL count is 175, and the record constraints
+``t(open)(Field(r), ...)`` of the AXI4 packages are the next family.
+
 _______
 Commits
 _______
@@ -314,3 +343,7 @@ _______
      - Skip a VHDL comment pragma translate_off region
    * - ``bf07aa7``
      - Support a VHDL physical type with user-declared units
+   * - ``08da791``
+     - Support a VHDL attribute naming one index range
+   * - ``177c45d``
+     - Support a VHDL index constraint list and bound a folded body
