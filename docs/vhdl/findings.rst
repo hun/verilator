@@ -220,6 +220,13 @@ ______
       zero width and faulted; the index is reported instead. A function returning a
       plain ``std_logic_vector`` still selects one bit, which is what its type says
     - ``t_vhdl_elem_unsup``
+  * - N61
+    - the file-I/O subset: a ``line`` variable of ``ieee.std_logic_textio`` in a debug
+      procedure (bit-serial), and poc's ``protected`` type definition
+    - both are for simulation and have no synthesizable meaning: an access type with
+      file operations, and a semaphore built for shared variables. A cycle model
+      cannot represent them, so the refusal is deliberate; a design that only uses
+      them in a debug procedure keeps everything else
 
 ____
 Open
@@ -245,6 +252,13 @@ ____
      - an aggregate that does not cover every element of its target
      - the coverage rule (choices naming fewer elements than the target has, with
        no ``others``) is not modelled. This is poc-divider's last error.
+  * - N61
+    - the file-I/O subset: a ``line`` variable of ``ieee.std_logic_textio`` in a debug
+      procedure (bit-serial), and poc's ``protected`` type definition
+    - both are for simulation and have no synthesizable meaning: an access type with
+      file operations, and a semaphore built for shared variables. A cycle model
+      cannot represent them, so the refusal is deliberate; a design that only uses
+      them for a debug procedure keeps everything else
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
     - no implementation of that vendor package is in the corpus and none is
