@@ -330,6 +330,14 @@ The frontend follows them and drops the label. The ROMs then stop at a generic
 with no default value and no instance to bind it, which is a sweep artifact
 rather than a frontend gap.
 
+Indexing an array a function returns was reading one bit of the returned value,
+because a designator could not type a call: the value's own data type is a flat
+vector. The declared return type now types it, but only where the mark names a
+declared array type -- an unconstrained `std_logic_vector` return has no
+element width to give, and taking one from it turned a wrong value into an
+error for `t_vhdl_slice`. A conversion still selects a bit, which is what it
+means.
+
 _______
 Commits
 _______
@@ -391,3 +399,5 @@ _______
      - Skip a VHDL context declaration
    * - ``12d75c8``
      - Accept a VHDL generate condition with a label
+   * - ``13e5936``
+     - Select an element of an array a VHDL function returns

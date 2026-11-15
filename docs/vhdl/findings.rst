@@ -199,6 +199,14 @@ ______
       after it as the condition, which is what poc's ocrom ROMs rely on, so the
       label is dropped and the rest parsed as the condition
     - ``t_vhdl_labelled_cond``
+  * - N54
+    - one element of an array a function returns: ``f(x)(0)``
+    - a call's declared return type now types the designator, so the element comes
+      from the array and not from the returned value's flat data type. The
+      resolution is only made for a type mark that names a declared array type,
+      since an unconstrained ``std_logic_vector`` return has no element width to
+      give; a conversion keeps selecting a bit
+    - ``t_vhdl_func_result_index``
 
 ____
 Open
@@ -233,13 +241,6 @@ ____
     - a concurrent assignment to an ``inout`` port
     - modelling two drivers needs bus arbitration, which the frontend has no notion
       of. neo430's TWI, patmos' I2C and bit-serial each run into it (8 errors).
-  * - N54
-    - one element of an array a function returns: ``f(x)(0)``
-    - a call's declared return type is not visible to a designator, so the
-      element is taken from the returned value's data type and one bit is
-      selected instead of one element. Silent, not refused: poc's sortnet
-      indexes a call result. ``t_vhdl_array_attr_index`` stops one level short of
-      it, indexing the local inside the folded body instead.
 
 ___________
 Verification
