@@ -147,6 +147,16 @@ ______
     - the lexer drops a region's tokens; the pragmas nest, and any tool prefix
       counts as long as the pragma word ends the comment
     - ``t_vhdl_translate_off``
+  * - N50
+    - a user-defined physical type and its units: ``type FREQ is range ... units
+      Hz; kHz = 1000 Hz; end units;``, read as ``1 MHz``
+    - the parser keeps an abstract literal and the unit name beside it; the
+      lowering resolves that name to a multiple of its type's step unit through a
+      table built over the whole design, since a literal names its unit and not
+      its type. Two types giving one unit name different multiples stay refused:
+      only the expected type could tell them apart
+    - ``t_vhdl_physical_units``, ``t_vhdl_physical_units_bad``,
+      ``t_vhdl_physical_units_unsup``
 
 ____
 Open
@@ -172,13 +182,6 @@ ____
      - an aggregate that does not cover every element of its target
      - the coverage rule (choices naming fewer elements than the target has, with
        no ``others``) is not modelled. This is poc-divider's last error.
-  * - N50
-    - a user-defined physical type: ``type FREQ is range ... units Hz; kHz = 1000
-      Hz; end units;``
-    - neither a user unit map nor the scaling of ``<numeric> <unit>`` for one is
-      modelled, so 12 poc files stop at a generic default written as a physical
-      literal (``poc/src/common/physical.vhdl``, ``poc/src/io/io_*.vhdl``). The
-      predefined ``time`` path does not extend to them: its units are a fixed table.
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
     - no implementation of that vendor package is in the corpus and none is
@@ -208,9 +211,11 @@ clock edge.
 
 The corpus is also swept whole, not only through its ported testcases: every
 non-testbench VHDL of the 20 cores is linted at once and the refusals are
-histogrammed by message. Over this session the RTL refusals went from 251 to 201:
-neo430 45 to 4, poc 51 to 39, open-logic 7 to 2, potato 17 to 13, microwatt 3 to
-2. What remains of patmos' 99 is its argo wrappers, whose ``work.ocp`` and
+histogrammed by message. Over this session the RTL refusals went from 251 to 182:
+neo430 45 to 4, poc 51 to 20, open-logic 7 to 2, potato 17 to 13, microwatt 3 to
+2. Physical literals in generic clauses were the last parse-level family in that
+histogram: 15 poc refusals, all gone once a user-declared physical type is read.
+What remains of patmos' 99 is its argo wrappers, whose ``work.ocp`` and
 ``work.argo_types`` packages are not in the repository at all, plus the
 ``std_logic_misc`` gap above (N51). The sweep also names the constructs still
 refused in RTL that no core in the corpus happens to combine with a testbench,

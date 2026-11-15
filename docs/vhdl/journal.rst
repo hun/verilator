@@ -233,6 +233,38 @@ its argo wrappers import ``work.ocp`` and ``work.argo_types``, neither of which 
 in the repository, and its fpu reads ``IEEE.std_logic_misc``. Both are recorded as
 open (N51) rather than chased.
 
+_______________________
+Units the designer adds
+_______________________
+
+poc describes its rates as physical types: ``type FREQ is range 0 to integer'high
+units Hz; kHz = 1000 Hz; MHz = 1000 kHz; end units;``, and then writes
+``generic (CLOCK_FREQ : FREQ := 100 MHz)``. Neither the type nor that literal was
+read, so 12 poc files stopped before their first line of code and a further 15
+refusals were the parser losing the generic clause at ``MHz``.
+
+A physical literal names its unit and not its type, which is what decides where
+the value is computed: the parser cannot scale ``1`` by ``MHz``, only the type
+being assigned to says whether ``1`` means one step of it or a million of them.
+So the parser keeps the abstract literal and the unit name beside it, and the
+scaling happens at lowering against a table of every unit name and the multiple
+of its type's step unit. That table is filled from the library before any
+package is elaborated: a generic default lowers before the declarations that
+may own the type it names. Which identifier is a unit is the grammar's own rule:
+an abstract literal is followed by an identifier nowhere else, so the 115
+reserved words (IEEE 1076-2008 15.10) are excluded and everything else names a
+unit. Looking at the token after the identifier was the first attempt and still
+misread ``0 sec then``; the reserved-word test does not.
+
+One case stays refused. Two physical types may share a unit name with different
+multiples while neither is visible to the other, and GHDL and nvc both answer
+``1 k`` there -- 1000, from the expected type -- while a frontend that does not
+type a literal has no answer. It reports the gap rather than picking a factor
+silently. The rest is confirmed value for value: GHDL and nvc agree on all 11
+expressions of the new test, from ``2 MHz + 500 kHz`` through a 1024-step
+``MEMORY`` type to a fractional ``1.5 kHz``. poc's RTL refusals went from 39 to
+20, and the sweep's whole RTL count from 201 to 182.
+
 _______
 Commits
 _______
@@ -280,3 +312,5 @@ _______
      - Model the length a VHDL bit-string literal states
    * - ``39435c7``
      - Skip a VHDL comment pragma translate_off region
+   * - ``bf07aa7``
+     - Support a VHDL physical type with user-declared units
