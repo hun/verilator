@@ -313,6 +313,18 @@ ______
       simple name now resolves from the enclosing unit's string generics, the
       same way a generic type that is passed on does
     - ``t_vhdl_str_pass``
+  * - N76
+    - ``std.textio`` used to build a memory image at elaboration: microwatt's
+      ``fpga/main_bram.vhdl`` reads ``RAM_INIT_FILE`` with ``readline``,
+      ``hread`` and ``endfile`` into an ``impure function ... return ram_t``
+    - a file has no runtime meaning, so the file declaration is parsed rather than
+      skipped and the body is evaluated while the design is elaborated: an
+      interpreter in the lowering runs its ``for``/``exit when``/element
+      assignment/``return`` against the file and the result becomes a constant.
+      ``hread`` fills as many hex digits as the target is wide and leaves the rest
+      of the line unread, which is what GHDL and nvc both do. Nothing reaches the
+      middle end or the runtime
+    - ``t_vhdl_file_init``
 
 ____
 Open
@@ -339,8 +351,9 @@ ____
      - the coverage rule (choices naming fewer elements than the target has, with
        no ``others``) is not modelled. This is poc-divider's last error.
   * - N67
-    - the simulation-only subset: a ``line`` variable of ``ieee.std_logic_textio``
-      in a debug procedure (bit-serial), poc's ``protected`` type definition, and
+    - the simulation-only subset: a ``line`` variable *written* by a debug
+      procedure through ``ieee.std_logic_textio`` (bit-serial; reading a file into
+      an image is N76), poc's ``protected`` type definition, and
       neorv32's trace file name ``"neorv32_trace" & natural'image(HART_ID) & ".log"``
     - none of them has a synthesizable meaning: an access type with file operations,
       a semaphore built for shared variables, and a string constant feeding a trace
@@ -364,14 +377,17 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 175 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 176 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
 The corpus lints and runs clean: 14 designs, no lint errors, and every run passes
 including the harnesses added for the rpu ALU, the rpu register set, the t65 CPU
-and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``. ``hdl-modules-ring-buffer`` is in the corpus's
-``blocked`` target, because ``math_pkg`` needs a real value at compile time
+and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``. The last of those
+runs ``fpga/main_bram.vhdl`` unmodified, its ``RAM_INIT_FILE`` read at
+elaboration from a checked-in image. ``hdl-modules-ring-buffer`` is in the
+corpus's ``blocked`` target, because ``math_pkg`` needs a real value at compile
+time
 (N69).
 
 Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)

@@ -465,3 +465,5 @@ _______
      - Fold a constant expression that has real operands
    * - ``e13eccd``
      - Pass a VHDL string generic on to a sub-instance
+   * - ``fc94582``
+     - Read a std.textio file into a constant at elaboration
