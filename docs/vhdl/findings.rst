@@ -345,6 +345,39 @@ ______
       constant is now completed by a further pass over its own unit, after that
       unit's other constants, and a type naming it waits for that pass
     - ``t_vhdl_pkg_fn_const``
+  * - N79
+    - a discrete subtype where a range is expected:
+      ``type predec_array is array(index_t) of predec_t;`` and
+      ``for i in index_t loop``, as microwatt's ``predecode`` writes them
+    - an index constraint and a loop range accepted only a literal range, an
+      attribute or (for an array index) an enumeration mark. A subtype whose
+      kind is integer now supplies its own bounds, ascending when low <= high
+    - ``t_vhdl_subtype_range``
+  * - N80
+    - ``std_match(iword, "01100000000000000000000000000000")`` from
+      ``ieee.std_logic_1164``, as microwatt's ``predecode`` compares opcodes
+    - not modelled at all, so the call was an unknown identifier. It lowers to
+      an equality under a mask of the bits that are not ``-`` wildcards, which
+      the lexer already keeps in a bit-string literal for exactly this
+    - ``t_vhdl_subtype_range``
+  * - N81
+    - a slice whose bounds are variables holding static values:
+      ``lbit := i * BYTEWID; ... ram(widx)(mbit downto lbit) <= ...``, as
+      microwatt's ``cache_ram`` writes the byte lanes
+    - the bounds were folded without the tracked variable values, and entering
+      an ``if`` or ``case`` discarded them outright, so a bound assigned before
+      the statement was unknown inside its branches. A branch now starts from the
+      values that held before the statement, and a slice bound substitutes them
+      before it folds
+    - ``t_vhdl_subtype_range``
+  * - N82
+    - a process variable whose name is also an enumeration literal of a used
+      package: ``variable ra : real_addr_t;`` in microwatt's ``icache``, where
+      ``ra`` is also a literal somewhere in the packages it uses
+    - a local variable was registered without reserving its name, so the lookup
+      found the imported enumeration literal first and reported ``cannot assign
+      to constant 'ra'``. A variable now hides a package member as a signal does
+    - ``t_vhdl_var_shadow``
 
 ____
 Open
@@ -397,7 +430,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 178 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 180 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
