@@ -6768,10 +6768,6 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context)
     if (!subp) return nullptr;  // resolveCall reported why
     // A subprogram that reads a file builds its result at elaboration
     if (readsFile(*subp)) return evalFileInit(*subp, call);
-    if (!m_inlineBodies.insert(subp).second) {
-        unsupportedError(call.flp, "recursive call of function '" + subp->spelling + "'");
-        return nullptr;
-    }
     m_funcWriteCost = 0;  // This call's own fold budget
     InlineEnv env;
     AstNode* unusedPrologsp = nullptr;  // A function has no out mode formal
@@ -6779,8 +6775,14 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context)
     ScopeSave base;
     captureBaseFor(*refp, base, env);
     if (!bindSubprogramFormals(call, *subp, env, unusedPrologsp, false, false)) {
-        m_inlineBodies.erase(subp);
         deleteInlineEnv(env);
+        return nullptr;
+    }
+    // An actual may call this same subprogram again: nesting is not recursion, so the body
+    // is marked only once its actuals are bound
+    if (!m_inlineBodies.insert(subp).second) {
+        deleteInlineEnv(env);
+        unsupportedError(call.flp, "recursive call of function '" + subp->spelling + "'");
         return nullptr;
     }
     const ScopeSave outer = saveScope();
@@ -7380,10 +7382,6 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
         }
         return nullptr;  // resolveCall reported the reason for a known subprogram
     }
-    if (!m_inlineBodies.insert(subp).second) {
-        unsupportedError(callExpr.flp, "recursive call of procedure '" + subp->spelling + "'");
-        return nullptr;
-    }
     m_funcWriteCost = 0;  // This call's own fold budget
     InlineEnv env;
     AstNode* prologsp = nullptr;  // Out-parameter initializations
@@ -7391,9 +7389,15 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
     ScopeSave base;
     captureBaseFor(*refp, base, env);
     if (!bindSubprogramFormals(callExpr, *subp, env, prologsp, true, concurrent)) {
-        m_inlineBodies.erase(subp);
         deleteInlineEnv(env);
         if (prologsp) prologsp->deleteTree();
+        return nullptr;
+    }
+    // An actual may call this same subprogram again: nesting is not recursion
+    if (!m_inlineBodies.insert(subp).second) {
+        deleteInlineEnv(env);
+        if (prologsp) prologsp->deleteTree();
+        unsupportedError(callExpr.flp, "recursive call of procedure '" + subp->spelling + "'");
         return nullptr;
     }
     const ScopeSave outer = saveScope();
