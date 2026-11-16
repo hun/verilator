@@ -3309,7 +3309,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
             if (!valuep) return nullptr;
             const VType valueType = typeOfDType(valuep->dtypep());
             int64_t width = 0;
-            if (!staticInt(expr.args[1], width) || width <= 0 || width > 4096) {
+            if (!staticIntFold(expr.args[1], width) || width <= 0 || width > 4096) {
                 unsupportedError(flp, "non-static or invalid conversion width");
                 valuep->deleteTree();
                 return nullptr;
@@ -4391,7 +4391,8 @@ bool Lowering::deriveAggregateType(const Expr& expr, VType& out) {
                 int64_t low = 0;
                 int64_t high = 0;
                 if (choicep->kind == Expr::SLICE) {
-                    if (!staticInt(choicep->b, low) || !staticInt(choicep->c, high)) {
+                    // The bounds may be folded calls, e.g. `(log2(SIZE) - 1 downto 0 => '0')`
+                    if (!staticIntFold(choicep->b, low) || !staticIntFold(choicep->c, high)) {
                         return refuse();
                     }
                     // A choice names its bounds in its own direction: `7 downto 4` covers
@@ -4399,7 +4400,7 @@ bool Lowering::deriveAggregateType(const Expr& expr, VType& out) {
                     if (low > high) std::swap(low, high);
                 } else if (choicep->kind == Expr::NAME && choicep->text == "others") {
                     return refuse();
-                } else if (!staticInt(choicep, high)) {
+                } else if (!staticIntFold(choicep, high)) {
                     return refuse();
                 } else {
                     low = high;
@@ -4542,7 +4543,8 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
                 if (choicep->kind == Expr::SLICE) {
                     int64_t left = 0;
                     int64_t right = 0;
-                    if (!staticInt(choicep->b, left) || !staticInt(choicep->c, right)) {
+                    // A bound may be a folded call, e.g. `(log2(SIZE) - 1 downto 0 => '0')`
+                    if (!staticIntFold(choicep->b, left) || !staticIntFold(choicep->c, right)) {
                         unsupportedError(flp, "non-static aggregate choice range");
                         return nullptr;
                     }
