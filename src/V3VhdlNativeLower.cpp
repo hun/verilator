@@ -6793,10 +6793,15 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 unsupportedError(flp, "assignment to an element of a non-vector value");
                 return nullptr;
             }
-            // A nested target selects inside a select, so its offset in the local's value is
-            // the sum of the levels: `v(i)(j)` and `r.field(j)` land inside `v` and `r`
+            // A nested target selects inside a select, so its offset in the local's value
+            // is the sum of the levels: `v(i)(j)` lands inside `v`. The selects that came
+            // from binding the local to its actual are not part of the target -- the
+            // local's own value is what is rebuilt -- so summing stops at the level whose
+            // width is the local's
+            const int localWidth = it->second.exprp->width();
             AstNodeExpr* offsetp = selp->lsbp()->cloneTree(false);
-            for (AstSel* subjectp = VN_CAST(selp->fromp(), Sel); subjectp;
+            for (AstSel* subjectp = VN_CAST(selp->fromp(), Sel);
+                 subjectp && subjectp->width() != localWidth;
                  subjectp = VN_CAST(subjectp->fromp(), Sel)) {
                 AstNodeExpr* const summed
                     = new AstAdd{flp, offsetp, subjectp->lsbp()->cloneTree(false)};
