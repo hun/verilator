@@ -291,8 +291,8 @@ class Lowering final {
     std::map<std::string, DeferredType> m_deferredTypes;
     size_t m_deferSeq = 0;  // Sequence number of the part being registered
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
-    std::map<std::string, VType> m_constTypes;
-    std::map<std::string, std::string> m_stringConsts;  // Folded name to its text  // Type of each typed constant
+    std::map<std::string, VType> m_constTypes;  // Type of each typed constant
+    std::map<std::string, std::string> m_stringConsts;  // Folded name to its text
     std::map<std::string, AstConst*> m_enumConsts;  // Enumeration literals by folded name
     std::vector<std::unique_ptr<AstConst>> m_ownedConsts;  // Owns constants in the tables
     std::vector<std::pair<std::string, std::string>> m_pendingNames;  // Duplicate detection
