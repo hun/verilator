@@ -4857,16 +4857,6 @@ AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const
     return headp;
 }
 
-//! Whether an assignment target writes an entity inout port: synthesis models those
-//! only through V3Tristate/V3Inst, so a direct assignment reaches DFG as a non-read reference
-static bool writesInoutPort(AstNodeExpr* const lhsp) {
-    bool inoutPort = false;
-    lhsp->foreach([&](AstVarRef* const refp) {
-        if (refp->varp()->isIO() && refp->varp()->direction().isInout()) inoutPort = true;
-    });
-    return inoutPort;
-}
-
 AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
     // A delay of zero is a delta, which a cycle model already has; a longer one needs a
     // scheduled update, which a process body has no notion of
@@ -4884,11 +4874,6 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
     }
     AstNodeExpr* lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return nullptr;
-    if (!concurrent && !variable && writesInoutPort(lhsp)) {
-        unsupportedError(stmt.flp, "procedural assignment to an inout port");
-        lhsp->deleteTree();
-        return nullptr;
-    }
     const VType ltype = typeOfTarget(*stmt.target, lhsp);
     AstNodeExpr* rhsp = nullptr;
     if (!stmt.alternatives.empty()) {
@@ -7541,6 +7526,12 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
 
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
+        // A cycle model has no tristate, so an inout port has no driver it can resolve; it is
+        // refused here rather than letting an undriven bidirectional port reach the DFG. The
+        // port is declared as an input so the rest of the design still analyzes
+        if (port.dir == PortMode::INOUT) {
+            unsupportedError(port.flp, "inout port");
+        }
         VType type;
         const PortBounds* boundsp = nullptr;
         if (portBounds) {
@@ -7580,9 +7571,11 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
                 continue;
             }
             AstVar* const varp = new AstVar{port.flp, VVarType::PORT, name.first, type.dtp};
-            varp->direction(port.dir == PortMode::IN    ? VDirection::INPUT
-                            : port.dir == PortMode::OUT ? VDirection::OUTPUT
-                                                        : VDirection::INOUT);
+            // An inout port was refused above; it stays an input so later references resolve
+            const PortMode dir = port.dir == PortMode::INOUT ? PortMode::IN : port.dir;
+            varp->direction(dir == PortMode::IN    ? VDirection::INPUT
+                             : dir == PortMode::OUT ? VDirection::OUTPUT
+                                                    : VDirection::INOUT);
             varp->pinNum(++pinNum);
             // VHDL ports are signals, so procedural assignment is legal
             varp->declTyped(true);
@@ -8599,11 +8592,6 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
     }
     AstNodeExpr* const lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return;
-    if (writesInoutPort(lhsp)) {
-        unsupportedError(stmt.flp, "concurrent assignment to an inout port");
-        lhsp->deleteTree();
-        return;
-    }
     const VType ltype = typeOfTarget(*stmt.target, lhsp);
     if (stmt.kind == Concurrent::COND_ASSIGN && concHasEdge(stmt)) {
         // Register clocked by the edge the condition names

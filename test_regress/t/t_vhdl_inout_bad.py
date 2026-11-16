@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL procedural assignment to an inout port
+# DESCRIPTION: Verilator: VHDL procedural assignment to an inout port (GHDL frontend)
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -13,7 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_inout_bad.vhdl'
 
-vhdl_frontend.require_frontend(test)
+vhdl_frontend.ghdl_only(test)
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 'top_inout'],
              fails=True,
