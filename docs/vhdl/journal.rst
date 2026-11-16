@@ -479,3 +479,5 @@ _______
      - Fold a call where an aggregate bound or conversion width is expected
    * - ``d8fda96``
      - Fold a static condition before lowering a callee body
+   * - ``9f9b04b``
+     - Fold images and string constants, and drop unused entities

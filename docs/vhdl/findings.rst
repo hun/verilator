@@ -405,6 +405,32 @@ ______
       section. Reviewing a VHDL design's internals needs the dump a simulator
       that has the feature produces (``ghdl --vcd``), or the frontend's own
       ``--public-flat-rw`` accessors
+  * - N87
+    - an unconstrained ``string`` constant: neorv32's CPU names its trace file
+      ``"neorv32_trace" & natural'image(HART_ID) & ".log"``
+    - the ``string`` mark resolved to a one-element array, so the initialiser was
+      truncated to one character, and ``'image`` with an argument was refused by
+      name. A string constant now takes its bounds from its value, a literal or a
+      static expression, and ``'image`` folds to the decimal of an integer or the
+      literal name of a Boolean value (IEEE 1076-2008 16.2.2)
+    - ``t_vhdl_image_attr``
+  * - N88
+    - an entity no instance names, whose generics have no defaults: neorv32's
+      ``neorv32_prim_*`` entities and hdl-modules' modules
+    - the entity was reported as having an unbound generic, and its empty module
+      was left behind, which then looked like a second top level. An entity that no
+      instance names is not part of the design, so it is dropped; a referenced one
+      still reports the unbound generic at its instance
+    - ``t_vhdl_unused_entity``
+  * - N89
+    - a record aggregate as a whole-port actual:
+      ``ibus_rsp_i => (ack => i_ack, err => i_err, data => i_rdata)``, as the
+      neorv32 port shim connects the CPU's buses
+    - the aggregate was lowered against the port's packed vector, whose element
+      names are not those of the record, so its field choices read as array
+      choices. A whole-port actual or default now takes the record type the port is
+      declared with
+    - ``t_vhdl_record_port_agg``
   * - N86
     - a concurrent ``assert`` whose condition is a pure function of generics:
       ``assert is_power_of_two(segment_length_bytes)``, as hdl-modules'
@@ -450,6 +476,15 @@ ____
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
+  * - N90
+    - a model of neorv32's CPU core (``neorv32_cpu``, RV32I) never updates any
+      state: every register, including the fetch state, keeps its initial value
+    - the frontend lowers the design (the reset branch of the fetch process is
+      present after linking), but the generated model's sequential regions never
+      run, so no instruction is fetched. GHDL simulates the same files with the
+      same testbench and fetches correctly (19 fetches in 40 cycles), so the
+      refusal is in the model rather than in the testbench. The corpus keeps the
+      port in its ``blocked`` target until this is understood
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
     - no implementation of that vendor package is in the corpus and none is
@@ -461,7 +496,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 183 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 186 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
