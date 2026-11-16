@@ -305,6 +305,14 @@ ______
       now folds first, and a real expression is evaluated as a real so that each
       step does not truncate
     - ``t_vhdl_real_const``
+  * - N75
+    - a string generic passed on to a sub-instance:
+      ``generic map (RAM_INIT_FILE => RAM_INIT_FILE)``, as microwatt's
+      ``wishbone_bram_wrapper`` binds its RAM
+    - the actual had to be a literal, in the parser and in the lowering; a
+      simple name now resolves from the enclosing unit's string generics, the
+      same way a generic type that is passed on does
+    - ``t_vhdl_str_pass``
 
 ____
 Open
@@ -356,13 +364,13 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 174 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 175 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
-The corpus lints and runs clean: 13 designs, no lint errors, and every run passes
-including the three harnesses added for the rpu ALU, the rpu register set and
-microwatt's ``soc_reset``. ``hdl-modules-ring-buffer`` is in the corpus's
+The corpus lints and runs clean: 14 designs, no lint errors, and every run passes
+including the harnesses added for the rpu ALU, the rpu register set, the t65 CPU
+and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``. ``hdl-modules-ring-buffer`` is in the corpus's
 ``blocked`` target, because ``math_pkg`` needs a real value at compile time
 (N69).
 

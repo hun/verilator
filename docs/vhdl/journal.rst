@@ -463,3 +463,5 @@ _______
      - Resolve signal aliases, and width unconstrained vector constants
    * - ``7258f2f``
      - Fold a constant expression that has real operands
+   * - ``e13eccd``
+     - Pass a VHDL string generic on to a sub-instance
