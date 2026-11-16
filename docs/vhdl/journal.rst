@@ -455,3 +455,9 @@ _______
      - Accept a selected entity name in a VHDL instantiation
    * - ``ee3df9e``
      - Support conversions to the predefined integer subtypes
+   * - ``3bbe87a``
+     - Support the std_logic_1164 X01 conversions
+   * - ``5307195``
+     - Refuse an inout port where it is declared
+   * - ``643e55e``
+     - Resolve signal aliases, and width unconstrained vector constants

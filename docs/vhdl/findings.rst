@@ -271,6 +271,33 @@ ______
       so the other type marks reached the parser as calls and were reported as
       unknown identifiers
     - ``t_vhdl_conv_predefined``
+  * - N70
+    - an inout port: a cycle model has no tristate, so nothing resolves its
+      driver
+    - the port reached the DFG undriven and failed the read-only assertion
+      there; it is now refused where it is declared, and declared as an input so
+      the rest of the design still analyzes
+    - ``t_vhdl_inout_unsup``
+  * - N71
+    - the std_logic_1164 X01 conversions ``to_x01``, ``to_01``, ``to_x01z`` and
+      ``to_ux01``, as t80's ALU writes them
+    - the intrinsic list had the ``is_*`` predicates but not the ``to_*`` forms,
+      so the calls were reported as unknown identifiers
+    - ``t_vhdl_std_logic_fn``
+  * - N72
+    - an alias of a signal in a process sensitivity list and in an edge call:
+      ``alias clk is wb_clk_i; process (clk)``, as microwatt's 16550 writes it
+    - the name lookup searched the scope only, and an alias is registered beside
+      it, so the process reported an unknown signal
+    - ``t_vhdl_sens_alias``
+  * - N73
+    - an unconstrained vector constant or generic with a literal default:
+      ``constant c : std_logic_vector := "0011"``, as f32c's clock generics are
+      written
+    - the declared type leaves the width open, so resolving it reported an
+      unconstrained type; the literal's width is all that is missing, and the
+      constant now takes it
+    - ``t_vhdl_unconstrained_gen``
 
 ____
 Open
@@ -316,23 +343,21 @@ ____
     - no implementation of that vendor package is in the corpus and none is
       modelled. patmos' fpu is its only user (9 errors), so this is a library
       question rather than a frontend one.
-  * - N52
-    - a concurrent assignment to an ``inout`` port
-    - modelling two drivers needs bus arbitration, which the frontend has no notion
-      of. neo430's TWI, patmos' I2C and bit-serial each run into it (8 errors).
 
 ___________
 Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``) and against the corpus:
+``t_vhdl_*.py``): 173 passed, 2 skipped (the two GHDL-only diagnostics). The
+GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
+``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
-- lints: poc-divider, hdl-modules-fifo, neotrng, lfsr, spi-single-cs,
-  spi-fpga-slave, spi-fpga-master. ring-buffer stops at the real conversion of
-  ``math_pkg`` (N69) and is no longer listed.
-- runs: fifo (153 checks), ring-buffer, neotrng, lfsr
-- traces: neotrng and lfsr cycle for cycle against GHDL
+The corpus lints and runs clean: 13 designs, no lint errors, and every run passes
+including the three harnesses added for the rpu ALU, the rpu register set and
+microwatt's ``soc_reset``. ``hdl-modules-ring-buffer`` is in the corpus's
+``blocked`` target, because ``math_pkg`` needs a real value at compile time
+(N69).
 
 Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)
 whenever GHDL and the native frontend disagree. nvc settled the value of a toggle
