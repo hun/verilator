@@ -800,6 +800,17 @@ class Lowering final {
         const VSigning signing = mark == "signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
         return vectorType(flp, kwd, signing, width);
     }
+
+    //! Whether an expression contains a real literal, so its value is a real
+    static bool hasRealLiteral(const Expr& expr) {
+        if (expr.kind == Expr::REAL_LIT) return true;
+        if (expr.a && hasRealLiteral(*expr.a)) return true;
+        if (expr.b && hasRealLiteral(*expr.b)) return true;
+        for (const ExprP& arg : expr.args) {
+            if (arg && hasRealLiteral(*arg)) return true;
+        }
+        return false;
+    }
     bool isIntrinsic(const std::string& name) const {
         static const char* const names[] = {"is_x",
                                             "is_x01",
@@ -1204,6 +1215,15 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         return false;
     }
     case Expr::BINARY: {
+        // An expression with a real operand is a real expression: dividing two integers
+        // here would truncate each step instead of the result
+        if (hasRealLiteral(expr)) {
+            double realValue = 0.0;
+            if (!evalReal(expr, realValue)) return false;
+            // The value is consumed as an integer, so it rounds like a conversion
+            value = static_cast<int64_t>(std::llround(realValue));
+            return true;
+        }
         int64_t lhs = 0;
         int64_t rhs = 0;
         if (!evalInt(*expr.a, lhs) || !evalInt(*expr.b, rhs)) return false;
@@ -1253,16 +1273,21 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         }
         if (expr.args.size() != 1) return false;
         const std::string& fn = expr.a->text;
+        // real(integer) is integral, so it folds as an integer and the real expression
+        // around it stays inside the constant folders
+        if (fn == "real") return evalInt(*expr.args[0], value);
         double real = 0.0;
         if (!evalReal(*expr.args[0], real)) return false;
         if (fn == "ceil") {
             value = static_cast<int64_t>(std::ceil(real));
         } else if (fn == "floor") {
             value = static_cast<int64_t>(std::floor(real));
-        } else if (fn == "round" || fn == "natural" || fn == "positive" || fn == "integer") {
-            value = static_cast<int64_t>(std::llround(real));
         } else if (fn == "trunc") {
-            value = static_cast<int64_t>(real);
+            value = static_cast<int64_t>(std::trunc(real));
+        } else if (fn == "round" || fn == "natural" || fn == "positive" || fn == "integer") {
+            // A conversion to an integer type rounds to nearest, as IEEE 1076-2008 9.3.6
+            // says; only trunc() truncates
+            value = static_cast<int64_t>(std::llround(real));
         } else {
             return false;
         }
@@ -3210,7 +3235,11 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
                                   + " arguments");
         return nullptr;
     }
-    AstNodeExpr* valuep = lowerExpr(*expr.args[0], nullptr);
+    // A constant operand folds first: a real expression inside it never reaches the
+    // model, which has no real type, and the conversion of a constant is a constant
+    int64_t folded = 0;
+    AstNodeExpr* valuep = evalInt(*expr.args[0], folded) ? makeIntConst(flp, folded)
+                                                          : lowerExpr(*expr.args[0], nullptr);
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
     if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {

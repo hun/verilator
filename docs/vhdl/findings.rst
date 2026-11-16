@@ -298,6 +298,13 @@ ______
       unconstrained type; the literal's width is all that is missing, and the
       constant now takes it
     - ``t_vhdl_unconstrained_gen``
+  * - N74
+    - a constant expression with real operands: ``integer(1000000000.0 / real(c_ns)
+      / real(c_freq) * 268435456.0)``, as f32c's prescaler is written
+    - the real value reached the model, which has no real type; a constant operand
+      now folds first, and a real expression is evaluated as a real so that each
+      step does not truncate
+    - ``t_vhdl_real_const``
 
 ____
 Open
@@ -349,7 +356,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 173 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 174 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
