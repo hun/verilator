@@ -471,3 +471,5 @@ _______
      - Fill a record aggregate from an others choice
    * - ``e16c965``
      - Complete a deferred package constant in its own unit
+   * - ``3ea1733``
+     - Accept a discrete subtype as a range, and std_match
