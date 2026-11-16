@@ -273,8 +273,10 @@ class Lowering final {
         const TypeSpec* typep = nullptr;
         const Expr* initp = nullptr;
         FileLine* flp = nullptr;
+        std::string owner;  // Unit that declared it: only that unit completes it
     };
     std::vector<DeferredConst> m_deferredConsts;
+    std::string m_unitName;  // Unit being emitted, which owns its deferred constants
     //! A pure function call the elaboration-time folders are evaluating: its formals
     //! bound to the values of the actuals, plus the declaration to stop a body folding
     //! into itself. Only the innermost frame is in scope and every actual is already
@@ -1033,6 +1035,11 @@ public:
               const GenericBindings* bindings = nullptr,
               const PortBoundsMap* portBounds = nullptr);
     AstNode* lowerInstance(const Concurrent& conc);
+    bool hasDeferredConsts() const { return !m_deferredConsts.empty(); }
+    std::string deferredOwner() const {
+        return m_deferredConsts.empty() ? std::string{} : m_deferredConsts.front().owner;
+    }
+
     void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
                      const GenericBindings* bindings = nullptr,
                      const std::string& publishName = {});
@@ -7636,7 +7643,7 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
                 = std::any_of(refs.begin(), refs.end(),
                               [](const SubprogramDecl* const subp) { return subp->hasBody; });
             if (!refs.empty() && !anyBody) {
-                m_deferredConsts.push_back(DeferredConst{names, &type, initp, flp});
+                m_deferredConsts.push_back(DeferredConst{names, &type, initp, flp, m_unitName});
                 return;
             }
         }
@@ -7844,6 +7851,7 @@ void Lowering::importPackage(const std::string& name) {
 void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
                            const GenericBindings* bindings, const std::string& publishName) {
     const std::string& pubName = publishName.empty() ? pkg.name : publishName;
+    m_unitName = pubName;
 
     // A package sees its own declarations and the packages its `use` clauses name
     m_types.clear();
@@ -7881,13 +7889,33 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // Preliminary snapshot: a constant's value may already call a subprogram, whose body
     // evaluates against this scope and not against whatever the caller has
     m_moduleScope = saveScope();
-    // A specification constant whose call had no body is completed now that they are read
-    for (const DeferredConst& deferred : std::exchange(m_deferredConsts, {})) {
-        emitConstant(deferred.names, *deferred.typep, deferred.initp, deferred.flp, true);
-    }
     for (const Decl& decl : pkg.decls)
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
-    finishDeferredTypes();
+    // A constant whose call had no body when the unit was first read is completed now
+    // that the bodies are read. It runs after the unit's own constants, because the call
+    // may name one of them, and only the unit that declared it completes it: the scope
+    // of another unit is not its own
+    std::vector<DeferredConst> owned;
+    std::vector<DeferredConst> others;
+    for (const DeferredConst& deferred : m_deferredConsts) {
+        (deferred.owner == m_unitName ? owned : others).push_back(deferred);
+    }
+    m_deferredConsts = std::move(others);
+    for (const DeferredConst& deferred : owned) {
+        // A later pass may already have emitted it now that the bodies are read
+        bool present = false;
+        for (const auto& name : deferred.names) {
+            if (m_consts.count(name.first) || m_constValues.count(name.first)) present = true;
+        }
+        if (present) continue;
+        emitConstant(deferred.names, *deferred.typep, deferred.initp, deferred.flp, true);
+    }
+    // A type that names a constant this unit could not complete waits for the pass that
+    // does complete it, rather than reporting the name as unknown
+    const bool stillDeferred
+        = std::any_of(m_deferredConsts.begin(), m_deferredConsts.end(),
+                      [&](const DeferredConst& d) { return d.owner == m_unitName; });
+    if (!stillDeferred) finishDeferredTypes();
 
     PackageInfo info;
     info.aliases = m_aliases;
@@ -9302,6 +9330,16 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
         if (pkg.isBody && !isTemplate(pkg)) lowering.emitPackage(pkg, table.impl());
     for (const PackageInstance& inst : library.packageInstances)
         lowering.instantiatePackage(library.packages, inst, table.impl());
+    // A specification constant whose call had no body when the specification was emitted
+    // is completed by a second pass over the specifications, now that every body is read
+    for (int pass = 0; pass < 4 && lowering.hasDeferredConsts(); ++pass) {
+        const std::string owner = lowering.deferredOwner();
+        const auto it = std::find_if(
+            library.packages.begin(), library.packages.end(),
+            [&](const PackageUnit& pkg) { return !pkg.isBody && pkg.name == owner; });
+        if (it == library.packages.end()) break;
+        lowering.emitPackage(*it, table.impl());
+    }
 }
 
 //! The netlist the modules belong to, for the dtype table
