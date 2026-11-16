@@ -4409,9 +4409,13 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
                 segments.push_back(segment);
             }
         } else {
-            // Named association: each choice names one record element
+            // Named association: each choice names one record element, or is `others`
             for (size_t i = 0; i < expr.args.size(); ++i) {
                 for (const ExprP& choicep : expr.choices[i]) {
+                    if (choicep->kind == Expr::NAME && choicep->text == "others") {
+                        othersValuep = expr.args[i].get();
+                        continue;
+                    }
                     if (choicep->kind != Expr::NAME) {
                         unsupportedError(flp,
                                          "record aggregate choice that is not an element name");
@@ -4496,12 +4500,28 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
             }
         }
     }
-    // Fill the elements no association names, in element-sized pieces
+    // Fill the elements no association names: a record fills whole fields, an array
+    // element-sized pieces
+    if (type.kind == VType::RECORD && othersValuep) {
+        for (const VField& field : type.fields) {
+            const bool covered
+                = std::any_of(segments.begin(), segments.end(), [&](const Segment& segment) {
+                      return field.offset >= segment.offset
+                             && field.offset < segment.offset + segment.width;
+                  });
+            if (covered) continue;
+            Segment segment;
+            segment.offset = field.offset;
+            segment.width = field.width;
+            segment.exprp = othersValuep;
+            segments.push_back(segment);
+        }
+    }
     const int elemSpan = type.kind == VType::RECORD ? 1 : std::max(1, type.elemWidth);
     const int elementCount = elemSpan > 0 ? type.width / elemSpan : 0;
     if (type.kind != VType::RECORD && !othersValuep) {
         // No `others`: every element must be covered by an association
-    } else if (othersValuep) {
+    } else if (othersValuep && type.kind != VType::RECORD) {
         for (int element = 0; element < elementCount; ++element) {
             const int offset = element * elemSpan;
             const bool covered
