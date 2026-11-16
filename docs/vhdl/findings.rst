@@ -489,11 +489,13 @@ ____
   * - N90
     - a model of neorv32's CPU core (``neorv32_cpu``, RV32I) never updates any
       state: every register, including the fetch state, keeps its initial value
-    - the frontend lowers the design (the reset branch of the fetch process is
-      present after linking), but the generated model's sequential regions never
-      run, so no instruction is fetched. GHDL simulates the same files with the
-      same testbench and fetches correctly (19 fetches in 40 cycles), so the
-      refusal is in the model rather than in the testbench. The corpus keeps the
+    - GHDL simulates the same files, shim and testbench and fetches correctly (19
+      fetches in 40 cycles), so the design and the stimulus are right. In the model
+      the act region does compute its triggers, including the clock's, but the
+      non-blocking block that holds the fetch process is gated on
+      ``__VnbaTriggered`` bit 0 alone, a bit the act region derives from
+      ``env_pend`` rather than from the clock, so the clock edge never reaches the
+      process and the fetch state stays at its reset value. The corpus keeps the
       port in its ``blocked`` target until this is understood
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
