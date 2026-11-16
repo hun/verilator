@@ -781,6 +781,10 @@ class Lowering final {
                                             "is_x01",
                                             "is_x01z",
                                             "is_ux01",
+                                            "to_x01",
+                                            "to_01",
+                                            "to_x01z",
+                                            "to_ux01",
                                             "resize",
                                             "shift_left",
                                             "shift_right",
@@ -3012,6 +3016,15 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
     // The model is 2-state, so no value can be a metavalue
     if (fn == "is_x" || fn == "is_x01" || fn == "is_x01z" || fn == "is_ux01") {
         return bitConst(flp, '0');
+    }
+    // The model is 2-state, so every value is already 0 or 1 and the X01 mapping
+    // of the X/Z/don't-care values is the identity
+    if (fn == "to_x01" || fn == "to_01" || fn == "to_x01z" || fn == "to_ux01") {
+        if (argsp.size() != 1) {
+            unsupportedError(flp, "function '" + fn + "' without one argument");
+            return nullptr;
+        }
+        return lowerExpr(*argsp[0], nullptr);
     }
     if (argsp.empty()) {
         unsupportedError(flp, "function '" + fn + "' without an argument");
