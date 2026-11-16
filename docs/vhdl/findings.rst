@@ -325,6 +325,15 @@ ______
       of the line unread, which is what GHDL and nvc both do. Nothing reaches the
       middle end or the runtime
     - ``t_vhdl_file_init``
+  * - N77
+    - a record aggregate that leaves the rest of the fields to ``others``:
+      ``constant wishbone_slave_out_init : wishbone_slave_out := (ack => '0',
+      stall => '0', others => (others => '0'));``, as microwatt's
+      ``wishbone_types`` writes it
+    - ``others`` was only handled for arrays, so a record aggregate reported
+      ``record has no element 'others'``. The remaining fields are now filled whole,
+      one field at a time, with the last association's value
+    - ``t_vhdl_record_agg``
 
 ____
 Open
@@ -377,7 +386,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 176 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 177 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 

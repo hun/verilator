@@ -467,3 +467,5 @@ _______
      - Pass a VHDL string generic on to a sub-instance
    * - ``fc94582``
      - Read a std.textio file into a constant at elaboration
+   * - ``5855816``
+     - Fill a record aggregate from an others choice
