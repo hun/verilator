@@ -587,6 +587,10 @@ class Lowering final {
     bool evalInt(const Expr& expr, int64_t& value) const;
     //! Evaluate a locally static real-valued expression
     bool evalReal(const Expr& expr, double& value) const;
+    //! Evaluate a locally static condition: a literal, a comparison of literals, or a
+    //! pure function of literals returning one. An elaboration-time check such as
+    //! `assert is_power_of_two(n)` folds, so its callee's body is never lowered.
+    bool evalCond(const Expr& expr, bool& value) const;
     bool mentionsReal(const Expr& expr) const;
     bool rejectRealObject(const VType& type, FileLine* flp, bool allowUnconstrained = false);
     bool staticInt(const ExprP& exprp, int64_t& value) const {
@@ -1418,10 +1422,37 @@ bool Lowering::pushPureCall(const Expr& call, const Expr*& returnp) const {
             frame.args[name.first] = std::move(valuep);
         }
     }
-    if (!closedOverFormals(*candidate->body[0]->value, frame.args)) return false;
     frame.subp = candidate;
-    returnp = candidate->body[0]->value.get();
     m_pureCalls.push_back(std::move(frame));
+    // Constants of the body's declarative part are folded on top of the formals, which a
+    // helper such as `constant log2_value : natural := floor_log2(value);` needs
+    for (const Decl& decl : candidate->decls) {
+        auto valuep = std::make_unique<Expr>(Expr::INT_LIT);
+        valuep->flp = decl.flp;
+        int64_t intValue = 0;
+        double realValue = 0.0;
+        if (decl.kind == Decl::CONSTANT && decl.init && evalInt(*decl.init, intValue)) {
+            valuep->intValue = intValue;
+        } else if (decl.kind == Decl::CONSTANT && decl.init && evalReal(*decl.init, realValue)) {
+            valuep->kind = Expr::REAL_LIT;
+            valuep->realValue = realValue;
+        } else {
+            popPureCall();
+            return false;
+        }
+        for (const auto& name : decl.names) {
+            auto binding = std::make_unique<Expr>(valuep->kind);
+            binding->flp = valuep->flp;
+            binding->intValue = valuep->intValue;
+            binding->realValue = valuep->realValue;
+            m_pureCalls.back().args[name.first] = std::move(binding);
+        }
+    }
+    if (!closedOverFormals(*candidate->body[0]->value, m_pureCalls.back().args)) {
+        popPureCall();
+        return false;
+    }
+    returnp = candidate->body[0]->value.get();
     return true;
 }
 
@@ -1550,6 +1581,84 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
         } else {
             return false;
         }
+        return true;
+    }
+    default: return false;
+    }
+}
+
+bool Lowering::evalCond(const Expr& expr, bool& value) const {
+    switch (expr.kind) {
+    case Expr::PAREN: return evalCond(*expr.a, value);
+    case Expr::NAME: {
+        if (expr.text == "true" || expr.text == "false") {
+            value = expr.text == "true";
+            return true;
+        }
+        // A function without a formal may be written as the bare name
+        const Expr* returnp = nullptr;
+        if (!pushPureCall(expr, returnp)) return false;
+        const bool folded = evalCond(*returnp, value);
+        popPureCall();
+        return folded;
+    }
+    case Expr::INDEX: {
+        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        const Expr* returnp = nullptr;
+        if (!pushPureCall(expr, returnp)) return false;
+        const bool folded = evalCond(*returnp, value);
+        popPureCall();
+        return folded;
+    }
+    case Expr::UNARY: {
+        bool operand = false;
+        if (expr.text != "not" || !evalCond(*expr.a, operand)) return false;
+        value = !operand;
+        return true;
+    }
+    case Expr::BINARY: {
+        const std::string& op = expr.text;
+        if (op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor") {
+            bool lhs = false;
+            bool rhs = false;
+            if (!evalCond(*expr.a, lhs) || !evalCond(*expr.b, rhs)) return false;
+            if (op == "and")
+                value = lhs && rhs;
+            else if (op == "or")
+                value = lhs || rhs;
+            else if (op == "xor")
+                value = lhs != rhs;
+            else if (op == "nand")
+                value = !(lhs && rhs);
+            else
+                value = !(lhs || rhs);
+            return true;
+        }
+        if (op != "=" && op != "/=" && op != "<" && op != "<=" && op != ">" && op != ">=") {
+            return false;
+        }
+        double lhs = 0.0;
+        double rhs = 0.0;
+        int64_t lhsInt = 0;
+        int64_t rhsInt = 0;
+        if (evalInt(*expr.a, lhsInt) && evalInt(*expr.b, rhsInt)) {
+            lhs = static_cast<double>(lhsInt);
+            rhs = static_cast<double>(rhsInt);
+        } else if (!evalReal(*expr.a, lhs) || !evalReal(*expr.b, rhs)) {
+            return false;
+        }
+        if (op == "=")
+            value = lhs == rhs;
+        else if (op == "/=")
+            value = lhs != rhs;
+        else if (op == "<")
+            value = lhs < rhs;
+        else if (op == "<=")
+            value = lhs <= rhs;
+        else if (op == ">")
+            value = lhs > rhs;
+        else
+            value = lhs >= rhs;
         return true;
     }
     default: return false;
@@ -3714,6 +3823,12 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
 
 AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
     FileLine* const flp = expr.flp;
+    // A condition that is static folds to a constant, so the body of a pure function
+    // used as an elaboration-time check is never lowered
+    bool condValue = false;
+    if (evalCond(expr, condValue)) {
+        return makeVectorConst(flp, logicType(flp), condValue ? 1 : 0);
+    }
     // The classic `clk'event and clk = '1'` idiom is a clock edge
     if (expr.kind == Expr::BINARY && expr.text == "and" && expr.a && expr.b) {
         for (int side = 0; side < 2; ++side) {
