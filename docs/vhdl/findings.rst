@@ -262,6 +262,15 @@ ______
       name reached the parser as a procedure call; the lookahead now walks the
       selected name
     - ``t_vhdl_selected_inst``
+  * - N68
+    - a conversion to a predefined integer subtype or to numeric_std's
+      unresolved vector: ``natural(x)``, ``positive(x)``, ``u_unsigned(x)``,
+      ``u_signed(x)``, as hdl-modules' ``math_pkg`` and
+      ``lfsr_fibonacci_multi`` write them
+    - the conversion list only named ``integer``, ``unsigned`` and ``signed``,
+      so the other type marks reached the parser as calls and were reported as
+      unknown identifiers
+    - ``t_vhdl_conv_predefined``
 
 ____
 Open
@@ -295,6 +304,13 @@ ____
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
+  * - N69
+    - a real value: ``log2(real(value))`` in hdl-modules' ``math_pkg``, which
+      ``ring_buffer_write_simple`` calls
+    - no runtime primitive represents a real, so a conversion to one is
+      refused by name (``conversion to a real value is not supported yet``)
+      instead of being reported as an unknown identifier. Everything else in
+      the design lowers.
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
     - no implementation of that vendor package is in the corpus and none is
@@ -312,8 +328,9 @@ ___________
 Each run was checked with the full native suite (``test_regress``,
 ``t_vhdl_*.py``) and against the corpus:
 
-- lints: poc-divider, hdl-modules-fifo, neotrng, lfsr, ring-buffer,
-  spi-single-cs, spi-fpga-slave, spi-fpga-master
+- lints: poc-divider, hdl-modules-fifo, neotrng, lfsr, spi-single-cs,
+  spi-fpga-slave, spi-fpga-master. ring-buffer stops at the real conversion of
+  ``math_pkg`` (N69) and is no longer listed.
 - runs: fifo (153 checks), ring-buffer, neotrng, lfsr
 - traces: neotrng and lfsr cycle for cycle against GHDL
 

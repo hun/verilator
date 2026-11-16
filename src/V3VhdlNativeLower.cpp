@@ -825,8 +825,10 @@ class Lowering final {
                          bool sign);
     bool isConversion(const std::string& name) const {
         return name == "std_logic_vector" || name == "std_ulogic_vector" || name == "bit_vector"
-               || name == "unsigned" || name == "signed" || name == "to_integer"
-               || name == "to_unsigned" || name == "to_signed" || name == "integer";
+               || name == "unsigned" || name == "signed" || name == "u_unsigned"
+               || name == "u_signed" || name == "to_integer" || name == "to_unsigned"
+               || name == "to_signed" || name == "integer" || name == "natural"
+               || name == "positive";
     }
 
     AstNodeExpr* lowerExpr(const Expr& expr, const VType* context);
@@ -2389,6 +2391,11 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, context);
             if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
             if (isConversion(expr.a->text)) return lowerConversion(expr);
+            // A real has no synthesizable form, so a conversion to one is refused by name
+            if (expr.a->text == "real") {
+                unsupportedError(flp, "conversion to a real value");
+                return nullptr;
+            }
             // A predefined scalar type mark applied to a value is the identity conversion
             if (expr.a->text == "boolean" || expr.a->text == "bit" || expr.a->text == "std_logic"
                 || expr.a->text == "std_ulogic") {
@@ -3169,7 +3176,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
     AstNodeExpr* valuep = lowerExpr(*expr.args[0], nullptr);
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
-    if (name == "to_integer" || name == "integer") {
+    if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {
         if (valueType.isInt()) return valuep;
         if (!valueType.isVector() || valueType.width > 32) {
             unsupportedError(flp, name + " of this operand");
@@ -3185,7 +3192,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
     }
     VBasicDTypeKwd kwd = valueType.kwd;
     VSigning signing = VSigning::UNSIGNED;
-    if (name == "signed") {
+    if (name == "signed" || name == "u_signed") {
         signing = VSigning::SIGNED;
     } else if (name == "bit_vector") {
         kwd = VBasicDTypeKwd::BIT;
