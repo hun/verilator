@@ -395,6 +395,7 @@ class Parser final {
     void parseSubtypeDecl(Architecture& arch);
     void parseSubtypeInto(std::vector<TypeDecl>& types);
     void parseAliasInto(std::vector<AliasDecl>& aliases);
+    void parseFileDeclInto(std::vector<Decl>& decls);
     void parsePackage(FileLine* flp, bool isBody);
     void parseUseClause();
     void parseUseClauseInto(std::vector<std::pair<std::string, std::string>>& uses);
@@ -1293,6 +1294,31 @@ void Parser::parseEntity(FileLine* flp) {
 
 void Parser::parseDecl(Architecture& arch, Decl::Kind kind) { parseDeclInto(arch.decls, kind); }
 
+void Parser::parseFileDeclInto(std::vector<Decl>& decls) {
+    Decl decl{Decl::FILE};
+    decl.flp = m_cur.flp;
+    parseNameList(decl.names);
+    if (m_failed) return;
+    parseTypeSpec(decl.type);
+    if (m_failed) return;
+    if (acceptId("open")) {
+        Token mode;
+        if (!takeId(mode)) return;
+        decl.fileMode = mode.spelling;
+        if (m_failed) return;
+    }
+    // `is <logical name>` is optional: a file can be declared without one
+    if (acceptId("is")) {
+        decl.init = parseExpr();
+        if (!decl.init) return;
+    }
+    if (!acceptSym(";")) {
+        error("expected ';' after a file declaration");
+        return;
+    }
+    decls.push_back(std::move(decl));
+}
+
 void Parser::parseDeclInto(std::vector<Decl>& decls, Decl::Kind kind) {
     Decl decl{kind};
     decl.flp = m_cur.flp;
@@ -1439,7 +1465,13 @@ void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
             parseSubprogramInto(sub.subprograms);
             continue;
         }
-        if (skipFileDecl()) continue;
+        if (isId("file")) {
+            // The one declaration to capture rather than skip: a file image is read
+            // at elaboration by the subprogram that declares it
+            advance();
+            parseFileDeclInto(sub.decls);
+            continue;
+        }
         unsupported("subprogram declarative item '" + m_cur.text + "'");
         return;
     }

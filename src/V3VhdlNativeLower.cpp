@@ -30,11 +30,14 @@
 #include "V3FileLine.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -58,7 +61,9 @@ struct VField final {
 
 //! VHDL type as it survives into the committed AST
 struct VType final {
-    enum Kind : uint8_t { LOGIC, BIT, BOOLEAN, INT, VECTOR, ARRAY, RECORD, ENUM, REAL } kind = LOGIC;
+    enum Kind : uint8_t {
+        LOGIC, BIT, BOOLEAN, INT, VECTOR, ARRAY, RECORD, ENUM, REAL, FILE, LINE
+    } kind = LOGIC;
     AstNodeDType* dtp = nullptr;
     int width = 1;
     VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
@@ -293,6 +298,26 @@ class Lowering final {
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
     std::map<std::string, VType> m_constTypes;  // Type of each typed constant
     std::map<std::string, std::string> m_stringConsts;  // Folded name to its text
+    //! One value inside a subprogram that reads a file at elaboration
+    struct FileVal final {
+        int64_t i = 0;  // INTEGER value, or a line's read cursor
+        int width = 0;  // Width of a vector value
+        std::string bits;  // Vector value, most significant bit first
+        std::string text;  // STRING or LINE value
+        std::map<size_t, std::string> elems;  // Image elements by index
+    };
+    struct FileReader final {
+        std::ifstream in;
+        bool eof = false;
+    };
+    using FileVals = std::map<std::string, FileVal>;
+    using FileReaders = std::map<std::string, FileReader>;
+    AstNodeExpr* evalFileInit(const SubprogramDecl& subp, const Expr& call);
+    bool evalFileExpr(const Expr& expr, FileVal& out, FileVals& vals, FileReaders& files);
+    bool evalFileStmts(const std::vector<StmtP>& stmts, FileVal& result, bool& returned,
+                       bool& exited, FileVals& vals, FileReaders& files);
+    bool fileAssign(const Stmt& stmt, FileVal& value, FileVals& vals, FileReaders& files);
+    bool fileCall(const Stmt& stmt, FileVals& vals, FileReaders& files);
     std::map<std::string, AstConst*> m_enumConsts;  // Enumeration literals by folded name
     std::vector<std::unique_ptr<AstConst>> m_ownedConsts;  // Owns constants in the tables
     std::vector<std::pair<std::string, std::string>> m_pendingNames;  // Duplicate detection
@@ -2197,6 +2222,14 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         out.dtp = nullptr;
         return true;
     }
+    if (mark == "text" || mark == "line") {
+        // A textio type, existing only inside a subprogram that reads a file at
+        // elaboration, so it has no width and no node either
+        out = VType{};
+        out.kind = mark == "line" ? VType::LINE : VType::FILE;
+        out.dtp = nullptr;
+        return true;
+    }
     const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
                             || mark == "bit_vector" || mark == "unsigned" || mark == "signed";
     if (!vectorMark) {
@@ -3240,7 +3273,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
     // model, which has no real type, and the conversion of a constant is a constant
     int64_t folded = 0;
     AstNodeExpr* valuep = evalInt(*expr.args[0], folded) ? makeIntConst(flp, folded)
-                                                          : lowerExpr(*expr.args[0], nullptr);
+                                                         : lowerExpr(*expr.args[0], nullptr);
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
     if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {
@@ -5664,6 +5697,12 @@ std::vector<const SubprogramDecl*> Lowering::visibleSubprograms(const std::strin
     return out;
 }
 
+//! Whether a subprogram opens a file to build its result while the design is elaborated
+static bool readsFile(const SubprogramDecl& subp) {
+    return std::any_of(subp.decls.begin(), subp.decls.end(),
+                       [](const Decl& decl) { return decl.kind == Decl::FILE && decl.init; });
+}
+
 bool Lowering::subprogramMatches(const Expr& call, const SubprogramDecl& sub,
                                  std::string& why) const {
     // A formal declaration can declare several names; positional actuals fill them in order
@@ -5745,8 +5784,12 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
             continue;
         }
         if (function && sub.impure) {
-            impureSeen = true;
-            continue;
+            // An impure function that reads a file builds its result at elaboration,
+            // so its call resolves like any other
+            if (!readsFile(sub)) {
+                impureSeen = true;
+                continue;
+            }
         }
         std::string why;
         if (!subprogramMatches(call, sub, why)) {
@@ -5820,6 +5863,10 @@ bool Lowering::markKind(const std::string& mark, VType::Kind& out) const {
     }
     if (mark == "real") {
         out = VType::REAL;
+        return true;
+    }
+    if (mark == "text" || mark == "line") {
+        out = mark == "line" ? VType::LINE : VType::FILE;
         return true;
     }
     if (mark == "boolean" || mark == "std_logic" || mark == "std_ulogic") {
@@ -6095,10 +6142,375 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
     return true;
 }
 
+//! `read`/`hread` take one value of `width` bits from the front of a line and leave
+//! the rest of it unread, which is what GHDL and nvc both do
+static bool fileReadValue(const std::string& line, size_t& pos, int width, bool hex,
+                          std::string& bits) {
+    const size_t want = hex ? static_cast<size_t>((width + 3) / 4) : static_cast<size_t>(width);
+    std::string found;
+    size_t i = pos;
+    while (found.size() < want && i < line.size()) {
+        const char c = line[i];
+        const bool ok = hex ? std::isxdigit(static_cast<unsigned char>(c)) != 0
+                            : std::strchr("01xXzZwWlLhH-", c) != nullptr;
+        if (!ok) break;
+        found += c;
+        ++i;
+    }
+    if (found.empty()) return false;
+    pos = i;
+    bits.clear();
+    for (const char c : found) {
+        if (!hex) {
+            bits += (c == '1' || c == 'H' || c == 'h') ? '1' : '0';
+            continue;
+        }
+        const int v = std::isdigit(static_cast<unsigned char>(c))
+                          ? c - '0'
+                          : std::tolower(static_cast<unsigned char>(c)) - 'a' + 10;
+        for (int b = 3; b >= 0; --b) bits += char('0' + ((v >> b) & 1));
+    }
+    // The value is right-aligned in the target, so keep its low bits
+    if (static_cast<int>(bits.size()) > width) {
+        bits.erase(0, bits.size() - static_cast<size_t>(width));
+    }
+    while (static_cast<int>(bits.size()) < width) bits.insert(bits.begin(), '0');
+    return true;
+}
+
+bool Lowering::evalFileExpr(const Expr& expr, FileVal& out, FileVals& vals, FileReaders& files) {
+    out = FileVal{};
+    switch (expr.kind) {
+    case Expr::INT_LIT: out.i = expr.intValue; return true;
+    case Expr::TRUE_LIT: out.i = 1; return true;
+    case Expr::FALSE_LIT: out.i = 0; return true;
+    case Expr::BITS_LIT:
+        out.bits = expr.bits;
+        out.width = static_cast<int>(expr.bits.size());
+        return true;
+    case Expr::STRING_LIT: out.text = expr.spelling; return true;
+    case Expr::NAME: {
+        const auto it = vals.find(expr.text);
+        if (it != vals.end()) {
+            out = it->second;
+            return true;
+        }
+        const auto textIt = m_stringConsts.find(expr.text);
+        if (textIt != m_stringConsts.end()) {
+            out.text = textIt->second;
+            return true;
+        }
+        return evalInt(expr, out.i);
+    }
+    case Expr::PAREN: return evalFileExpr(*expr.a, out, vals, files);
+    case Expr::UNARY: {
+        FileVal operand;
+        if (!evalFileExpr(*expr.a, operand, vals, files)) return false;
+        out.i = expr.text == "-" ? -operand.i : operand.i;
+        return true;
+    }
+    case Expr::BINARY: {
+        FileVal lhs;
+        FileVal rhs;
+        if (!evalFileExpr(*expr.a, lhs, vals, files)) return false;
+        if (!evalFileExpr(*expr.b, rhs, vals, files)) return false;
+        const std::string& op = expr.text;
+        if (op == "+") {
+            out.i = lhs.i + rhs.i;
+        } else if (op == "-") {
+            out.i = lhs.i - rhs.i;
+        } else if (op == "*") {
+            out.i = lhs.i * rhs.i;
+        } else if (op == "/" && rhs.i) {
+            out.i = lhs.i / rhs.i;
+        } else if (op == "mod" && rhs.i) {
+            out.i = lhs.i % rhs.i;
+        } else {
+            return false;
+        }
+        return true;
+    }
+    case Expr::INDEX:
+        // `endfile(f)`: whether the file has no line left to read
+        if (expr.a && expr.a->kind == Expr::NAME && expr.a->text == "endfile"
+            && expr.args.size() == 1 && expr.args[0]->kind == Expr::NAME) {
+            const auto it = files.find(expr.args[0]->text);
+            out.i = it == files.end() || it->second.eof ? 1 : 0;
+            return true;
+        }
+        return false;
+    default: return false;
+    }
+}
+
+bool Lowering::fileAssign(const Stmt& stmt, FileVal& value, FileVals& vals, FileReaders& files) {
+    const Expr& target = *stmt.target;
+    if (target.kind == Expr::NAME) {
+        FileVal& slot = vals[target.text];
+        if (!value.bits.empty()) {
+            if (!slot.width) slot.width = value.width;
+            slot.bits = value.bits;
+            return true;
+        }
+        slot = value;
+        return true;
+    }
+    // An element of an image: it is kept by index, and placed in the packed value
+    // once the bounds of the array it belongs to are known
+    if (target.kind == Expr::INDEX && target.a && target.a->kind == Expr::NAME
+        && target.args.size() == 1 && !value.bits.empty()) {
+        FileVal index;
+        if (!evalFileExpr(*target.args[0], index, vals, files)) return false;
+        FileVal& slot = vals[target.a->text];
+        slot.width = static_cast<int>(value.bits.size());
+        slot.elems[static_cast<size_t>(index.i)] = value.bits;
+        return true;
+    }
+    unsupportedError(stmt.flp, "assignment target in a subprogram that reads a file");
+    return false;
+}
+
+bool Lowering::fileCall(const Stmt& stmt, FileVals& vals, FileReaders& files) {
+    const Expr& call = *stmt.value;
+    // A predefined file operation is written like a call, and parses like an index
+    std::string name;
+    if (call.kind == Expr::CALL) {
+        name = call.text;
+    } else if (call.kind == Expr::INDEX && call.a && call.a->kind == Expr::NAME) {
+        name = call.a->text;
+    }
+    if (call.args.size() != 2 || call.args[0]->kind != Expr::NAME
+        || call.args[1]->kind != Expr::NAME) {
+        unsupportedError(stmt.flp, "file operation with unexpected arguments");
+        return false;
+    }
+    const std::string& file = call.args[0]->text;
+    const std::string& var = call.args[1]->text;
+    if (name == "readline") {
+        const auto it = files.find(file);
+        if (it == files.end() || !it->second.in.is_open()) {
+            unsupportedError(stmt.flp, "read of a file that is not open");
+            return false;
+        }
+        std::string line;
+        if (!std::getline(it->second.in, line)) {
+            it->second.eof = true;
+            return false;
+        }
+        it->second.eof = false;
+        // A line variable holds the text, and its cursor in i
+        FileVal& slot = vals[var];
+        slot.text = line;
+        slot.i = 0;
+        slot.bits.clear();
+        return true;
+    }
+    if (name != "read" && name != "hread") {
+        unsupportedError(stmt.flp, "file operation '" + name + "'");
+        return false;
+    }
+    const auto lineIt = vals.find(file);
+    if (lineIt == vals.end()) {
+        unsupportedError(stmt.flp, "read from a line that was never filled");
+        return false;
+    }
+    // The width is the target's, not the line's: the line holds text only
+    const int width = vals[call.args[1]->text].width;
+    if (width <= 0) {
+        unsupportedError(stmt.flp, "read into a value of unknown width");
+        return false;
+    }
+    std::string bits;
+    size_t pos = static_cast<size_t>(lineIt->second.i);
+    if (!fileReadValue(lineIt->second.text, pos, width, name == "hread", bits)) {
+        unsupportedError(stmt.flp, "read past the end of a line");
+        return false;
+    }
+    lineIt->second.i = static_cast<int64_t>(pos);
+    FileVal& slot = vals[call.args[1]->text];
+    slot.bits = bits;
+    slot.width = width;
+    return true;
+}
+
+bool Lowering::evalFileStmts(const std::vector<StmtP>& stmts, FileVal& result, bool& returned,
+                             bool& exited, FileVals& vals, FileReaders& files) {
+    for (const StmtP& stmtp : stmts) {
+        if (!stmtp) continue;
+        const Stmt& stmt = *stmtp;
+        if (stmt.kind == Stmt::RETURN) {
+            if (!stmt.value || !evalFileExpr(*stmt.value, result, vals, files)) return false;
+            returned = true;
+            return true;
+        }
+        if (stmt.kind == Stmt::VAR_ASSIGN) {
+            FileVal value;
+            if (!stmt.value || !evalFileExpr(*stmt.value, value, vals, files)) return false;
+            if (!fileAssign(stmt, value, vals, files)) return false;
+            continue;
+        }
+        if (stmt.kind == Stmt::CALL) {
+            if (!fileCall(stmt, vals, files)) return false;
+            continue;
+        }
+        if (stmt.kind == Stmt::FOR) {
+            FileVal lo;
+            FileVal hi;
+            if (!stmt.b || !stmt.c || !evalFileExpr(*stmt.b, lo, vals, files)
+                || !evalFileExpr(*stmt.c, hi, vals, files)) {
+                unsupportedError(stmt.flp, "loop in a subprogram that reads a file");
+                return false;
+            }
+            for (int64_t k = lo.i; stmt.rangeAscending ? k <= hi.i : k >= hi.i;
+                 stmt.rangeAscending ? ++k : --k) {
+                FileVal& loopVar = vals[stmt.loopVar];
+                loopVar = FileVal{};
+                loopVar.i = k;
+                bool bodyReturned = false;
+                bool bodyExited = false;
+                if (!evalFileStmts(stmt.body, result, bodyReturned, bodyExited, vals, files)) {
+                    return false;
+                }
+                if (bodyReturned) {
+                    returned = true;
+                    return true;
+                }
+                if (bodyExited) break;
+            }
+            continue;
+        }
+        if (stmt.kind == Stmt::EXIT) {
+            FileVal cond;
+            cond.i = 1;
+            if (stmt.value && !evalFileExpr(*stmt.value, cond, vals, files)) return false;
+            if (cond.i) {
+                exited = true;
+                return true;
+            }
+            continue;
+        }
+        if (stmt.kind == Stmt::REPORT || stmt.kind == Stmt::ASSERT) continue;
+        unsupportedError(stmt.flp, "statement in a subprogram that reads a file");
+        return false;
+    }
+    return true;
+}
+
+AstNodeExpr* Lowering::evalFileInit(const SubprogramDecl& subp, const Expr& call) {
+    FileVals vals;
+    FileReaders files;
+    // Bind the formals: a string one takes the actual's text, the rest its value
+    for (size_t i = 0; i < subp.formals.size() && i < call.args.size(); ++i) {
+        const FormalDecl& formal = subp.formals[i];
+        FileVal value;
+        bool known = true;
+        if (formal.type.mark == "string") {
+            if (call.args[i]->kind == Expr::STRING_LIT) {
+                value.text = call.args[i]->spelling;
+            } else if (call.args[i]->kind == Expr::NAME) {
+                const auto textIt = m_stringConsts.find(call.args[i]->text);
+                if (textIt != m_stringConsts.end()) value.text = textIt->second;
+                known = !value.text.empty();
+            } else {
+                known = false;
+            }
+        } else {
+            known = evalFileExpr(*call.args[i], value, vals, files);
+        }
+        if (!known) {
+            unsupportedError(call.args[i]->flp, "argument of a subprogram that reads a file");
+            return nullptr;
+        }
+        for (const auto& name : formal.names) vals[name.first] = value;
+    }
+    // The locals, so a read knows how wide the value it fills is
+    for (const Decl& decl : subp.decls) {
+        if (decl.kind == Decl::FILE) {
+            std::string name;
+            if (decl.init && decl.init->kind == Expr::STRING_LIT) {
+                name = decl.init->spelling;
+            } else if (decl.init && decl.init->kind == Expr::NAME) {
+                const auto bound = vals.find(decl.init->text);
+                if (bound != vals.end()) name = bound->second.text;
+                if (name.empty()) {
+                    const auto textIt = m_stringConsts.find(decl.init->text);
+                    if (textIt != m_stringConsts.end()) name = textIt->second;
+                }
+            }
+            if (name.empty()) {
+                unsupportedError(decl.flp, "file name that is not a string constant");
+                return nullptr;
+            }
+            if (!decl.fileMode.empty() && decl.fileMode != "read"
+                && decl.fileMode != "read_mode") {
+                unsupportedError(decl.flp, "file opened for writing");
+                return nullptr;
+            }
+            for (const auto& one : decl.names) {
+                FileReader reader;
+                reader.in.open(name);
+                if (!reader.in.is_open()) {
+                    unsupportedError(decl.flp, "cannot open file '" + name + "'");
+                    return nullptr;
+                }
+                files.emplace(one.first, std::move(reader));
+            }
+            continue;
+        }
+        VType declType;
+        if (!resolveType(decl.type, declType)) return nullptr;
+        for (const auto& one : decl.names) {
+            FileVal& slot = vals[one.first];
+            slot.width = declType.width;
+            if (slot.bits.empty())
+                slot.bits = std::string(static_cast<size_t>(declType.width), '0');
+        }
+    }
+    VType retType;
+    if (!resolveType(subp.returnType, retType)) return nullptr;
+    FileVal result;
+    bool returned = false;
+    bool exited = false;
+    if (!evalFileStmts(subp.body, result, returned, exited, vals, files)) return nullptr;
+    if (!returned) {
+        unsupportedError(call.flp, "subprogram that reads a file returns no image");
+        return nullptr;
+    }
+    if (!result.elems.empty()) {
+        // An array of elements: indexOffset says where each one sits, counted in
+        // elements from the least significant
+        if (!retType.isVector() || retType.elemWidth <= 0) {
+            unsupportedError(call.flp, "image that is not an array of vectors");
+            return nullptr;
+        }
+        std::string bits(static_cast<size_t>(retType.width), '0');
+        for (const auto& elem : result.elems) {
+            const int offset = retType.indexOffset(static_cast<int>(elem.first));
+            if (offset < 0 || offset >= retType.length()) {
+                unsupportedError(call.flp, "image element outside the array bounds");
+                return nullptr;
+            }
+            const size_t begin = bits.size() - static_cast<size_t>(offset + 1) * retType.elemWidth;
+            const size_t count
+                = std::min(elem.second.size(), static_cast<size_t>(retType.elemWidth));
+            std::copy(elem.second.end() - static_cast<std::ptrdiff_t>(count), elem.second.end(),
+                      bits.begin()
+                          + static_cast<std::ptrdiff_t>(begin + retType.elemWidth - count));
+        }
+        result.bits = std::move(bits);
+    }
+    if (static_cast<int>(result.bits.size()) < retType.width) {
+        result.bits.insert(result.bits.begin(), retType.width - result.bits.size(), '0');
+    }
+    return makeBitsConst(call.flp, retType.dtp, result.bits);
+}
+
 AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context) {
     const SubprogramRef* refp = nullptr;
     const SubprogramDecl* const subp = resolveCall(call, true, &refp);
     if (!subp) return nullptr;  // resolveCall reported why
+    // A subprogram that reads a file builds its result at elaboration
+    if (readsFile(*subp)) return evalFileInit(*subp, call);
     if (!m_inlineBodies.insert(subp).second) {
         unsupportedError(call.flp, "recursive call of function '" + subp->spelling + "'");
         return nullptr;
@@ -7592,9 +8004,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         // A cycle model has no tristate, so an inout port has no driver it can resolve; it is
         // refused here rather than letting an undriven bidirectional port reach the DFG. The
         // port is declared as an input so the rest of the design still analyzes
-        if (port.dir == PortMode::INOUT) {
-            unsupportedError(port.flp, "inout port");
-        }
+        if (port.dir == PortMode::INOUT) { unsupportedError(port.flp, "inout port"); }
         VType type;
         const PortBounds* boundsp = nullptr;
         if (portBounds) {
@@ -7637,8 +8047,8 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             // An inout port was refused above; it stays an input so later references resolve
             const PortMode dir = port.dir == PortMode::INOUT ? PortMode::IN : port.dir;
             varp->direction(dir == PortMode::IN    ? VDirection::INPUT
-                             : dir == PortMode::OUT ? VDirection::OUTPUT
-                                                    : VDirection::INOUT);
+                            : dir == PortMode::OUT ? VDirection::OUTPUT
+                                                   : VDirection::INOUT);
             varp->pinNum(++pinNum);
             // VHDL ports are signals, so procedural assignment is legal
             varp->declTyped(true);

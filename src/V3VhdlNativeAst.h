@@ -256,11 +256,12 @@ struct PortDecl final {
 };
 
 struct Decl final {
-    enum Kind : uint8_t { SIGNAL, CONSTANT, VARIABLE } kind;
+    enum Kind : uint8_t { SIGNAL, CONSTANT, VARIABLE, FILE } kind;
     FileLine* flp = nullptr;
     std::vector<std::pair<std::string, std::string>> names;
     TypeSpec type;
     ExprP init;
+    std::string fileMode;  // FILE: the open mode
     explicit Decl(Kind kind_)
         : kind{kind_} {}
 };
