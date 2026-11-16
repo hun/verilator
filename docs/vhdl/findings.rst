@@ -405,6 +405,16 @@ ______
       section. Reviewing a VHDL design's internals needs the dump a simulator
       that has the feature produces (``ghdl --vcd``), or the frontend's own
       ``--public-flat-rw`` accessors
+  * - N91
+    - a call of a function nested in another call's own actuals: neorv32's top selects
+      its boot address with
+      ``sel_suv_f(cond, base_io_bootrom_c, sel_suv_f(cond, BOOT_ADDR_CUSTOM, ...))``
+    - the recursion guard marked a subprogram's body before its actuals were bound, so
+      the inner call of the same function looked recursive and the constant that holds
+      the result could not be folded, which then made the constant look unknown where a
+      generate body passes it on as a generic. The body is marked once its actuals are
+      bound, so nesting folds while a body that calls itself is still reported
+    - ``t_vhdl_nested_call`` and ``t_vhdl_recursive_bad``
   * - N87
     - an unconstrained ``string`` constant: neorv32's CPU names its trace file
       ``"neorv32_trace" & natural'image(HART_ID) & ".log"``
@@ -496,7 +506,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 186 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 188 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
@@ -506,6 +516,10 @@ t65 CPU and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``. The last of
 those runs ``fpga/main_bram.vhdl`` unmodified, its ``RAM_INIT_FILE`` read at
 elaboration from a checked-in image. hdl-modules' ``ring_buffer_write_simple``
 runs too, its width checks folded at elaboration (N86).
+
+The whole neorv32 core (``rtl/core/*.vhd`` with ``neorv32_top`` as the top) now lints
+with no errors, its CPU running the same C program as potato's SoC being blocked only
+by its model (N90).
 
 Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)
 whenever GHDL and the native frontend disagree. nvc settled the value of a toggle
