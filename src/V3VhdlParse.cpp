@@ -7703,7 +7703,17 @@ class VhdlXmlFrontend final {
                 }
                 if (declIt->isString) {
                     std::string content;
-                    if (!stringLiteral(actualp, content)) {
+                    bool known = stringLiteral(actualp, content);
+                    if (!known && actualp->attr("kind") == "simple_name") {
+                        // A string generic passed on from the enclosing unit
+                        const auto outer = m_stringBindings.find(
+                            vhdlFold(actualp->attr("identifier")));
+                        if (outer != m_stringBindings.end()) {
+                            content = outer->second;
+                            known = true;
+                        }
+                    }
+                    if (!known) {
                         unsupported(assocp, "non-literal string generic actual");
                         bad = true;
                         continue;

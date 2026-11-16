@@ -291,7 +291,8 @@ class Lowering final {
     std::map<std::string, DeferredType> m_deferredTypes;
     size_t m_deferSeq = 0;  // Sequence number of the part being registered
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
-    std::map<std::string, VType> m_constTypes;  // Type of each typed constant
+    std::map<std::string, VType> m_constTypes;
+    std::map<std::string, std::string> m_stringConsts;  // Folded name to its text  // Type of each typed constant
     std::map<std::string, AstConst*> m_enumConsts;  // Enumeration literals by folded name
     std::vector<std::unique_ptr<AstConst>> m_ownedConsts;  // Owns constants in the tables
     std::vector<std::pair<std::string, std::string>> m_pendingNames;  // Duplicate detection
@@ -7265,6 +7266,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
         m_ownedConsts.push_back(std::unique_ptr<AstConst>(valuep));
         m_constValues[folded] = m_ownedConsts.back().get();
         m_constTypes[folded] = type;
+        m_stringConsts[folded] = text;
     };
     for (const GenericDecl& gen : generics) {
         for (const auto& name : gen.names) {
@@ -7806,14 +7808,23 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
                 freeBindings(bindings);
                 return nullptr;
             }
-            if (actualp->kind != Expr::STRING_LIT) {
+            std::string stringValue;
+            if (actualp->kind == Expr::STRING_LIT) {
+                stringValue = actualp->spelling;
+            } else if (actualp->kind == Expr::NAME) {
+                // A string generic passed on from the enclosing unit, so its text
+                // comes from that unit's generic
+                const auto outer = m_stringConsts.find(actualp->text);
+                if (outer != m_stringConsts.end()) stringValue = outer->second;
+            }
+            if (stringValue.empty()) {
                 unsupportedError(actualp->flp, "string generic actual");
                 freeBindings(bindings);
                 return nullptr;
             }
             GenericBinding binding;
             binding.isString = true;
-            binding.stringValue = actualp->spelling;
+            binding.stringValue = stringValue;
             bindings[items[k].folded] = binding;
             continue;
         }
