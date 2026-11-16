@@ -772,9 +772,33 @@ class Lowering final {
         return width > 0;
     }
 
-    AstVar* lookupVar(const Expr& nameExpr) const {
+    //! The variable a name denotes; an alias of a signal denotes its target, which is
+    //! not in the scope under its own name
+    AstVar* lookupVar(const Expr& nameExpr) {
         const auto it = m_scope.find(nameExpr.text);
-        return it == m_scope.end() ? nullptr : it->second.varp;
+        if (it != m_scope.end()) return it->second.varp;
+        AstNodeExpr* const aliasp = lowerAlias(nameExpr, false);
+        AstVarRef* const refp = VN_CAST(aliasp, VarRef);
+        AstVar* const varp = refp ? refp->varp() : nullptr;
+        if (aliasp) aliasp->deleteTree();
+        return varp;
+    }
+
+    //! An unconstrained vector object whose value is a bit string: the mark leaves the
+    //! width open and the literal fixes it, e.g. `constant c : std_logic_vector := "0011"`
+    bool isLiteralSizedVector(const TypeSpec& type, const Expr* initp) const {
+        if (!initp || initp->kind != Expr::BITS_LIT) return false;
+        if (type.hasRange || !type.constraintMark.empty()) return false;
+        return type.mark == "std_logic_vector" || type.mark == "std_ulogic_vector"
+               || type.mark == "bit_vector" || type.mark == "unsigned" || type.mark == "signed";
+    }
+
+    //! The type such a value has: the mark's element type and the literal's width
+    VType literalVectorType(FileLine* flp, const std::string& mark, int width) const {
+        const VBasicDTypeKwd kwd
+            = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+        const VSigning signing = mark == "signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+        return vectorType(flp, kwd, signing, width);
     }
     bool isIntrinsic(const std::string& name) const {
         static const char* const names[] = {"is_x",
@@ -6901,15 +6925,19 @@ void Lowering::lowerProcess(const Process& process) {
     for (const std::string& name : sensNames) {
         // A variable is not a signal, so it never becomes a sensitivity item
         if (varNames.count(name) || m_variables.count(name)) continue;
-        const auto it = m_scope.find(name);
-        if (it == m_scope.end()) {
+        Expr nameExpr{Expr::NAME};
+        nameExpr.flp = process.flp;
+        nameExpr.text = name;
+        nameExpr.spelling = name;
+        AstVar* const varp = lookupVar(nameExpr);
+        if (!varp) {
             // process(all) collects read names including subprogram and type marks; only
             // names that are actual signals sensitize the process
             if (process.sensitivityAll) continue;
             process.flp->v3error("VHDL: unknown signal '" + name + "' in a sensitivity list");
             return;
         }
-        sensVars.push_back(it->second.varp);
+        sensVars.push_back(varp);
     }
     // A process runs on every event of its sensitivity list, so an edge call must not
     // become a constant. A whole-signal edge is the signal's level when it is the only
@@ -7094,7 +7122,11 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
     VType constType;
     bool intConstant = true;
     bool realConstant = false;
-    if (type.flp && resolveType(type, constType)) {
+    if (isLiteralSizedVector(type, initp)) {
+        // The mark leaves the width open, so the literal fixes it
+        constType = literalVectorType(flp, type.mark, static_cast<int>(initp->bits.size()));
+        intConstant = false;
+    } else if (type.flp && resolveType(type, constType)) {
         intConstant = constType.isInt();
         realConstant = constType.kind == VType::REAL;
     }
