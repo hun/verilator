@@ -461,3 +461,5 @@ _______
      - Refuse an inout port where it is declared
    * - ``643e55e``
      - Resolve signal aliases, and width unconstrained vector constants
+   * - ``7258f2f``
+     - Fold a constant expression that has real operands
