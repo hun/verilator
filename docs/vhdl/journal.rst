@@ -453,3 +453,5 @@ _______
      - Accept a VHDL alias in a process declarative part
    * - ``bc37b5f``
      - Accept a selected entity name in a VHDL instantiation
+   * - ``ee3df9e``
+     - Support conversions to the predefined integer subtypes
