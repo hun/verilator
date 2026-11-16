@@ -835,6 +835,22 @@ class Lowering final {
                || type.mark == "bit_vector" || type.mark == "unsigned" || type.mark == "signed";
     }
 
+    //! The type of a string of a given length: 8-bit character codes indexed from 1 up
+    VType stringType(FileLine* flp, int length) const {
+        VType type;
+        type.kind = VType::ARRAY;
+        type.elemp = std::make_shared<VType>(
+            vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
+        type.elemWidth = 8;
+        type.kwd = VBasicDTypeKwd::LOGIC;
+        type.signing = VSigning::UNSIGNED;
+        type.left = 1;
+        type.right = length;
+        type.ascending = true;
+        type.width = 8 * length;
+        type.dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, type.width);
+        return type;
+    }
     //! The type such a value has: the mark's element type and the literal's width
     VType literalVectorType(FileLine* flp, const std::string& mark, int width) const {
         const VBasicDTypeKwd kwd
@@ -1590,6 +1606,8 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
 bool Lowering::evalCond(const Expr& expr, bool& value) const {
     switch (expr.kind) {
     case Expr::PAREN: return evalCond(*expr.a, value);
+    case Expr::TRUE_LIT: value = true; return true;
+    case Expr::FALSE_LIT: value = false; return true;
     case Expr::NAME: {
         if (expr.text == "true" || expr.text == "false") {
             value = expr.text == "true";
@@ -4106,9 +4124,9 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         typep = &predefined;
         typeMark = true;
     }
-    if (!typep && expr.a->text == "character") {
-        // `character` is a predefined type the frontend models directly rather than
-        // as a declared entry in m_types; resolve it so its attributes reach below
+    if (!typep && (expr.a->text == "character" || expr.a->text == "boolean")) {
+        // `character` and `boolean` are predefined types the frontend models directly
+        // rather than as entries in m_types; resolve them so their attributes reach below
         TypeSpec spec;
         spec.flp = flp;
         spec.mark = expr.a->text;
@@ -4228,6 +4246,26 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         // use the same answer a constant gets
         int64_t folded = 0;
         if (evalInt(expr, folded)) return makeIntConst(flp, folded);
+        // The value as written: the decimal of an integer, the literal of a Boolean or
+        // enumeration value, IEEE 1076-2008 16.2.2
+        if (attribute == "image" && expr.args[0]) {
+            std::string text;
+            bool foldedAll = false;
+            if (expr.a->text == "boolean") {  // Resolves as a 1-bit logic type
+                bool condValue = false;
+                foldedAll = evalCond(*expr.args[0], condValue);
+                text = condValue ? "TRUE" : "FALSE";
+            } else if (evalInt(*expr.args[0], folded)) {
+                foldedAll = true;
+                if (typep->kind == VType::ENUM && folded >= 0
+                    && static_cast<size_t>(folded) < typep->literals.size()) {
+                    text = typep->literals[static_cast<size_t>(folded)];
+                } else {
+                    text = std::to_string(folded);
+                }
+            }
+            if (foldedAll) return makeStringConst(flp, text);
+        }
         unsupportedError(flp, "attribute '" + attribute + "' with arguments");
         return nullptr;
     }
@@ -7789,9 +7827,26 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
     VType constType;
     bool intConstant = true;
     bool realConstant = false;
+    AstNodeExpr* valuep = nullptr;  // A value lowered early, when the type needed it
     if (isLiteralSizedVector(type, initp)) {
         // The mark leaves the width open, so the literal fixes it
         constType = literalVectorType(flp, type.mark, static_cast<int>(initp->bits.size()));
+        intConstant = false;
+    } else if (initp->kind == Expr::STRING_LIT && type.mark == "string" && !type.hasRange
+               && type.constraintMark.empty()) {
+        // An unconstrained string takes its bounds from the literal, as a vector does
+        constType = stringType(flp, static_cast<int>(initp->spelling.size()));
+        intConstant = false;
+    } else if (type.mark == "string" && !type.hasRange && type.constraintMark.empty()) {
+        // An unconstrained string takes its bounds from a static expression too, such as
+        // the image of a value, so the value is folded before the type is fixed
+        valuep = lowerExpr(*initp, nullptr);
+        if (!valuep) return;
+        if (AstConst* const foldedp = foldStatic(valuep)) {
+            if (foldedp != valuep) valuep->deleteTree();
+            valuep = foldedp;
+        }
+        constType = stringType(flp, valuep->width() / 8);
         intConstant = false;
     } else if (type.flp && resolveType(type, constType)) {
         intConstant = constType.isInt();
@@ -7848,7 +7903,12 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         // A call to a declared function is static as well: lower and fold it below
         if (!constType.dtp) constType = intType(flp);
     }
-    AstNodeExpr* valuep = lowerExpr(*initp, &constType);
+    if (!constType.dtp) {
+        unsupportedError(flp, "constant of an unresolved type");
+        valuep->deleteTree();
+        return;
+    }
+    if (!valuep) valuep = lowerExpr(*initp, &constType);
     if (!valuep) return;
     if (AstConst* const foldedp = foldStatic(valuep)) {
         valuep->deleteTree();
@@ -7878,33 +7938,22 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                                 const GenericBindings* bindings, bool probe) {
     bool ok = true;
     bool unbound = false;  // A generic here has neither a binding nor a default
-    const auto registerString = [&](FileLine* flp, const std::string& folded,
-                                    const std::string& text) {
-        if (text.empty()) {
-            unsupportedError(flp, "empty string generic");
-            return;
-        }
-        // A string generic's value is fixed at elaboration, so register it as a typed
-        // constant of packed 8-bit character codes rather than a variable; that lets a
-        // reference fold, e.g. `if val = "one" generate`.
-        VType type;
-        type.kind = VType::ARRAY;
-        type.elemp = std::make_shared<VType>(
-            vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
-        type.elemWidth = 8;
-        type.kwd = VBasicDTypeKwd::LOGIC;
-        type.signing = VSigning::UNSIGNED;
-        type.left = 1;
-        type.right = static_cast<int>(text.size());
-        type.ascending = true;
-        type.width = 8 * static_cast<int>(text.size());
-        type.dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, type.width);
-        AstConst* const valuep = makeStringConst(flp, text);
-        m_ownedConsts.push_back(std::unique_ptr<AstConst>(valuep));
-        m_constValues[folded] = m_ownedConsts.back().get();
-        m_constTypes[folded] = type;
-        m_stringConsts[folded] = text;
-    };
+    const auto registerString
+        = [&](FileLine* flp, const std::string& folded, const std::string& text) {
+              if (text.empty()) {
+                  unsupportedError(flp, "empty string generic");
+                  return;
+              }
+              // A string generic's value is fixed at elaboration, so register it as a typed
+              // constant of packed 8-bit character codes rather than a variable; that lets a
+              // reference fold, e.g. `if val = "one" generate`.
+              const VType type = stringType(flp, static_cast<int>(text.size()));
+              AstConst* const valuep = makeStringConst(flp, text);
+              m_ownedConsts.push_back(std::unique_ptr<AstConst>(valuep));
+              m_constValues[folded] = m_ownedConsts.back().get();
+              m_constTypes[folded] = type;
+              m_stringConsts[folded] = text;
+          };
     for (const GenericDecl& gen : generics) {
         for (const auto& name : gen.names) {
             if (unbound) continue;  // An earlier generic has no value, so nothing can elaborate
@@ -8831,6 +8880,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                      + conc.instanceName + "', which has no generics");
         return nullptr;
     }
+    if (entityp) m_designp->instantiated.insert(conc.instanceName);
     PortBoundsMap portBounds;
     if (entityp) {
         for (const PortDecl& port : entityp->ports) {
@@ -8883,9 +8933,13 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                                return name.first == portp->name();
                                            });
             if (!match) continue;
-            VType vt;
-            if (resolveType(port.type, vt) && vt.kind == VType::RECORD) return vt;
-            return none;
+            // Only a declared record type names elements, and its mark carries no range: a
+            // vector's or a generic type's range would need values that are not in the
+            // enclosing scope this instance is lowered in
+            if (port.type.hasRange || !port.type.constraintMark.empty()) return none;
+            const auto typeIt = m_types.find(port.type.mark);
+            if (typeIt == m_types.end() || typeIt->second.kind != VType::RECORD) return none;
+            return typeIt->second;
         }
         return none;
     };
@@ -8907,6 +8961,10 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             }
         }
         const VType portType = typeOfDType(portp->dtypep());
+        // The packed vector of a record port does not name its elements, so an aggregate
+        // actual or default takes the record type the port is declared with
+        const VType recPortType = recordPortType(portp);
+        const VType& aggType = recPortType.kind == VType::RECORD ? recPortType : portType;
         if (assocs.empty()) {
             // An unassociated input takes its declared default; otherwise it is open
             AstNodeExpr* defaultp = nullptr;
@@ -8919,7 +8977,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                           return name.first == portp->name();
                                       });
                     if (!matches) continue;
-                    defaultp = lowerExpr(*port.init, &portType);
+                    defaultp = lowerExpr(*port.init, &aggType);
                     if (defaultp) defaultp = resizeExpr(defaultp, portType, flp);
                     break;
                 }
@@ -8937,7 +8995,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                           [](const PortAssoc* assocp) { return !assocp->formalMember.empty(); });
         AstNodeExpr* actualp = nullptr;
         if (recordMember) {
-            const VType recType = recordPortType(portp);
+            const VType& recType = recPortType;
             if (recType.kind != VType::RECORD) {
                 unsupportedError(flp, "record-member association on a non-record port");
                 return nullptr;
@@ -9010,7 +9068,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             if (assoc.actual) {
                 const bool driven = portp->direction().isOutput() || portp->direction().isInout();
                 AstNodeExpr* valuep = driven ? lowerDesignator(*assoc.actual, true)
-                                             : lowerExpr(*assoc.actual, &portType);
+                                             : lowerExpr(*assoc.actual, &aggType);
                 if (!valuep) return nullptr;
                 actualp = resizeExpr(valuep, portType, flp);
             }

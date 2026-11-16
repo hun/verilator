@@ -270,10 +270,14 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
             // Only the specializations are referenced; the empty base would look like a top
             AstModule* const modp = modules[entityp->name];
             VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
-        } else {
+        } else if (design.instantiated.count(entityp->name)) {
             entityp->flp->v3error("VHDL: entity '" + entityp->spelling
                                   + "' has a generic without a default value, and no instance "
                                     "binds it");
+        } else if (AstModule* const modp = modules[entityp->name]) {
+            // An entity no instance names is not part of the design: nothing binds its
+            // generics, and an empty module would look like another top
+            VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
         }
     }
     // An entity with unconstrained ports elaborates only through its instances
