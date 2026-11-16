@@ -755,6 +755,16 @@ class Lowering final {
         }
         return copy;
     }
+    //! Copy the tracked variable values, for a sibling branch to start from the same ones
+    std::map<std::string, ExprP> saveVarVals() const {
+        std::map<std::string, ExprP> out;
+        for (const auto& entry : m_varVals) out[entry.first] = substVars(*entry.second);
+        return out;
+    }
+    void restoreVarVals(const std::map<std::string, ExprP>& saved) {
+        m_varVals.clear();
+        for (const auto& entry : saved) m_varVals[entry.first] = substVars(*entry.second);
+    }
     //! Record or invalidate a variable's tracked value after a statement
     void updateVarVals(const Stmt& stmt) {
         if (stmt.kind == Stmt::VAR_ASSIGN) {
@@ -848,6 +858,7 @@ class Lowering final {
                                             "to_01",
                                             "to_x01z",
                                             "to_ux01",
+                                            "std_match",
                                             "resize",
                                             "shift_left",
                                             "shift_right",
@@ -1675,10 +1686,12 @@ void Lowering::registerType(const TypeDecl& decl) {
         }
         if (!decl.index.hasRange) {
             // An index that is a type mark takes the mark's range: an enumeration's
-            // positions (IEEE 1800-2023 6.9)
+            // positions (IEEE 1800-2023 6.9), or a discrete subtype's own bounds
             const auto indexIt = m_types.find(decl.index.mark);
-            if (indexIt == m_types.end() || indexIt->second.kind != VType::ENUM
-                || indexIt->second.literals.empty()) {
+            const bool enumIndex = indexIt != m_types.end() && indexIt->second.kind == VType::ENUM
+                                   && !indexIt->second.literals.empty();
+            const bool intIndex = indexIt != m_types.end() && indexIt->second.kind == VType::INT;
+            if (!enumIndex && !intIndex) {
                 unsupportedError(flp, "array type without an index constraint");
                 return;
             }
@@ -1696,6 +1709,14 @@ void Lowering::registerType(const TypeDecl& decl) {
         bool constrained = true;
         for (size_t k = 0; k < specs.size(); ++k) {
             if (!specs[k]->hasRange) {
+                const auto markIt = m_types.find(specs[k]->mark);
+                if (markIt != m_types.end() && markIt->second.kind == VType::INT) {
+                    // A discrete subtype as the index constraint: its own bounds
+                    lefts[k] = markIt->second.intLow;
+                    rights[k] = markIt->second.intHigh;
+                    ascends[k] = lefts[k] <= rights[k];
+                    continue;
+                }
                 // An enumeration index runs over the positions of its literals
                 lefts[k] = 0;
                 rights[k]
@@ -3116,6 +3137,42 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         }
         return lowerExpr(*argsp[0], nullptr);
     }
+    // `std_match(a, b)`: a '-' bit of either operand matches anything, so the operands
+    // are compared under a mask of the bits that are not wildcards. The model is
+    // 2-state, so a metavalue is a 0 on both sides and compares equal
+    if (fn == "std_match") {
+        if (argsp.size() != 2) {
+            unsupportedError(flp, "std_match without two arguments");
+            return nullptr;
+        }
+        AstNodeExpr* lp = lowerExpr(*argsp[0], nullptr);
+        if (!lp) return nullptr;
+        AstNodeExpr* rp = lowerExpr(*argsp[1], nullptr);
+        if (!rp) {
+            lp->deleteTree();
+            return nullptr;
+        }
+        const int width = std::max(lp->width(), rp->width());
+        std::string mask(static_cast<size_t>(width), '1');
+        for (const ExprP& argp : argsp) {
+            if (!argp || argp->kind != Expr::BITS_LIT) continue;
+            const size_t argWidth = argp->bits.size();
+            for (size_t i = 0; i < argWidth && i < static_cast<size_t>(width); ++i) {
+                if (argp->bits[i] == '-') mask[i + static_cast<size_t>(width) - argWidth] = '0';
+            }
+        }
+        const VType vec = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width);
+        AstNodeExpr* const maskp = makeBitsConst(flp, vec.dtp, mask);
+        lp = resizeExpr(lp, vec, flp);
+        rp = resizeExpr(rp, vec, flp);
+        AstNodeExpr* const leftp = new AstAnd{flp, lp, maskp->cloneTree(false)};
+        leftp->dtypep(vec.dtp);
+        AstNodeExpr* const rightp = new AstAnd{flp, rp, maskp};
+        rightp->dtypep(vec.dtp);
+        AstNodeExpr* const eqp = new AstEq{flp, leftp, rightp};
+        eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        return eqp;
+    }
     if (argsp.empty()) {
         unsupportedError(flp, "function '" + fn + "' without an argument");
         return nullptr;
@@ -3414,36 +3471,39 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
     unsupportedError(flp, "expression as an assignment target");
     return nullptr;
 }
-bool Lowering::sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
+bool Lowering::sliceBound(const ExprP& exprp, const std::string& prefix, const VType& baseType,
                           int64_t& out) {
+    // A variable that was assigned a static value earlier counts as one here, as does the
+    // loop constant it was computed from
+    const ExprP boundp = substVars(*exprp);
     // A bound can name a constant whose value only a folded call provides, e.g. a slice of
     // a fixed number of address bits next to a base address
-    if (staticIntFold(expr, out)) return true;
-    if (expr->kind == Expr::PAREN && expr->a) {
-        return sliceBound(expr->a, prefix, baseType, out);
+    if (staticIntFold(boundp, out)) return true;
+    if (boundp->kind == Expr::PAREN && boundp->a) {
+        return sliceBound(boundp->a, prefix, baseType, out);
     }
-    if (expr->kind == Expr::ATTR && expr->a && expr->a->spelling == prefix) {
-        if (expr->text == "left") {
+    if (boundp->kind == Expr::ATTR && boundp->a && boundp->a->spelling == prefix) {
+        if (boundp->text == "left") {
             out = baseType.left;
             return true;
         }
-        if (expr->text == "right") {
+        if (boundp->text == "right") {
             out = baseType.right;
             return true;
         }
-        if (expr->text == "length") {
+        if (boundp->text == "length") {
             out = std::abs(baseType.left - baseType.right) + 1;
             return true;
         }
         return false;
     }
-    if (expr->kind == Expr::BINARY && (expr->text == "+" || expr->text == "-") && expr->a
-        && expr->b) {
+    if (boundp->kind == Expr::BINARY && (boundp->text == "+" || boundp->text == "-") && boundp->a
+        && boundp->b) {
         int64_t lhs = 0;
         int64_t rhs = 0;
-        if (!sliceBound(expr->a, prefix, baseType, lhs)) return false;
-        if (!staticIntFold(expr->b, rhs)) return false;
-        out = expr->text == "+" ? lhs + rhs : lhs - rhs;
+        if (!sliceBound(boundp->a, prefix, baseType, lhs)) return false;
+        if (!staticIntFold(boundp->b, rhs)) return false;
+        out = boundp->text == "+" ? lhs + rhs : lhs - rhs;
         return true;
     }
     return false;
@@ -3834,6 +3894,9 @@ const VType* Lowering::typeOfName(const Expr& expr) const {
     if (it != m_scope.end()) return &it->second.type;
     const auto constIt = m_constTypes.find(expr.text);
     if (constIt != m_constTypes.end()) return &constIt->second;
+    // A type mark names no object, but `subtype'range` takes its bounds
+    const auto typeIt = m_types.find(expr.text);
+    if (typeIt != m_types.end()) return &typeIt->second;
     return nullptr;
 }
 
@@ -5063,10 +5126,12 @@ Lowering::lowerConditionalChain(FileLine* flp,
 
 AstNode* Lowering::lowerIf(const Stmt& stmt) {
     AstNode* elsesp = nullptr;
-    m_varVals.clear();
+    // A value tracked before the statement still holds inside each branch, which are
+    // lowered in reverse, so each one starts from the same values
+    const auto entryVals = saveVarVals();
     for (std::size_t i = stmt.branches.size(); i-- > 0;) {
         const auto& branch = stmt.branches[i];
-        m_varVals.clear();
+        restoreVarVals(entryVals);
         AstNode* bodyp = lowerStmtList(branch.second);
         if (!branch.first) {
             elsesp = bodyp;
@@ -5121,14 +5186,15 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
 
 AstNode* Lowering::lowerCase(const Stmt& stmt) {
     FileLine* const flp = stmt.flp;
-    m_varVals.clear();
+    // As in an if, an alternative starts from the values that held before the statement
+    const auto entryVals = saveVarVals();
     AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
     if (!selectorp) return nullptr;
     AstNodeDType* const selDtp = selectorp->dtypep();
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen
     for (const auto& item : stmt.caseItems) {
-        m_varVals.clear();
+        restoreVarVals(entryVals);
         AstNode* const bodyp = lowerStmtList(item.second);
         std::vector<AstConst*> cops;
         if (!lowerChoiceConsts(item.first, selDtp, cops)) {
@@ -5491,25 +5557,34 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
     int64_t right = 0;
     bool up = stmt.rangeAscending;
     if (!stmt.c) {
-        // `for i in name'range loop`: the bounds come from the prefix's type
-        if (!stmt.b || stmt.b->kind != Expr::ATTR || stmt.b->text != "range" || !stmt.b->a
-            || stmt.b->a->kind != Expr::NAME) {
-            unsupportedError(flp, "loop range without 'to' or 'downto'");
-            return nullptr;
+        // `for i in subtype loop`: a discrete subtype is its own range
+        const auto subtypeIt
+            = stmt.b && stmt.b->kind == Expr::NAME ? m_types.find(stmt.b->text) : m_types.end();
+        if (subtypeIt != m_types.end() && subtypeIt->second.kind == VType::INT) {
+            left = subtypeIt->second.intLow;
+            right = subtypeIt->second.intHigh;
+            up = left <= right;
+        } else {
+            // `for i in name'range loop`: the bounds come from the prefix's type
+            if (!stmt.b || stmt.b->kind != Expr::ATTR || stmt.b->text != "range" || !stmt.b->a
+                || stmt.b->a->kind != Expr::NAME) {
+                unsupportedError(flp, "loop range without 'to' or 'downto'");
+                return nullptr;
+            }
+            const VType* const typep = typeOfName(*stmt.b->a);
+            if (!typep) {
+                unsupportedError(flp, "loop range of an unresolved name");
+                return nullptr;
+            }
+            const VType* const levelp = indexRangeLevel(*stmt.b, *typep);
+            if (!levelp) {
+                unsupportedError(flp, "loop range of an unknown index");
+                return nullptr;
+            }
+            left = levelp->left;
+            right = levelp->right;
+            up = levelp->ascending;
         }
-        const VType* const typep = typeOfName(*stmt.b->a);
-        if (!typep) {
-            unsupportedError(flp, "loop range of an unresolved name");
-            return nullptr;
-        }
-        const VType* const levelp = indexRangeLevel(*stmt.b, *typep);
-        if (!levelp) {
-            unsupportedError(flp, "loop range of an unknown index");
-            return nullptr;
-        }
-        left = levelp->left;
-        right = levelp->right;
-        up = levelp->ascending;
     } else if (!staticInt(stmt.b, left) || !staticInt(stmt.c, right)) {
         // A sequential loop evaluates its bounds when it is reached, so they may read a
         // signal: run the loop at run time instead of unrolling it
@@ -7524,6 +7599,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
         if (!resolveType(decl.type, type)) continue;
         if (rejectRealObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
+            if (!reserveName(name.first, name.second, decl.flp)) continue;
             // Mangle so the same variable name in two processes stays distinct
             const std::string mangled
                 = "vhdlvar_" + std::to_string(++m_varSeq) + "__" + name.first;
