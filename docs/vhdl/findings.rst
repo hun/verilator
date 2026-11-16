@@ -378,6 +378,24 @@ ______
       found the imported enumeration literal first and reported ``cannot assign
       to constant 'ra'``. A variable now hides a package member as a signal does
     - ``t_vhdl_var_shadow``
+  * - N83
+    - a function that writes a slice of one of its own variables, called with a
+      record element as the actual: ``r.row <= next_row(r.row)`` with
+      ``v(2 downto 0) := std_ulogic_vector(idx + 1)`` in the body, as microwatt's
+      ``icache`` advances its row counter
+    - the body is folded by rebuilding the local's value around each element
+      write, and the offset summed the selects that binding the actual had
+      brought along (the record element sits one bit up) on top of the target's
+      own. The sum now stops at the level whose width is the local's, so only the
+      target's selects count. In ``icache`` this left the row counter stuck, the
+      line never completed, and every fetch after the first was never answered
+    - ``t_vhdl_fn_slice_formal``
+  * - N84
+    - a trace of a VHDL design: ``--trace`` with ``--vcd`` or ``--fst``
+    - the model registers no signals at all, so the dump has an empty definition
+      section. Reviewing a VHDL design's internals needs the dump a simulator
+      that has the feature produces (``ghdl --vcd``), or the frontend's own
+      ``--public-flat-rw`` accessors
 
 ____
 Open
@@ -430,7 +448,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 180 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 181 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
