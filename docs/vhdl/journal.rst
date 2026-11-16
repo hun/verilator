@@ -475,3 +475,5 @@ _______
      - Accept a discrete subtype as a range, and std_match
    * - ``51f05c0``
      - Take an inlined slice write's offset inside the local, not its actual
+   * - ``e1c95a2``
+     - Fold a call where an aggregate bound or conversion width is expected

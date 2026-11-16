@@ -390,6 +390,15 @@ ______
       target's selects count. In ``icache`` this left the row counter stuck, the
       line never completed, and every fetch after the first was never answered
     - ``t_vhdl_fn_slice_formal``
+  * - N85
+    - a call where a *width* is expected: potato's icache names an aggregate with
+      ``(log2(LINE_SIZE * 4) - 1 downto 0 => '0')`` and a conversion with
+      ``to_unsigned(cl_current_word, log2(LINE_SIZE))``
+    - both bounds and the conversion width were folded with the plain constant
+      folder, which cannot read a call, so an aggregate in a concatenation had no
+      type and the conversion had no width. They now use the folder that inlines a
+      pure function, the same one a type range uses (N78)
+    - ``t_vhdl_folded_width``
   * - N84
     - a trace of a VHDL design: ``--trace`` with ``--vcd`` or ``--fst``
     - the model registers no signals at all, so the dump has an empty definition
@@ -448,7 +457,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 181 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 182 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
