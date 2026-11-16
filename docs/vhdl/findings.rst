@@ -405,6 +405,17 @@ ______
       section. Reviewing a VHDL design's internals needs the dump a simulator
       that has the feature produces (``ghdl --vcd``), or the frontend's own
       ``--public-flat-rw`` accessors
+  * - N86
+    - a concurrent ``assert`` whose condition is a pure function of generics:
+      ``assert is_power_of_two(segment_length_bytes)``, as hdl-modules'
+      ``ring_buffer_write_simple`` writes its width checks
+    - the condition was lowered, and lowering a call inlines the body, so the
+      math helper reached ``real(value)``, which has no synthesizable form, and
+      the design was refused. A static condition now folds to a constant before
+      any body is lowered, and a pure function whose body declares constants
+      folds too, as ``constant log2_value : natural := floor_log2(value);``
+      does
+    - ``t_vhdl_static_cond``
 
 ____
 Open
@@ -439,13 +450,6 @@ ____
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N69
-    - a real value: ``log2(real(value))`` in hdl-modules' ``math_pkg``, which
-      ``ring_buffer_write_simple`` calls
-    - no runtime primitive represents a real, so a conversion to one is
-      refused by name (``conversion to a real value is not supported yet``)
-      instead of being reported as an unknown identifier. Everything else in
-      the design lowers.
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
     - no implementation of that vendor package is in the corpus and none is
@@ -457,18 +461,16 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 182 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 183 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
-The corpus lints and runs clean: 14 designs, no lint errors, and every run passes
-including the harnesses added for the rpu ALU, the rpu register set, the t65 CPU
-and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``. The last of those
-runs ``fpga/main_bram.vhdl`` unmodified, its ``RAM_INIT_FILE`` read at
-elaboration from a checked-in image. ``hdl-modules-ring-buffer`` is in the
-corpus's ``blocked`` target, because ``math_pkg`` needs a real value at compile
-time
-(N69).
+The corpus lints and runs clean: 19 designs, no lint errors, and every run
+passes, including the harnesses added for the rpu ALU, the rpu register set, the
+t65 CPU and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``. The last of
+those runs ``fpga/main_bram.vhdl`` unmodified, its ``RAM_INIT_FILE`` read at
+elaboration from a checked-in image. hdl-modules' ``ring_buffer_write_simple``
+runs too, its width checks folded at elaboration (N86).
 
 Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)
 whenever GHDL and the native frontend disagree. nvc settled the value of a toggle
