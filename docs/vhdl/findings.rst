@@ -334,6 +334,17 @@ ______
       ``record has no element 'others'``. The remaining fields are now filled whole,
       one field at a time, with the last association's value
     - ``t_vhdl_record_agg``
+  * - N78
+    - a package constant whose value is a call into another package:
+      ``constant TAG_NUMBER_BITS : natural := log2(TAG_COUNT);`` and a subtype
+      sized by it, as microwatt's ``common`` writes them
+    - the call cannot be folded while the specifications are read, because the
+      called body comes later, so the constant was deferred. The deferred value was
+      then completed during the *next* unit's emission, whose scope is not the one
+      it was declared in, so the name it calls was reported unknown. A deferred
+      constant is now completed by a further pass over its own unit, after that
+      unit's other constants, and a type naming it waits for that pass
+    - ``t_vhdl_pkg_fn_const``
 
 ____
 Open
@@ -386,7 +397,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 177 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 178 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
