@@ -9071,6 +9071,16 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             for (const PortAssoc& assoc : conc.associations) {
                 if (assoc.formal == portp->name()) assocs.push_back(&assoc);
             }
+            // A whole port may be associated once; only a part of it (a slice or a record
+            // element) may be associated alongside another part
+            if (assocs.size() > 1
+                && std::any_of(assocs.begin(), assocs.end(), [](const PortAssoc* assocp) {
+                       return !assocp->hasFormalRange && assocp->formalMember.empty();
+                   })) {
+                flp->v3error("VHDL: port '" + assocs.front()->formalSpelling
+                             + "' is associated more than once");
+                return nullptr;
+            }
         }
         const VType portType = typeOfDType(portp->dtypep());
         // The packed vector of a record port does not name its elements, so an aggregate
