@@ -2418,12 +2418,6 @@ Summary:
 
    Displays program version and exits.
 
-.. option:: --vhdl-frontend <value>
-
-   Selects the frontend used to read VHDL sources. ``ghdl`` (the default) runs
-   GHDL out of process and imports its analyzed XML; ``native`` uses the
-   in-tree frontend, which needs no external analyzer.
-
 .. option:: --vpi
 
    Enable the use of VPI and linking against the :file:`verilated_vpi.cpp` files.

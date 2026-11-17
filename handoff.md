@@ -1,5 +1,9 @@
 # VHDL frontend handoff — 2026-11-10
 
+**Historical.** These notes describe the retired GHDL-XML frontend and the
+branch that developed it. The in-tree frontend is now the only VHDL frontend;
+see `docs/vhdl/architecture.rst` and `docs/vhdl/review.rst`.
+
 Branch: `vhdl-frontend-wp0`
 Repo: `/home/hannes/git_extern/verilator`
 GHDL: `/home/hannes/.local/bin/ghdl` (7.0.0-dev, llvm 21.1.8)

@@ -8,12 +8,11 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import vltest_bootstrap
-import vhdl_frontend
 
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_record_ind.vhdl'
 
-vhdl_frontend.require_frontend(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

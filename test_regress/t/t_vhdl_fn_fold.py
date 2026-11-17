@@ -13,11 +13,11 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_fn_fold.vhdl'
 
-# The GHDL XML path refuses a return from inside a loop in a function body, so it reports
+# The native frontend refuses a return from inside a loop in a function body, so it reports
 # `function does not return a value on all paths` for first_length already
-vhdl_frontend.native_only(test)
 
-vhdl_frontend.require_frontend(test)
+
+
 
 test.compile(make_top_shell=False,
              make_main=False,

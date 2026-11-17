@@ -13,7 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_gen_unconst.vhdl'
 
-vhdl_frontend.require_frontend(test)
+
 
 # The child entity is instantiated, so --top-module keeps the wrapper as the only top
 test.compile(make_top_shell=False,

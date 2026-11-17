@@ -16,8 +16,7 @@
 //
 // Frontend interface types shared by the native VHDL stages:
 //   lexer (V3VhdlNativeLexer.cpp) -> parser (V3VhdlNativeParse.cpp) ->
-//   semantic analysis (V3VhdlNativeSem.cpp) -> elaboration
-//   (V3VhdlNativeElab.cpp) -> lowering (V3VhdlNativeLower.cpp).
+//   elaboration and lowering (V3VhdlNativeLower.cpp).
 //
 //*************************************************************************
 

@@ -7,13 +7,12 @@ Native VHDL frontend architecture
 ##################################
 
 The native frontend translates SystemVerilog's cousin, VHDL, directly into the
-V3 AST that the rest of Verilator consumes. It is selected with
-``--vhdl-frontend native`` and runs in place of an external analyzer: one
-process, no intermediate files. Everything below is inside the frontend; the
-middle end and the runtime library are unchanged by it, and no V3 AST node,
-pass or runtime primitive exists only for VHDL.
+V3 AST that the rest of Verilator consumes. It is the only VHDL frontend and
+runs in one process, with no intermediate files. Everything below is inside the
+frontend; the middle end and the runtime library are unchanged by it, and no V3
+AST node, pass or runtime primitive exists only for VHDL.
 
-The driver is ``V3VhdlParseImp::finishNative()``, which calls
+The driver is ``V3VhdlParseImp::finish()``, which calls
 ``V3VhdlNative::emit(rootp, files)``. From there to the netlist:
 
 .. code-block:: text
@@ -28,7 +27,8 @@ _______________
 ======================================================  ============================================
 File                                                    Role
 ======================================================  ============================================
-``src/V3VhdlNative.h``, ``.cpp``                        Entry point and the driver loop
+``src/V3VhdlParse.h``, ``.cpp``                         Frontend driver: collects design files
+``src/V3VhdlNative.h``, ``.cpp``                        Frontend entry: parse, elaborate, lower
 ``src/V3VhdlNativeAst.h``                               The frontend's own syntax tree
 ``src/V3VhdlNativeLexer.cpp``                           Lexer: tokens, including VHDL literals
 ``src/V3VhdlNativeParse.cpp``                           Parser: design units to ``DesignLibrary``
@@ -202,7 +202,8 @@ _______________
 
 Every construct the frontend supports is pinned by a test in ``test_regress/t``
 that fails without it, and the value is confirmed with an independent simulator.
-GHDL is the default ground truth; nvc (``nvc --std=2008``) is used when the two
+GHDL is the default reference; nvc (``nvc --std=2008``) is used when the two
 disagree, and has settled arguments GHDL got wrong. The findings these tests
-came from, and the ones still open, are in :doc:`findings`, and the record of
-how they were closed is in :doc:`journal`.
+came from, and the ones still open, are in :doc:`findings`; the record of how
+they were closed is in :doc:`journal`, and the current coverage and remaining
+correctness risks are assessed in :doc:`review`.

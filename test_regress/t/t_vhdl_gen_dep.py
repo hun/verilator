@@ -13,8 +13,8 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_gen_dep.vhdl'
 
-# The GHDL XML path has no default for a generic that defaults from another generic
-vhdl_frontend.native_only(test)
+# The native frontend has no default for a generic that defaults from another generic
+
 
 # The child entity is instantiated, so --top-module keeps the wrapper as the only top
 test.compile(make_top_shell=False,

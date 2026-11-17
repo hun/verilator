@@ -375,7 +375,6 @@ RAW_OBJS_PCH_ASTNOMT = \
   V3VhdlNativeLower.o \
   V3VhdlNativeParse.o \
   V3VhdlParse.o \
-  V3VhdlXml.o \
   V3Width.o \
   V3WidthCommit.o \
   V3WidthSel.o \

@@ -13,9 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_func_result_index.vhdl'
 
-# The GHDL XML path selects a bit of the returned value instead of an element, so
-# only the native frontend is checked here
-vhdl_frontend.native_only(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

@@ -13,8 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_fn_loop.vhdl'
 
-# The GHDL path declines a call whose body loops, so only the native fold is exercised
-vhdl_frontend.native_only(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

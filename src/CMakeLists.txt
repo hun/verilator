@@ -213,7 +213,6 @@ set(HEADERS
     V3VhdlNativeAst.h
     V3VhdlNativeLower.h
     V3VhdlParse.h
-    V3VhdlXml.h
     V3Waiver.h
     V3Width.h
     V3WidthCommit.h
@@ -407,7 +406,6 @@ set(COMMON_SOURCES
     V3VhdlNativeLower.cpp
     V3VhdlNativeParse.cpp
     V3VhdlParse.cpp
-    V3VhdlXml.cpp
     V3Waiver.cpp
     V3Width.cpp
     V3WidthCommit.cpp

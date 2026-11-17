@@ -7,18 +7,13 @@
 # SPDX-FileCopyrightText: 2026 Hannes Klas
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
-import os
-
 import vltest_bootstrap
 import vhdl_frontend
 
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_arith_conv.vhdl'
 
-vhdl_frontend.require_frontend(test)
 
-# std_logic_arith is a Synopsys package
-os.environ['VERILATOR_GHDL_FLAGS'] = '-fsynopsys'
 
 test.compile(make_top_shell=False,
              make_main=False,

@@ -13,9 +13,9 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_subtype_attr.vhdl'
 
-# The GHDL XML path refuses the type form: `type form 'subtype_attribute' is not
+# The native frontend refuses the type form: `type form 'subtype_attribute' is not
 # supported yet`
-vhdl_frontend.native_only(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

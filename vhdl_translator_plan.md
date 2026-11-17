@@ -3,9 +3,10 @@
 
 # VHDL RTL-to-RTL translator -- implementation plan
 
-**Status:** proposed; not started. This plan is deliberately gated on the VHDL frontend for
-Verilator (`VHDL_FRONTEND_PLAN.md`) being integrated and stable. It is not user
-documentation and must not be linked from `docs/`.
+**Status:** historical. This plan assumed the retired GHDL-XML front half. The
+in-tree VHDL frontend is now the only frontend; see
+`docs/vhdl/architecture.rst` and `docs/vhdl/review.rst`. Not user
+documentation; this document must not be linked from `docs/`.
 
 **Target tree:** Verilator 5.055 devel, branch `vhdl-frontend-wp0`, commit `8a39064`
 (2026-11-09). The tree moves; treat line numbers as orientation, not as a contract.

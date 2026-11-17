@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL hierarchy, GHDL XML frontend
+-- DESCRIPTION: Verilator: VHDL hierarchy, native VHDL frontend
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas

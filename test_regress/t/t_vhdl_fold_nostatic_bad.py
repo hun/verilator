@@ -13,11 +13,11 @@ import vhdl_frontend
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_fold_nostatic_bad.vhdl'
 
-# GHDL analyses the same source, so only the native frontend can pin the refusal
-vhdl_frontend.native_only(test)
+# GHDL analyzes the same source; the golden pins the frontend refusal
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)
 
 test.passes()

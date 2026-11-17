@@ -9050,8 +9050,23 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             // enclosing scope this instance is lowered in
             if (port.type.hasRange || !port.type.constraintMark.empty()) return none;
             const auto typeIt = m_types.find(port.type.mark);
-            if (typeIt == m_types.end() || typeIt->second.kind != VType::RECORD) return none;
-            return typeIt->second;
+            if (typeIt != m_types.end() && typeIt->second.kind == VType::RECORD) {
+                return typeIt->second;
+            }
+            // The parent can name a record's elements without importing the package that
+            // declares the record, so fall back to the child's own context.
+            if (m_packagesp) {
+                for (const auto& use : entityp->uses) {
+                    const auto pkgIt = m_packagesp->packages.find(use.second);
+                    if (pkgIt == m_packagesp->packages.end()) continue;
+                    const auto fieldIt = pkgIt->second.types.find(port.type.mark);
+                    if (fieldIt != pkgIt->second.types.end()
+                        && fieldIt->second.kind == VType::RECORD) {
+                        return fieldIt->second;
+                    }
+                }
+            }
+            return none;
         }
         return none;
     };

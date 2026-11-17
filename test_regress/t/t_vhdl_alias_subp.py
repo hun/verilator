@@ -13,11 +13,11 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_alias_subp.vhdl'
 
-# The GHDL XML path has no subprogram alias: every call through one is refused as
+# The native frontend has no subprogram alias: every call through one is refused as
 # `function call 'add5' is not supported yet`
-vhdl_frontend.native_only(test)
 
-vhdl_frontend.require_frontend(test)
+
+
 
 test.compile(make_top_shell=False,
              make_main=False,

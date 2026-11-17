@@ -6,12 +6,11 @@
 Native VHDL frontend findings
 ############################
 
-Status of the gaps found by running the native VHDL frontend
-(``--vhdl-frontend native``) over the external corpus in
-``vhdl_references/corpus`` and over ``third_party``. Every finding below was
-closed by a frontend-only change unless it says otherwise: no new AST node, pass
-or runtime primitive was added to the V3 middle end. :doc:`architecture`
-describes the frontend these findings are about.
+Status of the gaps found by running the in-tree VHDL frontend over the external
+corpus in ``vhdl_references/corpus`` and over ``third_party``. Every finding
+below was closed by a frontend-only change unless it says otherwise: no new AST
+node, pass or runtime primitive was added to the V3 middle end.
+:doc:`architecture` describes the frontend these findings are about.
 
 Each finding was closed the same way: a minimal reproducer, the value confirmed
 with an independent simulator (GHDL, and nvc where GHDL and the frontend
@@ -272,11 +271,13 @@ ______
       unknown identifiers
     - ``t_vhdl_conv_predefined``
   * - N70
-    - an inout port: a cycle model has no tristate, so nothing resolves its
-      driver
-    - the port reached the DFG undriven and failed the read-only assertion
-      there; it is now refused where it is declared, and declared as an input so
-      the rest of the design still analyzes
+    - an inout port
+    - the frontend did not emit a tristate driver shape, so the port reached the
+      DFG undriven and failed the read-only assertion there; it is refused where
+      it is declared, and declared as an input so the rest of the design still
+      analyzes. Verilator already lowers simple tristate structures
+      (``V3Tristate``); emitting the shape it recognizes is the next frontend
+      target, described in :doc:`review`
     - ``t_vhdl_inout_unsup``
   * - N71
     - the std_logic_1164 X01 conversions ``to_x01``, ``to_01``, ``to_x01z`` and
@@ -475,6 +476,15 @@ ______
       folds too, as ``constant log2_value : natural := floor_log2(value);``
       does
     - ``t_vhdl_static_cond``
+  * - N95
+    - a record-member port association in a parent that does not import the
+      package declaring the child's record type: ``i.x => a, i.y => b``
+    - the record type was looked up only in the instantiating module's scope, so a
+      parent that names the elements without importing the type got "record-member
+      association on a non-record port". The lookup now falls back to the packages
+      the child entity uses. Element associations on a constrained record work; an
+      unconstrained record still needs a whole-record actual (N94)
+    - ``t_vhdl_record_ind``
 
 ____
 Open
@@ -514,15 +524,20 @@ ____
     - no implementation of that vendor package is in the corpus and none is
       modelled. patmos' fpu is its only user (9 errors), so this is a library
       question rather than a frontend one.
+  * - N94
+    - an unconstrained record port whose actuals associate only individual
+      elements: ``i.x => a, i.y => b``
+    - no whole-record actual fixes the member ranges, so the port is reported as
+      an unconstrained type. The constrained association form works;
+      ``t_vhdl_record_ind_unsup`` pins the refusal. Supporting it needs the
+      member bounds derived from the element actuals during specialization.
 
 ___________
 Verification
 ___________
 
-Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 190 passed, 2 skipped (the two GHDL-only diagnostics). The
-GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
-``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
+Each run was checked with the full VHDL suite (``test_regress``,
+``t_vhdl_*.py``): 191 tests, no failures.
 
 The corpus lints and runs clean: 20 designs, no lint errors, and every run
 passes, including the harnesses added for the rpu ALU, the rpu register set, the
@@ -540,7 +555,7 @@ words, over 12.2M cycles, and the SoC top runs a C program over the same bus and
 GPIO peripheral.
 
 Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)
-whenever GHDL and the native frontend disagree. nvc settled the value of a toggle
+whenever GHDL and the frontend disagree. nvc settled the value of a toggle
 flip-flop sampled at 22 ns, which the frontend had initially gotten wrong by one
 clock edge.
 
@@ -564,4 +579,4 @@ the corpus happens to combine with a testbench, which is where the next finding
 comes from.
 
 The ported testcases were re-run after each change: 11 run scenarios and 4 cycle
-traces (395, 612, 615 and 5621 cycles) pass against the native frontend.
+traces (395, 612, 615 and 5621 cycles) pass against the frontend.

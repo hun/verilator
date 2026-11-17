@@ -13,11 +13,11 @@ import vhdl_frontend
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_bit_len_bad.vhdl'
 
-# GHDL reports the same rule in its own words, so only the native message is pinned here
-vhdl_frontend.native_only(test)
+# GHDL reports the same rule in its own words; the golden pins the frontend message
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)
 
 test.passes()

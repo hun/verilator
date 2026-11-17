@@ -14,9 +14,7 @@ test.scenarios('simulator')
 test.top_filename = 't/t_vhdl_agg_choice.vhdl'
 
 
-# The GHDL frontend hands the same aggregate to this lowering in a shape it refuses, so
-# only the native frontend can check the values; GHDL itself analyzes the source fine
-vhdl_frontend.native_only(test)
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--binary'])
 

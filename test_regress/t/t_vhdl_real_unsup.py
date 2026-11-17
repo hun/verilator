@@ -11,11 +11,11 @@ import vltest_bootstrap
 import vhdl_frontend
 
 test.scenarios('vlt')
-vhdl_frontend.native_only(test)
+
 test.top_filename = 't/t_vhdl_real_unsup.vhdl'
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)
 
 test.passes()

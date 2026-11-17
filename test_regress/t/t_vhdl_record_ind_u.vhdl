@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL unconstrained record child for the element test
+-- DESCRIPTION: Verilator: VHDL record child for the element test
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
@@ -9,8 +9,8 @@ use ieee.std_logic_1164.all;
 
 package recpku is
   type pair_u is record
-    x : std_logic_vector;
-    y : std_logic_vector;
+    x : std_logic_vector(3 downto 0);
+    y : std_logic_vector(3 downto 0);
   end record;
 end package;
 

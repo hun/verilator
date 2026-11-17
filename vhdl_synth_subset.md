@@ -5,7 +5,8 @@
 
 **Status:** feature-set definition for the `--language vhdl` frontend. This is a
 planning document. It is not user documentation and must not be linked from
-`docs/`.
+`docs/`. The in-tree frontend is the only VHDL frontend; the former GHDL-XML
+importer has been retired.
 
 **Scope:** this document defines *what* the VHDL frontend accepts and how it must
 behave. The architecture, work packages, and implementation sequencing stay in
@@ -71,7 +72,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 
 | Item | Vivado | Tier | Notes |
 |---|---|---|---|
-| VHDL-2008 as the default dialect | Y | S | GHDL is invoked with `--std=08`; all new tests use VHDL-2008. |
+| VHDL-2008 as the default dialect | Y | S | The in-tree frontend parses VHDL-2008; all new tests use VHDL-2008. |
 | VHDL-2002 source | Y | O | A `--std` selector is deferred. |
 | VHDL-93 source | - | O | Same selector; a few VHDL-2008 reserved words can break old identifiers. |
 | VHDL-2019 source | Y (subset) | D | See Section 5.12. VHDL-2019 is not the baseline. |
@@ -115,7 +116,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 
 | Feature | Vivado | Tier | Notes |
 |---|---|---|---|
-| Port modes `in`, `out`, `inout`, `buffer` | Y | S | `buffer` is lowered as an output that is also readable internally. `inout` depends on the tristate/DFG fix; until then it is a clean `Unsupported` when it cannot be modeled. |
+| Port modes `in`, `out`, `inout`, `buffer` | Y | S | `buffer` is lowered as an output that is also readable internally. `inout` is refused until the frontend emits the tristate driver shape `V3Tristate` recognizes; that is the next target. |
 | `linkage` port mode | N | X | UG901 Table 15. |
 | Scalar port types (`bit`, `boolean`, `std_logic`, `std_ulogic`, enums, integer subtypes) | Y | S | |
 | Vector/array port types (`bit_vector`, `std_logic_vector`, `std_ulogic_vector`, `unsigned`, `signed`) | Y | S | One-dimensional. |
@@ -179,7 +180,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Signal declaration | Y | S | Architecture and block declarative regions. Not `register`/`bus` kinds. |
 | Variable declaration | Y | S | Process and subprogram declarative regions. |
 | Constant declaration | Y | S | Any declarative region. |
-| Shared variable | Y | S* | Modeled as a variable. Used by RAM coding styles. GHDL with `--std=08` rejects a non-protected shared variable unless `-frelaxed` is passed (or a VHDL-93 analysis mode is used); the frontend invocation must make that explicit. |
+| Shared variable | Y | S* | Modeled as a variable. Used by RAM coding styles. |
 | Object alias (signal, variable, constant, slice) | - | S | Alias is VHDL-93; aliases of slices and constants work. |
 | Signal declaration initializer | Y | S | Elaboration-time value; also a power-up value in the model. |
 | Initializer from a static function call | Y | S | Folded during elaboration when the function is static. |
@@ -395,7 +396,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Generics referencing generics | Y | S | |
 | Generics in packages | Y | D | |
 | Relaxed function return conversion | Y | D | |
-| Extended globally/locally static expressions | Y | S* | Concatenation and similar static forms; the frontend folds what GHDL resolves and rejects the rest. |
+| Extended globally/locally static expressions | Y | S* | Concatenation and similar static forms; the frontend folds what it can and rejects the rest. |
 | Static ranges from unconstrained objects | Y | S | Resolved at elaboration. |
 | `context` declarations | Y | S | |
 | Unconstrained array of unconstrained array | Y | D | |
@@ -412,7 +413,7 @@ VHDL-2008 subset. Vivado 2026.1 supports the listed subset.
 | 64-bit `integer` | Y | O | Would change the baseline integer width. |
 | Conditional expressions | Y | O | `expr when cond else expr`. |
 | Conditional return | Y | O | |
-| Optional trailing semicolon in interface lists | Y | O | Only in VHDL-2019 mode; GHDL under `--std=08` may reject it. |
+| Optional trailing semicolon in interface lists | Y | O | Only in VHDL-2019 mode. |
 | Partial connections in port maps | Y | O | `port(7 downto 4) => sig, port(3 downto 0) => open`. |
 | Subtype inference from initial value | Y | O | |
 | Subtype inference from function return context | Y | O | |
@@ -458,16 +459,18 @@ VHDL's nine-valued `std_logic` is therefore collapsed at elaboration:
 | `'0'`, `'L'` | 0 |
 | `'1'`, `'H'` | 1 |
 | `'X'`, `'U'`, `'W'`, `'-'` | X (constant); at runtime the model has 0/1 |
-| `'Z'` | Z/high-impedance only where the tristate lowering supports it; otherwise a clean `Unsupported` |
+| `'Z'` | Collapsed to 0 today; the tristate target preserves it in an inout driver |
 
 Consequences:
 
 - `-` is treated as an unknown data value, not as a synthesis don't-care.
 - `U` and `W` are accepted and mapped to X; Vivado rejects them.
-- A `std_logic` comparison with an X constant follows case-equality semantics;
-  this is not full VHDL 9-state resolution.
-- `'Z'` is not silently turned into 0. Designs that need buses must wait for the
-  tristate/DFG core work, or use an explicit single-driver style.
+- A `std_logic` comparison with an X constant is lowered as a four-state
+  equality, not as the identity equality of IEEE 1164; a comparison of two X
+  constants is false.
+- A `'Z'` constant currently lowers to 0, and an `inout` port is refused. A
+  design that needs a high-impedance bus must wait for tristate support or use
+  an explicit single-driver style.
 
 ### 5.2 Signals, variables, and scheduling
 
@@ -489,13 +492,14 @@ Consequences:
 ### 5.3 Multiple drivers and resolution
 
 - One driver per signal is the baseline.
-- `inout` ports and `std_logic` multi-driver resolution are limited by the
-  current `V3Tristate`/DFG core behavior. The frontend reports a clean
-  `Unsupported` when the model cannot represent the driver; it must not silently
-  drop a driver.
-- User-defined resolution functions are excluded until multi-driver support is
-  designed. `std_logic_1164` resolution is the only resolution the subset
-  eventually needs.
+- Verilator already lowers simple tristate structures: an inout driver assigned
+  `(enable) ? value : 1'bz` becomes an input plus `__en` and `__out` outputs.
+  The frontend currently refuses inout ports and does not emit that shape;
+  wiring the existing `V3Tristate` pass is the next target.
+- `std_logic` resolution between strong drivers is not modelled. Multiple
+  drivers are reported by the middle end as a multiple-driver warning; they do
+  not produce the IEEE 1164 resolved value.
+- User-defined resolution functions are excluded.
 
 ### 5.4 Integers, ranges, and checks
 
@@ -550,9 +554,9 @@ Consequences:
 
 ### 5.9 Libraries and analysis
 
-- The frontend does not repeat VHDL semantic analysis when GHDL supplies the
-  analyzed design units; GHDL is out-of-process, so the GPL boundary is a process
-  boundary.
+- The frontend performs VHDL parsing, elaboration, and semantic checking in
+  tree; no external analyzer is invoked. GHDL and nvc are reference simulators
+  for tests, not build dependencies.
 - Elaboration (architecture selection, component binding, generics, generate
   unrolling, unconstrained port specialization) happens in Verilator.
 - A VHDL run never auto-loads SystemVerilog design units. Cross-language binding
@@ -636,7 +640,7 @@ The subset is only meaningful if it is tested. Required coverage:
 | Language feature tests | One `t_vhdl_*` test per feature group or edge case | `test_regress/t/t_vhdl_*.py` |
 | Negative tests | Every excluded construct and every deferred construct reports the documented diagnostic | `t_*_bad` tests with `.out` goldens |
 | Elaboration tests | Generics, generic types/packages, generate, configurations, unconstrained ports, record/array specialization | VHDL corpus tests and AST dumps |
-| Simulation equivalence | Random-vector comparison against GHDL where the semantics overlap | Differential harness, gated on `VERILATOR_GHDL` |
+| Simulation equivalence | Random-vector comparison against GHDL where the semantics overlap | Differential harness; not implemented yet, the lint-only corpus and hand-computed test values are the current evidence |
 | Synthesis corpus | GHDL `synth` testsuite triage | `nodist/ghdl_synth_suite.py` |
 | Design corpus | Counter, shift register, FIFO, FSM, UART TX/RX, AXI-Lite slave, RAM wrappers, DSP-style arithmetic | Regression designs |
 | Mixed language | VHDL entity from SV and SV module from VHDL through the boundary rules | Separate mixed-language suite, later milestone |

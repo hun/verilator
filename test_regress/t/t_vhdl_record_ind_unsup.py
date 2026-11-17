@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: malformed VHDL through GHDL XML
+# DESCRIPTION: Verilator: an unconstrained record port cannot be specialized from elements only
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -11,12 +11,10 @@ import vltest_bootstrap
 import vhdl_frontend
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_ghdl_bad.vhdl'
+test.top_filename = 't/t_vhdl_record_ind_unsup.vhdl'
 
-vhdl_frontend.ghdl_only(test)
-
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl'],
+test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)
 
 test.passes()

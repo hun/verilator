@@ -13,10 +13,10 @@ import vhdl_frontend
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_port_bad.vhdl'
 
-vhdl_frontend.require_frontend(test)
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 'top_in'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)
 
 test.passes()

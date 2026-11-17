@@ -6,12 +6,13 @@
 Native VHDL frontend
 ########################
 
-The frontend that translates VHDL directly into the V3 AST, selected with
-``--vhdl-frontend native``.
+The frontend that translates VHDL directly into the V3 AST. It is the only
+VHDL frontend: Verilator invokes no external analyzer.
 
 .. toctree::
    :maxdepth: 2
 
    architecture
+   review
    findings
    journal

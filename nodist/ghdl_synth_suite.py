@@ -15,7 +15,6 @@ and categorizes the result:
 
   PASS          Verilator accepted the design
   UNSUPPORTED   the frontend reported "is not supported yet"
-  GHDL_ERROR    GHDL analysis rejected the sources
   EXPECTED_FAIL the testsuite marks the file as an expected `synth_failure` and the
                 frontend rejected it, as expected
   NO_TOP        no entity matching the requested top was found
@@ -44,9 +43,6 @@ from pathlib import Path
 ENTITY_RE = re.compile(r'^\s*entity\s+([A-Za-z][A-Za-z0-9_]*)\s+is\b',
                        re.IGNORECASE | re.MULTILINE)
 COMMENT_RE = re.compile(r'--[^\n]*')
-GHDL_FLAGS_RE = re.compile(
-    r'^\s*(?:export\s+)?(GHDL_STD_FLAGS|GHDL_FLAGS)\s*=\s*'
-    r'(?:"([^"]*)"|\'([^\']*)\'|(\S+))', re.MULTILINE)
 TOP_RE = re.compile(r'\b(?:synth_tb|synth_only|synth_analyze)\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_TOP_RE = re.compile(r'\bsynth\b[^\n]*?\s-e\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_FAIL_RE = re.compile(r'\bsynth_failure\b([^\n]*)')
@@ -95,20 +91,6 @@ def script_synth_failures(testdir):
             if token.endswith('.vhdl'):
                 files.add(token)
     return files
-
-
-def ghdl_flags(testdir):
-    """Collect GHDL analysis flags set by a test's testsuite.sh."""
-    script = testdir / 'testsuite.sh'
-    if not script.is_file():
-        return ''
-    text = script.read_text(errors='replace')
-    flags = []
-    for match in GHDL_FLAGS_RE.finditer(text):
-        value = match.group(2) or match.group(3) or match.group(4) or ''
-        if value and value not in flags:
-            flags.append(value)
-    return ' '.join(flags)
 
 
 def repo_root():
@@ -176,10 +158,6 @@ def classify(returncode, output):
         detail = next((line.strip() for line in output.splitlines()
                        if 'not supported yet' in line or 'UNSUPPORTED' in line), '')
         return 'UNSUPPORTED', detail
-    if 'GHDL failed to analyze' in output:
-        detail = next((line.strip() for line in output.splitlines()
-                       if line.startswith('%Error:') and 'GHDL failed' in line), '')
-        return 'GHDL_ERROR', detail
     if ('was not found in design' in output or 'No top module' in output
             or "Can't find module" in output):
         return 'NO_TOP', ''
@@ -196,8 +174,6 @@ def run_one(job):  # pylint: disable=too-many-locals
         args.verilator,
         '--language',
         'vhdl',
-        '--vhdl-frontend',
-        args.frontend,
         '--lint-only',
         '-Wno-fatal',
         '--top-module',
@@ -205,20 +181,10 @@ def run_one(job):  # pylint: disable=too-many-locals
         '-Mdir',
         str(workdir),
     ] + [f.name for f in files]
-    env = os.environ.copy()
-    if args.frontend == 'ghdl':
-        if args.ghdl:
-            env['VERILATOR_GHDL'] = args.ghdl
-        flags = ghdl_flags(testdir)
-        if args.ghdl_flags:
-            flags = (flags + ' ' + args.ghdl_flags).strip()
-        if flags:
-            env['VERILATOR_GHDL_FLAGS'] = flags
     started = time.monotonic()
     try:
         result = subprocess.run(cmd,
                                 cwd=testdir,
-                                env=env,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT,
                                 timeout=args.timeout,
@@ -261,14 +227,6 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
     parser.add_argument('--verilator',
                         default=str(root / 'bin' / 'verilator'),
                         help='Verilator executable (default: bin/verilator)')
-    parser.add_argument('--frontend',
-                        choices=('ghdl', 'native'),
-                        default='ghdl',
-                        help='VHDL frontend to pass to Verilator (default: ghdl)')
-    parser.add_argument('--ghdl', default=None, help='GHDL executable (sets VERILATOR_GHDL)')
-    parser.add_argument('--ghdl-flags',
-                        default='',
-                        help='extra GHDL analysis flags (VERILATOR_GHDL_FLAGS)')
     parser.add_argument('--outdir',
                         default=str(root / 'obj_dir' / 'ghdl_suite'),
                         help='directory for logs (default: obj_dir/ghdl_suite)')

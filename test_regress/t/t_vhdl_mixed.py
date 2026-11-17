@@ -13,7 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_mixed.vhdl'
 
-vhdl_frontend.require_frontend(test)
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', 't/t_vhdl_mixed.v'],
              fails=True,

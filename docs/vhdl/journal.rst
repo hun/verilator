@@ -6,11 +6,17 @@
 Native VHDL frontend journal
 ##############################
 
-A working log of the effort to close the gaps the native VHDL frontend
-(``--vhdl-frontend native``) shows on real designs. The findings themselves,
-and the test that pins each one, are in :doc:`findings`; the structure of the
-frontend is in :doc:`architecture`. This file records how the work went,
-including the attempts that were reverted.
+A working log of the effort to close the gaps the in-tree VHDL frontend shows
+on real designs. The findings themselves, and the test that pins each one, are
+in :doc:`findings`; the structure of the frontend is in :doc:`architecture`;
+the current coverage assessment is in :doc:`review`. This file records how the
+work went, including the attempts that were reverted.
+
+.. note::
+
+   The former GHDL-XML frontend was retired: the in-tree frontend is now the
+   only VHDL frontend. Earlier entries that mention selecting or debugging the
+   GHDL-XML path are historical.
 
 ______
 Method

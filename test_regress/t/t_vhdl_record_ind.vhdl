@@ -22,7 +22,7 @@ end;
 
 architecture rtl of t is
 begin
-  -- Unconstrained record ports specialized from the individual element actuals
+  -- Constrained record ports with the individual element association form
   u : entity work.child_u
     port map (
       i.x => a,

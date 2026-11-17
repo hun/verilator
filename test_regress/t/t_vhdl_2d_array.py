@@ -13,8 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_2d_array.vhdl'
 
-# The GHDL path declines a multi-dimensional array, so only the native path models it
-vhdl_frontend.native_only(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

@@ -13,9 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_overload.vhdl'
 
-# The GHDL path answers 0 for an element of an array formal, so only the native frontend
-# can run the value this file checks
-vhdl_frontend.native_only(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

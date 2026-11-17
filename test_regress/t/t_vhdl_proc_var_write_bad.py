@@ -13,11 +13,11 @@ import vhdl_frontend
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_proc_var_write_bad.vhdl'
 
-# GHDL accepts this source, so only the native frontend can pin the gap
-vhdl_frontend.native_only(test)
+# GHDL accepts this source; the golden pins the frontend refusal
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)
 
 test.passes()

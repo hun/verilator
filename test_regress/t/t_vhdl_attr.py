@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL static attributes through GHDL XML
+# DESCRIPTION: Verilator: VHDL static attributes through the native VHDL frontend
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -13,7 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_attr.vhdl'
 
-vhdl_frontend.require_frontend(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

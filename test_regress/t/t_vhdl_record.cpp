@@ -1,6 +1,6 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //
-// DESCRIPTION: Verilator: VHDL record types through GHDL XML test
+// DESCRIPTION: Verilator: VHDL record types
 //
 // This file ONLY is placed under the Creative Commons Public Domain.
 // SPDX-FileCopyrightText: 2026 Hannes Klas

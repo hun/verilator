@@ -13,9 +13,9 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_physical_units.vhdl'
 
-# The GHDL XML path refuses a physical literal of a user-declared type, so only the
+# The native frontend refuses a physical literal of a user-declared type, so only the
 # native frontend is checked here
-vhdl_frontend.native_only(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

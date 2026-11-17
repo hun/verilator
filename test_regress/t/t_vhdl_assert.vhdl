@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL assert and report statements through GHDL XML
+-- DESCRIPTION: Verilator: VHDL assert and report statements through the native VHDL frontend
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas

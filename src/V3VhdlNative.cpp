@@ -14,9 +14,9 @@
 //
 //*************************************************************************
 //
-// In-tree VHDL frontend. This replaces the GHDL XML importer with a hand-written
-// lexer/parser and a lowerer that emits the committed (post-width) Verilator AST
-// directly, so GHDL is not invoked.
+// In-tree VHDL frontend. It is the only VHDL frontend: a hand-written
+// lexer/parser and a lowerer that emit the committed (post-width) Verilator AST
+// directly, so no external analyzer is invoked.
 //
 // Structure: Lexer -> Parser (frontend syntax tree) -> Lowering (Verilator AST).
 // The parse of every file completes before any lowering, because VHDL design

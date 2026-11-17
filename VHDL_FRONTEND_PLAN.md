@@ -3,11 +3,12 @@
 
 # VHDL frontend for Verilator — implementation plan
 
-**Status:** implemented on branch `vhdl-frontend-wp0`: WP0 plumbing, the active GHDL XML
-front end (WP1/WP2), elaboration (WP3), lowering (WP4) and a partial standard-package
-intrinsic set (WP5) cover a substantial synthesizable VHDL subset. In-tree parsing and
-mixed-language designs are not implemented. Not user documentation; this is a planning
-document and must not be linked from `docs/`.
+**Status:** historical. This plan describes the work packages that produced the
+first VHDL frontend, whose active path was GHDL XML. That frontend has been
+retired; the in-tree frontend described in `docs/vhdl/architecture.rst` is the
+only VHDL frontend. The current coverage assessment is in
+`docs/vhdl/review.rst`. The rest of this file is kept as a historical record.
+Not user documentation; this document must not be linked from `docs/`.
 
 **Target tree:** Verilator 5.055 devel, commit `9c28d84` (2026-11-07).
 

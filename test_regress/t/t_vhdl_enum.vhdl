@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL enumeration types and attributes through GHDL XML
+-- DESCRIPTION: Verilator: VHDL enumeration types and attributes through the native VHDL frontend
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas

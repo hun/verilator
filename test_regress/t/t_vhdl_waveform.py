@@ -13,7 +13,7 @@ import vhdl_frontend
 test.scenarios('simulator')
 test.top_filename = 't/t_vhdl_waveform.vhdl'
 
-vhdl_frontend.native_only(test)
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + [
     '--language', 'vhdl', '--binary'

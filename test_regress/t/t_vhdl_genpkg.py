@@ -13,7 +13,7 @@ import vhdl_frontend
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_genpkg.vhdl'
 
-vhdl_frontend.require_frontend(test)
+
 
 test.compile(make_top_shell=False,
              make_main=False,

@@ -13,11 +13,10 @@ import vhdl_frontend
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_fn_loop_bad.vhdl'
 
-# Only the native frontend folds a function body, so only it can run into the bound
-vhdl_frontend.native_only(test)
+
 
 test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
              fails=True,
-             expect_filename=vhdl_frontend.golden_filename(test))
+             expect_filename=test.golden_filename)
 
 test.passes()

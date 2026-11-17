@@ -12,9 +12,7 @@ import vhdl_frontend
 
 test.scenarios('vlt_all')
 
-# The GHDL XML path wants a case to be exhaustive in writing, so only the native
-# frontend is checked here
-vhdl_frontend.native_only(test)
+
 test.top_filename = 't/t_vhdl_case_cover.vhdl'
 
 

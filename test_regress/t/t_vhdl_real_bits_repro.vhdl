@@ -1,7 +1,7 @@
 -- DESCRIPTION: Verilator: N30 real precision is implementation-defined (GHDL 31, native 30)
 --
 -- Reproducer, not a suite test: the finding is a value difference no test can pin as right. Lint it by hand with
---   bin/verilator --language vhdl --vhdl-frontend native --lint-only --top-module <top> <file>
+--   bin/verilator --language vhdl --lint-only --top-module <top> <file>
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
 -- SPDX-License-Identifier: CC0-1.0

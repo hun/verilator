@@ -9,8 +9,8 @@ use ieee.std_logic_1164.all;
 
 package recpko is
   type pair_o is record
-    a : std_logic_vector;
-    b : std_logic_vector;
+    a : std_logic_vector(3 downto 0);
+    b : std_logic_vector(3 downto 0);
   end record;
 end package;
 

@@ -11,7 +11,7 @@ import vltest_bootstrap
 import vhdl_frontend
 
 test.scenarios('vlt')
-vhdl_frontend.native_only(test)
+
 test.top_filename = 't/t_vhdl_std_logic_fn.vhdl'
 
 test.compile(make_top_shell=False,
