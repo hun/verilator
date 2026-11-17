@@ -75,7 +75,7 @@ Ports, generics, generic types               Supported  Unconstrained ports spec
 Scalar, enum, record, 1-D array types        Supported  Includes arrays of arrays; multi-
                                                          dimensional ports excluded
 Static real and physical types               Supported  Elaboration-time constants only
-Expressions and aggregates                   Supported  With the divergences below
+Expressions and aggregates                   Supported  Two-state model limits below
 Sequential statements and subprograms        Partial    Procedures/functions inlined; dynamic
                                                          loops, impure functions, signal formals
                                                          limited
@@ -181,7 +181,25 @@ Internal faults
 
 No corpus case now reaches an internal fault. The former crash class was closed
 by:
+Internal faults
+===============
 
+- an ``else``-less concurrent conditional assignment is emitted as a latch that
+  holds the target when no condition holds;
+- a concurrent procedure assertion is evaluated in its own ``always_comb``;
+- a two-dimensional element target descends one type level per index, so its
+  right-hand side is widened to the element width rather than the row width;
+- an unconstrained multi-dimensional port or array conversion is reported as
+  ``Unsupported:`` with its location;
+- repeated aggregate initializers fold a constant value into one constant and
+  chunk a run-time replication, so ``(others => (others => '0'))`` over 2^16
+  elements lints in 0.05 s and 20 MiB instead of aborting.
+No corpus case now reaches an internal fault. The former crash class was closed
+by:
+
+The full neorv32 ``rtl/`` tree with its stock Verilog wrapper still aborts with
+``std::bad_alloc`` under an 8 GiB limit when the wrapper's complete generic set
+is specialized. The core alone remains clean.
 - an ``else``-less concurrent conditional assignment is emitted as a latch that
   holds the target when no condition holds;
 - a concurrent procedure assertion is evaluated in its own ``always_comb``;
@@ -264,11 +282,39 @@ the resolved value. At the top-level C++ interface:
 - with :vlopt:`--pins-inout-enables`, the port is an input and the driver is
   exposed as ``name__en`` and ``name__out``. The testbench supplies the
   externally resolved value. Use this interface when external drivers exist.
+- ``inout`` ports, scalar and packed vector, at the top level and on instances;
+- ``'Z'`` is preserved in a logic constant. A ``'Z'`` that reaches a
+  non-tristate destination still resolves to 0;
+- a concurrent conditional assignment such as
+  ``bus <= data when oe = '1' else 'Z';`` is lowered to the conditional driver
+  form ``V3Tristate`` recognizes. A selected assignment with a high-impedance
+  value is rewritten to the equivalent comparison chain, including a ``'Z'``
+  produced by a folded function;
+- a process may drive an ``inout`` port; the procedural driver is converted in
+  the same way.
+
+At a non-top instance the port becomes an input plus ``__en``/``__out``
+connected to the parent signal, and reads of the signal inside the parent see
+the resolved value. At the top-level C++ interface:
+
+- without :vlopt:`--pins-inout-enables`, the port is a single inout field. The
+  model combines the external value with the internal driver by OR, and reads
+  inside the design see that combined value. This is the most convenient
+  single-driver interface, but the testbench cannot separately observe the
+  module's drive when an external driver is also present.
+- with :vlopt:`--pins-inout-enables`, the port is an input and the driver is
+  exposed as ``name__en`` and ``name__out``. The testbench supplies the
+  externally resolved value. Use this interface when external drivers exist.
 
 The limits are explicit. ``V3Tristate`` combines output enables; it does not
 implement IEEE 1164 resolution. Two enabled drivers of different values
 resolve to 1 in the two-state model, where VHDL produces ``'X'``. User-defined
 resolution functions remain out of scope.
+
+The feature is pinned by ``t_vhdl_inout`` (top level, conditional and selected
+drivers, scalar and vector, ``__en``/``__out``), ``t_vhdl_inout_bus`` (two
+instances on one resolved signal), ``t_vhdl_inout_proc`` (a clocked process
+driver), and ``t_vhdl_logic_z`` (``'Z'`` reaching non-tristate destinations).
 
 The feature is pinned by ``t_vhdl_inout`` (top level, conditional and selected
 drivers, scalar and vector, ``__en``/``__out``), ``t_vhdl_inout_bus`` (two

@@ -4679,11 +4679,29 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
             return enumConst(stepped);
         }
         if (attribute == "succ" || attribute == "pred") {
-            // succ/pred step to the neighbouring literal and wrap at the ends
             const bool succ = attribute == "succ";
             AstNodeExpr* const atLimitp
                 = new AstEq{flp, argp->cloneTree(false), enumConst(succ ? count - 1 : 0)};
             atLimitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            if (m_modp) {
+                // A dynamic argument can reach the end literal at run time, where VHDL
+                // requires a bound-check failure rather than a wrap
+                AstNode* bodyp = new AstDisplay{flp,
+                                                VDisplayType::DT_ERROR,
+                                                "VHDL: '" + attribute + "' of the "
+                                                    + (succ ? "last" : "first")
+                                                    + " enumeration literal is outside the type",
+                                                nullptr,
+                                                nullptr,
+                                                'd'};
+                VTimescale unit = m_modp->timeunit();
+                if (unit.isNone()) unit = VTimescale{VTimescale::TS_1PS};
+                VN_AS(bodyp, Display)->fmtp()->timeunit(unit);
+                bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, new AstFinish{flp});
+                m_modp->addStmtsp(
+                    new AstAlways{flp, VAlwaysKwd::ALWAYS_COMB, nullptr,
+                                  new AstIf{flp, atLimitp->cloneTree(false), bodyp, nullptr}});
+            }
             AstNodeExpr* const steppedp
                 = succ ? static_cast<AstNodeExpr*>(new AstAdd{flp, argp, enumConst(1)})
                        : static_cast<AstNodeExpr*>(new AstSub{flp, argp, enumConst(1)});
