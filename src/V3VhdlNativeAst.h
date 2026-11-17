@@ -450,6 +450,8 @@ struct EntityUnit final {
     std::vector<TypeDecl> types;
     // Packages named by the enclosing context clause: (library, package)
     std::vector<std::pair<std::string, std::string>> uses;
+    // Context declarations named by the enclosing context clause
+    std::vector<std::string> contextNames;
     // Generic constants, visible in the port clause and every architecture
     std::vector<GenericDecl> generics;
     std::vector<SubprogramDecl> subprograms;
@@ -469,6 +471,7 @@ struct Architecture final {
     std::vector<SubprogramDecl> subprograms;
     std::vector<std::unique_ptr<Concurrent>> stmts;
     std::vector<std::pair<std::string, std::string>> uses;
+    std::vector<std::string> contextNames;
 };
 
 //! A package declaration or body; its declarative part is elaborated once
@@ -485,6 +488,7 @@ struct PackageUnit final {
     std::vector<AliasDecl> aliases;
     // Packages made visible by the use clauses: (library, package)
     std::vector<std::pair<std::string, std::string>> uses;
+    std::vector<std::string> contextNames;
     std::vector<SubprogramDecl> subprograms;  // Prototypes in a spec, bodies in a body
 };
 //! `package NAME is new BASE [generic map (...)];` instantiates a generic package
@@ -496,6 +500,8 @@ struct PackageInstance final {
     FileLine* flp = nullptr;
     std::string baseName;  // Folded generic package being instantiated
     std::vector<PortAssoc> genericAssociations;
+    std::vector<std::pair<std::string, std::string>> uses;
+    std::vector<std::string> contextNames;
 };
 
 //! One component binding of a configuration: `for <instances> : <comp> use entity <lib>.<ent>;`
@@ -519,6 +525,14 @@ struct ConfigurationUnit final {
     std::vector<ConfigBinding> bindings;
 };
 
+//! A context declaration: a named bundle of library and use clauses
+struct ContextUnit final {
+    std::string name;  // Folded
+    FileLine* flp = nullptr;
+    std::vector<std::pair<std::string, std::string>> uses;
+    std::vector<std::string> contextNames;  // Contexts this one references
+};
+
 //! Design units parsed from all source files, in source order
 struct DesignLibrary final {
     std::vector<EntityUnit> entities;
@@ -526,6 +540,7 @@ struct DesignLibrary final {
     std::vector<PackageUnit> packages;  // Specs and bodies, in source order
     std::vector<PackageInstance> packageInstances;  // Generic-package instances
     std::vector<ConfigurationUnit> configurations;
+    std::vector<ContextUnit> contexts;  // Context declarations, in source order
 };
 
 //! Parse one design file and append its design units to the library

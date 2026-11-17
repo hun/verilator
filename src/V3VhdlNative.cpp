@@ -134,6 +134,42 @@ void orderVisit(const std::string& name,
     if (entityIt != byName.end()) order.push_back(entityIt->second);
 }
 
+//! Append the uses of a context declaration, following nested context references
+void appendContextUses(const std::string& name,
+                       const std::map<std::string, const vhdlnative::ContextUnit*>& contexts,
+                       std::set<std::string>& visiting,
+                       std::vector<std::pair<std::string, std::string>>& uses) {
+    const auto it = contexts.find(name);
+    if (it == contexts.end()) return;  // An unknown context is left for the unit to report
+    if (!visiting.insert(name).second) return;  // VHDL forbids a context cycle
+    for (const auto& use : it->second->uses) uses.push_back(use);
+    for (const std::string& nested : it->second->contextNames) {
+        appendContextUses(nested, contexts, visiting, uses);
+    }
+    visiting.erase(name);
+}
+
+//! Make every referenced context's packages visible to the referencing design unit
+void expandContexts(vhdlnative::DesignLibrary& library) {
+    std::map<std::string, const vhdlnative::ContextUnit*> byName;
+    for (const vhdlnative::ContextUnit& context : library.contexts) {
+        byName[context.name] = &context;
+    }
+    const auto expand = [&](const std::vector<std::string>& names,
+                            std::vector<std::pair<std::string, std::string>>& uses) {
+        std::set<std::string> visiting;
+        for (const std::string& name : names) { appendContextUses(name, byName, visiting, uses); }
+    };
+    for (vhdlnative::EntityUnit& entity : library.entities) {
+        expand(entity.contextNames, entity.uses);
+    }
+    for (vhdlnative::Architecture& arch : library.archs) expand(arch.contextNames, arch.uses);
+    for (vhdlnative::PackageUnit& pkg : library.packages) expand(pkg.contextNames, pkg.uses);
+    for (vhdlnative::PackageInstance& inst : library.packageInstances) {
+        expand(inst.contextNames, inst.uses);
+    }
+}
+
 }  // namespace
 
 void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& files) {
@@ -143,6 +179,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     // A parse error may have dropped design units, so elaboration would report spurious
     // missing-architecture and unknown-entity errors on top of the real diagnostic
     if (V3Error::errorCount() != errorsBefore) return;
+    expandContexts(library);
 
     // Bind each entity to one architecture; the last analyzed one is the default
     std::map<std::string, const vhdlnative::Architecture*> archByEntity;

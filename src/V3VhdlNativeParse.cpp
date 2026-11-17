@@ -184,8 +184,11 @@ class Parser final {
     std::vector<Architecture> m_archs;
     std::vector<PackageUnit> m_packages;  // Parsed package specs and bodies
     std::vector<PackageInstance> m_packageInstances;  // Parsed generic-package instances
+    std::vector<ContextUnit> m_contexts;  // Parsed context declarations
     // Packages named by the context clauses seen so far
     std::vector<std::pair<std::string, std::string>> m_uses;
+    // Context declarations named by the context clauses seen so far
+    std::vector<std::string> m_contextNames;
 
     void advance() { m_cur = m_lexer.next(); }
     bool isSym(const char* symText) const {
@@ -248,49 +251,96 @@ class Parser final {
         names.emplace_back(tok.text, tok.spelling);
     }
 
-    //! Skip a context clause `context work.c;`, or a whole context declaration
-    //! `context c is ... end context;` whose items only matter where it is referenced
-    void skipContextClause() {
-        // The helper also skips attribute, default and disconnect specifications, so the
-        // declaration form is only looked for where the clause really starts with `context`
-        if (isId("context")) {
-            const auto saved = m_lexer.state();
-            const Token contextTok = m_cur;
-            advance();  // `context`
-            if (m_cur.kind == Token::ID) {  // The name, or a selected `lib.name`
-                advance();
-                while (acceptSym(".")) {
-                    if (m_cur.kind != Token::ID) break;
-                    advance();
-                }
-            }
-            if (isId("is")) {  // A declaration: the clauses are its body
-                for (;;) {
-                    if (m_cur.kind == Token::END) {
-                        unsupported("context declaration that reaches the end of the file");
-                        return;
-                    }
-                    if (isId("end")) {
-                        advance();
-                        if (!expectId("context")) return;
-                        if (m_cur.kind == Token::ID) advance();  // Optional end name
-                        expectSym(";");
-                        return;
-                    }
-                    advance();
-                }
-            }
-            m_cur = contextTok;
-            m_lexer.restore(saved);
+    //! Skip an attribute, default or disconnect specification, or a PSL directive
+    void skipContextClause() { skipToSemicolon(); }
+
+    //! Parse `context lib.name [is ... end context];`. With a body, record the
+    //! declaration; without one, add the name to the context references.
+    void parseContextClause(std::vector<std::string>& names, bool allowDeclaration) {
+        const Token contextTok = m_cur;
+        advance();  // `context`
+        std::vector<std::string> parts;
+        if (m_cur.kind != Token::ID) {
+            error("expected a context name");
+            return;
         }
-        int parens = 0;
-        while (m_cur.kind != Token::END) {
-            if (isSym("(")) ++parens;
-            if (isSym(")")) --parens;
-            if (parens == 0 && acceptSym(";")) return;
+        parts.push_back(m_cur.text);
+        advance();
+        while (acceptSym(".")) {
+            if (m_cur.kind != Token::ID) {
+                error("expected a context name after '.'");
+                return;
+            }
+            parts.push_back(m_cur.text);
             advance();
         }
-        unsupported("context clause that reaches the end of the file");
+        if (isId("is")) {
+            if (!allowDeclaration) {
+                unsupported("context declaration in a declarative part");
+                return;
+            }
+            ContextUnit context;
+            context.flp = contextTok.flp;
+            context.name = parts.back();
+            advance();  // `is`
+            for (;;) {
+                if (m_failed) return;
+                if (m_cur.kind == Token::END) {
+                    unsupported("context declaration that reaches the end of the file");
+                    return;
+                }
+                if (isId("end")) {
+                    advance();
+                    if (!expectId("context")) return;
+                    if (m_cur.kind == Token::ID) advance();  // Optional end name
+                    expectSym(";");
+                    break;
+                }
+                if (isId("library")) {
+                    advance();
+                    skipLibraryClause();
+                    continue;
+                }
+                if (isId("use")) {
+                    parseUseClauseInto(context.uses);
+                    continue;
+                }
+                if (isId("context")) {
+                    std::vector<std::string> referenced;
+                    parseContextReference(referenced);
+                    if (!referenced.empty()) context.contextNames.push_back(referenced.front());
+                    continue;
+                }
+                error("unexpected token '" + m_cur.text + "' in a context declaration");
+                return;
+            }
+            m_contexts.push_back(std::move(context));
+            return;
+        }
+        expectSym(";");
+        names.push_back(parts.back());
+    }
+
+    //! Parse `context lib.name;` inside a context declaration
+    void parseContextReference(std::vector<std::string>& names) {
+        advance();  // `context`
+        std::string name;
+        if (m_cur.kind != Token::ID) {
+            error("expected a context name");
+            return;
+        }
+        name = m_cur.text;
+        advance();
+        while (acceptSym(".")) {
+            if (m_cur.kind != Token::ID) {
+                error("expected a context name after '.'");
+                return;
+            }
+            name = m_cur.text;
+            advance();
+        }
+        expectSym(";");
+        names.push_back(name);
     }
 
     //! Skip a declaration whose meaning is only verification-time or unused
@@ -444,6 +494,7 @@ public:
     std::vector<PackageUnit>& packages() { return m_packages; }
     std::vector<PackageInstance>& packageInstances() { return m_packageInstances; }
     std::vector<ConfigurationUnit>& configurations() { return m_configurations; }
+    std::vector<ContextUnit>& contexts() { return m_contexts; }
 };
 
 //######################################################################
@@ -1180,6 +1231,7 @@ void Parser::parseEntity(FileLine* flp) {
     entity.libname = m_libname;
     entity.inLibrary = m_inLibrary;
     entity.uses = m_uses;
+    entity.contextNames = m_contextNames;
     if (!expectId("is")) return;
     for (;;) {
         if (m_failed) return;
@@ -1249,7 +1301,7 @@ void Parser::parseEntity(FileLine* flp) {
             continue;
         }
         if (isId("context")) {
-            skipContextClause();
+            parseContextClause(entity.contextNames, false);
             continue;
         }
         if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
@@ -1793,6 +1845,8 @@ void Parser::parsePackageInstanceTail(FileLine* flp, const std::string& name,
     inst.spelling = spelling;
     inst.libname = m_libname;
     inst.inLibrary = m_inLibrary;
+    inst.uses = m_uses;
+    inst.contextNames = m_contextNames;
     if (isId("work")) {
         advance();
         if (!acceptSym(".")) {
@@ -1909,6 +1963,7 @@ void Parser::parseArchitecture(FileLine* flp) {
     arch.libname = m_libname;
     arch.inLibrary = m_inLibrary;
     arch.uses = m_uses;
+    arch.contextNames = m_contextNames;
     if (!expectId("of")) return;
     Token entityTok;
     if (!takeId(entityTok)) return;
@@ -1919,6 +1974,10 @@ void Parser::parseArchitecture(FileLine* flp) {
         if (isId("begin")) break;
         if (isId("use")) {
             parseUseClauseInto(arch.uses);
+            continue;
+        }
+        if (isId("context")) {
+            parseContextClause(arch.contextNames, false);
             continue;
         }
         if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
@@ -2878,6 +2937,7 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
     pkg.inLibrary = m_inLibrary;
     pkg.isBody = isBody;
     pkg.uses = m_uses;
+    pkg.contextNames = m_contextNames;
     if (!expectId("is")) return;
     if (isId("new")) {  // `package X is new G ...;` generic-package instance
         parsePackageInstanceTail(flp, pkg.name, pkg.spelling);
@@ -2888,6 +2948,10 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
         if (isId("end")) break;
         if (isId("use")) {
             parseUseClauseInto(pkg.uses);
+            continue;
+        }
+        if (isId("context")) {
+            parseContextClause(pkg.contextNames, false);
             continue;
         }
         if (isId("constant")) {
@@ -3125,7 +3189,7 @@ void Parser::parseDesignFile() {
             continue;
         }
         if (isId("context")) {
-            skipContextClause();
+            parseContextClause(m_contextNames, true);
             continue;
         }
         if (isId("entity")) {
@@ -3191,6 +3255,9 @@ void parseFile(const V3VhdlNativeFile& file, DesignLibrary& library) {
     }
     for (PackageInstance& inst : parser.packageInstances()) {
         library.packageInstances.push_back(std::move(inst));
+    }
+    for (ContextUnit& context : parser.contexts()) {
+        library.contexts.push_back(std::move(context));
     }
 }
 

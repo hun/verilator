@@ -31,7 +31,7 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 198 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 199 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
@@ -47,7 +47,7 @@ NO_TOP                                       13
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 198 regression tests, 20 ported corpus designs
+value-checked evidence is the 199 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
@@ -67,7 +67,7 @@ __________________
 Area                                         Status      Notes
 ===========================================  =========  =====================================
 Entities, architectures, packages            Supported  Multiple architectures: last analyzed
-                                                         wins; context references are skipped
+                                                         wins; context declarations are expanded
 Components and direct instantiation          Supported  Configurations are validated, not
                                                          applied
 Ports, generics, generic types               Supported  Unconstrained ports specialize per
@@ -152,9 +152,6 @@ with a different result. The reference values were confirmed with GHDL.
    * - ``use ieee.std_logic_signed.all``
      - arithmetic and comparison are signed
      - ``std_logic_vector`` operations are unsigned
-   * - ``context work.ctx;``
-     - makes the context's declarations visible
-     - the reference is skipped, so its types and packages are not imported
    * - ``'succ``/``'pred`` of an end literal with a non-static argument
      - a bound check fails
      - the runtime step wraps
@@ -206,7 +203,6 @@ Remaining feature gaps
 - ``std_logic`` resolution between strong tristate drivers is not modelled.
   Conflicting enabled values resolve to 1 rather than ``'X'``. User-defined
   resolution functions remain out of scope.
-- Context references do not import their declarations.
 - Concurrent ``unaffected`` is reported as an unknown identifier.
 - ``report`` with a non-literal message is dropped.
 - PSL properties are accepted and skipped, so they never fire.
@@ -300,10 +296,9 @@ ______
 Order
 ______
 
-1. Fix the silent divergences: the conditional assignment crash and hold
+1. Finish the silent divergences: the conditional assignment crash and hold
    semantics, enumeration literal scoping, operator and overload resolution,
-   array comparison and ``bit_vector`` shifts, ``std_logic_signed``,
-   ``report`` severity, and ``context`` references.
+   ``std_logic_vector`` array comparison, and ``std_logic_signed``.
 2. Bound repeated aggregate expansion, then revisit the large-memory and
    neorv32 allocation failures.
 3. Turn the remaining internal faults into clean diagnostics and pin them with
