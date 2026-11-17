@@ -68,6 +68,7 @@ struct VType final {
     int width = 1;
     VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
     VSigning signing = VSigning::UNSIGNED;
+    std::string typeName;  // Base type identity for overload resolution
     int left = 0;
     int right = 0;
     bool ascending = false;
@@ -419,6 +420,7 @@ class Lowering final {
         type.kind = VType::INT;
         type.width = 32;
         type.dtp = findBasic(flp, VBasicDTypeKwd::INT);
+        type.typeName = "integer";
         return type;
     }
 
@@ -444,12 +446,14 @@ class Lowering final {
         type.width = 64;
         type.kwd = VBasicDTypeKwd::LONGINT;
         type.dtp = findBasic(flp, VBasicDTypeKwd::LONGINT);
+        type.typeName = "time";
         return type;
     }
     VType logicType(FileLine* flp) const {
         VType type;
         type.kind = VType::LOGIC;
         type.dtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+        type.typeName = "std_ulogic";
         return type;
     }
     static VType typeOfDType(AstNodeDType* dtp) {
@@ -465,6 +469,7 @@ class Lowering final {
         if (basicp->keyword() == VBasicDTypeKwd::INT
             || basicp->keyword() == VBasicDTypeKwd::LONGINT) {
             type.kind = VType::INT;
+            type.typeName = "integer";
         } else if (basicp->isRanged()) {
             // A ranged width-1 dtype is a one-element vector, not a scalar
             type.kind = VType::VECTOR;
@@ -474,8 +479,16 @@ class Lowering final {
             type.signing = basicp->isNosign()
                                ? VSigning::NOSIGN
                                : (dtp->isSigned() ? VSigning::SIGNED : VSigning::UNSIGNED);
+            if (basicp->keyword() == VBasicDTypeKwd::BIT) {
+                type.typeName = "bit_vector";
+            } else if (type.signing == VSigning::SIGNED) {
+                type.typeName = "signed";
+            } else if (type.signing == VSigning::UNSIGNED) {
+                type.typeName = "unsigned";
+            }
         } else {
             type.kind = basicp->keyword() == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+            type.typeName = type.kind == VType::BIT ? "bit" : "std_ulogic";
         }
         return type;
     }
@@ -903,6 +916,7 @@ class Lowering final {
         type.ascending = true;
         type.width = 8 * length;
         type.dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, type.width);
+        type.typeName = "string";
         return type;
     }
     //! Signing a vector mark denotes: numeric_std unsigned/signed, or a VHDL array
@@ -915,7 +929,9 @@ class Lowering final {
     VType literalVectorType(FileLine* flp, const std::string& mark, int width) const {
         const VBasicDTypeKwd kwd
             = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-        return vectorType(flp, kwd, vectorSigning(mark), width);
+        VType type = vectorType(flp, kwd, vectorSigning(mark), width);
+        type.typeName = mark;
+        return type;
     }
 
     //! Whether an expression contains a real literal, so its value is a real
@@ -1084,16 +1100,23 @@ class Lowering final {
     formalSlots(const SubprogramDecl& sub);
     bool markKind(const std::string& mark, VType::Kind& out) const;
     bool actualKind(const Expr& expr, VType::Kind& out) const;
+    bool actualType(const Expr& expr, VType& out) const;
+    bool formalType(const TypeSpec& spec, VType& out) const;
+    static bool typesMatch(const VType& formal, const VType& actual);
     static bool kindAccepts(VType::Kind formal, VType::Kind actual);
     bool formalsAccept(const Expr& call, const SubprogramDecl& sub) const;
+    bool formalsExact(const Expr& call, const SubprogramDecl& sub) const;
     std::vector<const SubprogramDecl*> visibleSubprograms(const std::string& name) const;
     const SubprogramDecl* resolveCall(const Expr& call, bool function,
                                       const SubprogramRef** foundpp = nullptr);
+    //! A user-defined infix operator whose formals exactly match the operands
+    AstNodeExpr* lowerUserOperator(const Expr& expr, const VType* context, bool& found);
     void captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const;
     AstNodeExpr* inlineBinding(FileLine* flp, const std::string& name, bool write) const;
     bool bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub, InlineEnv& env,
                                AstNode*& prologsp, bool lvalueFormals, bool concurrent);
-    AstNodeExpr* lowerFunctionCall(const Expr& call, const VType* context);
+    AstNodeExpr* lowerFunctionCall(const Expr& call, const VType* context,
+                                   const SubprogramDecl* forcedp = nullptr);
     AstNodeExpr* evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index, InlineEnv& env,
                                const InlineCont& cont, const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncBlockBody(const std::vector<StmtP>& stmts, std::size_t index,
@@ -2017,6 +2040,11 @@ void Lowering::registerType(const TypeDecl& decl) {
         break;
     }
     }
+    if (decl.kind == TypeDecl::PHYSICAL) {
+        type.typeName = decl.name;  // A user physical type is distinct from time
+    } else if (decl.kind != TypeDecl::SUBTYPE && type.typeName.empty()) {
+        type.typeName = decl.name;
+    }
     m_types[decl.name] = type;
 }
 
@@ -2389,6 +2417,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     }
     if (declared != m_types.end()) {
         out = declared->second;
+        if (out.typeName.empty()) out.typeName = mark;
         if (!spec.memberConstraints.empty() && !applyMemberConstraints(spec, out)) return false;
         if (!spec.indexConstraints.empty()) return applyIndexConstraints(spec, out);
         return applyRange(spec, out);
@@ -2401,10 +2430,12 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         }
         out = vectorType(flp, VBasicDTypeKwd::LOGIC,
                          mark == "u_signed" ? VSigning::SIGNED : VSigning::UNSIGNED, 1);
+        out.typeName = mark == "u_signed" ? "signed" : "unsigned";
         return applyRange(spec, out);
     }
     if (mark == "character") {
         out = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8);
+        out.typeName = "character";
         return true;
     }
     if (mark == "string") {
@@ -2413,12 +2444,14 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         out.kind = VType::ARRAY;
         out.elemp = std::make_shared<VType>(
             vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
+        out.elemp->typeName = "character";
         out.elemWidth = 8;
         out.kwd = VBasicDTypeKwd::LOGIC;
         out.signing = VSigning::UNSIGNED;
         out.width = 0;
         out.left = 0;
         out.right = 0;
+        out.typeName = "string";
         if (spec.hasRange || !spec.constraintMark.empty()) return applyRange(spec, out);
         return true;
     }
@@ -2429,6 +2462,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         }
         out.kind = mark == "bit" ? VType::BIT : VType::LOGIC;
         out.dtp = findBasic(flp, mark == "bit" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC);
+        out.typeName = mark == "bit" ? "bit" : (mark == "boolean" ? "boolean" : "std_ulogic");
         return true;
     }
     if (mark == "integer" || mark == "natural" || mark == "positive") {
@@ -2448,6 +2482,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         out = VType{};
         out.kind = VType::REAL;
         out.dtp = nullptr;
+        out.typeName = "real";
         return true;
     }
     if (mark == "text" || mark == "line") {
@@ -2456,6 +2491,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         out = VType{};
         out.kind = mark == "line" ? VType::LINE : VType::FILE;
         out.dtp = nullptr;
+        out.typeName = mark;
         return true;
     }
     const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
@@ -2483,6 +2519,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     out.right = static_cast<int>(right);
     out.ascending = ascending;
     out.dtp = findVector(flp, kwd, signing, out.left, out.right, out.ascending);
+    out.typeName = mark;
     return true;
 }
 
@@ -2911,6 +2948,15 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
 AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
+    // An explicitly declared operator with matching parameter types takes precedence over
+    // the built-in operator of the same symbol
+    if (expr.a && expr.b) {
+        bool userFound = false;
+        if (AstNodeExpr* const userp = lowerUserOperator(expr, context, userFound)) {
+            return userp;
+        }
+        if (userFound) return nullptr;
+    }
     // A relational operator whose static operands are reals folds to a bit before
     // either operand is lowered, so a real generic/constant compared to a literal (as in
     // a `when` condition, a generate, or `integer(x) = 8`) becomes a constant. It fires
@@ -6492,6 +6538,13 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
             unsupportedError(call.flp, "no declaration of '" + name + "' accepts the actuals");
             return nullptr;
         }
+        if (fitting.size() > 1) {
+            std::vector<const SubprogramRef*> exact;
+            for (const SubprogramRef* const refp : fitting) {
+                if (formalsExact(call, *refp->declp)) exact.push_back(refp);
+            }
+            if (!exact.empty()) fitting = std::move(exact);
+        }
         matching = std::move(fitting);
     }
     if (!matching.empty()) {
@@ -6659,6 +6712,191 @@ bool Lowering::kindAccepts(VType::Kind formal, VType::Kind actual) {
     return false;
 }
 
+//! Types a declaration and a value present to overload resolution
+bool Lowering::actualType(const Expr& expr, VType& out) const {
+    switch (expr.kind) {
+    case Expr::INT_LIT:
+        out = VType{};
+        out.kind = VType::INT;
+        out.typeName = "integer";
+        return true;
+    case Expr::REAL_LIT:
+        out = VType{};
+        out.kind = VType::REAL;
+        out.typeName = "real";
+        return true;
+    case Expr::TRUE_LIT:
+    case Expr::FALSE_LIT:
+        out = VType{};
+        out.kind = VType::LOGIC;
+        out.typeName = "boolean";
+        return true;
+    case Expr::PAREN:
+    case Expr::UNARY: return expr.a && actualType(*expr.a, out);
+    case Expr::QUAL: {
+        TypeSpec spec;
+        spec.flp = expr.flp;
+        spec.mark = expr.text;
+        return formalType(spec, out);
+    }
+    case Expr::NAME:
+    case Expr::SELECTED:
+    case Expr::SLICE: {
+        if (typeOfDesignator(expr, out)) return true;
+        if (expr.kind != Expr::NAME) return false;
+        if (m_subprograms.count(expr.text)) {
+            Expr call{Expr::CALL};
+            call.flp = expr.flp;
+            call.text = expr.text;
+            call.spelling = expr.spelling;
+            return actualType(call, out);
+        }
+        if (m_consts.count(expr.text) || m_preConsts.count(expr.text)) {
+            out = VType{};
+            out.kind = VType::INT;
+            out.typeName = "integer";
+            return true;
+        }
+        if (m_realConsts.count(expr.text)) {
+            out = VType{};
+            out.kind = VType::REAL;
+            out.typeName = "real";
+            return true;
+        }
+        return false;
+    }
+    case Expr::INDEX: {
+        if (typeOfDesignator(expr, out)) return true;
+        // The parser writes both an array index and a function call as INDEX; a call
+        // has a subprogram name as its prefix.
+        if (!expr.a || expr.a->kind != Expr::NAME || !m_subprograms.count(expr.a->text)) {
+            return false;
+        }
+        Expr call{Expr::CALL};
+        call.flp = expr.flp;
+        call.text = expr.a->text;
+        call.spelling = expr.a->spelling;
+        call.formalNames = expr.formalNames;
+        for (const ExprP& argp : expr.args) {
+            call.args.push_back(argp ? cloneExpr(*argp) : ExprP{});
+        }
+        return actualType(call, out);
+    }
+    case Expr::ATTR:
+        if (expr.text == "high" || expr.text == "low" || expr.text == "left"
+            || expr.text == "right" || expr.text == "length" || expr.text == "pos"
+            || expr.text == "to_integer") {
+            out = VType{};
+            out.kind = VType::INT;
+            out.typeName = "integer";
+            return true;
+        }
+        return false;
+    case Expr::CALL: {
+        TypeSpec spec;
+        spec.flp = expr.flp;
+        spec.mark = expr.text;
+        if (formalType(spec, out)) return true;  // A type conversion carries its mark
+        std::vector<const SubprogramDecl*> candidates;
+        for (const SubprogramDecl* const subp : visibleSubprograms(expr.text)) {
+            if (subp->kind != SubprogramDecl::FUNCTION || !subp->hasBody || subp->impure) continue;
+            std::string why;
+            if (!subprogramMatches(expr, *subp, why)) continue;
+            if (!formalsAccept(expr, *subp)) continue;
+            candidates.push_back(subp);
+        }
+        if (candidates.size() == 1) return formalType(candidates.front()->returnType, out);
+        return false;
+    }
+    default: return false;
+    }
+}
+
+//! The base type of a formal, without needing a constraint. Constraints do not distinguish
+//! overloads; the base element type and signing do.
+bool Lowering::formalType(const TypeSpec& spec, VType& out) const {
+    const std::string& mark = spec.mark;
+    const auto declared = m_types.find(mark);
+    if (declared != m_types.end()) {
+        out = declared->second;
+        return true;
+    }
+    if (!spec.flp) return false;
+    if (mark == "integer" || mark == "natural" || mark == "positive") {
+        out = intType(spec.flp);
+        return true;
+    }
+    if (mark == "real") {
+        out = VType{};
+        out.kind = VType::REAL;
+        out.typeName = "real";
+        return true;
+    }
+    if (mark == "boolean" || mark == "std_logic" || mark == "std_ulogic" || mark == "bit") {
+        out = VType{};
+        out.kind = mark == "bit" ? VType::BIT : VType::LOGIC;
+        out.dtp = findBasic(spec.flp, mark == "bit" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC);
+        out.typeName = mark == "bit" ? "bit" : (mark == "boolean" ? "boolean" : "std_ulogic");
+        return true;
+    }
+    if (mark == "character") {
+        out = vectorType(spec.flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8);
+        out.typeName = "character";
+        return true;
+    }
+    if (mark == "string") {
+        out.kind = VType::ARRAY;
+        out.elemp = std::make_shared<VType>(
+            vectorType(spec.flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
+        out.elemp->typeName = "character";
+        out.elemWidth = 8;
+        out.kwd = VBasicDTypeKwd::LOGIC;
+        out.signing = VSigning::UNSIGNED;
+        out.typeName = "string";
+        return true;
+    }
+    if (mark == "time") {
+        out = timeType(spec.flp);
+        return true;
+    }
+    if (mark == "text" || mark == "line") {
+        out = VType{};
+        out.kind = mark == "line" ? VType::LINE : VType::FILE;
+        out.typeName = mark;
+        return true;
+    }
+    if (isUnconstrainedMark(mark) || mark == "u_unsigned" || mark == "u_signed") {
+        out = VType{};
+        out.kind = VType::VECTOR;
+        out.kwd = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+        out.signing = vectorSigning(mark);
+        out.typeName = (mark == "u_signed" || mark == "signed")
+                           ? "signed"
+                           : ((mark == "u_unsigned" || mark == "unsigned") ? "unsigned" : mark);
+        return true;
+    }
+    return false;
+}
+
+//! Whether an actual may be associated with a formal of the given base type
+bool Lowering::typesMatch(const VType& formal, const VType& actual) {
+    // Universal integer literals also fit a real formal
+    if (formal.kind == VType::REAL && actual.kind == VType::INT) return true;
+    if (!formal.typeName.empty() && !actual.typeName.empty()
+        && formal.typeName != actual.typeName) {
+        return false;
+    }
+    if (formal.kind != actual.kind && !(formal.isVector() && actual.isVector())) return false;
+    if (formal.kind == VType::INT || formal.kind == VType::REAL) return true;
+    if (formal.isVector() && actual.isVector()) {
+        if (formal.kwd != actual.kwd) return false;
+        if (formal.signing != actual.signing) return false;
+        if (formal.elemWidth != actual.elemWidth) return false;
+        if (formal.elemp && actual.elemp) return typesMatch(*formal.elemp, *actual.elemp);
+    }
+    return true;
+}
+
 //! Whether every actual of a call can be associated with the formal it fills. A caller asks
 //! only to choose between declarations that already accept the actuals' count and names.
 bool Lowering::formalsAccept(const Expr& call, const SubprogramDecl& sub) const {
@@ -6678,12 +6916,81 @@ bool Lowering::formalsAccept(const Expr& call, const SubprogramDecl& sub) const 
             }
             if (!formalp) return true;
         }
+        VType aType;
+        VType fType;
+        if (actualType(*actualp, aType) && formalType(formalp->type, fType)) {
+            if (!typesMatch(fType, aType)) return false;
+            continue;
+        }
         VType::Kind aKind;
         VType::Kind fKind;
         if (!actualKind(*actualp, aKind) || !markKind(formalp->type.mark, fKind)) continue;
         if (!kindAccepts(fKind, aKind)) return false;
     }
     return true;
+}
+
+//! Whether every known actual has exactly the base type of its formal, which picks one
+//! declaration when the category-level test left several.
+bool Lowering::formalsExact(const Expr& call, const SubprogramDecl& sub) const {
+    const std::vector<std::pair<const FormalDecl*, std::string>> slots = formalSlots(sub);
+    std::size_t positional = 0;
+    for (std::size_t i = 0; i < call.args.size(); ++i) {
+        const Expr* const actualp = call.args[i].get();
+        if (!actualp) return false;
+        const std::string formal = i < call.formalNames.size() ? call.formalNames[i] : "";
+        const FormalDecl* formalp = nullptr;
+        if (formal.empty()) {
+            if (positional >= slots.size()) return false;
+            formalp = slots[positional++].first;
+        } else {
+            for (const auto& slot : slots) {
+                if (slot.second == formal) formalp = slot.first;
+            }
+            if (!formalp) return false;
+        }
+        VType aType;
+        VType fType;
+        if (!actualType(*actualp, aType) || !formalType(formalp->type, fType)) return false;
+        if (!typesMatch(fType, aType)) return false;
+    }
+    return true;
+}
+
+//! A user-defined infix operator whose formals exactly match the operands
+AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context, bool& found) {
+    found = false;
+    if (!expr.a || !expr.b) return nullptr;
+    VType actual0;
+    VType actual1;
+    if (!actualType(*expr.a, actual0) || !actualType(*expr.b, actual1)) return nullptr;
+    std::vector<const SubprogramDecl*> matches;
+    for (const SubprogramDecl* const subp : visibleSubprograms(expr.text)) {
+        if (subp->kind != SubprogramDecl::FUNCTION || !subp->hasBody || subp->impure) continue;
+        const std::vector<std::pair<const FormalDecl*, std::string>> slots = formalSlots(*subp);
+        if (slots.size() != 2) continue;
+        VType formal0;
+        VType formal1;
+        if (!formalType(slots[0].first->type, formal0)
+            || !formalType(slots[1].first->type, formal1)) {
+            continue;
+        }
+        if (!typesMatch(formal0, actual0) || !typesMatch(formal1, actual1)) continue;
+        matches.push_back(subp);
+    }
+    if (matches.empty()) return nullptr;
+    found = true;
+    if (matches.size() > 1) {
+        expr.flp->v3error("VHDL: operator '" + expr.text + "' is ambiguous for these operands");
+        return nullptr;
+    }
+    Expr call{Expr::CALL};
+    call.flp = expr.flp;
+    call.text = expr.text;
+    call.spelling = expr.spelling;
+    call.args.push_back(cloneExpr(*expr.a));
+    call.args.push_back(cloneExpr(*expr.b));
+    return lowerFunctionCall(call, context, matches.front());
 }
 
 void Lowering::captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const {
@@ -7187,10 +7494,29 @@ AstNodeExpr* Lowering::evalFileInit(const SubprogramDecl& subp, const Expr& call
     return makeBitsConst(call.flp, retType.dtp, result.bits);
 }
 
-AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context) {
+AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
+                                         const SubprogramDecl* forcedp) {
     const SubprogramRef* refp = nullptr;
-    const SubprogramDecl* const subp = resolveCall(call, true, &refp);
-    if (!subp) return nullptr;  // resolveCall reported why
+    const SubprogramDecl* subp = nullptr;
+    if (forcedp) {
+        subp = forcedp;
+        for (const auto& entry : m_subprograms) {
+            for (const SubprogramRef& ref : entry.second) {
+                if (ref.declp == forcedp) {
+                    refp = &ref;
+                    break;
+                }
+            }
+            if (refp) break;
+        }
+        if (!refp) {
+            call.flp->v3error("VHDL: operator '" + call.text + "' is no longer visible");
+            return nullptr;
+        }
+    } else {
+        subp = resolveCall(call, true, &refp);
+        if (!subp) return nullptr;  // resolveCall reported why
+    }
     // A subprogram that reads a file builds its result at elaboration
     if (readsFile(*subp)) return evalFileInit(*subp, call);
     m_funcWriteCost = 0;  // This call's own fold budget
