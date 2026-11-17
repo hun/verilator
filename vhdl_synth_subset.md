@@ -212,7 +212,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `**` | P | S* | UG901 restricts the left operand to 2. Static exponents and non-negative integer exponents are in subset; negative or real exponents are not. |
 | `abs` | Y | S | |
 | Unary `+`, `-` | Y | S | |
-| Shifts `sll`, `srl`, `sla`, `sra` | Y | S | VHDL fill rules, including arithmetic fill for `sla`/`sra`. |
+| Shifts `sll`, `srl`, `sla`, `sra` | Y | S | `bit_vector` uses the predefined edge fill (IEEE 1076-2008 9.2.3). `numeric_std` `signed`/`unsigned` keep their numeric shift semantics. A `std_logic_vector` is treated as unsigned, so its `sra`/`sla` still zero-fill rather than using the predefined edge value. |
 | Rotates `rol`, `ror` | Y | S | |
 | `maximum`, `minimum` | Y (2008) | S | |
 | Integer literals (decimal) | Y | S | |
@@ -260,7 +260,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Wait statement together with a sensitivity list | N | X | |
 | Wait-based latch | N | X | UG901 explicitly disallows latch descriptions from waits. |
 | `assert` | P | S* | Static conditions are evaluated at elaboration. Runtime assertions are optional (Section 5.6). |
-| `report` | - | I | No effect, matching synthesis. |
+| `report` | - | I | A literal message prints; `severity failure` ends the run (IEEE 1076-2008 8.3). A non-literal message is dropped. |
 | Procedure call statement | Y | S | |
 | Conditional sequential signal/variable assignment (VHDL-2008) | Y | D | `sig <= a when c else b;` |
 | Delay/`after` on a signal assignment | P (delay ignored) | X | Verilator rejects a nonzero delay unless a future `--timing` mode is enabled; silently ignoring it would change simulation behavior. |
@@ -351,7 +351,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `'ascending` | Y | S | |
 | `'range`, `'reverse_range` | Y | S | Usable as a range constraint. |
 | `'pos`, `'val` | Y | S | Enumeration position/value. |
-| `'succ`, `'pred` | - | S | Enumeration successor/predecessor. |
+| `'succ`, `'pred` | - | S | Enumeration successor/predecessor. A locally static out-of-range value is an error; a dynamic end value wraps. |
 | `'event` | Y | S* | Supported on the clock/sensitivity signal in recognized clock idioms; other uses are deferred. |
 | `'stable` | - | D | Only in clock/sensitivity idioms if a lowering exists. |
 | `'last_value`, `'last_event`, `'transaction`, `'quiet`, `'delayed` | - | X | Simulation-only event attributes; no hardware meaning. |
@@ -465,9 +465,10 @@ Consequences:
 
 - `-` is treated as an unknown data value, not as a synthesis don't-care.
 - `U` and `W` are accepted and mapped to X; Vivado rejects them.
-- A `std_logic` comparison with an X constant is lowered as a four-state
-  equality, not as the identity equality of IEEE 1164; a comparison of two X
-  constants is false.
+- A `std_logic` or `std_logic_vector` comparison uses identity (case)
+  equality, so two identical X constants compare equal; a comparison of X and
+  0 is false. Vector equality still resizes unequal lengths, except
+  `bit_vector` equality, which is false.
 - A `'Z'` constant is kept as high impedance and is lowered by `V3Tristate` when
   it drives an `inout` port or a signal with a tristate driver. Anywhere else it
   resolves to 0. A design that needs a high-impedance bus uses an `inout` port
@@ -529,7 +530,9 @@ Consequences:
   evaluated with the `-assert` option.
 - The frontend accepts `assert`/`report` syntax. Static assertions may be
   evaluated at elaboration. Runtime assertions are optional and, when enabled,
-  lower to the existing assertion machinery. `report` has no effect.
+  lower to the existing assertion machinery. A report with a literal message
+  prints it, and `severity failure` ends the run. A non-literal report message
+  is dropped.
 - `severity` does not by itself reject a design; the policy is a frontend option,
   not a language rule.
 

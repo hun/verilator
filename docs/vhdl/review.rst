@@ -31,15 +31,15 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 194 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 198 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
 ========================================  =====
 Result                                    Count
 ========================================  =====
-PASS (accepted and lowered)                 875
-UNSUPPORTED (clean diagnostic)              128
+PASS (accepted and lowered)                 877
+UNSUPPORTED (clean diagnostic)              126
 ERROR                                        90
 EXPECTED_FAIL                                33
 NO_TOP                                       13
@@ -47,7 +47,7 @@ NO_TOP                                       13
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 194 regression tests, 20 ported corpus designs
+value-checked evidence is the 198 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
@@ -116,7 +116,7 @@ Where the implementation is sound
   enable/drive interface are tested. Conflicting drivers remain a documented
   two-state divergence.
 - Most unsupported constructs produce a source-located ``Unsupported:``
-  diagnostic; 128 corpus cases are classified that way.
+  diagnostic; 126 corpus cases are classified that way.
 
 Silent semantic divergences
 ===========================
@@ -131,13 +131,15 @@ with a different result. The reference values were confirmed with GHDL.
    * - Construct
      - VHDL behavior
      - Frontend behavior
-   * - ``std_logic_vector`` comparison with unequal lengths
-     - predefined array equality is false; array ordering is lexicographic
-     - operands are resized and compared numerically
-   * - ``bit_vector sra``/``sla``
+   * - ``std_logic_vector`` equality with unequal lengths, and array ordering
+     - equality is false; ordering is lexicographic
+     - equal lengths compare by identity; unequal equality resizes, and
+       ordering is numeric
+   * - ``std_logic_vector sra``/``sla`` without ``numeric_std``
      - vacated positions use the array's leftmost/rightmost element
        (IEEE 1076-2008 9.2.3)
-     - zero fill
+     - zero fill; ``sra``/``sla`` on ``unsigned`` also zero-fill, and the two
+       types are not distinguished
    * - Two enumeration types with the same literal name
      - the literal is resolved by the expected type
      - one global literal table is used; the last declaration wins
@@ -150,24 +152,21 @@ with a different result. The reference values were confirmed with GHDL.
    * - ``use ieee.std_logic_signed.all``
      - arithmetic and comparison are signed
      - ``std_logic_vector`` operations are unsigned
-   * - ``report "text" severity failure;``
-     - terminates the simulation (IEEE 1076-2008 8.3)
-     - prints and continues; only ``assert`` terminates
-   * - ``std_logic'('X') = std_logic'('X')``
-     - true (identity equality in ``std_logic_1164``)
-     - false; four-state equality is used, not case equality
    * - ``context work.ctx;``
      - makes the context's declarations visible
      - the reference is skipped, so its types and packages are not imported
-   * - ``'succ`` of the last enumeration literal, ``'pred`` of the first
+   * - ``'succ``/``'pred`` of an end literal with a non-static argument
      - a bound check fails
-     - the value wraps
+     - the runtime step wraps
 
 The two-state model makes some of these unavoidable at runtime: ``is_x`` is
-always false, ``'Z'`` constants become zero, and a signal cannot hold a
-metavalue. Those are documented divergences. The items in the table above are
-different: they change the value of legal, entirely two-state designs and do so
-without a diagnostic.
+always false, and a signal cannot hold a metavalue. ``'Z'`` is preserved for a
+tristate driver and resolves to zero anywhere else. Those are documented
+divergences. The items in the table above are different: they change the value
+of legal, entirely two-state designs and do so without a diagnostic.
+
+An out-of-range ``'succ``/``'pred`` whose argument is locally static is now a
+frontend error. Only the dynamic value still wraps.
 
 Two library caveats deserve emphasis. Unknown standard packages are treated as
 intrinsics instead of being refused, which is why ``std_logic_signed`` is

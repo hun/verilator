@@ -1257,12 +1257,20 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         }
         if (typep->kind != VType::ENUM) return false;
         const int64_t count = static_cast<int64_t>(typep->literals.size());
-        if (attribute == "succ") {
-            value = (position + 1) % count;
-            return true;
-        }
-        if (attribute == "pred") {
-            value = (position - 1 + count) % count;
+        if (attribute == "succ" || attribute == "pred") {
+            const int64_t next = attribute == "succ" ? position + 1 : position - 1;
+            if (position < 0 || position >= count) {
+                expr.flp->v3error("VHDL: '" + std::string{attribute}
+                                  + "' value is outside the enumeration type");
+                return false;
+            }
+            if (next < 0 || next >= count) {
+                expr.flp->v3error("VHDL: '" + std::string{attribute} + "' of the "
+                                  + (attribute == "succ" ? "last" : "first")
+                                  + " enumeration literal is outside the type");
+                return false;
+            }
+            value = next;
             return true;
         }
         return false;
@@ -2876,6 +2884,34 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         };
         reSignLiteral(*expr.a, lp, lt, rt);
         reSignLiteral(*expr.b, rp, rt, lt);
+        // IEEE 1164 defines `=` on std_logic as identity, so 'X' = 'X' is true; a 4-state
+        // equality would report false. The same applies element-wise to a logic vector.
+        const bool logicCompare
+            = (lt.kind == VType::LOGIC && rt.kind == VType::LOGIC)
+              || (lt.kind == VType::VECTOR && rt.kind == VType::VECTOR
+                  && lt.kwd == VBasicDTypeKwd::LOGIC && rt.kwd == VBasicDTypeKwd::LOGIC);
+        if ((cmpOp == "=" || cmpOp == "/=") && logicCompare && lt.width == rt.width) {
+            AstNodeExpr* cmpp = nullptr;
+            if (cmpOp == "=") {
+                cmpp = new AstEqCase{flp, lp, rp};
+            } else {
+                cmpp = new AstNeqCase{flp, lp, rp};
+            }
+            cmpp->dtypep(bitDtp);
+            return cmpp;
+        }
+        // Predefined array equality is false when the operands have different lengths.
+        // A bit_vector has no library overload, so this is unambiguous.
+        if ((cmpOp == "=" || cmpOp == "/=") && lt.kind == VType::VECTOR && rt.kind == VType::VECTOR
+            && lt.kwd == VBasicDTypeKwd::BIT && rt.kwd == VBasicDTypeKwd::BIT
+            && lt.width != rt.width) {
+            lp->deleteTree();
+            rp->deleteTree();
+            AstConst* const resultp
+                = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
+            resultp->dtypep(bitDtp);
+            return resultp;
+        }
         if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
             unsupportedError(flp, "comparison between signed and unsigned operands");
             lp->deleteTree();
@@ -2991,13 +3027,42 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         AstNodeDType* const dtp = lp->dtypep();
         const int width = dtp->width();
         if (op == "rol" || op == "ror") return makeRotate(flp, lp, rp, op == "rol");
+        // A predefined `bit_vector` shift fills the vacated positions with the array's
+        // edge element: sra with the leftmost, sla with the rightmost (IEEE 1076-2008
+        // 9.2.3). The numeric_std vector types keep their own shift semantics.
+        const bool edgeFill = lt.kwd == VBasicDTypeKwd::BIT;
         AstNodeExpr* resultp = nullptr;
-        if (op == "sll" || op == "sla") {
+        if (op == "sll") {
             resultp = new AstShiftL{flp, lp, rp, width};
         } else if (op == "sra") {
-            // Arithmetic only for a signed operand; an unsigned value shifts in zeros
-            resultp = lt.isSigned() ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, lp, rp, width})
-                                    : static_cast<AstNodeExpr*>(new AstShiftR{flp, lp, rp, width});
+            resultp = edgeFill ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, lp, rp, width})
+                      : lt.isSigned()
+                          ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, lp, rp, width})
+                          : static_cast<AstNodeExpr*>(new AstShiftR{flp, lp, rp, width});
+        } else if (op == "sla" && edgeFill) {
+            // (value << n) | (rightmost_element & ((1 << n) - 1)). The mask subtraction
+            // wraps for n >= width, which fills the whole result with the edge element.
+            AstConst* const onep = new AstConst{flp, V3Number{flp, width, 1u}};
+            onep->dtypep(dtp);
+            AstSel* const lsbp = new AstSel{flp, lp->cloneTree(false), 0, 1};
+            lsbp->dtypep(findBasic(flp, VBasicDTypeKwd::BIT));
+            AstReplicate* const fillValuep
+                = new AstReplicate{flp, lsbp, static_cast<uint32_t>(width)};
+            fillValuep->dtypep(dtp);
+            AstNodeExpr* const maskShiftp
+                = new AstShiftL{flp, onep->cloneTree(false), rp->cloneTree(false), width};
+            maskShiftp->dtypep(dtp);
+            AstNodeExpr* const maskp = new AstSub{flp, maskShiftp, onep};
+            maskp->dtypep(dtp);
+            AstAnd* const fillp = new AstAnd{flp, fillValuep, maskp};
+            fillp->dtypep(dtp);
+            AstNodeExpr* const shiftedp = new AstShiftL{flp, lp, rp, width};
+            shiftedp->dtypep(dtp);
+            AstOr* const resultOrp = new AstOr{flp, shiftedp, fillp};
+            resultOrp->dtypep(dtp);
+            resultp = resultOrp;
+        } else if (op == "sla") {
+            resultp = new AstShiftL{flp, lp, rp, width};
         } else {
             resultp = new AstShiftR{flp, lp, rp, width};
         }
@@ -4216,8 +4281,14 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         }
         if ((attribute == "succ" || attribute == "pred") && argConstp) {
             argp->deleteTree();
-            const int stepped
-                = attribute == "succ" ? (position + 1) % count : (position - 1 + count) % count;
+            if ((attribute == "succ" && position == count - 1)
+                || (attribute == "pred" && position == 0)) {
+                flp->v3error("VHDL: '" + attribute + "' of the "
+                             + (attribute == "succ" ? "last" : "first")
+                             + " enumeration literal is outside the type");
+                return nullptr;
+            }
+            const int stepped = attribute == "succ" ? position + 1 : position - 1;
             return enumConst(stepped);
         }
         if (attribute == "succ" || attribute == "pred") {
@@ -5950,9 +6021,15 @@ static std::string reportText(const Expr* exprp, const char* fallback) {
 AstNode* Lowering::lowerReport(const Stmt& stmt) {
     // A computed message is not modelled yet: only a literal reaches the model
     if (stmt.value && stmt.value->kind != Expr::STRING_LIT) return nullptr;
-    return new AstDisplay{
+    AstNode* const displayp = new AstDisplay{
         stmt.flp, VDisplayType::DT_DISPLAY, reportText(stmt.value.get(), ""), nullptr, nullptr,
         'd'};
+    // `report ... severity failure` ends the simulation (IEEE 1076-2008 8.3); the other
+    // severities only report
+    if (stmt.severity == Stmt::SEV_FAILURE) {
+        return AstNode::addNext<AstNode, AstNode>(displayp, new AstFinish{stmt.flp});
+    }
+    return displayp;
 }
 
 AstNode* Lowering::lowerAssert(const Stmt& stmt) {
