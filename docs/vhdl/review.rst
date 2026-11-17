@@ -31,7 +31,7 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 209 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 211 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
@@ -47,7 +47,7 @@ NO_TOP                                       13
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 209 regression tests, 20 ported corpus designs
+value-checked evidence is the 211 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
@@ -127,43 +127,29 @@ Where the implementation is sound
 - Most unsupported constructs produce a source-located ``Unsupported:``
   diagnostic; 135 corpus cases are classified that way.
 
-Silent semantic divergences
-===========================
+Semantic divergences
+====================
 
-The following constructs are legal VHDL, accepted by the frontend, and lowered
-with a different result. The reference values were confirmed with GHDL.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 34 35 31
-
-   * - Construct
-     - VHDL behavior
-     - Frontend behavior
-   * - Two visible enumeration types share a literal and no expected type picks one
-     - overload resolution picks the literal from the expected type
-     - one global literal table is used; the last declaration wins
-   * - User-defined infix operator with both operands polymorphic
-     - overload resolution uses the result type and the expected context
-     - neither operand fixes a candidate, so the built-in operator is applied
-   * - ``'succ``/``'pred`` of an end literal with a non-static argument
-     - a bound check fails
-     - the runtime step wraps
-
-The two-state model makes some of these unavoidable at runtime: ``is_x`` is
-always false, and a signal cannot hold a metavalue. ``'Z'`` is preserved for a
+The remaining divergences come from the two-state model: ``is_x`` is always
+false, and a signal cannot hold a metavalue. ``'Z'`` is preserved for a
 tristate driver and resolves to zero anywhere else. Array ordering of
 metavalue constants uses the two-state order, not the IEEE 1164 enumeration
-order. Those are documented divergences. The items in the table above are
-different: they change the value of legal, entirely two-state designs and do so
-without a diagnostic.
+order. These are documented model limits, not silent miscompilations.
 
-A typed context now resolves enumeration literals, including two types that
-share a name, and a static out-of-range ``'succ``/``'pred`` is a frontend error;
-only the dynamic value still wraps. Array equality works for any element type;
-ordering is lexicographic for an array of a discrete element type, and an array
-whose element is not discrete is rejected because VHDL defines no ordering for
-it.
+The former overload and bound-check divergences are closed:
+
+- A typed context resolves an enumeration literal, including when two visible
+  types share a literal name. Without such a context, a shared literal is an
+  ambiguity error rather than the last declaration silently winning.
+- Two polymorphic operands are matched by their bit-string widths and the
+  expected result type. If neither operand is a sized literal, the built-in
+  operator applies as before.
+- A dynamic ``'succ``/``'pred`` of an end enumeration literal is checked at run
+  time and reports an error and finishes; a static one is a frontend error.
+
+Array equality works for any element type; ordering is lexicographic for an
+array of a discrete element type, and an array whose element is not discrete is
+rejected because VHDL defines no ordering for it.
 
 Two library caveats deserve emphasis. Unknown standard packages are treated as
 intrinsics instead of being refused; ``std_logic_unsigned`` matches the modeled
@@ -172,34 +158,17 @@ unsigned behavior, while an arithmetic or comparison operator under
 subprogram overloads are selected by base parameter type, including
 ``unsigned`` versus ``signed``, distinct array types, and package-qualified
 type names. When one operand is polymorphic, the selected formal gives it a
-type; with two polymorphic operands the built-in operator remains. Multiple
-exact candidates are reported as ambiguous. Importing two packages that export
-the same type name unqualified is an error; the qualified mark selects one.
+type; two polymorphic sized literals are resolved by width and result type.
+Multiple exact candidates are reported as ambiguous. Importing two packages
+that export the same type name unqualified is an error; the qualified mark
+selects one.
 
 Internal faults
 ===============
 
 No corpus case now reaches an internal fault. The former crash class was closed
 by:
-Internal faults
-===============
 
-- an ``else``-less concurrent conditional assignment is emitted as a latch that
-  holds the target when no condition holds;
-- a concurrent procedure assertion is evaluated in its own ``always_comb``;
-- a two-dimensional element target descends one type level per index, so its
-  right-hand side is widened to the element width rather than the row width;
-- an unconstrained multi-dimensional port or array conversion is reported as
-  ``Unsupported:`` with its location;
-- repeated aggregate initializers fold a constant value into one constant and
-  chunk a run-time replication, so ``(others => (others => '0'))`` over 2^16
-  elements lints in 0.05 s and 20 MiB instead of aborting.
-No corpus case now reaches an internal fault. The former crash class was closed
-by:
-
-The full neorv32 ``rtl/`` tree with its stock Verilog wrapper still aborts with
-``std::bad_alloc`` under an 8 GiB limit when the wrapper's complete generic set
-is specialized. The core alone remains clean.
 - an ``else``-less concurrent conditional assignment is emitted as a latch that
   holds the target when no condition holds;
 - a concurrent procedure assertion is evaluated in its own ``always_comb``;
@@ -282,29 +251,6 @@ the resolved value. At the top-level C++ interface:
 - with :vlopt:`--pins-inout-enables`, the port is an input and the driver is
   exposed as ``name__en`` and ``name__out``. The testbench supplies the
   externally resolved value. Use this interface when external drivers exist.
-- ``inout`` ports, scalar and packed vector, at the top level and on instances;
-- ``'Z'`` is preserved in a logic constant. A ``'Z'`` that reaches a
-  non-tristate destination still resolves to 0;
-- a concurrent conditional assignment such as
-  ``bus <= data when oe = '1' else 'Z';`` is lowered to the conditional driver
-  form ``V3Tristate`` recognizes. A selected assignment with a high-impedance
-  value is rewritten to the equivalent comparison chain, including a ``'Z'``
-  produced by a folded function;
-- a process may drive an ``inout`` port; the procedural driver is converted in
-  the same way.
-
-At a non-top instance the port becomes an input plus ``__en``/``__out``
-connected to the parent signal, and reads of the signal inside the parent see
-the resolved value. At the top-level C++ interface:
-
-- without :vlopt:`--pins-inout-enables`, the port is a single inout field. The
-  model combines the external value with the internal driver by OR, and reads
-  inside the design see that combined value. This is the most convenient
-  single-driver interface, but the testbench cannot separately observe the
-  module's drive when an external driver is also present.
-- with :vlopt:`--pins-inout-enables`, the port is an input and the driver is
-  exposed as ``name__en`` and ``name__out``. The testbench supplies the
-  externally resolved value. Use this interface when external drivers exist.
 
 The limits are explicit. ``V3Tristate`` combines output enables; it does not
 implement IEEE 1164 resolution. Two enabled drivers of different values
@@ -316,17 +262,12 @@ drivers, scalar and vector, ``__en``/``__out``), ``t_vhdl_inout_bus`` (two
 instances on one resolved signal), ``t_vhdl_inout_proc`` (a clocked process
 driver), and ``t_vhdl_logic_z`` (``'Z'`` reaching non-tristate destinations).
 
-The feature is pinned by ``t_vhdl_inout`` (top level, conditional and selected
-drivers, scalar and vector, ``__en``/``__out``), ``t_vhdl_inout_bus`` (two
-instances on one resolved signal), ``t_vhdl_inout_proc`` (a clocked process
-driver), and ``t_vhdl_logic_z`` (``'Z'`` reaching non-tristate destinations).
-
 Verification gaps
 =================
 
 - The corpus is lint-only, and the regression suite pins expected values by
   hand. There is no automated differential simulation harness in the
-  repository, which is why the silent divergences above survive.
+  repository, so value differences must be found by targeted tests.
 - The VHDL suite has no dedicated CI job; it must be run explicitly.
 - Before the GHDL-XML frontend was retired, three tests did not request a
   frontend selector and therefore exercised the GHDL path even in a native run.
@@ -343,9 +284,8 @@ ______
 Order
 ______
 
-1. Finish the silent divergences: enumeration literal scoping, operator and
-   overload resolution, dynamic ``'succ``/``'pred`` bounds, and
-   ``std_logic_signed``.
+1. Implement ``std_logic_signed`` arithmetic and comparison. The remaining
+   value differences are the documented two-state model limits.
 2. Add a differential simulation harness and a CI job, and treat lint-only
    corpus counts as breadth, not correctness.
 3. Revisit the large-memory and neorv32 wrapper allocation failures.

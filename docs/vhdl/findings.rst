@@ -537,7 +537,6 @@ Verification
 ___________
 
 Each run was checked with the full VHDL suite (``test_regress``,
-``t_vhdl_*.py``): 209 tests, no failures.
 ``t_vhdl_*.py``): 211 tests, no failures.
 
 The corpus lints and runs clean: 20 designs, no lint errors, and every run
