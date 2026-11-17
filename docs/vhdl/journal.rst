@@ -505,3 +505,5 @@ _______
      - Compare wider VHDL arrays element by element
    * - ``f835f38``
      - Resolve VHDL operator and subprogram overloads by type
+   * - ``9cdd8ce``
+     - Resolve the remaining VHDL overload limits
