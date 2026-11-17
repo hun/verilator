@@ -31,7 +31,7 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 205 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 206 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
@@ -47,7 +47,7 @@ NO_TOP                                       13
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 205 regression tests, 20 ported corpus designs
+value-checked evidence is the 206 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
@@ -134,10 +134,9 @@ with a different result. The reference values were confirmed with GHDL.
    * - Two visible enumeration types share a literal and no expected type picks one
      - overload resolution picks the literal from the expected type
      - one global literal table is used; the last declaration wins
-   * - User-defined infix operator with a bare bit-string or aggregate operand
-     - the overload is called
-     - the operand's type is not known before lowering, so the built-in operator
-       is applied
+   * - User-defined infix operator with both operands polymorphic
+     - overload resolution uses the result type and the expected context
+     - neither operand fixes a candidate, so the built-in operator is applied
    * - ``'succ``/``'pred`` of an end literal with a non-static argument
      - a bound check fails
      - the runtime step wraps
@@ -160,11 +159,13 @@ it.
 Two library caveats deserve emphasis. Unknown standard packages are treated as
 intrinsics instead of being refused; ``std_logic_unsigned`` matches the modeled
 unsigned behavior, while an arithmetic or comparison operator under
-``std_logic_signed`` is refused. Explicit infix operators and subprogram
-overloads are selected by base parameter type, including ``unsigned`` versus
-``signed`` and two distinct array types. An operand whose type is not known
-before lowering, such as a bare bit-string literal or an aggregate, still takes
-the built-in operator; unary operator declarations are not resolved.
+``std_logic_signed`` is refused. Explicit infix and prefix operators and
+subprogram overloads are selected by base parameter type, including
+``unsigned`` versus ``signed``, distinct array types, and package-qualified
+type names. When one operand is polymorphic, the selected formal gives it a
+type; with two polymorphic operands the built-in operator remains. Multiple
+exact candidates are reported as ambiguous. Importing two packages that export
+the same type name unqualified is an error; the qualified mark selects one.
 
 Crash-class gaps
 ================
@@ -198,7 +199,6 @@ Remaining feature gaps
   Conflicting enabled values resolve to 1 rather than ``'X'``. User-defined
   resolution functions remain out of scope.
 - Concurrent ``unaffected`` is reported as an unknown identifier.
-- User-defined unary operators are not resolved; infix operators are.
 - Arithmetic and comparison under ``use ieee.std_logic_signed.all`` are
   refused with ``Unsupported:``; ``std_logic_unsigned`` is modeled.
 - ``report`` with a non-literal message is dropped.

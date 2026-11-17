@@ -22,6 +22,7 @@ int main(int argc, char** argv) {
     topp->b1 = 1;
     topp->u = 9;
     topp->s = 9;
+    topp->sv = 2;
     topp->eval();
 
     int fails = 0;
@@ -35,11 +36,16 @@ int main(int argc, char** argv) {
     check("sum1", static_cast<int>(topp->sum1), 101);
     check("diff0", static_cast<int>(topp->diff0), 3);
     check("diff1", static_cast<int>(topp->diff1), -1);
+    check("neg0", static_cast<int>(topp->neg0), -5);
+    check("neg1", static_cast<int>(topp->neg1), -100);
+    check("bit_o", static_cast<int>(topp->bit_o), 10);
     check("pick_u", static_cast<int>(topp->pick_u), 1);
     check("pick_s", static_cast<int>(topp->pick_s), 2);
     check("pick_a", static_cast<int>(topp->pick_a), 3);
     check("pick_b", static_cast<int>(topp->pick_b), 4);
     check("pick_f", static_cast<int>(topp->pick_f), 3);
+    check("pick_pa", static_cast<int>(topp->pick_pa), 5);
+    check("pick_pb", static_cast<int>(topp->pick_pb), 6);
 
     topp->final();
     delete topp;

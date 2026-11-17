@@ -214,7 +214,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Unary `+`, `-` | Y | S | |
 | Shifts `sll`, `srl`, `sla`, `sra` | Y | S | `bit_vector` and `std_logic_vector` use the predefined edge fill (IEEE 1076-2008 9.2.3). `numeric_std` `signed`/`unsigned` keep their numeric shift semantics. |
 | Rotates `rol`, `ror` | Y | S | |
-| User-declared operators and overloads | Y | S* | Infix operators and subprograms are selected by base parameter type; unary operators and operands whose type is not statically known use the built-in path. |
+| User-declared operators and overloads | Y | S* | Infix and prefix operators and subprograms are selected by base parameter type, including package-qualified types; a polymorphic operand takes its type from the selected formal. Two polymorphic operands use the built-in path. |
 | `maximum`, `minimum` | Y (2008) | S | |
 | Integer literals (decimal) | Y | S | |
 | Based literals (`16#FF#`) | Y | S | |

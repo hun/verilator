@@ -225,6 +225,7 @@ class Lowering final {
         std::map<std::string, int64_t> consts;
         std::map<std::string, int64_t> preConsts;
         std::map<std::string, VType> types;
+        std::set<std::string> ambiguousTypes;
         std::map<std::string, AstConst*> constValues;
         std::map<std::string, VType> constTypes;
         std::map<std::string, AstConst*> enumConsts;
@@ -364,6 +365,7 @@ class Lowering final {
     PackageTable::Impl* m_publishp = nullptr;  // Package table to publish into
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
+    std::set<std::string> m_ambiguousTypes;  // Type names imported from two packages
     bool m_stdLogicSigned = false;  // `use ieee.std_logic_signed.all` is in effect
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
@@ -1111,6 +1113,8 @@ class Lowering final {
                                       const SubprogramRef** foundpp = nullptr);
     //! A user-defined infix operator whose formals exactly match the operands
     AstNodeExpr* lowerUserOperator(const Expr& expr, const VType* context, bool& found);
+    //! A user-defined prefix operator whose formal matches the operand
+    AstNodeExpr* lowerUserUnary(const Expr& expr, const VType* context, bool& found);
     void captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const;
     AstNodeExpr* inlineBinding(FileLine* flp, const std::string& name, bool write) const;
     bool bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub, InlineEnv& env,
@@ -2041,11 +2045,12 @@ void Lowering::registerType(const TypeDecl& decl) {
     }
     }
     if (decl.kind == TypeDecl::PHYSICAL) {
-        type.typeName = decl.name;  // A user physical type is distinct from time
+        type.typeName = m_unitName.empty() ? decl.name : m_unitName + "." + decl.name;
     } else if (decl.kind != TypeDecl::SUBTYPE && type.typeName.empty()) {
-        type.typeName = decl.name;
+        type.typeName = m_unitName.empty() ? decl.name : m_unitName + "." + decl.name;
     }
     m_types[decl.name] = type;
+    m_ambiguousTypes.erase(decl.name);
 }
 
 //! Whether `expr` names any of `names` anywhere in it
@@ -2397,6 +2402,27 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         return typeOfDesignator(prefix, out);
     }
     const std::string& mark = spec.mark;
+    if (!spec.pkg.empty() && m_packagesp) {
+        // A qualified mark names one package's type even when another imported package
+        // declares the same name
+        const auto pkgIt = m_packagesp->packages.find(spec.pkg);
+        if (pkgIt != m_packagesp->packages.end()) {
+            const auto typeIt = pkgIt->second.types.find(mark);
+            if (typeIt != pkgIt->second.types.end()) {
+                out = typeIt->second;
+                if (out.typeName.empty()) out.typeName = spec.pkg + "." + mark;
+                if (!spec.memberConstraints.empty() && !applyMemberConstraints(spec, out)) {
+                    return false;
+                }
+                if (!spec.indexConstraints.empty()) return applyIndexConstraints(spec, out);
+                return applyRange(spec, out);
+            }
+        }
+    }
+    if (m_ambiguousTypes.count(mark)) {
+        flp->v3error("VHDL: type name '" + mark + "' is ambiguous between imported packages");
+        return false;
+    }
     auto declared = m_types.find(mark);
     if (declared == m_types.end() && m_inlineFrames.empty()) {
         // The part deferred this type because its constraint named a constant with no value
@@ -2682,6 +2708,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     case Expr::SELECTED: return lowerSelectedExpr(expr);
     case Expr::PAREN: return lowerExpr(*expr.a, context);
     case Expr::UNARY: {
+        bool userFound = false;
+        if (AstNodeExpr* const userp = lowerUserUnary(expr, context, userFound)) return userp;
+        if (userFound) return nullptr;
         AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
         if (!operandp) return nullptr;
         const VType type = typeOfDType(operandp->dtypep());
@@ -4222,6 +4251,8 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
     if (evalCond(expr, condValue)) {
         return makeVectorConst(flp, logicType(flp), condValue ? 1 : 0);
     }
+    VType boolT = logicType(flp);
+    boolT.typeName = "boolean";
     // The classic `clk'event and clk = '1'` idiom is a clock edge
     if (expr.kind == Expr::BINARY && expr.text == "and" && expr.a && expr.b) {
         for (int side = 0; side < 2; ++side) {
@@ -4273,7 +4304,7 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
     }
     if (containsEdgeCall(expr)) {
         // A compound wait condition may test a level and one clock edge together
-        AstNodeExpr* const compoundp = lowerExpr(expr, nullptr);
+        AstNodeExpr* const compoundp = lowerExpr(expr, &boolT);
         if (!compoundp) return nullptr;
         if (compoundp->width() != 1) {
             flp->v3error("VHDL: condition is not a 1-bit value");
@@ -4282,7 +4313,7 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
         }
         return compoundp;
     }
-    AstNodeExpr* condp = lowerExpr(expr, nullptr);
+    AstNodeExpr* condp = lowerExpr(expr, &boolT);
     if (!condp) return nullptr;
     if (condp->width() != 1) {
         flp->v3error("VHDL: condition is not a 1-bit value");
@@ -6389,6 +6420,7 @@ void Lowering::setScope(const ScopeSave& saved) {
     m_scope = saved.scope;
     m_consts = saved.consts;
     m_types = saved.types;
+    m_ambiguousTypes = saved.ambiguousTypes;
     m_constValues = saved.constValues;
     m_constTypes = saved.constTypes;
     m_enumConsts = saved.enumConsts;
@@ -6543,7 +6575,12 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
             for (const SubprogramRef* const refp : fitting) {
                 if (formalsExact(call, *refp->declp)) exact.push_back(refp);
             }
-            if (!exact.empty()) fitting = std::move(exact);
+            if (exact.size() == 1) {
+                fitting = exact;
+            } else if (exact.size() > 1) {
+                call.flp->v3error("VHDL: ambiguous call to '" + name + "'");
+                return nullptr;
+            }
         }
         matching = std::move(fitting);
     }
@@ -6731,8 +6768,69 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
         out.kind = VType::LOGIC;
         out.typeName = "boolean";
         return true;
-    case Expr::PAREN:
-    case Expr::UNARY: return expr.a && actualType(*expr.a, out);
+    case Expr::PAREN: return expr.a && actualType(*expr.a, out);
+    case Expr::UNARY:
+        if (!visibleSubprograms(expr.text).empty()) return false;
+        return expr.a && actualType(*expr.a, out);
+    case Expr::BINARY: {
+        if (!visibleSubprograms(expr.text).empty()) return false;
+        const std::string& op = expr.text;
+        if (op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">" || op == ">="
+            || op == "?=" || op == "?/=" || op == "?<" || op == "?<=" || op == "?>"
+            || op == "?>=") {
+            out = VType{};
+            out.kind = VType::LOGIC;
+            out.typeName = "boolean";
+            return true;
+        }
+        VType aType;
+        VType bType;
+        if (!actualType(*expr.a, aType) || !actualType(*expr.b, bType)) return false;
+        if (op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor"
+            || op == "xnor") {
+            if (aType.isVector() || bType.isVector()) {
+                out = aType.isVector() ? aType : bType;
+                out.width = std::max(aType.width, bType.width);
+                if (aType.typeName != bType.typeName) out.typeName.clear();
+            } else {
+                out = aType;
+                if (aType.typeName != bType.typeName) out.typeName.clear();
+            }
+            return true;
+        }
+        if (op == "&") {
+            if (!aType.isVector() && !bType.isVector()) return false;
+            out = aType.isVector() ? aType : bType;
+            out.width = aType.width + bType.width;
+            out.dtp = nullptr;
+            if (aType.typeName != bType.typeName) out.typeName.clear();
+            return true;
+        }
+        if (op == "sll" || op == "srl" || op == "sla" || op == "sra" || op == "rol"
+            || op == "ror") {
+            if (!aType.isVector() && !bType.isVector()) return false;
+            out = aType.isVector() ? aType : bType;
+            return true;
+        }
+        if (aType.kind == VType::INT && bType.kind == VType::INT) {
+            out = intType(expr.flp);
+            return true;
+        }
+        if (aType.kind == VType::REAL || bType.kind == VType::REAL) {
+            out = VType{};
+            out.kind = VType::REAL;
+            out.typeName = "real";
+            return true;
+        }
+        if (aType.isVector() && bType.isVector()) {
+            out = aType;
+            out.width = op == "*" ? aType.width + bType.width : std::max(aType.width, bType.width);
+            out.dtp = nullptr;
+            if (aType.typeName != bType.typeName) out.typeName.clear();
+            return true;
+        }
+        return false;
+    }
     case Expr::QUAL: {
         TypeSpec spec;
         spec.flp = expr.flp;
@@ -6816,6 +6914,17 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
 //! overloads; the base element type and signing do.
 bool Lowering::formalType(const TypeSpec& spec, VType& out) const {
     const std::string& mark = spec.mark;
+    if (!spec.pkg.empty() && m_packagesp) {
+        const auto pkgIt = m_packagesp->packages.find(spec.pkg);
+        if (pkgIt != m_packagesp->packages.end()) {
+            const auto typeIt = pkgIt->second.types.find(mark);
+            if (typeIt != pkgIt->second.types.end()) {
+                out = typeIt->second;
+                return true;
+            }
+        }
+    }
+    if (m_ambiguousTypes.count(mark)) return false;
     const auto declared = m_types.find(mark);
     if (declared != m_types.end()) {
         out = declared->second;
@@ -6963,7 +7072,11 @@ AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context,
     if (!expr.a || !expr.b) return nullptr;
     VType actual0;
     VType actual1;
-    if (!actualType(*expr.a, actual0) || !actualType(*expr.b, actual1)) return nullptr;
+    const bool have0 = actualType(*expr.a, actual0);
+    const bool have1 = actualType(*expr.b, actual1);
+    // A bit-string literal, aggregate, or nested expression has no type of its own. If the
+    // other operand fixes one side, the call's formal supplies the missing type.
+    if (!have0 && !have1) return nullptr;
     std::vector<const SubprogramDecl*> matches;
     for (const SubprogramDecl* const subp : visibleSubprograms(expr.text)) {
         if (subp->kind != SubprogramDecl::FUNCTION || !subp->hasBody || subp->impure) continue;
@@ -6975,7 +7088,14 @@ AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context,
             || !formalType(slots[1].first->type, formal1)) {
             continue;
         }
-        if (!typesMatch(formal0, actual0) || !typesMatch(formal1, actual1)) continue;
+        if (have0 && !typesMatch(formal0, actual0)) continue;
+        if (have1 && !typesMatch(formal1, actual1)) continue;
+        if (context) {
+            VType returnType;
+            if (formalType(subp->returnType, returnType) && !typesMatch(returnType, *context)) {
+                continue;
+            }
+        }
         matches.push_back(subp);
     }
     if (matches.empty()) return nullptr;
@@ -6990,6 +7110,42 @@ AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context,
     call.spelling = expr.spelling;
     call.args.push_back(cloneExpr(*expr.a));
     call.args.push_back(cloneExpr(*expr.b));
+    return lowerFunctionCall(call, context, matches.front());
+}
+
+//! A user-defined prefix operator whose formal exactly matches the operand
+AstNodeExpr* Lowering::lowerUserUnary(const Expr& expr, const VType* context, bool& found) {
+    found = false;
+    if (!expr.a) return nullptr;
+    VType actual;
+    if (!actualType(*expr.a, actual)) return nullptr;
+    std::vector<const SubprogramDecl*> matches;
+    for (const SubprogramDecl* const subp : visibleSubprograms(expr.text)) {
+        if (subp->kind != SubprogramDecl::FUNCTION || !subp->hasBody || subp->impure) continue;
+        const std::vector<std::pair<const FormalDecl*, std::string>> slots = formalSlots(*subp);
+        if (slots.size() != 1) continue;
+        VType formal;
+        if (!formalType(slots[0].first->type, formal)) continue;
+        if (!typesMatch(formal, actual)) continue;
+        if (context) {
+            VType returnType;
+            if (formalType(subp->returnType, returnType) && !typesMatch(returnType, *context)) {
+                continue;
+            }
+        }
+        matches.push_back(subp);
+    }
+    if (matches.empty()) return nullptr;
+    found = true;
+    if (matches.size() > 1) {
+        expr.flp->v3error("VHDL: operator '" + expr.text + "' is ambiguous for this operand");
+        return nullptr;
+    }
+    Expr call{Expr::CALL};
+    call.flp = expr.flp;
+    call.text = expr.text;
+    call.spelling = expr.spelling;
+    call.args.push_back(cloneExpr(*expr.a));
     return lowerFunctionCall(call, context, matches.front());
 }
 
@@ -7084,16 +7240,30 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
               && (formalp->mode != PortMode::IN || formalp->cls == FormalDecl::VARIABLE);
         const Expr& actual = *call.args[i];
         VType formalType;
-        const bool constrained = formalp->type.hasRange || !formalp->type.constraintMark.empty();
-        const VType* ctxp
-            = constrained && resolveType(formalp->type, formalType) ? &formalType : nullptr;
+        const VType* ctxp = nullptr;
+        const std::string& formalMark = formalp->type.mark;
+        const bool predefinedUnconstrained
+            = !formalp->type.hasRange && formalp->type.constraintMark.empty()
+              && formalp->type.indexConstraints.empty()
+              && (formalMark == "std_logic_vector" || formalMark == "std_ulogic_vector"
+                  || formalMark == "bit_vector" || formalMark == "unsigned"
+                  || formalMark == "signed" || formalMark == "u_unsigned"
+                  || formalMark == "u_signed");
+        if (!predefinedUnconstrained && resolveType(formalp->type, formalType)
+            && (formalType.isVector() ? formalType.width > 0 : formalType.dtp != nullptr)) {
+            ctxp = &formalType;
+        }
         AstNodeExpr* actualp = asLvalue ? lowerDesignator(actual, true) : lowerExpr(actual, ctxp);
         if (!actualp) return false;
         InlineBinding binding{actualp, asLvalue, true};
         // The actual's VHDL type first: an array's element width and index bounds are gone
         // from its data type, and a formal indexing the actual needs both
         if (!typeOfDesignator(actual, binding.type)) {
-            binding.type = typeOfDType(actualp->dtypep());
+            if (ctxp) {
+                binding.type = *ctxp;
+            } else {
+                binding.type = typeOfDType(actualp->dtypep());
+            }
         }
         if (asLvalue && formalp->mode == PortMode::OUT && formalp->cls == FormalDecl::SIGNAL) {
             // Reading an out signal formal before return would see the actual's old value
@@ -8610,6 +8780,7 @@ Lowering::ScopeSave Lowering::saveScope() const {
     saved.consts = m_consts;
     saved.preConsts = m_preConsts;
     saved.types = m_types;
+    saved.ambiguousTypes = m_ambiguousTypes;
     saved.constValues = m_constValues;
     saved.constTypes = m_constTypes;
     saved.enumConsts = m_enumConsts;
@@ -8622,6 +8793,7 @@ void Lowering::restoreScope(const ScopeSave& saved) {
     m_consts = saved.consts;
     m_preConsts = saved.preConsts;
     m_types = saved.types;
+    m_ambiguousTypes = saved.ambiguousTypes;
     m_constValues = saved.constValues;
     m_constTypes = saved.constTypes;
     m_enumConsts = saved.enumConsts;
@@ -8941,8 +9113,22 @@ void Lowering::importPackage(const std::string& name) {
         m_aliases[alias.first] = alias.second;
     }
 
+    const bool ownSpec = !m_unitName.empty() && name == m_unitName;
     for (const auto& type : info.types) {
-        if (m_types.count(type.first)) continue;
+        if (ownSpec) {
+            // A package body sees its own specification closer than any imported package
+            m_types[type.first] = type.second;
+            m_ambiguousTypes.erase(type.first);
+            continue;
+        }
+        const auto existing = m_types.find(type.first);
+        if (existing != m_types.end()) {
+            if (!existing->second.typeName.empty() && !type.second.typeName.empty()
+                && existing->second.typeName != type.second.typeName) {
+                m_ambiguousTypes.insert(type.first);
+            }
+            continue;
+        }
         m_types[type.first] = type.second;
         m_imported.insert(type.first);
     }
@@ -8998,6 +9184,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_preConsts.clear();
     m_ownedConsts.clear();
     m_imported.clear();
+    m_ambiguousTypes.clear();
+    m_arrayDtypes.clear();
+    m_stdLogicSigned = false;
     m_scope.clear();
     m_aliases.clear();
     m_subprograms.clear();
