@@ -405,6 +405,21 @@ ______
       section. Reviewing a VHDL design's internals needs the dump a simulator
       that has the feature produces (``ghdl --vcd``), or the frontend's own
       ``--public-flat-rw`` accessors
+  * - N92
+    - the asynchronous-reset flip-flop every synchronous design writes:
+      ``process (rstn, clk) is if rstn = '0' then <reset> elsif rising_edge(clk) then
+      <clocked> end if;``, as neorv32's CPU, its control unit and its frontend write
+      them
+    - the process was emitted as a level-sensitive always over both signals, with the
+      clock edge tested inside the body, which is not a flip-flop as far as the
+      scheduler is concerned: for a design large enough to split the block, the part
+      that committed the registers lost the clock from its trigger set and no register
+      ever updated (N90). The idiom is now recognised and emitted as
+      ``always @(posedge clk or negedge rstn) if (!rstn) ... else ...``, so the clock is
+      the block's sensitivity
+    - ``t_vhdl_async_reset`` keeps the semantics; the discriminating case is the corpus's
+      ``neorv32-cpu``, whose model fetched nothing before this change and now runs a
+      12.2M-cycle program to the same four words the host and potato produce
   * - N91
     - a call of a function nested in another call's own actuals: neorv32's top selects
       its boot address with
@@ -486,17 +501,6 @@ ____
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N90
-    - a model of neorv32's CPU core (``neorv32_cpu``, RV32I) never updates any
-      state: every register, including the fetch state, keeps its initial value
-    - GHDL simulates the same files, shim and testbench and fetches correctly (19
-      fetches in 40 cycles), so the design and the stimulus are right. In the model
-      the act region does compute its triggers, including the clock's, but the
-      non-blocking block that holds the fetch process is gated on
-      ``__VnbaTriggered`` bit 0 alone, a bit the act region derives from
-      ``env_pend`` rather than from the clock, so the clock edge never reaches the
-      process and the fetch state stays at its reset value. The corpus keeps the
-      port in its ``blocked`` target until this is understood
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
     - no implementation of that vendor package is in the corpus and none is
@@ -508,7 +512,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 188 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 189 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
@@ -519,9 +523,10 @@ those runs ``fpga/main_bram.vhdl`` unmodified, its ``RAM_INIT_FILE`` read at
 elaboration from a checked-in image. hdl-modules' ``ring_buffer_write_simple``
 runs too, its width checks folded at elaboration (N86).
 
-The whole neorv32 core (``rtl/core/*.vhd`` with ``neorv32_top`` as the top) now lints
-with no errors, its CPU running the same C program as potato's SoC being blocked only
-by its model (N90).
+The whole neorv32 core (``rtl/core/*.vhd`` with ``neorv32_top`` as the top) lints with
+no errors, and its CPU runs the same freestanding C program as potato's SoC (N92): the
+corpus harness feeds it the image, acts as its memory and checks the same four result
+words, over 12.2M cycles.
 
 Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)
 whenever GHDL and the native frontend disagree. nvc settled the value of a toggle

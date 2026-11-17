@@ -483,3 +483,5 @@ _______
      - Fold images and string constants, and drop unused entities
    * - ``d3250ea``
      - Allow a function to be called inside its own arguments
+   * - ``539a6b5``
+     - Emit the asynchronous-reset idiom as an edge-triggered flip-flop
