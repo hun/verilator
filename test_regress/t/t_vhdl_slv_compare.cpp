@@ -34,6 +34,14 @@ int main(int argc, char** argv) {
         delete topp;
         return 1;
     }
+    const int wGot = static_cast<int>(topp->w);
+    const int wWant = (1 << 1) | (1 << 5) | (1 << 6) | (1 << 7);
+    if (wGot != wWant) {
+        std::printf("%%Error: w=0x%x expected 0x%x\n", wGot, wWant);
+        topp->final();
+        delete topp;
+        return 1;
+    }
 
     topp->final();
     delete topp;

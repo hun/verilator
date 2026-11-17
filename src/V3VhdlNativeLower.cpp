@@ -81,6 +81,10 @@ struct VType final {
     bool isVector() const { return kind == VECTOR || kind == ARRAY; }
     bool isInt() const { return kind == INT; }
     bool isSigned() const { return signing == VSigning::SIGNED; }
+    //! A VHDL array type, as opposed to a numeric_std unsigned/signed vector
+    bool isVhdlArray() const {
+        return signing == VSigning::NOSIGN && (kind == VECTOR || kind == ARRAY);
+    }
     //! A predefined 1-D array type such as std_logic_vector or bit_vector (or a
     //! user-declared array of a one-bit element, which compares the same way)
     bool isPredefinedVector() const {
@@ -360,6 +364,8 @@ class Lowering final {
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
     bool m_stdLogicSigned = false;  // `use ieee.std_logic_signed.all` is in effect
+    //! Element structure of an array dtype, including a function result's return type
+    std::map<AstNodeDType*, VType> m_arrayDtypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
     std::map<std::string, AliasInfo> m_aliases;
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
@@ -486,6 +492,17 @@ class Lowering final {
             out.literals.push_back(itemp->name());
         }
         return true;
+    }
+    //! Type of a lowered operand. A designator keeps the declared array structure,
+    //! which a packed dtype no longer carries.
+    VType typeOfLowered(const Expr& expr, AstNodeExpr* nodep) const {
+        VType type;
+        if (typeOfDesignator(expr, type) && type.width == nodep->width()) return type;
+        const auto arrayIt = m_arrayDtypes.find(nodep->dtypep());
+        if (arrayIt != m_arrayDtypes.end() && arrayIt->second.width == nodep->width()) {
+            return arrayIt->second;
+        }
+        return typeOfDType(nodep->dtypep());
     }
 
     AstConst* makeIntConst(FileLine* flp, int64_t value) const {
@@ -973,6 +990,10 @@ class Lowering final {
 
     AstNodeExpr* lowerExpr(const Expr& expr, const VType* context);
     AstNodeExpr* lowerBinary(const Expr& expr, const VType* context);
+    //! Lexicographic ordering of two VHDL arrays; consumes the operands
+    AstNodeExpr* lowerArrayRelation(FileLine* flp, const std::string& cmpOp, const VType& lt,
+                                    const VType& rt, AstNodeExpr*& lp, AstNodeExpr*& rp,
+                                    AstNodeDType* bitDtp);
     AstNodeExpr* lowerConversion(const Expr& expr);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
@@ -2771,6 +2792,122 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     return nullptr;
 }
 
+//! Lexicographic ordering of two VHDL arrays. Arrays of signed integers flip each
+//! element's sign bit, which turns signed element order into unsigned packed order.
+AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpOp, const VType& lt,
+                                          const VType& rt, AstNodeExpr*& lp, AstNodeExpr*& rp,
+                                          AstNodeDType* bitDtp) {
+    const VType* structp = nullptr;
+    if (lt.kind == VType::ARRAY && lt.elemp)
+        structp = &lt;
+    else if (rt.kind == VType::ARRAY && rt.elemp)
+        structp = &rt;
+    int elemWidth = 1;
+    bool elemSigned = false;
+    VType elem;
+    if (structp) {
+        if (lt.kind != VType::ARRAY || rt.kind != VType::ARRAY || !lt.elemp || !rt.elemp) {
+            flp->v3error("VHDL: comparison of unrelated array types");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+        elemWidth = structp->elemWidth;
+        elem = *structp->elemp;
+        elemSigned = elem.kind == VType::INT;
+        if (elem.kind != VType::INT && elem.kind != VType::ENUM && elem.kind != VType::BOOLEAN
+            && elem.kind != VType::LOGIC && elem.kind != VType::BIT) {
+            flp->v3error("VHDL: array ordering requires a discrete element type");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+    } else {
+        elem = elementType(lt, flp);
+        if (elem.kind != VType::LOGIC && elem.kind != VType::BIT) {
+            flp->v3error("VHDL: array ordering requires a discrete element type");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+    }
+    const int lLen = lt.kind == VType::ARRAY ? lt.length() : lt.width;
+    const int rLen = rt.kind == VType::ARRAY ? rt.length() : rt.width;
+    // A null array has no elements; only its length orders it
+    if (lLen <= 0 || rLen <= 0) {
+        lp->deleteTree();
+        rp->deleteTree();
+        bool result = false;
+        if (cmpOp == "<" || cmpOp == "<=") {
+            result = lLen < rLen || (cmpOp == "<=" && lLen == rLen);
+        } else {
+            result = lLen > rLen || (cmpOp == ">=" && lLen == rLen);
+        }
+        return bitConst(flp, result ? '1' : '0');
+    }
+    if (lLen * elemWidth != lt.width || rLen * elemWidth != rt.width) {
+        flp->v3error("VHDL: comparison of arrays with different element widths");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    const auto flipSigns = [&](AstNodeExpr* nodep, int elements) -> AstNodeExpr* {
+        V3Number maskNum{flp, nodep->width(), 0u};
+        for (int i = 0; i < elements; ++i) { maskNum.setBit(i * elemWidth + elemWidth - 1, '1'); }
+        AstConst* const maskp = new AstConst{flp, maskNum};
+        maskp->dtypep(findVectorWidth(flp, lt.kwd, VSigning::NOSIGN, nodep->width()));
+        AstXor* const xorp = new AstXor{flp, nodep, maskp};
+        xorp->dtypep(findVectorWidth(flp, lt.kwd, VSigning::NOSIGN, nodep->width()));
+        return xorp;
+    };
+    if (elemSigned) {
+        lp = flipSigns(lp, lLen);
+        rp = flipSigns(rp, rLen);
+    }
+    if (lLen == rLen) {
+        AstNodeExpr* cmpp = nullptr;
+        if (cmpOp == "<") {
+            cmpp = new AstLt{flp, lp, rp};
+        } else if (cmpOp == "<=") {
+            cmpp = new AstLte{flp, lp, rp};
+        } else if (cmpOp == ">") {
+            cmpp = new AstGt{flp, lp, rp};
+        } else {
+            cmpp = new AstGte{flp, lp, rp};
+        }
+        cmpp->dtypep(bitDtp);
+        return cmpp;
+    }
+    const int commonElems = std::min(lLen, rLen);
+    const int commonBits = commonElems * elemWidth;
+    const VType prefixType = vectorType(flp, lt.kwd, VSigning::NOSIGN, commonBits);
+    AstSel* const lpfx = new AstSel{flp, lp->cloneTree(false), lt.width - commonBits, commonBits};
+    lpfx->dtypep(prefixType.dtp);
+    AstSel* const rpfx = new AstSel{flp, rp->cloneTree(false), rt.width - commonBits, commonBits};
+    rpfx->dtypep(prefixType.dtp);
+    lp->deleteTree();
+    rp->deleteTree();
+    lp = nullptr;
+    rp = nullptr;
+    AstNodeExpr* const eqp = new AstEqCase{flp, lpfx->cloneTree(false), rpfx->cloneTree(false)};
+    eqp->dtypep(bitDtp);
+    AstNodeExpr* prefixp = nullptr;
+    if (cmpOp == "<" || cmpOp == "<=") {
+        prefixp = new AstLt{flp, lpfx, rpfx};
+    } else {
+        prefixp = new AstGt{flp, lpfx, rpfx};
+    }
+    prefixp->dtypep(bitDtp);
+    // The prefix is equal and the lengths differ; the shorter array is the smaller one
+    const bool lengthWins = (cmpOp == "<" || cmpOp == "<=") ? lLen < rLen : lLen > rLen;
+    AstNodeExpr* const lengthp = bitConst(flp, lengthWins ? '1' : '0');
+    AstAnd* const andp = new AstAnd{flp, eqp, lengthp};
+    andp->dtypep(bitDtp);
+    AstOr* const resultp = new AstOr{flp, prefixp, andp};
+    resultp->dtypep(bitDtp);
+    return resultp;
+}
+
 AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
@@ -2863,8 +3000,8 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         lp->deleteTree();
         return nullptr;
     }
-    VType lt = typeOfDType(lp->dtypep());
-    VType rt = typeOfDType(rp->dtypep());
+    VType lt = typeOfLowered(*expr.a, lp);
+    VType rt = typeOfLowered(*expr.b, rp);
     AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
 
     if (op == "?=" || op == "?/=") {
@@ -2963,18 +3100,25 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         reSignLiteral(*expr.a, lp, lt, rt);
         reSignLiteral(*expr.b, rp, rt, lt);
         if (m_stdLogicSigned
-            && ((lt.isPredefinedVector() && lt.kwd == VBasicDTypeKwd::LOGIC)
-                || (rt.isPredefinedVector() && rt.kwd == VBasicDTypeKwd::LOGIC))) {
+            && ((lt.kind == VType::VECTOR && lt.kwd == VBasicDTypeKwd::LOGIC)
+                || (rt.kind == VType::VECTOR && rt.kwd == VBasicDTypeKwd::LOGIC))) {
             unsupportedError(flp, "std_logic_signed comparison");
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
         }
-        // Predefined array equality: different lengths are unequal, equal lengths compare
-        // element by element with identity equality.
-        if ((cmpOp == "=" || cmpOp == "/=") && lt.isPredefinedVector()
-            && rt.isPredefinedVector()) {
+        // VHDL array equality: different lengths are unequal, equal lengths compare
+        // element by element. A packed bitwise identity comparison is the same test.
+        if ((cmpOp == "=" || cmpOp == "/=") && lt.isVhdlArray() && rt.isVhdlArray()) {
             if (lt.width != rt.width) {
+                lp->deleteTree();
+                rp->deleteTree();
+                AstConst* const resultp
+                    = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
+                resultp->dtypep(bitDtp);
+                return resultp;
+            }
+            if (lt.width == 0) {
                 lp->deleteTree();
                 rp->deleteTree();
                 AstConst* const resultp
@@ -3004,33 +3148,11 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             cmpp->dtypep(bitDtp);
             return cmpp;
         }
-        // Predefined array ordering is lexicographic over the common prefix; if that is
-        // equal, the shorter array is the smaller one (IEEE 1076-2008 9.2.3).
-        if ((cmpOp == "<" || cmpOp == "<=" || cmpOp == ">" || cmpOp == ">=")
-            && lt.isPredefinedVector() && rt.isPredefinedVector() && lt.width != rt.width) {
-            const int common = std::min(lt.width, rt.width);
-            const VType prefixType = vectorType(flp, lt.kwd, VSigning::NOSIGN, common);
-            AstSel* const lpfx = new AstSel{flp, lp->cloneTree(false), lt.width - common, common};
-            lpfx->dtypep(prefixType.dtp);
-            AstSel* const rpfx = new AstSel{flp, rp->cloneTree(false), rt.width - common, common};
-            rpfx->dtypep(prefixType.dtp);
-            lp->deleteTree();
-            rp->deleteTree();
-            AstNodeExpr* const eqp
-                = new AstEqCase{flp, lpfx->cloneTree(false), rpfx->cloneTree(false)};
-            eqp->dtypep(bitDtp);
-            AstNodeExpr* cmpp = nullptr;
-            if (cmpOp == "<" || cmpOp == "<=") {
-                AstNodeExpr* const ltp = new AstLt{flp, lpfx, rpfx};
-                ltp->dtypep(bitDtp);
-                cmpp = new AstCond{flp, eqp, bitConst(flp, lt.width < rt.width ? '1' : '0'), ltp};
-            } else {
-                AstNodeExpr* const gtp = new AstGt{flp, lpfx, rpfx};
-                gtp->dtypep(bitDtp);
-                cmpp = new AstCond{flp, eqp, bitConst(flp, lt.width > rt.width ? '1' : '0'), gtp};
-            }
-            cmpp->dtypep(bitDtp);
-            return cmpp;
+        // VHDL array ordering is lexicographic over the elements; a shorter array is
+        // smaller when the common prefix is equal (IEEE 1076-2008 9.2.3).
+        if ((cmpOp == "<" || cmpOp == "<=" || cmpOp == ">" || cmpOp == ">=") && lt.isVhdlArray()
+            && rt.isVhdlArray()) {
+            return lowerArrayRelation(flp, cmpOp, lt, rt, lp, rp, bitDtp);
         }
         if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
             unsupportedError(flp, "comparison between signed and unsigned operands");
@@ -3273,8 +3395,8 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         return nullptr;
     }
     if (m_stdLogicSigned
-        && ((lt.isPredefinedVector() && lt.kwd == VBasicDTypeKwd::LOGIC)
-            || (rt.isPredefinedVector() && rt.kwd == VBasicDTypeKwd::LOGIC))) {
+        && ((lt.kind == VType::VECTOR && lt.kwd == VBasicDTypeKwd::LOGIC)
+            || (rt.kind == VType::VECTOR && rt.kwd == VBasicDTypeKwd::LOGIC))) {
         unsupportedError(flp, "std_logic_signed arithmetic");
         lp->deleteTree();
         rp->deleteTree();
@@ -7166,6 +7288,34 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context)
     }
     if (resultp && context && context->dtp && resultp->width() == context->width) {
         resultp->dtypep(context->dtp);
+    }
+    // A constrained array return type keeps the element structure that the packed dtype
+    // would otherwise lose; comparisons of a direct call need it. An unconstrained return
+    // takes the element type from the declaration and the element count from the result.
+    if (resultp) {
+        VType structType;
+        bool haveStruct = retType.kind == VType::ARRAY && retType.elemWidth > 0;
+        if (haveStruct) {
+            structType = retType;
+        } else {
+            const auto typeIt = m_types.find(subp->returnType.mark);
+            if (typeIt != m_types.end() && typeIt->second.kind == VType::ARRAY
+                && typeIt->second.elemWidth > 0) {
+                structType = typeIt->second;
+                haveStruct = true;
+            }
+        }
+        if (haveStruct && resultp->width() % structType.elemWidth == 0) {
+            structType.width = resultp->width();
+            const int elements = structType.width / structType.elemWidth;
+            if (elements > 0 && structType.length() != elements) {
+                // Packed order: the first element is the most significant one
+                structType.left = elements - 1;
+                structType.right = 0;
+                structType.ascending = false;
+            }
+            m_arrayDtypes[resultp->dtypep()] = structType;
+        }
     }
     return fail(resultp);
 }

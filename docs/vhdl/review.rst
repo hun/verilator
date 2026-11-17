@@ -31,7 +31,7 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 203 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 204 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
@@ -47,7 +47,7 @@ NO_TOP                                       13
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 203 regression tests, 20 ported corpus designs
+value-checked evidence is the 204 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
@@ -131,9 +131,6 @@ with a different result. The reference values were confirmed with GHDL.
    * - Construct
      - VHDL behavior
      - Frontend behavior
-   * - A user-declared array whose element is wider than one bit
-     - element-wise equality and lexicographic ordering
-     - packed operands are resized and compared numerically
    * - Two visible enumeration types share a literal and no expected type picks one
      - overload resolution picks the literal from the expected type
      - one global literal table is used; the last declaration wins
@@ -157,7 +154,10 @@ without a diagnostic.
 
 A typed context now resolves enumeration literals, including two types that
 share a name, and a static out-of-range ``'succ``/``'pred`` is a frontend error;
-only the dynamic value still wraps.
+only the dynamic value still wraps. Array equality works for any element type;
+ordering is lexicographic for an array of a discrete element type, and an array
+whose element is not discrete is rejected because VHDL defines no ordering for
+it.
 
 Two library caveats deserve emphasis. Unknown standard packages are treated as
 intrinsics instead of being refused; ``std_logic_unsigned`` matches the modeled

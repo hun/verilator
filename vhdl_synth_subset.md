@@ -467,9 +467,10 @@ Consequences:
 - `U` and `W` are accepted and mapped to X; Vivado rejects them.
 - A `std_logic` or `std_logic_vector` comparison uses identity (case)
   equality, so two identical X constants compare equal; a comparison of X and
-  0 is false. Predefined arrays of one-bit elements compare unequal lengths as
-  equality false and order lexicographically; a `numeric_std`
-  `unsigned`/`signed` resizes and compares numerically.
+  0 is false. Arrays of discrete elements compare unequal lengths as equality
+  false and order lexicographically, including arrays of integers; an array
+  whose element is not discrete has no predefined ordering and is rejected. A
+  `numeric_std` `unsigned`/`signed` resizes and compares numerically.
 - A `'Z'` constant is kept as high impedance and is lowered by `V3Tristate` when
   it drives an `inout` port or a signal with a tristate driver. Anywhere else it
   resolves to 0. A design that needs a high-impedance bus uses an `inout` port
