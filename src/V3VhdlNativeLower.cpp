@@ -114,6 +114,7 @@ struct PackageInfo final {
     std::map<std::string, AstConst*> constValues;
     std::map<std::string, VType> constTypes;
     std::map<std::string, AstConst*> enumConsts;
+    std::set<std::string> ambiguousLiterals;  // Literals declared by more than one type
     std::map<std::string, double> realConsts;  // Elaboration-time reals, by folded name
     std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
     std::vector<const AliasDecl*> subprogramAliases;  // Synonyms, re-registered on import
@@ -226,6 +227,7 @@ class Lowering final {
         std::map<std::string, int64_t> preConsts;
         std::map<std::string, VType> types;
         std::set<std::string> ambiguousTypes;
+        std::set<std::string> ambiguousLiterals;
         std::map<std::string, AstConst*> constValues;
         std::map<std::string, VType> constTypes;
         std::map<std::string, AstConst*> enumConsts;
@@ -366,6 +368,7 @@ class Lowering final {
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
     std::set<std::string> m_ambiguousTypes;  // Type names imported from two packages
+    std::set<std::string> m_ambiguousLiterals;  // Enumeration literals from two types
     bool m_stdLogicSigned = false;  // `use ieee.std_logic_signed.all` is in effect
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
@@ -1273,6 +1276,7 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
             value = preIt->second;
             return true;
         }
+        if (m_ambiguousLiterals.count(expr.text)) return false;
         const auto enumIt = m_enumConsts.find(expr.text);
         if (enumIt != m_enumConsts.end()) {
             value = static_cast<int64_t>(enumIt->second->num().toUInt());
@@ -1875,6 +1879,10 @@ void Lowering::registerType(const TypeDecl& decl) {
             AstConst* const constp
                 = new AstConst{flp, V3Number{flp, width, static_cast<uint32_t>(i)}};
             constp->dtypep(type.dtp);
+            const auto existing = m_enumConsts.find(decl.literals[i].first);
+            if (existing != m_enumConsts.end() && existing->second->dtypep() != type.dtp) {
+                m_ambiguousLiterals.insert(decl.literals[i].first);
+            }
             m_enumConsts[decl.literals[i].first] = constp;
         }
         break;
@@ -2623,12 +2631,18 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         // enumeration declares the same name (IEEE 1076-2008 12.5)
         if (context && context->kind == VType::ENUM) {
             for (size_t i = 0; i < context->literals.size(); ++i) {
-                if (context->literals[i] != expr.text) continue;
+                if (VString::downcase(context->literals[i]) != VString::downcase(expr.text)) {
+                    continue;
+                }
                 AstConst* const constp
                     = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
                 constp->dtypep(context->dtp);
                 return constp;
             }
+        }
+        if (m_ambiguousLiterals.count(expr.text)) {
+            flp->v3error("VHDL: enumeration literal '" + expr.spelling + "' is ambiguous");
+            return nullptr;
         }
         const auto constIt = m_consts.find(expr.text);
         if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
@@ -3937,6 +3951,10 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
                 return nullptr;
             }
             return makeIntConst(flp, preIt->second);
+        }
+        if (m_ambiguousLiterals.count(expr.text)) {
+            flp->v3error("VHDL: enumeration literal '" + expr.spelling + "' is ambiguous");
+            return nullptr;
         }
         const auto valueIt = m_constValues.find(expr.text);
         if (valueIt != m_constValues.end() || m_enumConsts.count(expr.text)) {
@@ -6567,6 +6585,7 @@ void Lowering::setScope(const ScopeSave& saved) {
     m_consts = saved.consts;
     m_types = saved.types;
     m_ambiguousTypes = saved.ambiguousTypes;
+    m_ambiguousLiterals = saved.ambiguousLiterals;
     m_constValues = saved.constValues;
     m_constTypes = saved.constTypes;
     m_enumConsts = saved.enumConsts;
@@ -7220,9 +7239,17 @@ AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context,
     VType actual1;
     const bool have0 = actualType(*expr.a, actual0);
     const bool have1 = actualType(*expr.b, actual1);
-    // A bit-string literal, aggregate, or nested expression has no type of its own. If the
-    // other operand fixes one side, the call's formal supplies the missing type.
-    if (!have0 && !have1) return nullptr;
+    // A bit-string literal, aggregate, or nested expression has no type of its own.
+    // The other operand, the expected result type, or a bit-string's width can fix
+    // the operator; with none of those the built-in operator applies.
+    const auto literalWidth = [](const Expr& operand) {
+        return operand.kind == Expr::BITS_LIT ? static_cast<int>(operand.bits.size()) : 0;
+    };
+    const int width0 = literalWidth(*expr.a);
+    const int width1 = literalWidth(*expr.b);
+    // Two untyped operands are resolvable only when both are sized literals; a
+    // pair of conversions or calls keeps its built-in operator.
+    if (!have0 && !have1 && (width0 == 0 || width1 == 0)) return nullptr;
     std::vector<const SubprogramDecl*> matches;
     for (const SubprogramDecl* const subp : visibleSubprograms(expr.text)) {
         if (subp->kind != SubprogramDecl::FUNCTION || !subp->hasBody || subp->impure) continue;
@@ -7236,6 +7263,22 @@ AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context,
         }
         if (have0 && !typesMatch(formal0, actual0)) continue;
         if (have1 && !typesMatch(formal1, actual1)) continue;
+        // A formal's base type has no constraint width, so compare a bit-string
+        // literal against the width its full type spec gives.
+        if (!have0 && width0 > 0) {
+            VType exact;
+            if (resolveType(slots[0].first->type, exact) && exact.width > 0
+                && exact.width != width0) {
+                continue;
+            }
+        }
+        if (!have1 && width1 > 0) {
+            VType exact;
+            if (resolveType(slots[1].first->type, exact) && exact.width > 0
+                && exact.width != width1) {
+                continue;
+            }
+        }
         if (context) {
             VType returnType;
             if (formalType(subp->returnType, returnType) && !typesMatch(returnType, *context)) {
@@ -8927,6 +8970,7 @@ Lowering::ScopeSave Lowering::saveScope() const {
     saved.preConsts = m_preConsts;
     saved.types = m_types;
     saved.ambiguousTypes = m_ambiguousTypes;
+    saved.ambiguousLiterals = m_ambiguousLiterals;
     saved.constValues = m_constValues;
     saved.constTypes = m_constTypes;
     saved.enumConsts = m_enumConsts;
@@ -8940,6 +8984,7 @@ void Lowering::restoreScope(const ScopeSave& saved) {
     m_preConsts = saved.preConsts;
     m_types = saved.types;
     m_ambiguousTypes = saved.ambiguousTypes;
+    m_ambiguousLiterals = saved.ambiguousLiterals;
     m_constValues = saved.constValues;
     m_constTypes = saved.constTypes;
     m_enumConsts = saved.enumConsts;
@@ -9298,8 +9343,15 @@ void Lowering::importPackage(const std::string& name) {
         m_realConsts[realConst.first] = realConst.second;
         m_imported.insert(realConst.first);
     }
+    m_ambiguousLiterals.insert(info.ambiguousLiterals.begin(), info.ambiguousLiterals.end());
     for (const auto& literal : info.enumConsts) {
-        if (m_enumConsts.count(literal.first)) continue;
+        const auto existing = m_enumConsts.find(literal.first);
+        if (existing != m_enumConsts.end()) {
+            if (existing->second->dtypep() != literal.second->dtypep()) {
+                m_ambiguousLiterals.insert(literal.first);
+            }
+            continue;
+        }
         m_ownedConsts.push_back(std::unique_ptr<AstConst>(literal.second->cloneTree(false)));
         m_enumConsts[literal.first] = m_ownedConsts.back().get();
         m_imported.insert(literal.first);
@@ -9327,6 +9379,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_constValues.clear();
     m_constTypes.clear();
     m_enumConsts.clear();
+    m_ambiguousLiterals.clear();
     m_preConsts.clear();
     m_ownedConsts.clear();
     m_imported.clear();
@@ -9395,6 +9448,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     info.constValues = std::move(m_constValues);
     info.constTypes = std::move(m_constTypes);
     info.enumConsts = std::move(m_enumConsts);
+    info.ambiguousLiterals = m_ambiguousLiterals;
     info.realConsts = std::move(m_realConsts);
     info.owned = std::move(m_ownedConsts);
     for (const SubprogramDecl& sub : pkg.subprograms) info.subprograms.push_back(&sub);
@@ -9406,6 +9460,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_constValues.clear();
     m_constTypes.clear();
     m_enumConsts.clear();
+    m_ambiguousLiterals.clear();
     m_realConsts.clear();
     m_preConsts.clear();
     m_ownedConsts.clear();
@@ -9465,6 +9520,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         m_constValues.clear();
         m_constTypes.clear();
         m_enumConsts.clear();
+        m_ambiguousLiterals.clear();
         m_ownedConsts.clear();
         m_types.clear();
         m_deferredTypes.clear();
@@ -9628,6 +9684,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     m_constValues.clear();
     m_constTypes.clear();
     m_enumConsts.clear();
+    m_ambiguousLiterals.clear();
     m_ownedConsts.clear();
     m_types.clear();
     m_preConsts.clear();

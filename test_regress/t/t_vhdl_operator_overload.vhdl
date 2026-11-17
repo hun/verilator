@@ -38,7 +38,10 @@ entity t is
     pick_b : out integer;
     pick_f : out integer;
     pick_pa : out integer;
-    pick_pb : out integer
+    pick_pb : out integer;
+    nib_o  : out std_logic_vector(3 downto 0);
+    byte_o : out std_logic_vector(7 downto 0);
+    nib_eq : out bit
   );
 end;
 
@@ -64,6 +67,19 @@ architecture rtl of t is
   function "xor"(l, r : std_logic_vector(3 downto 0)) return std_logic_vector(3 downto 0) is
   begin
     return "1010";
+  end function;
+
+  type nib_t is array (0 to 3) of std_logic;
+  type byte_t is array (0 to 7) of std_logic;
+
+  function "nand"(l, r : nib_t) return nib_t is
+  begin
+    return "1001";
+  end function;
+
+  function "nand"(l, r : byte_t) return byte_t is
+  begin
+    return "10101010";
   end function;
 
   function pick(x : unsigned(3 downto 0)) return integer is
@@ -106,6 +122,7 @@ architecture rtl of t is
   signal qa, qb, qs : pair2_t;
   signal xa : work.ov_a_pkg.pair_t;
   signal xb : work.ov_b_pkg.pair_t;
+  signal nib_s : nib_t := "1001";
 begin
   pa <= (a0, a1);
   ns <= -pa;
@@ -133,4 +150,9 @@ begin
   -- Same-named types from two packages stay distinct
   pick_pa <= pickp(xa);
   pick_pb <= pickp(xb);
+  -- Both operands are polymorphic; the literal width picks the operator, and
+  -- the comparison context does not supply a type for the left expression
+  nib_o <= std_logic_vector("1010" nand "0011");
+  byte_o <= std_logic_vector("10101010" nand "00001111");
+  nib_eq <= '1' when ("1010" nand "0011") = nib_s else '0';
 end;

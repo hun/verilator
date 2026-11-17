@@ -46,6 +46,9 @@ int main(int argc, char** argv) {
     check("pick_f", static_cast<int>(topp->pick_f), 3);
     check("pick_pa", static_cast<int>(topp->pick_pa), 5);
     check("pick_pb", static_cast<int>(topp->pick_pb), 6);
+    check("nib_o", static_cast<int>(topp->nib_o), 9);
+    check("byte_o", static_cast<int>(topp->byte_o), 0xaa);
+    check("nib_eq", static_cast<int>(topp->nib_eq), 1);
 
     topp->final();
     delete topp;
