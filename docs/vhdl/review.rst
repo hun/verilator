@@ -38,9 +38,9 @@ case/top pairs:
 ========================================  =====
 Result                                    Count
 ========================================  =====
-PASS (accepted and lowered)                 877
+PASS (accepted and lowered)                 880
 UNSUPPORTED (clean diagnostic)              135
-ERROR                                        81
+ERROR                                        78
 EXPECTED_FAIL                                33
 NO_TOP                                       13
 ========================================  =====
@@ -51,8 +51,8 @@ value-checked evidence is the 209 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
-Of the 81 corpus errors, 40 are "entity not found" (mostly corpus-runner
-selection artifacts), 4 are entities without an architecture, 10 are missing
+Of the 78 corpus errors, 40 are "entity not found" (mostly corpus-runner
+selection artifacts), 4 are entities without an architecture, 7 are missing
 standard functions, and none are internal faults. A sweep of 18 real designs with
 whole-design linting reports 143 refusals in 39 files; 54 of those need the
 whole design to answer. The neorv32 core (``rtl/core/*.vhd``, top
@@ -83,8 +83,9 @@ Concurrent statements and generate           Supported  Conditional assignment w
                                                          ``else`` is a latch holding the target
 ``numeric_std`` and ``std_logic_1164``       Partial    Arithmetic and conversions; not every
                                                          function; see library gaps
-``std_logic_arith``, ``std_logic_signed``    Partial    Conversions work; signed operators on
-                                                         ``std_logic_vector`` are modelled unsigned
+``std_logic_arith``, ``std_logic_signed``    Partial    Conversions and ``shl``/``shr`` work;
+                                                         signed operators on ``std_logic_vector``
+                                                         are modelled unsigned
 ``math_real``                                Partial    Locally static constants only
 Access, protected, file, textio runtime      Excluded   File contents can be read at
                                                          elaboration; runtime objects are refused
@@ -108,13 +109,14 @@ Where the implementation is sound
 - ``numeric_std`` arithmetic follows VHDL for widths, sign extension, division,
   ``mod``/``rem``, ``resize``, and the shift/rotate functions on ``unsigned``
   and ``signed``. Overflow and runtime range checks are intentionally absent;
-  integer arithmetic is 32-bit.
+  integer arithmetic is 32-bit. ``std_logic_arith``'s ``shl``/``shr`` are
+  logical for both signednesses.
 - Slicing, indexing, ascending and descending ranges, records, and aggregate
   targets are value-tested. A two-dimensional element target is typed one array
   level per index, so element writes use the element width.
-- Concurrent conditional assignments with no final ``else`` hold the target,
-  and an assertion inside a concurrent procedure call is evaluated
-  continuously. Both are covered by value-checked and lint tests.
+- Concurrent conditional assignments with no final ``else`` or an
+  ``unaffected`` branch hold the target, and an assertion inside a concurrent
+  procedure call is evaluated continuously. Both are value-checked.
 - Repeated aggregate initializers are linear: a constant ``(others => value)``
   becomes one constant, and a run-time repetition is chunked below the
   replication limit. A 2^16-element nested-zero memory lints in 0.05 s.
@@ -201,7 +203,6 @@ Remaining feature gaps
 - ``std_logic`` resolution between strong tristate drivers is not modelled.
   Conflicting enabled values resolve to 1 rather than ``'X'``. User-defined
   resolution functions remain out of scope.
-- Concurrent ``unaffected`` is reported as an unknown identifier.
 - Arithmetic and comparison under ``use ieee.std_logic_signed.all`` are
   refused with ``Unsupported:``; ``std_logic_unsigned`` is modeled.
 - ``report`` with a non-literal message is dropped.
