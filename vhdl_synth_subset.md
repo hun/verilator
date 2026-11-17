@@ -116,7 +116,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 
 | Feature | Vivado | Tier | Notes |
 |---|---|---|---|
-| Port modes `in`, `out`, `inout`, `buffer` | Y | S | `buffer` is lowered as an output that is also readable internally. `inout` is refused until the frontend emits the tristate driver shape `V3Tristate` recognizes; that is the next target. |
+| Port modes `in`, `out`, `inout`, `buffer` | Y | S | `buffer` is lowered as an output that is also readable internally. `inout` ports are lowered through `V3Tristate`: a non-top port becomes an input plus `__en`/`__out`, and the top-level C++ interface is described in `docs/vhdl/review.rst`. |
 | `linkage` port mode | N | X | UG901 Table 15. |
 | Scalar port types (`bit`, `boolean`, `std_logic`, `std_ulogic`, enums, integer subtypes) | Y | S | |
 | Vector/array port types (`bit_vector`, `std_logic_vector`, `std_ulogic_vector`, `unsigned`, `signed`) | Y | S | One-dimensional. |
@@ -322,7 +322,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 |---|---|---|---|
 | `standard` | Y | S | `bit`, `boolean`, `integer`, `natural`, `positive`, `real`, `time`, `character`, `string`, `severity_level`. File types parse but file operations are excluded. |
 | `ieee.std_logic_1164` | Y | S | Types, logic operators, `rising_edge`, `falling_edge`, `to_stdlogicvector`, `to_stdulogicvector`, `to_bitvector`, `to_stdulogic`, `to_bit`. |
-| `std_logic_1164` `to_X01`, `to_X01Z`, `to_UX01` | - | O | Constant-level mapping; runtime values are already 0/1. `to_X01Z` needs tristate support for Z. |
+| `std_logic_1164` `to_X01`, `to_X01Z`, `to_UX01` | - | O | Constant-level mapping; runtime values are already 0/1. A tristate driver keeps its `'Z'`. |
 | `std_logic_1164` `is_x` | - | X | A 2-state runtime cannot answer this faithfully for runtime signals. |
 | `ieee.numeric_std` | Y | S | `unsigned`/`signed`, arithmetic, comparison, shifts/rotates, `to_integer`, `to_unsigned`, `to_signed`, `resize`, `shift_left`, `shift_right`, `rotate_left`, `rotate_right`, `minimum`, `maximum`. Division/modulus/remainder/exponentiation follow VHDL semantics. |
 | `numeric_std` `std_match` | - | D | Useful for matching operators; works on 0/1/`-`. |
@@ -459,7 +459,7 @@ VHDL's nine-valued `std_logic` is therefore collapsed at elaboration:
 | `'0'`, `'L'` | 0 |
 | `'1'`, `'H'` | 1 |
 | `'X'`, `'U'`, `'W'`, `'-'` | X (constant); at runtime the model has 0/1 |
-| `'Z'` | Collapsed to 0 today; the tristate target preserves it in an inout driver |
+| `'Z'` | Preserved in a logic constant; `V3Tristate` lowers it for a tristate driver, otherwise it resolves to 0 |
 
 Consequences:
 
@@ -468,9 +468,10 @@ Consequences:
 - A `std_logic` comparison with an X constant is lowered as a four-state
   equality, not as the identity equality of IEEE 1164; a comparison of two X
   constants is false.
-- A `'Z'` constant currently lowers to 0, and an `inout` port is refused. A
-  design that needs a high-impedance bus must wait for tristate support or use
-  an explicit single-driver style.
+- A `'Z'` constant is kept as high impedance and is lowered by `V3Tristate` when
+  it drives an `inout` port or a signal with a tristate driver. Anywhere else it
+  resolves to 0. A design that needs a high-impedance bus uses an `inout` port
+  or a signal with a `'Z'` driver; conflicting strong drivers remain two-state.
 
 ### 5.2 Signals, variables, and scheduling
 
@@ -491,15 +492,15 @@ Consequences:
 
 ### 5.3 Multiple drivers and resolution
 
-- One driver per signal is the baseline.
-- Verilator already lowers simple tristate structures: an inout driver assigned
+- One driver per signal is the baseline for non-tristate signals.
+- Verilator lowers simple tristate structures: an inout driver assigned
   `(enable) ? value : 1'bz` becomes an input plus `__en` and `__out` outputs.
-  The frontend currently refuses inout ports and does not emit that shape;
-  wiring the existing `V3Tristate` pass is the next target.
-- `std_logic` resolution between strong drivers is not modelled. Multiple
-  drivers are reported by the middle end as a multiple-driver warning; they do
-  not produce the IEEE 1164 resolved value.
-- User-defined resolution functions are excluded.
+  The VHDL frontend emits this shape for `inout` ports and `'Z'` drivers. A
+  non-top port is connected to the parent signal as input plus
+  `__en`/`__out`; at the top level the C++ interface either presents one inout
+  field or, with `--pins-inout-enables`, an input plus `__en`/`__out`.
+- Conflicting enabled tristate drivers resolve to 1 in the two-state model,
+  where VHDL produces `'X'`. User-defined resolution functions are excluded.
 
 ### 5.4 Integers, ranges, and checks
 

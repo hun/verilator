@@ -31,30 +31,30 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 191 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 194 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
 ========================================  =====
 Result                                    Count
 ========================================  =====
-PASS (accepted and lowered)                 864
-UNSUPPORTED (clean diagnostic)              135
-ERROR                                        91
-EXPECTED_FAIL                                36
+PASS (accepted and lowered)                 875
+UNSUPPORTED (clean diagnostic)              128
+ERROR                                        90
+EXPECTED_FAIL                                33
 NO_TOP                                       13
 ========================================  =====
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 191 regression tests, 20 ported corpus designs
+value-checked evidence is the 194 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
-Of the 91 corpus errors, 40 are "entity not found" (mostly corpus-runner
+Of the 90 corpus errors, 40 are "entity not found" (mostly corpus-runner
 selection artifacts), 4 are entities without an architecture, 11 are missing
 standard functions, and 8 are internal faults. A sweep of 18 real designs with
-whole-design linting reports 160 refusals in 44 files; 52 of those need the
+whole-design linting reports 143 refusals in 39 files; 54 of those need the
 whole design to answer. The neorv32 core (``rtl/core/*.vhd``, top
 ``neorv32_top``) lints clean; the whole ``rtl/`` tree with its stock Verilog
 wrapper still aborts with ``std::bad_alloc`` under an 8 GiB limit.
@@ -69,9 +69,9 @@ Area                                         Status      Notes
 Entities, architectures, packages            Supported  Multiple architectures: last analyzed
                                                          wins; context references are skipped
 Components and direct instantiation          Supported  Configurations are validated, not
-                                                         applied; inout ports refused
+                                                         applied
 Ports, generics, generic types               Supported  Unconstrained ports specialize per
-                                                         instance; generic subprograms mostly not
+                                                         instance; inout ports use V3Tristate
 Scalar, enum, record, 1-D array types        Supported  Includes arrays of arrays; multi-
                                                          dimensional ports excluded
 Static real and physical types               Supported  Elaboration-time constants only
@@ -111,8 +111,12 @@ Where the implementation is sound
   integer arithmetic is 32-bit.
 - Slicing, indexing, ascending and descending ranges, records, and aggregate
   targets are value-tested.
+- Inout and tristate: scalar and vector ports, concurrent conditional and
+  selected drivers, process drivers, hierarchical connections, and the top-level
+  enable/drive interface are tested. Conflicting drivers remain a documented
+  two-state divergence.
 - Most unsupported constructs produce a source-located ``Unsupported:``
-  diagnostic; 135 corpus cases are classified that way.
+  diagnostic; 128 corpus cases are classified that way.
 
 Silent semantic divergences
 ===========================
@@ -200,14 +204,9 @@ frontend or a later pass aborts:
 Remaining feature gaps
 ======================
 
-- ``inout`` ports are refused at declaration, so bidirectional buses do not
-  elaborate. This is the next planned feature; see below.
-- An unconstrained record port can be specialized when a whole-record actual
-  supplies the member ranges, but not when only individual record elements are
-  associated (``i.x => a, i.y => b``). The frontend reports a clean
-  ``Unsupported``; ``t_vhdl_record_ind_unsup`` pins it.
-- Multiple drivers and user resolution functions are not modelled; the middle
-  end reports a multiple-driver warning rather than VHDL resolution.
+- ``std_logic`` resolution between strong tristate drivers is not modelled.
+  Conflicting enabled values resolve to 1 rather than ``'X'``. User-defined
+  resolution functions remain out of scope.
 - Context references do not import their declarations.
 - Concurrent ``unaffected`` is reported as an unknown identifier.
 - ``report`` with a non-literal message is dropped.
@@ -225,11 +224,11 @@ Remaining feature gaps
 - Mixed VHDL/SystemVerilog design sources are rejected; only one language per
   invocation is supported.
 
-Next target: inout and tristate
-===============================
+Inout and tristate
+==================
 
-Verilator already converts simple tristate structures into a two-state form.
-As described in :doc:`../guide/languages`, an inout driver of the shape
+Verilator converts simple tristate structures into a two-state form, as
+described in :doc:`../guide/languages`. An inout driver of the shape
 
 .. code-block:: sv
 
@@ -244,27 +243,41 @@ becomes an input plus two outputs:
    output driver__en;   // True when this module drives
    output driver__out;  // Value this module drives
 
-The VHDL equivalent is an ``inout`` port driven by a conditional assignment
-such as ``bus <= 'Z' when oe = '0' else data;``. The frontend currently refuses
-the port and collapses ``'Z'`` to zero, so no tristate driver reaches
-``V3Tristate``. Supporting the feature needs:
+The VHDL frontend emits this shape:
 
-- accept ``inout`` ports and emit the port variable with an inout direction;
-- preserve the high-impedance value in the driver expression instead of
-  mapping it to zero;
-- lower conditional and selected assignments to the conditional-driver shape
-  ``V3Tristate`` recognizes, including the enable expression;
-- keep reads of the port inside the entity consistent with the resolved input
-  plus the local driver;
-- add a positive regression test with a C++ harness that drives the input and
-  reads ``__en`` and ``__out``, and keep a negative test for the cases the
-  conversion cannot represent.
+- ``inout`` ports, scalar and packed vector, at the top level and on instances;
+- ``'Z'`` is preserved in a logic constant. A ``'Z'`` that reaches a
+  non-tristate destination still resolves to 0;
+- a concurrent conditional assignment such as
+  ``bus <= data when oe = '1' else 'Z';`` is lowered to the conditional driver
+  form ``V3Tristate`` recognizes. A selected assignment with a high-impedance
+  value is rewritten to the equivalent comparison chain, including a ``'Z'``
+  produced by a folded function;
+- a process may drive an ``inout`` port; the procedural driver is converted in
+  the same way.
+
+At a non-top instance the port becomes an input plus ``__en``/``__out``
+connected to the parent signal, and reads of the signal inside the parent see
+the resolved value. At the top-level C++ interface:
+
+- without :vlopt:`--pins-inout-enables`, the port is a single inout field. The
+  model combines the external value with the internal driver by OR, and reads
+  inside the design see that combined value. This is the most convenient
+  single-driver interface, but the testbench cannot separately observe the
+  module's drive when an external driver is also present.
+- with :vlopt:`--pins-inout-enables`, the port is an input and the driver is
+  exposed as ``name__en`` and ``name__out``. The testbench supplies the
+  externally resolved value. Use this interface when external drivers exist.
 
 The limits are explicit. ``V3Tristate`` combines output enables; it does not
-implement nine-state resolution, so two strong conflicting drivers still do
-not produce ``'X'``. That remains a documented divergence. At the top-level
-C++ interface an inout port will expose ``__en``/``__out`` names, as it does
-for SystemVerilog; testbenches must drive the input and read the other two.
+implement IEEE 1164 resolution. Two enabled drivers of different values
+resolve to 1 in the two-state model, where VHDL produces ``'X'``. User-defined
+resolution functions remain out of scope.
+
+The feature is pinned by ``t_vhdl_inout`` (top level, conditional and selected
+drivers, scalar and vector, ``__en``/``__out``), ``t_vhdl_inout_bus`` (two
+instances on one resolved signal), ``t_vhdl_inout_proc`` (a clocked process
+driver), and ``t_vhdl_logic_z`` (``'Z'`` reaching non-tristate destinations).
 
 Verification gaps
 =================
@@ -296,6 +309,5 @@ ______
    neorv32 allocation failures.
 3. Turn the remaining internal faults into clean diagnostics and pin them with
    negative tests.
-4. Add inout/tristate using the existing ``V3Tristate`` conversion.
-5. Add a differential simulation harness and a CI job, and treat lint-only
+4. Add a differential simulation harness and a CI job, and treat lint-only
    corpus counts as breadth, not correctness.

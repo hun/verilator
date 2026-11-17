@@ -272,13 +272,13 @@ ______
     - ``t_vhdl_conv_predefined``
   * - N70
     - an inout port
-    - the frontend did not emit a tristate driver shape, so the port reached the
-      DFG undriven and failed the read-only assertion there; it is refused where
-      it is declared, and declared as an input so the rest of the design still
-      analyzes. Verilator already lowers simple tristate structures
-      (``V3Tristate``); emitting the shape it recognizes is the next frontend
-      target, described in :doc:`review`
-    - ``t_vhdl_inout_unsup``
+    - the frontend emitted no tristate driver shape, so the port reached the DFG
+      undriven. Inout ports are now emitted as nets, ``'Z'`` is preserved, and
+      conditional, selected and process drivers are lowered to the shape
+      ``V3Tristate`` recognizes. A non-top port becomes an input plus
+      ``__en``/``__out``; the top-level interface and the two-state conflict
+      behavior are described in :doc:`review`
+    - ``t_vhdl_inout``, ``t_vhdl_inout_bus``, ``t_vhdl_inout_proc``
   * - N71
     - the std_logic_1164 X01 conversions ``to_x01``, ``to_01``, ``to_x01z`` and
       ``to_ux01``, as t80's ALU writes them
@@ -537,7 +537,7 @@ Verification
 ___________
 
 Each run was checked with the full VHDL suite (``test_regress``,
-``t_vhdl_*.py``): 191 tests, no failures.
+``t_vhdl_*.py``): 194 tests, no failures.
 
 The corpus lints and runs clean: 20 designs, no lint errors, and every run
 passes, including the harnesses added for the rpu ALU, the rpu register set, the

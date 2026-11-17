@@ -476,11 +476,15 @@ class Lowering final {
         V3Number num{flp, width, 0u};
         for (int i = 0; i < width; ++i) {
             const char bit = bits[width - 1 - i];  // bits[0] is the most significant bit
-            if (bit == '1')
+            if (bit == '1') {
                 num.setBit(i, '1');
-            else if (bit == 'x' || bit == '-')
+            } else if (bit == 'x' || bit == '-') {
                 num.setBit(i, 'x');
-            // 'z' has no driver and resolves to logic 0 in this two-state model
+            } else if (bit == 'z') {
+                // Keep the high-impedance value: V3Tristate lowers it for a tristate
+                // driver, and any other destination resolves it to 0 (as a real 'Z' does)
+                num.setBit(i, 'z');
+            }
         }
         AstConst* const constp = new AstConst{flp, num};
         constp->dtypep(dtp);
@@ -5079,6 +5083,15 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
     return true;
 }
 
+//! Whether a lowered value contains a high-impedance constant.
+static bool astHasZ(AstNode* nodep) {
+    bool found = false;
+    nodep->foreach([&](AstConst* constp) {
+        if (constp->num().hasZ()) found = true;
+    });
+    return found;
+}
+
 AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
     AstNodeExpr* const selectorp = lowerExpr(*conc.selector, nullptr);
@@ -5090,23 +5103,96 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     }
     const VType ltype = typeOfTarget(*conc.target, lhsp);
     AstNodeDType* const selDtp = selectorp->dtypep();
-    AstCaseItem* itemsp = nullptr;
-    AstCaseItem* currentp = nullptr;
+    // Lower every value once. Checking the lowered value also catches a high-impedance
+    // constant produced by a folded call, not only a literal in the source.
+    std::vector<AstNodeExpr*> values;
+    values.reserve(conc.choices.size());
+    bool tristate = false;
     for (const auto& alternative : conc.choices) {
         AstNodeExpr* valuep = lowerExpr(*alternative.second, &ltype);
         if (!valuep) {
-            if (itemsp) itemsp->deleteTree();
+            for (AstNodeExpr* const ownedp : values) ownedp->deleteTree();
             lhsp->deleteTree();
             selectorp->deleteTree();
             return nullptr;
         }
         valuep = resizeExpr(valuep, ltype, flp);
+        if (astHasZ(valuep)) tristate = true;
+        values.push_back(valuep);
+    }
+    const auto deleteValues = [&values](std::size_t from) {
+        for (std::size_t i = from; i < values.size(); ++i) {
+            if (values[i]) values[i]->deleteTree();
+        }
+    };
+    // V3Tristate derives the output enable from a conditional expression, not from a
+    // case item, so a selected assignment that releases the driver is lowered to the
+    // equivalent if/elsif chain.
+    if (tristate) {
+        AstNodeExpr* restp = nullptr;
+        for (std::size_t i = conc.choices.size(); i-- > 0;) {
+            AstNodeExpr* const valuep = values[i];
+            values[i] = nullptr;
+            std::vector<AstConst*> cops;
+            if (!lowerChoiceConsts(conc.choices[i].first, selDtp, cops)) {
+                for (AstConst* const cop : cops) cop->deleteTree();
+                valuep->deleteTree();
+                deleteValues(0);
+                if (restp) restp->deleteTree();
+                lhsp->deleteTree();
+                selectorp->deleteTree();
+                return nullptr;
+            }
+            if (cops.empty()) {  // The `others` alternative is the fall-through
+                if (restp) {
+                    valuep->deleteTree();  // A second `others` can never be selected
+                } else {
+                    restp = valuep;
+                }
+                continue;
+            }
+            AstNodeExpr* condp = nullptr;
+            for (AstConst* const cop : cops) {
+                AstEq* const eqp = new AstEq{flp, selectorp->cloneTree(false), cop};
+                eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+                if (!condp) {
+                    condp = eqp;
+                } else {
+                    AstOr* const orp = new AstOr{flp, condp, eqp};
+                    orp->dtypep(eqp->dtypep());
+                    condp = orp;
+                }
+            }
+            AstCond* const condexprp = new AstCond{flp, condp, valuep, restp};
+            condexprp->dtypep(ltype.dtp);
+            restp = condexprp;
+        }
+        selectorp->deleteTree();
+        if (!restp) {
+            // A selected assignment without `others` must be exhaustive; the
+            // fall-through is then unreachable, but a conditional expression needs one.
+            if (!ltype.isVector()) {
+                flp->v3error("VHDL: selected assignment must cover every value");
+                lhsp->deleteTree();
+                return nullptr;
+            }
+            restp = makeRepeatedConst(flp, ltype, '0');
+        }
+        // The caller wraps this in the conditional-assignment always
+        return new AstAssignW{flp, lhsp, restp};
+    }
+    AstCaseItem* itemsp = nullptr;
+    AstCaseItem* currentp = nullptr;
+    for (std::size_t i = 0; i < conc.choices.size(); ++i) {
+        AstNodeExpr* const valuep = values[i];
+        values[i] = nullptr;
         AstNode* const assignp = new AstAssignW{flp, lhsp->cloneTree(false), valuep};
         std::vector<AstConst*> cops;
-        if (!lowerChoiceConsts(alternative.first, selDtp, cops)) {
+        if (!lowerChoiceConsts(conc.choices[i].first, selDtp, cops)) {
             for (AstConst* const cop : cops) cop->deleteTree();
             assignp->deleteTree();
-            itemsp->deleteTree();
+            deleteValues(i + 1);
+            if (itemsp) itemsp->deleteTree();
             lhsp->deleteTree();
             selectorp->deleteTree();
             return nullptr;
@@ -5118,7 +5204,7 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
         }
         AstCaseItem* const itemp = cops.empty() ? new AstCaseItem{flp, nullptr, assignp}
                                                 : new AstCaseItem{flp, cops.front(), assignp};
-        for (size_t i = 1; i < cops.size(); ++i) itemp->addCondsp(cops[i]);
+        for (size_t j = 1; j < cops.size(); ++j) itemp->addCondsp(cops[j]);
         if (cops.empty()) currentp = itemp;
         itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, itemp) : itemp;
     }
@@ -8408,10 +8494,6 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
 
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
-        // A cycle model has no tristate, so an inout port has no driver it can resolve; it is
-        // refused here rather than letting an undriven bidirectional port reach the DFG. The
-        // port is declared as an input so the rest of the design still analyzes
-        if (port.dir == PortMode::INOUT) { unsupportedError(port.flp, "inout port"); }
         VType type;
         const PortBounds* boundsp = nullptr;
         if (portBounds) {
@@ -8450,12 +8532,17 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
                 port.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
                 continue;
             }
-            AstVar* const varp = new AstVar{port.flp, VVarType::PORT, name.first, type.dtp};
-            // An inout port was refused above; it stays an input so later references resolve
-            const PortMode dir = port.dir == PortMode::INOUT ? PortMode::IN : port.dir;
-            varp->direction(dir == PortMode::IN    ? VDirection::INPUT
-                            : dir == PortMode::OUT ? VDirection::OUTPUT
-                                                   : VDirection::INOUT);
+            // An inout port is a net: V3Tristate connects its drivers and converts it to
+            // the input plus output-enable/output pins of the two-state model.
+            const VVarType varType = port.dir == PortMode::INOUT ? VVarType::WIRE : VVarType::PORT;
+            AstVar* const varp = new AstVar{port.flp, varType, name.first, type.dtp};
+            const VDirection direction = port.dir == PortMode::IN    ? VDirection::INPUT
+                                         : port.dir == PortMode::OUT ? VDirection::OUTPUT
+                                                                     : VDirection::INOUT;
+            varp->direction(direction);
+            // V3Tristate distinguishes a converted tristate input from an input that was
+            // declared as one by comparing against the declared direction.
+            varp->declDirection(direction);
             varp->pinNum(++pinNum);
             // VHDL ports are signals, so procedural assignment is legal
             varp->declTyped(true);

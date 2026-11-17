@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: an inout port has no driver a cycle model can resolve
+# DESCRIPTION: Verilator: VHDL top-level inout port without enable pins
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,12 +10,14 @@
 import vltest_bootstrap
 import vhdl_frontend
 
-test.scenarios('vlt')
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_inout_top.vhdl'
 
-test.top_filename = 't/t_vhdl_inout_unsup.vhdl'
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=[
+                 *vhdl_frontend.flags(), '--language', 'vhdl', '--exe', test.pli_filename])
 
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+test.execute()
 
 test.passes()

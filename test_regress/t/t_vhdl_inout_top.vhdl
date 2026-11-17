@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: an inout port has no driver a cycle model can resolve
+-- DESCRIPTION: Verilator: VHDL top-level inout port without enable pins
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
@@ -9,13 +9,15 @@ use ieee.std_logic_1164.all;
 
 entity t is
   port (
-    i   : in std_logic;
-    io  : inout std_logic;
-    o   : out std_logic
+    oe : in std_logic;
+    d  : in std_logic;
+    io : inout std_logic;
+    y  : out std_logic
   );
-end entity t;
+end;
 
 architecture rtl of t is
 begin
-  o <= i;
-end architecture rtl;
+  io <= d when oe = '1' else 'Z';
+  y <= io;
+end;
