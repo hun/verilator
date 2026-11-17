@@ -405,6 +405,14 @@ ______
       section. Reviewing a VHDL design's internals needs the dump a simulator
       that has the feature produces (``ghdl --vcd``), or the frontend's own
       ``--public-flat-rw`` accessors
+  * - N93
+    - an instance that associates the same port twice: ``port map (a => x, a => z)``,
+      as a generated wrapper did while it was being written
+    - the second association silently replaced the first, so the model was built from
+      the wrong connection with no diagnostic, while GHDL refuses it. A whole port may
+      now be associated once; disjoint slices or record elements of one port still
+      combine, which is what the microwatt shims rely on
+    - ``t_vhdl_port_dup_bad``
   * - N92
     - the asynchronous-reset flip-flop every synchronous design writes:
       ``process (rstn, clk) is if rstn = '0' then <reset> elsif rising_edge(clk) then
@@ -512,7 +520,7 @@ Verification
 ___________
 
 Each run was checked with the full native suite (``test_regress``,
-``t_vhdl_*.py``): 189 passed, 2 skipped (the two GHDL-only diagnostics). The
+``t_vhdl_*.py``): 190 passed, 2 skipped (the two GHDL-only diagnostics). The
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 

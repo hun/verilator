@@ -485,3 +485,5 @@ _______
      - Allow a function to be called inside its own arguments
    * - ``539a6b5``
      - Emit the asynchronous-reset idiom as an edge-triggered flip-flop
+   * - ``facd57d``
+     - Report a port that an instance associates more than once
