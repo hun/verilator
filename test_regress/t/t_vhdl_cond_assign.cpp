@@ -16,19 +16,20 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     VM_PREFIX* const topp = new VM_PREFIX;
 
-    //          en  sel  a    b  -> o   cnt k
-    static const int inEn[4] = {1, 0, 1, 1};
-    static const int inSel[4] = {1, 0, 0, 1};
-    static const int inA[4] = {5, 1, 2, 12};
-    static const int inB[4] = {9, 3, 7, 1};
-    static const int expO[4] = {5, 3, 7, 12};
-    static const int expCnt[4] = {5, 0, 2, 12};
-    static const int expK[4] = {5, 5, 2, 12};
+    //          en  sel  a    b  -> o   cnt k   hold
+    static const int inEn[6] = {1, 0, 1, 1, 0, 0};
+    static const int inSel[6] = {1, 0, 0, 1, 1, 0};
+    static const int inA[6] = {5, 1, 2, 12, 3, 4};
+    static const int inB[6] = {9, 3, 7, 1, 6, 2};
+    static const int expO[6] = {5, 3, 7, 12, 3, 2};
+    static const int expCnt[6] = {5, 0, 2, 12, 0, 0};
+    static const int expK[6] = {5, 5, 2, 12, 12, 12};
+    static const int expHold[6] = {5, 5, 2, 12, 6, 6};
 
     int fails = 0;
     topp->clk = 0;
     topp->eval();
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 6; ++i) {
         topp->en = inEn[i];
         topp->sel = inSel[i];
         topp->a = inA[i];
@@ -40,9 +41,10 @@ int main(int argc, char** argv) {
         const int o = topp->o;
         const int cnt = topp->cnt;
         const int k = topp->k;
-        if (o != expO[i] || cnt != expCnt[i] || k != expK[i]) {
-            std::printf("%%Error: i=%d o=%d cnt=%d k=%d exp o=%d cnt=%d k=%d\n", i, o, cnt, k,
-                        expO[i], expCnt[i], expK[i]);
+        const int hold = topp->hold;
+        if (o != expO[i] || cnt != expCnt[i] || k != expK[i] || hold != expHold[i]) {
+            std::printf("%%Error: i=%d o=%d cnt=%d k=%d hold=%d exp o=%d cnt=%d k=%d hold=%d\n", i,
+                        o, cnt, k, hold, expO[i], expCnt[i], expK[i], expHold[i]);
             ++fails;
         }
         topp->clk = 0;

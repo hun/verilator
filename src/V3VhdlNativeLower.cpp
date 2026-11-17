@@ -1054,6 +1054,9 @@ class Lowering final {
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
     AstNodeExpr* lowerAttr(const Expr& expr);
     AstNodeExpr* lowerAggregate(const Expr& expr, const VType& type);
+    //! Replicate an element value `count` times, folding a constant and chunking a
+    //! run-time replication to stay below the Verilator replication limit
+    AstNodeExpr* repeatValue(FileLine* flp, AstNodeExpr* valuep, int count, AstNodeDType* dtp);
     bool deriveAggregateType(const Expr& expr, VType& out);
     AstConst* foldStatic(AstNodeExpr* exprp) const;
     AstNodeExpr* lowerSelectedExpr(const Expr& expr);
@@ -1067,6 +1070,8 @@ class Lowering final {
     AstNodeExpr* lowerPackageMember(const Expr& expr, const std::string& pkgName);
     VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
+    AstNode* lowerLatchedAlternatives(const Concurrent& conc, const VType& type,
+                                      AstNodeExpr* lhsp);
     AstNode* lowerClockedAlternatives(const Concurrent& conc, const VType& type,
                                       AstNodeExpr* lhsp);
     bool concHasEdge(const Concurrent& conc) const;
@@ -2806,9 +2811,28 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
                                               + std::to_string(expr.args.size()) + " arguments");
                     return nullptr;
                 }
-                AstNodeExpr* valuep = lowerExpr(*expr.args[0], &typeIt->second);
+                const VType& target = typeIt->second;
+                AstNodeExpr* valuep = lowerExpr(*expr.args[0], target.dtp ? &target : nullptr);
                 if (!valuep) return nullptr;
-                return resizeExpr(valuep, typeIt->second, flp);
+                if (!target.dtp) {
+                    // A conversion to an unconstrained array takes its bounds from the
+                    // operand. Closely related arrays have the same packed form, so the
+                    // operand is the result; anything else has no representable size.
+                    const VType valueType = typeOfDType(valuep->dtypep());
+                    const VType targetElem = elementType(target, flp);
+                    const VType valueElem = elementType(valueType, flp);
+                    const bool sameType
+                        = !target.typeName.empty() && target.typeName == valueType.typeName;
+                    const bool sameElement = target.isVector() && valueType.isVector()
+                                             && target.elemWidth == valueType.elemWidth
+                                             && targetElem.kind == valueElem.kind;
+                    if (sameType || sameElement) return valuep;
+                    unsupportedError(flp,
+                                     "conversion to unconstrained type '" + expr.a->text + "'");
+                    valuep->deleteTree();
+                    return nullptr;
+                }
+                return resizeExpr(valuep, target, flp);
             }
         }
         return lowerDesignator(expr, false);
@@ -2846,13 +2870,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         AstNodeExpr* valuep = lowerExpr(*expr.a, &elemType);
         if (!valuep) return nullptr;
         valuep = resizeExpr(valuep, elemType, flp);
-        const int count = context->length();
-        AstNodeExpr* resultp = valuep;
-        for (int i = 1; i < count; ++i) {
-            resultp = new AstConcat{flp, resultp, valuep->cloneTree(false)};
-        }
-        resultp->dtypep(context->dtp);
-        return resultp;
+        return repeatValue(flp, valuep, context->length(), context->dtp);
     }
     }
     return nullptr;
@@ -4375,13 +4393,27 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
                                        ? discreteRangeType(*expr.args[0])
                                        : nullptr;
         if (expr.kind == Expr::INDEX && !rangep && !markp) {
-            if (prefixType.kind == VType::ARRAY && prefixType.elemp) {
-                out = *prefixType.elemp;
-            } else {
-                out = VType{};
-                out.kind = prefixType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
-                out.dtp = findBasic(expr.flp, prefixType.kwd);
+            // One level per index: `m(i, j)` of a two-dimensional array names the
+            // element, not the inner array
+            VType current = prefixType;
+            for (const ExprP& argp : expr.args) {
+                if (!argp || argp->kind == Expr::SLICE
+                    || (argp->kind == Expr::ATTR
+                        && (argp->text == "range" || argp->text == "reverse_range"))
+                    || discreteRangeType(*argp)) {
+                    return false;  // A sliced dimension keeps its structure in the selection
+                }
+                if (!current.isVector()) return false;
+                if (current.kind == VType::ARRAY && current.elemp) {
+                    current = *current.elemp;
+                } else {
+                    VType elem;
+                    elem.kind = current.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+                    elem.dtp = findBasic(expr.flp, current.kwd);
+                    current = elem;
+                }
             }
+            out = current;
             return true;
         }
         // A slice keeps the element type over the sliced index range
@@ -4989,6 +5021,49 @@ bool Lowering::deriveAggregateType(const Expr& expr, VType& out) {
     return true;
 }
 
+AstNodeExpr* Lowering::repeatValue(FileLine* flp, AstNodeExpr* valuep, int count,
+                                   AstNodeDType* dtp) {
+    if (count <= 1) {
+        if (dtp) valuep->dtypep(dtp);
+        return valuep;
+    }
+    if (AstConst* const constp = VN_CAST(valuep, Const)) {
+        // A constant aggregate is one value, not a chain of concatenations. Copy
+        // directly: V3Number::opRepl warns above --replication-limit, which does not
+        // apply to an aggregate.
+        V3Number num{flp, constp->width() * count, 0u};
+        for (int i = 0; i < count; ++i) {
+            num.opSelInto(constp->num(), i * constp->width(), constp->width());
+        }
+        AstConst* const resultp = new AstConst{flp, num};
+        resultp->dtypep(dtp);
+        valuep->deleteTree();
+        return resultp;
+    }
+    // V3Width warns on a replication above --replication-limit, which is a heuristic
+    // for hand-written RTL; an aggregate legitimately repeats many times. Chunk it,
+    // and combine the chunks in a balanced tree.
+    const int limit = v3Global.opt.replicationLimit();
+    const int chunkSize = limit > 0 ? std::min(limit, count) : count;
+    std::vector<AstNodeExpr*> parts;
+    for (int remaining = count; remaining > 0;) {
+        const int n = std::min(chunkSize, remaining);
+        AstNodeExpr* const srcp = parts.empty() ? valuep : valuep->cloneTree(false);
+        parts.push_back(new AstReplicate{flp, srcp, static_cast<uint32_t>(n)});
+        remaining -= n;
+    }
+    while (parts.size() > 1) {
+        std::vector<AstNodeExpr*> next;
+        for (std::size_t i = 0; i + 1 < parts.size(); i += 2) {
+            next.push_back(new AstConcat{flp, parts[i], parts[i + 1]});
+        }
+        if (parts.size() % 2) next.push_back(parts.back());
+        parts = std::move(next);
+    }
+    parts.front()->dtypep(dtp);
+    return parts.front();
+}
+
 AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
     FileLine* const flp = expr.flp;
     if (!type.isVector() && type.kind != VType::RECORD) {
@@ -5188,11 +5263,8 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
         unsupportedError(flp, "aggregate that does not cover every element");
         return nullptr;
     }
-    // Assemble from the least significant segment up
-    AstNodeExpr* resultp = nullptr;
-    bool allConst = true;
-    for (std::size_t i = 0; i < segments.size(); ++i) {
-        const Segment& segment = segments[i];
+    // Value of one segment, typed and widened to the segment
+    const auto lowerSegment = [&](const Segment& segment) -> AstNodeExpr* {
         VType segType;
         if (segment.width == type.elemWidth && type.kind == VType::ARRAY && type.elemp) {
             segType = *type.elemp;
@@ -5213,15 +5285,9 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
             // A range association's value is either one element, repeated over the
             // whole range, or spans the range itself
             const VType elemType = elementType(type, flp);
-            if (elemType.width <= 0) {
-                if (resultp) resultp->deleteTree();
-                return nullptr;
-            }
+            if (elemType.width <= 0) return nullptr;
             valuep = lowerExpr(*segment.exprp, &elemType);
-            if (!valuep) {
-                if (resultp) resultp->deleteTree();
-                return nullptr;
-            }
+            if (!valuep) return nullptr;
             if (valuep->width() == elemType.width) {
                 AstNodeExpr* const elemp = valuep;
                 valuep = elemp->cloneTree(false);
@@ -5234,11 +5300,33 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
         }
         if (!valuep) {
             valuep = lowerExpr(*segment.exprp, &segType);
-            if (!valuep) {
-                if (resultp) resultp->deleteTree();
-                return nullptr;
-            }
+            if (!valuep) return nullptr;
             valuep = resizeExpr(valuep, segType, flp);
+        }
+        return valuep;
+    };
+    // `(others => value)` gives every uncovered element the same value: lower it once
+    // and replicate. Expanding it into one concatenation per element made a large
+    // memory image quadratic in the array size.
+    bool uniform = segments.size() > 1;
+    for (std::size_t i = 1; uniform && i < segments.size(); ++i) {
+        uniform = segments[i].exprp == segments.front().exprp
+                  && segments[i].width == segments.front().width
+                  && segments[i].offset == static_cast<int>(i) * segments.front().width;
+    }
+    if (uniform && type.isVector()) {
+        AstNodeExpr* const valuep = lowerSegment(segments.front());
+        if (!valuep) return nullptr;
+        return repeatValue(flp, valuep, static_cast<int>(segments.size()), type.dtp);
+    }
+    // Assemble from the least significant segment up
+    AstNodeExpr* resultp = nullptr;
+    bool allConst = true;
+    for (const Segment& segment : segments) {
+        AstNodeExpr* valuep = lowerSegment(segment);
+        if (!valuep) {
+            if (resultp) resultp->deleteTree();
+            return nullptr;
         }
         if (!VN_IS(valuep, Const)) allConst = false;
         resultp
@@ -5344,6 +5432,43 @@ AstNode* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType&
             = level ? static_cast<AstNode*>(new AstAssign{flp, lhsp->cloneTree(false), valuep})
                     : static_cast<AstNode*>(new AstAssignDly{flp, lhsp->cloneTree(false), valuep});
         if (!alt.second) {  // The final else
+            if (restp) restp->deleteTree();
+            restp = assignp;
+            continue;
+        }
+        AstNodeExpr* const condp = lowerCond(*alt.second);
+        if (!condp) {
+            assignp->deleteTree();
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        restp = new AstIf{flp, condp, assignp, restp};
+    }
+    return restp;
+}
+
+//! A conditional signal assignment with no final `else` is a process that keeps the
+//! target value when no condition holds. Emit it as a latch, so the hold is explicit
+//! rather than feeding the target back into a continuous assignment.
+AstNode* Lowering::lowerLatchedAlternatives(const Concurrent& conc, const VType& type,
+                                            AstNodeExpr* lhsp) {
+    FileLine* const flp = conc.flp;
+    AstNode* restp = nullptr;
+    for (std::size_t i = conc.alternatives.size(); i-- > 0;) {
+        const auto& alt = conc.alternatives[i];
+        if (alt.first->kind == Expr::UNAFFECTED) {
+            unsupportedError(flp, "'unaffected' in a conditional signal assignment without else");
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        AstNodeExpr* valuep = lowerExpr(*alt.first, &type);
+        if (!valuep) {
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        valuep = resizeExpr(valuep, type, flp);
+        AstNode* const assignp = new AstAssign{flp, lhsp->cloneTree(false), valuep};
+        if (!alt.second) {
             if (restp) restp->deleteTree();
             restp = assignp;
             continue;
@@ -6369,7 +6494,13 @@ AstNode* Lowering::lowerReport(const Stmt& stmt) {
 }
 
 AstNode* Lowering::lowerAssert(const Stmt& stmt) {
-    return assertBody(stmt.flp, *stmt.value, stmt.message.get(), stmt.severity);
+    AstNode* const bodyp = assertBody(stmt.flp, *stmt.value, stmt.message.get(), stmt.severity);
+    if (bodyp && m_concurrentProc) {
+        // A concurrent procedure call has no enclosing process; the assertion is
+        // evaluated continuously, like a concurrent assertion
+        return new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS_COMB, nullptr, bodyp};
+    }
+    return bodyp;
 }
 
 AstNode* Lowering::assertBody(FileLine* flp, const Expr& condition, const Expr* message,
@@ -9407,6 +9538,11 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             continue;
         }
         if (rejectRealObject(type, port.flp, /*allowUnconstrained:*/ true)) continue;
+        if (!type.dtp) {
+            unsupportedError(port.flp, "port of type '" + port.type.mark
+                                           + "' has no resolvable index constraint");
+            continue;
+        }
         for (const auto& name : port.names) {
             if (!m_scope.emplace(name.first, VarInfo{}).second) {
                 port.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
@@ -10522,6 +10658,16 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         m_modp->addStmtsp(
             new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, new AstSenTree{stmt.flp, itemsp}, bodyp});
         lhsp->deleteTree();
+        return;
+    }
+    if (stmt.kind == Concurrent::COND_ASSIGN && !stmt.alternatives.empty()
+        && stmt.alternatives.back().second) {
+        // No condition covers the rest, so the target holds its value
+        AstNode* const bodyp = lowerLatchedAlternatives(stmt, ltype, lhsp);
+        lhsp->deleteTree();
+        if (bodyp) {
+            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS_LATCH, nullptr, bodyp});
+        }
         return;
     }
     AstNodeExpr* rhsp = nullptr;

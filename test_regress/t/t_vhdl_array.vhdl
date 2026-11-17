@@ -26,6 +26,7 @@ entity t is
     am0 : out std_logic_vector(7 downto 0);
     am1 : out std_logic_vector(7 downto 0);
     am2 : out std_logic_vector(7 downto 0);
+    init1 : out std_logic_vector(7 downto 0);
     agg : out std_logic_vector(15 downto 0);
     d : out std_logic_vector(7 downto 0);
     sumout : out std_logic_vector(9 downto 0);
@@ -62,6 +63,7 @@ architecture rtl of t is
   signal outer : outer_t;
   signal states : smem2_t;
   signal agg4 : mem_t;
+  signal initmem : mem_t := (others => x"a5");
 begin
   mem(0) <= a;
   mem(1) <= std_logic_vector(unsigned(a) + 1);
@@ -108,6 +110,7 @@ begin
   am0 <= agg4(0);
   am1 <= agg4(1);
   am2 <= agg4(2);
+  init1 <= initmem(2);
   z <= mem(i);
   cat <= mem(3) & mem(2) & mem(1);
   agg <= aggsig(1) & aggsig(0);

@@ -22,7 +22,12 @@ library ieee; use ieee.std_logic_1164.all; use work.ap.all;
 entity t is port (clk : in std_logic; din : in std_logic; a : in integer;
                   y : out std_logic; v : out integer); end;
 architecture rtl of t is
+  procedure check(arg : in std_logic) is
+  begin
+    assert arg = '0' or arg = '1' report "bad arg" severity warning;
+  end procedure;
 begin
+  check(din);
   process (clk) is
   begin
     if rising_edge(clk) then

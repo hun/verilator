@@ -31,29 +31,29 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 206 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 209 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
 ========================================  =====
 Result                                    Count
 ========================================  =====
-PASS (accepted and lowered)                 870
-UNSUPPORTED (clean diagnostic)              134
-ERROR                                        89
+PASS (accepted and lowered)                 877
+UNSUPPORTED (clean diagnostic)              135
+ERROR                                        81
 EXPECTED_FAIL                                33
 NO_TOP                                       13
 ========================================  =====
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 206 regression tests, 20 ported corpus designs
+value-checked evidence is the 209 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
-Of the 89 corpus errors, 40 are "entity not found" (mostly corpus-runner
+Of the 81 corpus errors, 40 are "entity not found" (mostly corpus-runner
 selection artifacts), 4 are entities without an architecture, 10 are missing
-standard functions, and 8 are internal faults. A sweep of 18 real designs with
+standard functions, and none are internal faults. A sweep of 18 real designs with
 whole-design linting reports 143 refusals in 39 files; 54 of those need the
 whole design to answer. The neorv32 core (``rtl/core/*.vhd``, top
 ``neorv32_top``) lints clean; the whole ``rtl/`` tree with its stock Verilog
@@ -79,8 +79,8 @@ Expressions and aggregates                   Supported  With the divergences bel
 Sequential statements and subprograms        Partial    Procedures/functions inlined; dynamic
                                                          loops, impure functions, signal formals
                                                          limited
-Concurrent statements and generate           Supported  Conditional assignment without
-                                                         ``else`` is a crash, see below
+Concurrent statements and generate           Supported  Conditional assignment with no final
+                                                         ``else`` is a latch holding the target
 ``numeric_std`` and ``std_logic_1164``       Partial    Arithmetic and conversions; not every
                                                          function; see library gaps
 ``std_logic_arith``, ``std_logic_signed``    Partial    Conversions work; signed operators on
@@ -110,13 +110,20 @@ Where the implementation is sound
   and ``signed``. Overflow and runtime range checks are intentionally absent;
   integer arithmetic is 32-bit.
 - Slicing, indexing, ascending and descending ranges, records, and aggregate
-  targets are value-tested.
+  targets are value-tested. A two-dimensional element target is typed one array
+  level per index, so element writes use the element width.
+- Concurrent conditional assignments with no final ``else`` hold the target,
+  and an assertion inside a concurrent procedure call is evaluated
+  continuously. Both are covered by value-checked and lint tests.
+- Repeated aggregate initializers are linear: a constant ``(others => value)``
+  becomes one constant, and a run-time repetition is chunked below the
+  replication limit. A 2^16-element nested-zero memory lints in 0.05 s.
 - Inout and tristate: scalar and vector ports, concurrent conditional and
   selected drivers, process drivers, hierarchical connections, and the top-level
   enable/drive interface are tested. Conflicting drivers remain a documented
   two-state divergence.
 - Most unsupported constructs produce a source-located ``Unsupported:``
-  diagnostic; 134 corpus cases are classified that way.
+  diagnostic; 135 corpus cases are classified that way.
 
 Silent semantic divergences
 ===========================
@@ -167,30 +174,26 @@ type; with two polymorphic operands the built-in operator remains. Multiple
 exact candidates are reported as ambiguous. Importing two packages that export
 the same type name unqualified is an error; the qualified mark selects one.
 
-Crash-class gaps
-================
+Internal faults
+===============
 
-These inputs should produce a clean ``Unsupported:`` or user error; instead the
-frontend or a later pass aborts:
+No corpus case now reaches an internal fault. The former crash class was closed
+by:
 
-- A concurrent conditional assignment with no final ``else``
-  (``y <= a when c1 else b when c2;``) builds a conditional expression with no
-  else value and fails with an internal error. This is legal VHDL: the target
-  keeps its value when no condition holds. It accounts for two corpus faults
-  and is the most likely to be hit by real code.
-- A 2-D array port or a 2-D array type conversion fails with "AstVar created
-  with no dtype" or a generic internal fault instead of the documented
-  multi-dimensional-port refusal.
-- A concurrent procedure call whose body contains an assertion reaches
-  ``V3Localize`` with a variable reference outside a function.
-- Element-wise concurrent writes to a 2-D array reach the DFG with a
-  mismatched width.
-- A memory initializer of the form ``(others => (others => '0'))`` expands into
-  a chain of concatenations. The cost is quadratic in the array size: 2^12
-  elements lint in 0.2 s, 2^14 in 2.3 s and 1.6 GiB, and 2^16 aborts under an
-  8 GiB limit. Large memory images are ordinary RTL.
-- The full neorv32 ``rtl/`` tree with its Verilog wrapper hits the same
-  allocation failure when the wrapper's complete generic set is specialized.
+- an ``else``-less concurrent conditional assignment is emitted as a latch that
+  holds the target when no condition holds;
+- a concurrent procedure assertion is evaluated in its own ``always_comb``;
+- a two-dimensional element target descends one type level per index, so its
+  right-hand side is widened to the element width rather than the row width;
+- an unconstrained multi-dimensional port or array conversion is reported as
+  ``Unsupported:`` with its location;
+- repeated aggregate initializers fold a constant value into one constant and
+  chunk a run-time replication, so ``(others => (others => '0'))`` over 2^16
+  elements lints in 0.05 s and 20 MiB instead of aborting.
+
+The full neorv32 ``rtl/`` tree with its stock Verilog wrapper still aborts with
+``std::bad_alloc`` under an 8 GiB limit when the wrapper's complete generic set
+is specialized. The core alone remains clean.
 
 Remaining feature gaps
 ======================
@@ -293,12 +296,9 @@ ______
 Order
 ______
 
-1. Finish the silent divergences: the conditional assignment crash and hold
-   semantics, enumeration literal scoping, operator and overload resolution,
-   ``std_logic_vector`` array comparison, and ``std_logic_signed``.
-2. Bound repeated aggregate expansion, then revisit the large-memory and
-   neorv32 allocation failures.
-3. Turn the remaining internal faults into clean diagnostics and pin them with
-   negative tests.
-4. Add a differential simulation harness and a CI job, and treat lint-only
+1. Finish the silent divergences: enumeration literal scoping, operator and
+   overload resolution, dynamic ``'succ``/``'pred`` bounds, and
+   ``std_logic_signed``.
+2. Add a differential simulation harness and a CI job, and treat lint-only
    corpus counts as breadth, not correctness.
+3. Revisit the large-memory and neorv32 wrapper allocation failures.

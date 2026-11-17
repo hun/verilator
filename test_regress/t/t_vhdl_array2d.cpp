@@ -24,10 +24,12 @@ int main(int argc, char** argv) {
         topp->eval();
         const int o = topp->o;
         const int b = topp->b;
+        const int c = topp->c;
         const int expO = a & 0xF;  // row 1 holds a(3 downto 0)
         const int expB = (a >> 5) & 1;  // m(0, 1) is row 0's index-1 bit, i.e. a(5)
-        if (o != expO || b != expB) {
-            std::printf("%%Error: a=%02x o=%x b=%x exp o=%x b=%x\n", a, o, b, expO, expB);
+        if (o != expO || b != expB || c != (a & 1)) {
+            std::printf("%%Error: a=%02x o=%x b=%x c=%x exp o=%x b=%x c=%x\n", a, o, b, c, expO,
+                        expB, a & 1);
             ++fails;
         }
     }

@@ -48,6 +48,7 @@ int main(int argc, char** argv) {
                 {"am0", static_cast<int>(topp->am0), a},
                 {"am1", static_cast<int>(topp->am1), (a + 1) & 0xff},
                 {"am2", static_cast<int>(topp->am2), 0},
+                {"init1", static_cast<int>(topp->init1), 0xa5},
                 {"d", static_cast<int>(topp->d), (a + 1) & 0xff},
                 {"sum", static_cast<int>(topp->sumout), m0 + m1 + m2 + m3},
                 {"neg", static_cast<int>(topp->neg) & 0xff, (-a) & 0xff},
