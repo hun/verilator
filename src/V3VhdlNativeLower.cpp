@@ -1010,6 +1010,9 @@ class Lowering final {
     AstNode* lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
                                   bool variable, bool concurrentProc);
     void lowerProcess(const Process& process);
+    //! Emit the asynchronous-reset flip-flop idiom as an edge-triggered always, whose
+    //! sensitivity then carries the clock. False when the process is not that idiom.
+    bool lowerFlopIdiom(const Process& process);
     void registerSubprograms(const std::vector<SubprogramDecl>& decls, int frame,
                              bool processLocal = false);
     void setScope(const ScopeSave& saved);
@@ -7654,6 +7657,10 @@ void Lowering::lowerProcess(const Process& process) {
     const bool hasEdges = stmtsContainEdge(process.body);
     m_edgeAsLevel = hasEdges && sensVars.size() == 1;
     m_edgeAsPrev = hasEdges && sensVars.size() > 1;
+    if (lowerFlopIdiom(process)) {
+        restoreScope(saved);
+        return;
+    }
 
     m_edges.clear();
     m_initial = false;
@@ -7718,6 +7725,107 @@ void Lowering::lowerProcess(const Process& process) {
     // initial combination is visible to the testbench after the first eval
     if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
     restoreScope(saved);
+}
+
+//! The asynchronous-reset flip-flop idiom a process writes:
+//! `if rst = <active> then <reset values> elsif rising_edge(clk) then <clocked> end if`.
+//! Emitting it as an edge-triggered always puts the clock in the block's sensitivity,
+//! where the scheduler keeps it; the level test inside the body used to be the only place
+//! the clock appeared, and a split of the body could drop it.
+bool Lowering::lowerFlopIdiom(const Process& process) {
+    if (process.body.size() != 1 || !process.body[0]) return false;
+    const Stmt& ifStmt = *process.body[0];
+    if (ifStmt.kind != Stmt::IF || ifStmt.branches.size() != 2) return false;
+    // The test and the edge are usually written in parentheses: `if (rst = '0') then`
+    const auto unwrap = [](const Expr* exprp) {
+        while (exprp && exprp->kind == Expr::PAREN && exprp->a) exprp = exprp->a.get();
+        return exprp;
+    };
+    const Expr* const testp = unwrap(ifStmt.branches[0].first.get());  // `rst = '0'`
+    const Expr* const edgep = unwrap(ifStmt.branches[1].first.get());  // `rising_edge(clk)`
+    if (!testp || !edgep) return false;
+    if (edgep->kind != Expr::INDEX || !edgep->a || edgep->a->kind != Expr::NAME
+        || edgep->args.size() != 1 || !edgep->args[0] || edgep->args[0]->kind != Expr::NAME) {
+        return false;
+    }
+    const bool rising = edgep->a->text == "rising_edge";
+    if (!rising && edgep->a->text != "falling_edge") return false;
+    if (testp->kind != Expr::BINARY || (testp->text != "=" && testp->text != "/=") || !testp->a
+        || !testp->b) {
+        return false;
+    }
+    const Expr* namep = nullptr;
+    const Expr* levelp = nullptr;
+    if (unwrap(testp->a.get())->kind == Expr::NAME) {
+        namep = unwrap(testp->a.get());
+        levelp = unwrap(testp->b.get());
+    } else if (unwrap(testp->b.get())->kind == Expr::NAME) {
+        namep = unwrap(testp->b.get());
+        levelp = unwrap(testp->a.get());
+    } else {
+        return false;
+    }
+    if (levelp->kind != Expr::CHAR_LIT || (levelp->charValue != '0' && levelp->charValue != '1')) {
+        return false;
+    }
+    // The process must be sensitive to exactly the reset and the clock, so that those two
+    // edges are all it can be woken by
+    const std::string& resetName = namep->text;
+    const std::string& clockName = edgep->args[0]->text;
+    if (process.sensitivity.size() != 2 || resetName == clockName
+        || std::find(process.sensitivity.begin(), process.sensitivity.end(), resetName)
+               == process.sensitivity.end()
+        || std::find(process.sensitivity.begin(), process.sensitivity.end(), clockName)
+               == process.sensitivity.end()) {
+        return false;
+    }
+    Expr resetNameExpr{Expr::NAME};
+    resetNameExpr.flp = process.flp;
+    resetNameExpr.text = resetName;
+    resetNameExpr.spelling = namep->spelling;
+    AstVar* const resetVarp = lookupVar(resetNameExpr);
+    Expr clockNameExpr{Expr::NAME};
+    clockNameExpr.flp = process.flp;
+    clockNameExpr.text = clockName;
+    clockNameExpr.spelling = edgep->args[0]->spelling;
+    AstVar* const clockVarp = lookupVar(clockNameExpr);
+    if (!resetVarp || !clockVarp) return false;
+    // `rst = '0'` and `rst /= '1'` test the active level, `rst = '1'` and `rst /= '0'` the
+    // other one
+    const bool activeLow = (levelp->charValue == '0') == (testp->text == "=");
+    // The edge test is the sensitivity now, so the branches never see it; an edge call
+    // that remains in a branch is that signal's level on the edge
+    m_edgeAsLevel = true;
+    m_edgeAsPrev = false;
+    m_initial = false;
+    m_varVals.clear();
+    AstNode* const clockedp = lowerStmtList(ifStmt.branches[1].second);
+    AstNode* const resetp = lowerStmtList(ifStmt.branches[0].second);
+    AstNodeExpr* const condp = lowerCond(*testp);
+    if (!clockedp || !resetp || !condp) {
+        if (clockedp) clockedp->deleteTree();
+        if (resetp) resetp->deleteTree();
+        if (condp) condp->deleteTree();
+        return true;  // The failure is reported; the caller must not lower the body again
+    }
+    AstSenItem* itemsp
+        = new AstSenItem{process.flp, rising ? VEdgeType::ET_POSEDGE : VEdgeType::ET_NEGEDGE,
+                         new AstVarRef{process.flp, clockVarp, VAccess::READ}};
+    itemsp = AstNode::addNext<AstSenItem, AstSenItem>(
+        itemsp,
+        new AstSenItem{process.flp, activeLow ? VEdgeType::ET_NEGEDGE : VEdgeType::ET_POSEDGE,
+                       new AstVarRef{process.flp, resetVarp, VAccess::READ}});
+    AstNode* const bodyp = new AstIf{process.flp, condp, resetp, clockedp};
+    m_modp->addStmtsp(new AstAlways{process.flp, VAlwaysKwd::ALWAYS,
+                                    new AstSenTree{process.flp, itemsp}, bodyp});
+    // A VHDL process runs once at time zero, when the clock has not had an edge: only a
+    // reset that is already active assigns anything
+    m_initial = true;
+    m_varVals.clear();
+    AstNode* const initp = lowerStmtList(process.body);
+    m_initial = false;
+    if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
+    return true;
 }
 
 Lowering::ScopeSave Lowering::saveScope() const {
