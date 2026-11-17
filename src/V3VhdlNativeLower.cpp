@@ -81,6 +81,12 @@ struct VType final {
     bool isVector() const { return kind == VECTOR || kind == ARRAY; }
     bool isInt() const { return kind == INT; }
     bool isSigned() const { return signing == VSigning::SIGNED; }
+    //! A predefined 1-D array type such as std_logic_vector or bit_vector (or a
+    //! user-declared array of a one-bit element, which compares the same way)
+    bool isPredefinedVector() const {
+        return (kind == VECTOR && signing == VSigning::NOSIGN)
+               || (kind == ARRAY && signing == VSigning::NOSIGN && elemWidth == 1);
+    }
     //! Number of elements of an array, or 1 for a scalar
     int length() const { return isVector() ? std::abs(left - right) + 1 : 1; }
     //! Bit offset of a declared array index from the least significant element;
@@ -353,6 +359,7 @@ class Lowering final {
     PackageTable::Impl* m_publishp = nullptr;  // Package table to publish into
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
+    bool m_stdLogicSigned = false;  // `use ieee.std_logic_signed.all` is in effect
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
     std::map<std::string, AliasInfo> m_aliases;
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
@@ -364,6 +371,16 @@ class Lowering final {
     AstNodeDType* findVector(FileLine* flp, VBasicDTypeKwd kwd, VSigning signing, int left,
                              int right, bool ascending) const {
         const int width = std::abs(left - right) + 1;
+        if (signing == VSigning::NOSIGN) {
+            // AstBasicDType normalizes NOSIGN to UNSIGNED for a logic keyword, which would
+            // make a VHDL array indistinguishable from numeric_std unsigned. Keep a
+            // separate dtype instance so the frontend can tell the two apart.
+            AstBasicDType* const dtp = new AstBasicDType{flp, kwd, VSigning::UNSIGNED,
+                                                         VNumRange{left, right, ascending}, width};
+            dtp->numeric(VSigning::NOSIGN);
+            m_rootp->typeTablep()->addTypesp(dtp);
+            return dtp;
+        }
         return m_rootp->typeTablep()->findLogicBitDType(
             flp, kwd, VNumRange{left, right, ascending}, width, signing);
     }
@@ -448,11 +465,27 @@ class Lowering final {
             type.left = basicp->left();
             type.right = basicp->right();
             type.ascending = basicp->ascending();
-            type.signing = dtp->isSigned() ? VSigning::SIGNED : VSigning::UNSIGNED;
+            type.signing = basicp->isNosign()
+                               ? VSigning::NOSIGN
+                               : (dtp->isSigned() ? VSigning::SIGNED : VSigning::UNSIGNED);
         } else {
             type.kind = basicp->keyword() == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
         }
         return type;
+    }
+    //! The enumeration type behind a dtype, with its literal order, if it has one
+    static bool enumTypeOfDType(AstNodeDType* dtp, VType& out) {
+        AstEnumDType* const enump = VN_CAST(dtp->skipRefToEnump(), EnumDType);
+        if (!enump) return false;
+        out = VType{};
+        out.kind = VType::ENUM;
+        out.dtp = dtp;
+        out.width = dtp->width();
+        for (AstEnumItem* itemp = enump->itemsp(); itemp;
+             itemp = VN_CAST(itemp->nextp(), EnumItem)) {
+            out.literals.push_back(itemp->name());
+        }
+        return true;
     }
 
     AstConst* makeIntConst(FileLine* flp, int64_t value) const {
@@ -843,24 +876,29 @@ class Lowering final {
     VType stringType(FileLine* flp, int length) const {
         VType type;
         type.kind = VType::ARRAY;
-        type.elemp = std::make_shared<VType>(
-            vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
+        type.elemp
+            = std::make_shared<VType>(vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, 8));
         type.elemWidth = 8;
         type.kwd = VBasicDTypeKwd::LOGIC;
-        type.signing = VSigning::UNSIGNED;
+        type.signing = VSigning::NOSIGN;
         type.left = 1;
         type.right = length;
         type.ascending = true;
         type.width = 8 * length;
-        type.dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, type.width);
+        type.dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, type.width);
         return type;
+    }
+    //! Signing a vector mark denotes: numeric_std unsigned/signed, or a VHDL array
+    static VSigning vectorSigning(const std::string& mark) {
+        if (mark == "signed" || mark == "u_signed") return VSigning::SIGNED;
+        if (mark == "unsigned" || mark == "u_unsigned") return VSigning::UNSIGNED;
+        return VSigning::NOSIGN;
     }
     //! The type such a value has: the mark's element type and the literal's width
     VType literalVectorType(FileLine* flp, const std::string& mark, int width) const {
         const VBasicDTypeKwd kwd
             = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-        const VSigning signing = mark == "signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
-        return vectorType(flp, kwd, signing, width);
+        return vectorType(flp, kwd, vectorSigning(mark), width);
     }
 
     //! Whether an expression contains a real literal, so its value is a real
@@ -1798,8 +1836,7 @@ void Lowering::registerType(const TypeDecl& decl) {
             // An array of an unconstrained vector; a use supplies the element's range
             elem.kind = VType::VECTOR;
             elem.kwd = baseMark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-            elem.signing = (baseMark == "signed" || baseMark == "u_signed") ? VSigning::SIGNED
-                                                                            : VSigning::UNSIGNED;
+            elem.signing = vectorSigning(baseMark);
             elem.width = 0;
             elem.elemWidth = 1;
         } else if (baseMark == "integer_vector") {
@@ -1822,7 +1859,7 @@ void Lowering::registerType(const TypeDecl& decl) {
             elem.ascending = ascending;
             elem.width
                 = intElem.width * (std::abs(static_cast<int>(left) - static_cast<int>(right)) + 1);
-            elem.dtp = findVectorWidth(flp, elem.kwd, VSigning::UNSIGNED, elem.width);
+            elem.dtp = findVectorWidth(flp, elem.kwd, elem.signing, elem.width);
         } else if (!resolveType(decl.base, elem)) {
             return;
         }
@@ -1839,7 +1876,7 @@ void Lowering::registerType(const TypeDecl& decl) {
             }
         }
         type.kind = VType::ARRAY;
-        type.signing = VSigning::UNSIGNED;
+        type.signing = VSigning::NOSIGN;
         // Fold the index constraints (outermost first) into a nested array of arrays, so a
         // multi-dimensional array is a packed vector whose element is itself the inner array
         std::vector<const TypeSpec*> specs;
@@ -1883,7 +1920,7 @@ void Lowering::registerType(const TypeDecl& decl) {
                 arr.elemp = std::make_shared<VType>(inner);
                 arr.elemWidth = inner.width;
                 arr.kwd = inner.kwd;
-                arr.signing = VSigning::UNSIGNED;
+                arr.signing = VSigning::NOSIGN;
                 arr.width = 0;
                 inner = arr;
             }
@@ -1897,12 +1934,12 @@ void Lowering::registerType(const TypeDecl& decl) {
             arr.elemp = std::make_shared<VType>(cur);
             arr.elemWidth = cur.width;
             arr.kwd = cur.kwd;
-            arr.signing = VSigning::UNSIGNED;
+            arr.signing = VSigning::NOSIGN;
             arr.left = static_cast<int>(lefts[k]);
             arr.right = static_cast<int>(rights[k]);
             arr.ascending = ascends[k];
             arr.width = cur.width * arr.length();
-            arr.dtp = findVectorWidth(flp, arr.kwd, VSigning::UNSIGNED, arr.width);
+            arr.dtp = findVectorWidth(flp, arr.kwd, VSigning::NOSIGN, arr.width);
             cur = arr;
         }
         type = cur;  // The outermost array type
@@ -1925,8 +1962,7 @@ void Lowering::registerType(const TypeDecl& decl) {
                 memberType.kind = VType::VECTOR;
                 memberType.kwd
                     = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-                memberType.signing = (mark == "signed" || mark == "u_signed") ? VSigning::SIGNED
-                                                                              : VSigning::UNSIGNED;
+                memberType.signing = vectorSigning(mark);
                 memberType.width = 0;
             } else if (!resolveType(member.type, memberType)) {
                 return;
@@ -1951,9 +1987,10 @@ void Lowering::registerType(const TypeDecl& decl) {
         type.kind = VType::RECORD;
         type.width = total;
         type.kwd = kwd;
+        type.signing = VSigning::NOSIGN;
         type.fields = std::move(fields);
         // An unconstrained record (no fixed width) has no packed dtype until constrained
-        type.dtp = total > 0 ? findVectorWidth(flp, kwd, VSigning::UNSIGNED, total)
+        type.dtp = total > 0 ? findVectorWidth(flp, kwd, VSigning::NOSIGN, total)
                              : findBasic(flp, kwd == VBasicDTypeKwd::BIT ? VBasicDTypeKwd::BIT
                                                                          : VBasicDTypeKwd::LOGIC);
         break;
@@ -2418,7 +2455,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         return false;
     }
     const VBasicDTypeKwd kwd = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-    const VSigning signing = mark == "signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+    const VSigning signing = vectorSigning(mark);
     out = vectorType(flp, kwd, signing,
                      std::abs(static_cast<int>(left) - static_cast<int>(right)) + 1);
     out.left = static_cast<int>(left);
@@ -2485,12 +2522,23 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         if (context && context->isVector() && context->width == width) {
             dtp = context->dtp;
         } else {
-            dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width);
+            dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, width);
         }
         return makeBitsConst(flp, dtp, expr.bits);
     }
     case Expr::NAME: {
         if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, false);
+        // An expected enumeration type picks its own literal, even when another visible
+        // enumeration declares the same name (IEEE 1076-2008 12.5)
+        if (context && context->kind == VType::ENUM) {
+            for (size_t i = 0; i < context->literals.size(); ++i) {
+                if (context->literals[i] != expr.text) continue;
+                AstConst* const constp
+                    = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
+                constp->dtypep(context->dtp);
+                return constp;
+            }
+        }
         const auto constIt = m_consts.find(expr.text);
         if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
         const auto preIt = m_preConsts.find(expr.text);
@@ -2544,7 +2592,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             aggregateType.kind = VType::VECTOR;
             aggregateType.kwd
                 = expr.text == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-            aggregateType.signing = expr.text == "signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+            aggregateType.signing = vectorSigning(expr.text);
             int64_t low = 0;
             int64_t high = 0;
             if (!aggregateBounds(*expr.a, low, high)) {
@@ -2566,9 +2614,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         const VType valueType = typeOfDType(valuep->dtypep());
         if (declared != m_types.end()) return resizeExpr(valuep, declared->second, flp);
         VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
-        VSigning signing = VSigning::UNSIGNED;
+        VSigning signing = VSigning::NOSIGN;
         if (expr.text == "bit_vector" || expr.text == "bit") kwd = VBasicDTypeKwd::BIT;
-        if (expr.text == "signed") signing = VSigning::SIGNED;
+        if (expr.text == "signed" || expr.text == "unsigned") signing = vectorSigning(expr.text);
         const VType target = vectorType(flp, kwd, signing, valueType.width);
         return resizeExpr(valuep, target, flp);
     }
@@ -2766,6 +2814,8 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     AstNodeExpr* rp = nullptr;
     const bool aChar = expr.a && expr.a->kind == Expr::CHAR_LIT;
     const bool bChar = expr.b && expr.b->kind == Expr::CHAR_LIT;
+    const bool aEnumLit = expr.a && expr.a->kind == Expr::NAME && m_enumConsts.count(expr.a->text);
+    const bool bEnumLit = expr.b && expr.b->kind == Expr::NAME && m_enumConsts.count(expr.b->text);
     if (bChar && !aChar) {
         lp = lowerExpr(*expr.a, nullptr);
         if (!lp) return nullptr;
@@ -2776,6 +2826,34 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         if (!rp) return nullptr;
         const VType rctx = typeOfDType(rp->dtypep());
         lp = lowerExpr(*expr.a, &rctx);
+    } else if (aEnumLit != bEnumLit) {
+        // Resolve a bare enumeration literal from the type of the other operand, which is
+        // how two visible enumeration types can share a literal name
+        const Expr& typed = aEnumLit ? *expr.b : *expr.a;
+        AstNodeExpr* typedp = lowerExpr(typed, nullptr);
+        if (!typedp) return nullptr;
+        VType enumType;
+        bool haveEnum = typeOfDesignator(typed, enumType) && enumType.kind == VType::ENUM;
+        if (!haveEnum) haveEnum = enumTypeOfDType(typedp->dtypep(), enumType);
+        if (haveEnum) {
+            AstNodeExpr* const litp = lowerExpr(aEnumLit ? *expr.a : *expr.b, &enumType);
+            if (!litp) {
+                typedp->deleteTree();
+                return nullptr;
+            }
+            if (aEnumLit) {
+                lp = litp;
+                rp = typedp;
+            } else {
+                lp = typedp;
+                rp = litp;
+            }
+        } else {
+            typedp->deleteTree();
+            lp = lowerExpr(*expr.a, nullptr);
+            if (!lp) return nullptr;
+            rp = lowerExpr(*expr.b, nullptr);
+        }
     } else {
         lp = lowerExpr(*expr.a, nullptr);
         if (!lp) return nullptr;
@@ -2884,6 +2962,32 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         };
         reSignLiteral(*expr.a, lp, lt, rt);
         reSignLiteral(*expr.b, rp, rt, lt);
+        if (m_stdLogicSigned
+            && ((lt.isPredefinedVector() && lt.kwd == VBasicDTypeKwd::LOGIC)
+                || (rt.isPredefinedVector() && rt.kwd == VBasicDTypeKwd::LOGIC))) {
+            unsupportedError(flp, "std_logic_signed comparison");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+        // Predefined array equality: different lengths are unequal, equal lengths compare
+        // element by element with identity equality.
+        if ((cmpOp == "=" || cmpOp == "/=") && lt.isPredefinedVector()
+            && rt.isPredefinedVector()) {
+            if (lt.width != rt.width) {
+                lp->deleteTree();
+                rp->deleteTree();
+                AstConst* const resultp
+                    = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
+                resultp->dtypep(bitDtp);
+                return resultp;
+            }
+            AstNodeExpr* cmpp = cmpOp == "="
+                                    ? static_cast<AstNodeExpr*>(new AstEqCase{flp, lp, rp})
+                                    : static_cast<AstNodeExpr*>(new AstNeqCase{flp, lp, rp});
+            cmpp->dtypep(bitDtp);
+            return cmpp;
+        }
         // IEEE 1164 defines `=` on std_logic as identity, so 'X' = 'X' is true; a 4-state
         // equality would report false. The same applies element-wise to a logic vector.
         const bool logicCompare
@@ -2900,17 +3004,33 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             cmpp->dtypep(bitDtp);
             return cmpp;
         }
-        // Predefined array equality is false when the operands have different lengths.
-        // A bit_vector has no library overload, so this is unambiguous.
-        if ((cmpOp == "=" || cmpOp == "/=") && lt.kind == VType::VECTOR && rt.kind == VType::VECTOR
-            && lt.kwd == VBasicDTypeKwd::BIT && rt.kwd == VBasicDTypeKwd::BIT
-            && lt.width != rt.width) {
+        // Predefined array ordering is lexicographic over the common prefix; if that is
+        // equal, the shorter array is the smaller one (IEEE 1076-2008 9.2.3).
+        if ((cmpOp == "<" || cmpOp == "<=" || cmpOp == ">" || cmpOp == ">=")
+            && lt.isPredefinedVector() && rt.isPredefinedVector() && lt.width != rt.width) {
+            const int common = std::min(lt.width, rt.width);
+            const VType prefixType = vectorType(flp, lt.kwd, VSigning::NOSIGN, common);
+            AstSel* const lpfx = new AstSel{flp, lp->cloneTree(false), lt.width - common, common};
+            lpfx->dtypep(prefixType.dtp);
+            AstSel* const rpfx = new AstSel{flp, rp->cloneTree(false), rt.width - common, common};
+            rpfx->dtypep(prefixType.dtp);
             lp->deleteTree();
             rp->deleteTree();
-            AstConst* const resultp
-                = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
-            resultp->dtypep(bitDtp);
-            return resultp;
+            AstNodeExpr* const eqp
+                = new AstEqCase{flp, lpfx->cloneTree(false), rpfx->cloneTree(false)};
+            eqp->dtypep(bitDtp);
+            AstNodeExpr* cmpp = nullptr;
+            if (cmpOp == "<" || cmpOp == "<=") {
+                AstNodeExpr* const ltp = new AstLt{flp, lpfx, rpfx};
+                ltp->dtypep(bitDtp);
+                cmpp = new AstCond{flp, eqp, bitConst(flp, lt.width < rt.width ? '1' : '0'), ltp};
+            } else {
+                AstNodeExpr* const gtp = new AstGt{flp, lpfx, rpfx};
+                gtp->dtypep(bitDtp);
+                cmpp = new AstCond{flp, eqp, bitConst(flp, lt.width > rt.width ? '1' : '0'), gtp};
+            }
+            cmpp->dtypep(bitDtp);
+            return cmpp;
         }
         if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
             unsupportedError(flp, "comparison between signed and unsigned operands");
@@ -2968,7 +3088,8 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             return nullptr;
         }
         const VBasicDTypeKwd kwd = lt.isVector() ? lt.kwd : rt.kwd;
-        const VType resultType = vectorType(flp, kwd, VSigning::UNSIGNED, lt.width + rt.width);
+        const VSigning signing = lt.isVector() ? lt.signing : rt.signing;
+        const VType resultType = vectorType(flp, kwd, signing, lt.width + rt.width);
         AstConcat* const concatp = new AstConcat{flp, lp, rp};
         concatp->dtypep(resultType.dtp);
         return concatp;
@@ -3030,7 +3151,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         // A predefined `bit_vector` shift fills the vacated positions with the array's
         // edge element: sra with the leftmost, sla with the rightmost (IEEE 1076-2008
         // 9.2.3). The numeric_std vector types keep their own shift semantics.
-        const bool edgeFill = lt.kwd == VBasicDTypeKwd::BIT;
+        const bool edgeFill = lt.kwd == VBasicDTypeKwd::BIT || lt.isPredefinedVector();
         AstNodeExpr* resultp = nullptr;
         if (op == "sll") {
             resultp = new AstShiftL{flp, lp, rp, width};
@@ -3147,6 +3268,14 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     }
     if (!lt.isVector() || !rt.isVector() || lt.kwd != rt.kwd) {
         unsupportedError(flp, "arithmetic on non-numeric operands");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    if (m_stdLogicSigned
+        && ((lt.isPredefinedVector() && lt.kwd == VBasicDTypeKwd::LOGIC)
+            || (rt.isPredefinedVector() && rt.kwd == VBasicDTypeKwd::LOGIC))) {
+        unsupportedError(flp, "std_logic_signed arithmetic");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -3402,7 +3531,11 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         VSigning signing = valueType.signing;
         if (fn != "resize") {
             kwd = VBasicDTypeKwd::LOGIC;
-            signing = fn == "conv_signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+            if (fn == "conv_std_logic_vector") {
+                signing = VSigning::NOSIGN;
+            } else {
+                signing = fn == "conv_signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+            }
         }
         const VType target = vectorType(flp, kwd, signing, static_cast<int>(width));
         return resizeExpr(valuep, target, flp);
@@ -3483,7 +3616,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         const VType valueType = typeOfDType(valuep->dtypep());
         const VType target
             = vectorType(flp, fn == "to_bit" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC,
-                         VSigning::UNSIGNED, valueType.width);
+                         VSigning::NOSIGN, valueType.width);
         return resizeExpr(valuep, target, flp);
     }
     if (fn == "to_stdlogicvector" || fn == "to_stdulogicvector" || fn == "to_bitvector") {
@@ -3492,7 +3625,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         const VType valueType = typeOfDType(valuep->dtypep());
         const VType target
             = vectorType(flp, fn == "to_bitvector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC,
-                         VSigning::UNSIGNED, valueType.width);
+                         VSigning::NOSIGN, valueType.width);
         return resizeExpr(valuep, target, flp);
     }
     unsupportedError(flp, "function '" + fn + "'");
@@ -3554,9 +3687,11 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
         return nullptr;
     }
     VBasicDTypeKwd kwd = valueType.kwd;
-    VSigning signing = VSigning::UNSIGNED;
+    VSigning signing = VSigning::NOSIGN;
     if (name == "signed" || name == "u_signed") {
         signing = VSigning::SIGNED;
+    } else if (name == "unsigned" || name == "u_unsigned") {
+        signing = VSigning::UNSIGNED;
     } else if (name == "bit_vector") {
         kwd = VBasicDTypeKwd::BIT;
     }
@@ -5112,6 +5247,9 @@ bool Lowering::aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) con
 
 bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
                                  std::vector<AstConst*>& cops) {
+    VType choiceType;
+    const bool choiceEnum = enumTypeOfDType(dtp, choiceType);
+    if (!choiceEnum) choiceType = typeOfDType(dtp);
     for (const ExprP& choicep : choices) {
         if (choicep->kind == Expr::SLICE) {
             // A choice range expands to one case item per value
@@ -5127,14 +5265,13 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
                 return false;
             }
             for (int64_t value = left;; value += step) {
-                AstNodeExpr* const exprp = makeVectorConst(choicep->flp, typeOfDType(dtp), value);
+                AstNodeExpr* const exprp = makeVectorConst(choicep->flp, choiceType, value);
                 AstConst* const constp = VN_CAST(exprp, Const);
                 cops.push_back(constp);
                 if (value == right) break;
             }
             continue;
         }
-        const VType choiceType = typeOfDType(dtp);
         AstNodeExpr* const exprp = lowerExpr(*choicep, &choiceType);
         if (!exprp) return false;
         AstConst* constp = VN_CAST(exprp, Const);
@@ -8318,6 +8455,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
 }
 
 void Lowering::importPackage(const std::string& name) {
+    if (name == "std_logic_signed") m_stdLogicSigned = true;
     if (!m_packagesp) return;
     const auto pkgIt = m_packagesp->packages.find(name);
     if (pkgIt == m_packagesp->packages.end()) return;  // Standard package: intrinsics
@@ -8591,9 +8729,9 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         } else if (boundsp) {
             // An unconstrained port specialized from the actual at this instance
             VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
-            VSigning signing = VSigning::UNSIGNED;
+            VSigning signing = VSigning::NOSIGN;
             if (port.type.mark == "bit_vector") kwd = VBasicDTypeKwd::BIT;
-            if (port.type.mark == "signed") signing = VSigning::SIGNED;
+            signing = vectorSigning(port.type.mark);
             type = vectorType(entity.flp, kwd, signing,
                               std::abs(boundsp->left - boundsp->right) + 1);
             type.left = boundsp->left;
@@ -9424,15 +9562,14 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                     AstNodeExpr* valuep = nullptr;
                     if (connection.assocp->actual) {
                         const VType elementType
-                            = vectorType(flp, portType.kwd, VSigning::UNSIGNED, connection.width);
+                            = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
                         valuep = lowerExpr(*connection.assocp->actual, &elementType);
                         if (!valuep) return nullptr;
                         valuep = resizeExpr(valuep, elementType, flp);
                     } else {
                         // An open input element contributes unknown bits
                         valuep = makeRepeatedConst(
-                            flp,
-                            vectorType(flp, portType.kwd, VSigning::UNSIGNED, connection.width),
+                            flp, vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width),
                             'x');
                     }
                     actualp = actualp
@@ -9456,7 +9593,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                         return nullptr;
                     }
                     const VType elementType
-                        = vectorType(flp, portType.kwd, VSigning::UNSIGNED, connection.width);
+                        = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
                     AstSel* const rhsp
                         = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
                                      connection.lsb, connection.width};

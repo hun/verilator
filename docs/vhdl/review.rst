@@ -31,28 +31,28 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 199 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 203 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
 case/top pairs:
 
 ========================================  =====
 Result                                    Count
 ========================================  =====
-PASS (accepted and lowered)                 877
-UNSUPPORTED (clean diagnostic)              126
-ERROR                                        90
+PASS (accepted and lowered)                 869
+UNSUPPORTED (clean diagnostic)              135
+ERROR                                        89
 EXPECTED_FAIL                                33
 NO_TOP                                       13
 ========================================  =====
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 199 regression tests, 20 ported corpus designs
+value-checked evidence is the 203 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
-Of the 90 corpus errors, 40 are "entity not found" (mostly corpus-runner
-selection artifacts), 4 are entities without an architecture, 11 are missing
+Of the 89 corpus errors, 40 are "entity not found" (mostly corpus-runner
+selection artifacts), 4 are entities without an architecture, 10 are missing
 standard functions, and 8 are internal faults. A sweep of 18 real designs with
 whole-design linting reports 143 refusals in 39 files; 54 of those need the
 whole design to answer. The neorv32 core (``rtl/core/*.vhd``, top
@@ -116,7 +116,7 @@ Where the implementation is sound
   enable/drive interface are tested. Conflicting drivers remain a documented
   two-state divergence.
 - Most unsupported constructs produce a source-located ``Unsupported:``
-  diagnostic; 126 corpus cases are classified that way.
+  diagnostic; 135 corpus cases are classified that way.
 
 Silent semantic divergences
 ===========================
@@ -131,17 +131,11 @@ with a different result. The reference values were confirmed with GHDL.
    * - Construct
      - VHDL behavior
      - Frontend behavior
-   * - ``std_logic_vector`` equality with unequal lengths, and array ordering
-     - equality is false; ordering is lexicographic
-     - equal lengths compare by identity; unequal equality resizes, and
-       ordering is numeric
-   * - ``std_logic_vector sra``/``sla`` without ``numeric_std``
-     - vacated positions use the array's leftmost/rightmost element
-       (IEEE 1076-2008 9.2.3)
-     - zero fill; ``sra``/``sla`` on ``unsigned`` also zero-fill, and the two
-       types are not distinguished
-   * - Two enumeration types with the same literal name
-     - the literal is resolved by the expected type
+   * - A user-declared array whose element is wider than one bit
+     - element-wise equality and lexicographic ordering
+     - packed operands are resized and compared numerically
+   * - Two visible enumeration types share a literal and no expected type picks one
+     - overload resolution picks the literal from the expected type
      - one global literal table is used; the last declaration wins
    * - User-defined infix operator, e.g. ``"+"`` on an array type
      - the overload is called
@@ -149,25 +143,26 @@ with a different result. The reference values were confirmed with GHDL.
    * - Overloads of ``unsigned`` and ``signed``, or of two array types
      - selected by the full parameter type (IEEE 1076-2008 12.5)
      - both are the same broad category, so the first declaration wins
-   * - ``use ieee.std_logic_signed.all``
-     - arithmetic and comparison are signed
-     - ``std_logic_vector`` operations are unsigned
    * - ``'succ``/``'pred`` of an end literal with a non-static argument
      - a bound check fails
      - the runtime step wraps
 
 The two-state model makes some of these unavoidable at runtime: ``is_x`` is
 always false, and a signal cannot hold a metavalue. ``'Z'`` is preserved for a
-tristate driver and resolves to zero anywhere else. Those are documented
-divergences. The items in the table above are different: they change the value
-of legal, entirely two-state designs and do so without a diagnostic.
+tristate driver and resolves to zero anywhere else. Array ordering of
+metavalue constants uses the two-state order, not the IEEE 1164 enumeration
+order. Those are documented divergences. The items in the table above are
+different: they change the value of legal, entirely two-state designs and do so
+without a diagnostic.
 
-An out-of-range ``'succ``/``'pred`` whose argument is locally static is now a
-frontend error. Only the dynamic value still wraps.
+A typed context now resolves enumeration literals, including two types that
+share a name, and a static out-of-range ``'succ``/``'pred`` is a frontend error;
+only the dynamic value still wraps.
 
 Two library caveats deserve emphasis. Unknown standard packages are treated as
-intrinsics instead of being refused, which is why ``std_logic_signed`` is
-accepted with unsigned semantics. And vector operators are lowered by their
+intrinsics instead of being refused; ``std_logic_unsigned`` matches the modeled
+unsigned behavior, while an arithmetic or comparison operator under
+``std_logic_signed`` is refused. And vector operators are lowered by their
 symbol, not by resolving the visible overload set, so a design's own operator
 functions are bypassed. Both are structural: they need either real overload
 resolution or a diagnostic when the operator cannot be justified.
@@ -204,6 +199,8 @@ Remaining feature gaps
   Conflicting enabled values resolve to 1 rather than ``'X'``. User-defined
   resolution functions remain out of scope.
 - Concurrent ``unaffected`` is reported as an unknown identifier.
+- Arithmetic and comparison under ``use ieee.std_logic_signed.all`` are
+  refused with ``Unsupported:``; ``std_logic_unsigned`` is modeled.
 - ``report`` with a non-literal message is dropped.
 - PSL properties are accepted and skipped, so they never fire.
 - ``while`` and bare loops in processes are refused; dynamic-loop

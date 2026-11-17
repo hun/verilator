@@ -169,7 +169,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | File types | N | X | |
 | Type conversion (`T(expr)`) | Y | S | Includes array/vector conversions and numeric conversions. |
 | Qualified expressions (`T'(expr)`) | Y | S | UG901 supports them for accepted predefined attributes; Verilator accepts them generally. |
-| Enumeration literal | Y | S | |
+| Enumeration literal | Y | S | A typed context resolves a literal when two visible enumeration types share its name. |
 | Integer width (32-bit default) | Y | S | UG901 default is 32 bits; there is no width option. VHDL-2019 switches to 64 bits. |
 | 64-bit `integer` (VHDL-2019) | Y | O | Deferred; the baseline remains 32 bits. |
 
@@ -212,7 +212,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `**` | P | S* | UG901 restricts the left operand to 2. Static exponents and non-negative integer exponents are in subset; negative or real exponents are not. |
 | `abs` | Y | S | |
 | Unary `+`, `-` | Y | S | |
-| Shifts `sll`, `srl`, `sla`, `sra` | Y | S | `bit_vector` uses the predefined edge fill (IEEE 1076-2008 9.2.3). `numeric_std` `signed`/`unsigned` keep their numeric shift semantics. A `std_logic_vector` is treated as unsigned, so its `sra`/`sla` still zero-fill rather than using the predefined edge value. |
+| Shifts `sll`, `srl`, `sla`, `sra` | Y | S | `bit_vector` and `std_logic_vector` use the predefined edge fill (IEEE 1076-2008 9.2.3). `numeric_std` `signed`/`unsigned` keep their numeric shift semantics. |
 | Rotates `rol`, `ror` | Y | S | |
 | `maximum`, `minimum` | Y (2008) | S | |
 | Integer literals (decimal) | Y | S | |
@@ -220,7 +220,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Bit-string literals (`B"..."`, `O"..."`, `X"..."`) | Y | S | |
 | Enhanced bit-string literals (VHDL-2008) | Y | D | Signed/unsigned and length-prefixed forms. |
 | String and character literals | Y | S* | String literals are supported; non-logic character contexts are deferred (Section 5.11). |
-| Enumeration literals | Y | S | |
+| Enumeration literals | Y | S | Resolved from the expected type where one is available. |
 | Physical literals | P | S* | Folded in static contexts only; rejected in runtime expressions. UG901 simply ignores physical literals. |
 | Record aggregates | Y | S | Positional, named, `others`. |
 | Array aggregates | Y | S | Positional, named, range, `others`, and shared choices. |
@@ -331,7 +331,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `ieee.numeric_bit` | Y | D | Same operations on `bit`-based vectors. |
 | `ieee.std_logic_arith` | Y | D | Legacy Synopsys; `conv_integer`, `conv_unsigned`, `conv_signed`, `conv_std_logic_vector`, `ext`, `shl`, `shr`. |
 | `ieee.std_logic_unsigned` | Y | D | Arithmetic on `std_logic_vector` as unsigned. |
-| `ieee.std_logic_signed` | Y | D | Arithmetic on `std_logic_vector` as signed. |
+| `ieee.std_logic_signed` | Y | X | Arithmetic and comparison on `std_logic_vector` are refused with `Unsupported:` rather than lowering them as unsigned. |
 | `ieee.std_logic_misc` | Y | D | `and_reduce`, `or_reduce`, `xor_reduce`, and related helpers. |
 | `ieee.fixed_pkg` | Y | X | Fixed-point types would need a new value model; not in the subset. |
 | `ieee.float_pkg` | Y | X | Same as `fixed_pkg`. |
@@ -467,8 +467,9 @@ Consequences:
 - `U` and `W` are accepted and mapped to X; Vivado rejects them.
 - A `std_logic` or `std_logic_vector` comparison uses identity (case)
   equality, so two identical X constants compare equal; a comparison of X and
-  0 is false. Vector equality still resizes unequal lengths, except
-  `bit_vector` equality, which is false.
+  0 is false. Predefined arrays of one-bit elements compare unequal lengths as
+  equality false and order lexicographically; a `numeric_std`
+  `unsigned`/`signed` resizes and compares numerically.
 - A `'Z'` constant is kept as high impedance and is lowered by `V3Tristate` when
   it drives an `inout` port or a signal with a tristate driver. Anywhere else it
   resolves to 0. A design that needs a high-impedance bus uses an `inout` port
