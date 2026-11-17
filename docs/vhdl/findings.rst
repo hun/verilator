@@ -516,9 +516,11 @@ Each run was checked with the full native suite (``test_regress``,
 GHDL frontend passes 114 with 3 pre-existing failures (``t_vhdl_genfunc``,
 ``t_vhdl_genpkg``, ``t_vhdl_range_attr``).
 
-The corpus lints and runs clean: 19 designs, no lint errors, and every run
+The corpus lints and runs clean: 20 designs, no lint errors, and every run
 passes, including the harnesses added for the rpu ALU, the rpu register set, the
-t65 CPU and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``. The last of
+t65 CPU and microwatt's ``soc_reset`` and ``wishbone_bram_wrapper``, and neorv32's
+whole SoC, which boots a generated image from its instruction memory and reports
+its results over GPIO. The last of
 those runs ``fpga/main_bram.vhdl`` unmodified, its ``RAM_INIT_FILE`` read at
 elaboration from a checked-in image. hdl-modules' ``ring_buffer_write_simple``
 runs too, its width checks folded at elaboration (N86).
@@ -526,7 +528,8 @@ runs too, its width checks folded at elaboration (N86).
 The whole neorv32 core (``rtl/core/*.vhd`` with ``neorv32_top`` as the top) lints with
 no errors, and its CPU runs the same freestanding C program as potato's SoC (N92): the
 corpus harness feeds it the image, acts as its memory and checks the same four result
-words, over 12.2M cycles.
+words, over 12.2M cycles, and the SoC top runs a C program over the same bus and its
+GPIO peripheral.
 
 Two simulators are used as ground truth: GHDL, and nvc (``nvc --std=2008``)
 whenever GHDL and the native frontend disagree. nvc settled the value of a toggle
