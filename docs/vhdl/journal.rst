@@ -499,3 +499,5 @@ _______
      - Fix silent VHDL semantic divergences
    * - ``8e02b16``
      - Expand VHDL context declarations
+   * - ``86b7c43``
+     - Resolve typed VHDL enum literals and array semantics
