@@ -501,3 +501,5 @@ _______
      - Expand VHDL context declarations
    * - ``86b7c43``
      - Resolve typed VHDL enum literals and array semantics
+   * - ``cb2f1d8``
+     - Compare wider VHDL arrays element by element
