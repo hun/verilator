@@ -493,3 +493,9 @@ _______
      - Emit the asynchronous-reset idiom as an edge-triggered flip-flop
    * - ``facd57d``
      - Report a port that an instance associates more than once
+   * - ``0ae517f``
+     - Support VHDL inout ports and tristate drivers
+   * - ``1050f2e``
+     - Fix silent VHDL semantic divergences
+   * - ``8e02b16``
+     - Expand VHDL context declarations
