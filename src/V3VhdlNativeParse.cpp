@@ -2385,7 +2385,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             unsupported("delayed signal assignment ('" + m_cur.text + "')");
             return;
         }
-        conc->value = parseExpr();
+        conc->value = isId("unaffected") ? parseWaveformValue() : parseExpr();
         if (!conc->value) return;
         if (isId("when")) {
             conc->kind = Concurrent::COND_ASSIGN;
@@ -2395,7 +2395,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
                 if (!cond) return;
                 conc->alternatives.back().second = std::move(cond);
                 if (!acceptId("else")) break;
-                ExprP value = parseExpr();
+                ExprP value = isId("unaffected") ? parseWaveformValue() : parseExpr();
                 if (!value) return;
                 conc->alternatives.emplace_back(std::move(value), nullptr);
             }

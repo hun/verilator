@@ -23,7 +23,8 @@ entity t_vhdl_cond_assign is
     o   : out std_logic_vector(3 downto 0);
     cnt : out std_logic_vector(3 downto 0);
     k   : out std_logic_vector(3 downto 0);
-    hold : out std_logic_vector(3 downto 0)
+    hold : out std_logic_vector(3 downto 0);
+    keepc : out std_logic_vector(3 downto 0)
   );
 end entity;
 
@@ -45,4 +46,6 @@ begin
   k <= keep;
   -- No final else: hold when neither condition holds
   hold <= a when en = '1' else b when sel = '1';
+  -- An unaffected branch also holds when that branch is selected
+  keepc <= a when en = '1' else unaffected;
 end architecture;

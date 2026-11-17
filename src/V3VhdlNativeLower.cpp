@@ -5460,9 +5460,21 @@ AstNode* Lowering::lowerLatchedAlternatives(const Concurrent& conc, const VType&
     for (std::size_t i = conc.alternatives.size(); i-- > 0;) {
         const auto& alt = conc.alternatives[i];
         if (alt.first->kind == Expr::UNAFFECTED) {
-            unsupportedError(flp, "'unaffected' in a conditional signal assignment without else");
-            if (restp) restp->deleteTree();
-            return nullptr;
+            // The branch holds the target: an empty statement under its condition
+            AstNode* const holdp = new AstComment{flp, "unaffected"};
+            if (!alt.second) {
+                if (restp) restp->deleteTree();
+                restp = holdp;
+                continue;
+            }
+            AstNodeExpr* const condp = lowerCond(*alt.second);
+            if (!condp) {
+                holdp->deleteTree();
+                if (restp) restp->deleteTree();
+                return nullptr;
+            }
+            restp = new AstIf{flp, condp, holdp, restp};
+            continue;
         }
         AstNodeExpr* valuep = lowerExpr(*alt.first, &type);
         if (!valuep) {
@@ -10663,9 +10675,14 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         lhsp->deleteTree();
         return;
     }
-    if (stmt.kind == Concurrent::COND_ASSIGN && !stmt.alternatives.empty()
-        && stmt.alternatives.back().second) {
-        // No condition covers the rest, so the target holds its value
+    const bool holds = !stmt.alternatives.empty()
+                       && (stmt.alternatives.back().second
+                           || std::any_of(stmt.alternatives.begin(), stmt.alternatives.end(),
+                                          [](const std::pair<ExprP, ExprP>& alt) {
+                                              return alt.first->kind == Expr::UNAFFECTED;
+                                          }));
+    if (stmt.kind == Concurrent::COND_ASSIGN && holds) {
+        // A missing else or an unaffected branch makes the target hold its value
         AstNode* const bodyp = lowerLatchedAlternatives(stmt, ltype, lhsp);
         lhsp->deleteTree();
         if (bodyp) {
