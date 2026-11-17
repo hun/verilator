@@ -959,6 +959,8 @@ class Lowering final {
                                             "resize",
                                             "shift_left",
                                             "shift_right",
+                                            "shl",
+                                            "shr",
                                             "rotate_left",
                                             "rotate_right",
                                             "minimum",
@@ -3755,7 +3757,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         const VType target = vectorType(flp, kwd, signing, static_cast<int>(width));
         return resizeExpr(valuep, target, flp);
     }
-    if (fn == "shift_left" || fn == "shift_right") {
+    if (fn == "shift_left" || fn == "shift_right" || fn == "shl" || fn == "shr") {
         if (argsp.size() != 2) {
             unsupportedError(flp, "function '" + fn + "' without two arguments");
             return nullptr;
@@ -3769,10 +3771,11 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         }
         AstNodeDType* const dtp = valuep->dtypep();
         AstNodeExpr* resultp = nullptr;
-        // shift_right sign-extends a signed operand; shift_left does not
-        if (fn == "shift_left") {
+        // shift_right sign-extends a signed operand; shift_left does not.
+        // std_logic_arith's shl/shr are logical for both signednesses.
+        if (fn == "shift_left" || fn == "shl") {
             resultp = new AstShiftL{flp, valuep, amountp, dtp->width()};
-        } else if (dtp->isSigned()) {
+        } else if (fn == "shift_right" && dtp->isSigned()) {
             resultp = new AstShiftRS{flp, valuep, amountp, dtp->width()};
         } else {
             resultp = new AstShiftR{flp, valuep, amountp, dtp->width()};

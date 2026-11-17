@@ -14,7 +14,11 @@ entity t is
     u : out std_logic_vector(7 downto 0);
     s : out std_logic_vector(7 downto 0);
     w : out unsigned(7 downto 0);
-    x : out signed(7 downto 0)
+    x : out signed(7 downto 0);
+    v : in  unsigned(7 downto 0);
+    n : in  integer range 0 to 9;
+    sl : out unsigned(7 downto 0);
+    sr : out unsigned(7 downto 0)
   );
 end;
 
@@ -24,4 +28,6 @@ begin
   s <= conv_std_logic_vector(-1, 8);
   w <= conv_unsigned(5, 8);
   x <= conv_signed(-1, 8);
+  sl <= shl(v, n);
+  sr <= shr(v, n);
 end;

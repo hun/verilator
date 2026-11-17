@@ -521,9 +521,9 @@ ____
       design that only uses them in a simulation branch keeps everything else
   * - N51
     - ``shl`` and ``shr`` from ``IEEE.std_logic_misc``
-    - no implementation of that vendor package is in the corpus and none is
-      modelled. patmos' fpu is its only user (9 errors), so this is a library
-      question rather than a frontend one.
+    - resolved: they are lowered as intrinsics, logical for both signednesses.
+      ``t_vhdl_arith_conv`` value-checks them, and the GHDL ``sns01``/``sns02``
+      cases pass.
   * - N94
     - an unconstrained record port whose actuals associate only individual
       elements: ``i.x => a, i.y => b``
