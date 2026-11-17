@@ -503,3 +503,5 @@ _______
      - Resolve typed VHDL enum literals and array semantics
    * - ``cb2f1d8``
      - Compare wider VHDL arrays element by element
+   * - ``f835f38``
+     - Resolve VHDL operator and subprogram overloads by type
