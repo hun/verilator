@@ -561,6 +561,13 @@ ______
       before the vector fallthrough, so a scalar mark keeps its scalar type
       (IEEE 1076-2008 9.3.6)
     - ``t_vhdl_qual_int``
+  * - N101
+    - a don't-care in a constant was compared as data: ``std_match(x, pat)``
+      with ``pat`` a constant ``"1-0"`` never matched a pattern it should
+    - the wildcard mask is also built from the lowered operands, whose
+      don't-care bits are x bits (IEEE 1076-2008 16.8.3, 9.2.3), so a
+      ``'-'`` that arrives through a constant wildcards the position it names
+    - ``t_vhdl_std_match_const``
 
 ____
 Open
@@ -598,12 +605,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N101
-    - a don't-care in a constant is not a wildcard: ``std_match(x, pat)`` with
-      ``pat`` a constant ``"1-0"`` compares the ``-`` bit as data
-    - the wildcard mask is built only from bit-string *literal* operands, so a
-      ``'-'`` that arrives through a constant is lost (IEEE 1076-2008 16.8.3,
-      9.2.3). Test: ``t_vhdl_std_match_const``
   * - N103
     - a run-time ``for`` loop re-reads its bound every iteration: a loop whose
       body decrements the bound runs 2 iterations where VHDL runs 4; a bound

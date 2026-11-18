@@ -3797,6 +3797,16 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
                 if (argp->bits[i] == '-') mask[i + static_cast<size_t>(width) - argWidth] = '0';
             }
         }
+        // A don't-care can also arrive through a constant: its '-' bits are x bits in
+        // the lowered value, whatever name or expression carried them here
+        for (AstNodeExpr* const sidep : {lp, rp}) {
+            const AstConst* const constp = VN_CAST(sidep, Const);
+            if (!constp) continue;
+            for (int b = 0; b < constp->width() && b < width; ++b) {
+                if (!constp->num().bitIsX(b)) continue;
+                mask[static_cast<size_t>(width - 1 - b)] = '0';
+            }
+        }
         const VType vec = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width);
         AstNodeExpr* const maskp = makeBitsConst(flp, vec.dtp, mask);
         lp = resizeExpr(lp, vec, flp);
@@ -5473,6 +5483,17 @@ AstNodeExpr* Lowering::lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeE
             if (bits[i] != '-') continue;
             const int bit = width - 1 - static_cast<int>(i);
             if (bit < 0 || bit >= width) continue;
+            wildcard[static_cast<size_t>(bit)] = true;
+            anyWildcard = true;
+        }
+    }
+    // A don't-care can also arrive through a constant: the pattern operand is a
+    // lowered constant whose '-' bits are x bits (IEEE 1076-2008 16.8.3)
+    for (const AstNodeExpr* const sidep : {lp, rp}) {
+        const AstConst* const constp = VN_CAST(sidep, Const);
+        if (!constp) continue;
+        for (int bit = 0; bit < width; ++bit) {
+            if (!constp->num().bitIsX(bit)) continue;
             wildcard[static_cast<size_t>(bit)] = true;
             anyWildcard = true;
         }
