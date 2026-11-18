@@ -704,6 +704,10 @@ class Lowering final {
     bool applyIndexConstraints(const TypeSpec& spec, VType& out);
     //! Apply a record subtype's per-member ranges, widening each constrained element
     bool applyMemberConstraints(const TypeSpec& spec, VType& out);
+    //! Complete a record type with unconstrained members from a constant's aggregate
+    void completeRecordType(TypeSpec& spec, const Expr& init);
+    //! Deep copy of a subtype indication, for a constraint completed from a value
+    static TypeSpec copySpec(const TypeSpec& spec);
     //! Constrain one record element to a fixed vector range
     void setRecordField(FileLine* flp, VField& field, int left, int right, bool ascending);
     //! Recompute a record's total width, MSB-first offsets and packed dtype
@@ -2520,20 +2524,26 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
 
 //! Constrain one record element to a fixed vector range, keeping its element keyword/signing
 void Lowering::setRecordField(FileLine* flp, VField& field, int left, int right, bool ascending) {
+    // A member whose element is wider than one bit (a string) keeps that width, so the
+    // member's packed size is its element count times the element width
+    const int elemWidth = field.type && field.type->elemWidth > 0 ? field.type->elemWidth : 1;
+    const int elements = std::abs(left - right) + 1;
     VType constrained;
-    constrained.kind = VType::VECTOR;
+    constrained.kind = elemWidth > 1 ? VType::ARRAY : VType::VECTOR;
     constrained.kwd = VBasicDTypeKwd::LOGIC;
     constrained.signing = VSigning::UNSIGNED;
     if (field.type) {
         constrained.kwd = field.type->kwd;
         constrained.signing = field.type->signing;
+        if (elemWidth > 1) constrained.elemp = field.type->elemp;
+        constrained.typeName = field.type->typeName;
     }
+    constrained.elemWidth = elemWidth;
     constrained.left = left;
     constrained.right = right;
     constrained.ascending = ascending;
-    constrained.width = std::abs(left - right) + 1;
-    constrained.dtp = findVector(flp, constrained.kwd, constrained.signing, constrained.left,
-                                 constrained.right, constrained.ascending);
+    constrained.width = elements * elemWidth;
+    constrained.dtp = findVectorWidth(flp, constrained.kwd, constrained.signing, constrained.width);
     field.type = std::make_shared<VType>(constrained);
     field.width = constrained.width;
 }
@@ -2549,6 +2559,73 @@ void Lowering::finalizeRecordFields(FileLine* flp, VType& rec) {
     }
     rec.width = total;
     if (total > 0) rec.dtp = findVectorWidth(flp, rec.kwd, VSigning::UNSIGNED, total);
+}
+
+//! A copy of a subtype indication: its bound expressions are owned, so they are cloned
+TypeSpec Lowering::copySpec(const TypeSpec& spec) {
+    TypeSpec out;
+    out.mark = spec.mark;
+    out.pkg = spec.pkg;
+    out.objectName = spec.objectName;
+    out.elementMark = spec.elementMark;
+    out.flp = spec.flp;
+    out.hasRange = spec.hasRange;
+    out.ascending = spec.ascending;
+    out.constraintMark = spec.constraintMark;
+    if (spec.left) out.left = cloneExpr(*spec.left);
+    if (spec.right) out.right = cloneExpr(*spec.right);
+    for (const TypeSpec::MemberConstraint& member : spec.memberConstraints) {
+        TypeSpec::MemberConstraint copy;
+        copy.name = member.name;
+        copy.ascending = member.ascending;
+        if (member.lo) copy.lo = cloneExpr(*member.lo);
+        if (member.hi) copy.hi = cloneExpr(*member.hi);
+        if (member.range) copy.range = cloneExpr(*member.range);
+        out.memberConstraints.push_back(std::move(copy));
+    }
+    for (const TypeSpec& nested : spec.indexConstraints) {
+        out.indexConstraints.push_back(copySpec(nested));
+    }
+    return out;
+}
+
+//! A record type whose members are unconstrained takes their bounds from the constant's
+//! aggregate, as an array takes its bounds from its initial value (IEEE 1076-2008 6.4.2.1)
+void Lowering::completeRecordType(TypeSpec& spec, const Expr& init) {
+    VType rec;
+    if (init.kind != Expr::AGG_NAMED || !resolveType(spec, rec) || rec.kind != VType::RECORD) {
+        return;
+    }
+    for (std::size_t i = 0; i < init.args.size() && i < init.choices.size(); ++i) {
+        const std::vector<ExprP>& choices = init.choices[i];
+        if (choices.size() != 1 || !choices[0] || choices[0]->kind != Expr::NAME) continue;
+        const std::string& fieldName = choices[0]->text;
+        const VField* fieldp = nullptr;
+        for (const VField& candidate : rec.fields) {
+            if (candidate.name == fieldName) fieldp = &candidate;
+        }
+        if (!fieldp || !fieldp->type || fieldp->type->width != 0) continue;
+        const Expr& value = *init.args[i];
+        int elements = 0;
+        if (value.kind == Expr::BITS_LIT) {
+            // A bit-string literal spells one character per element, whether the member's
+            // elements are bits or characters
+            elements = static_cast<int>(value.bits.size());
+        } else if (value.kind == Expr::STRING_LIT) {
+            elements = static_cast<int>(value.spelling.size());
+        }
+        if (elements <= 0) continue;
+        TypeSpec::MemberConstraint member;
+        member.name = fieldName;
+        member.ascending = false;  // A value's range runs downwards, as a literal's does
+        member.lo = std::make_unique<Expr>(Expr::INT_LIT);
+        member.lo->flp = init.flp;
+        member.lo->intValue = elements - 1;
+        member.hi = std::make_unique<Expr>(Expr::INT_LIT);
+        member.hi->flp = init.flp;
+        member.hi->intValue = 0;
+        spec.memberConstraints.push_back(std::move(member));
+    }
 }
 
 bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
@@ -10046,9 +10123,15 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         }
         constType = stringType(flp, valuep->width() / 8);
         intConstant = false;
-    } else if (type.flp && resolveType(type, constType)) {
-        intConstant = constType.isInt();
-        realConstant = constType.kind == VType::REAL;
+    } else {
+        // A record constant whose type leaves a member unconstrained takes that member's
+        // bounds from the initial value, as a vector does
+        TypeSpec declaredType = copySpec(type);
+        if (initp) completeRecordType(declaredType, *initp);
+        if (declaredType.flp && resolveType(declaredType, constType)) {
+            intConstant = constType.isInt();
+            realConstant = constType.kind == VType::REAL;
+        }
     }
     // A packed constant of that many bits is copied once per write into it, so a memory
     // image is reported rather than folded

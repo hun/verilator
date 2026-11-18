@@ -907,6 +907,15 @@ ______
       does not, so the constant folder no longer needs the exponent; a static exponent
       keeps the unrolled multiplication chain
     - ``t_vhdl_pow2``
+  * - N141
+    - a record constant whose members are unconstrained vectors or strings: the CRC
+      catalogue in `olo_base_pkg_crc` declares its settings that way, so the package
+      was refused with "aggregate that does not cover every element"
+    - such a constant takes each member's bounds from its aggregate, as a vector takes
+      them from its initial value (IEEE 1076-2008 6.4.2.1): the named association's
+      value gives the element count, and a member with a wider element (a string) keeps
+      that element width, so its packed size is elements times element width
+    - ``t_vhdl_record_const``
 
 ____
 Open
