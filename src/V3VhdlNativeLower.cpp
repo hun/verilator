@@ -9557,6 +9557,7 @@ bool Lowering::reserveName(const std::string& folded, const std::string& spellin
         m_constValues.erase(folded);
         m_constTypes.erase(folded);
         m_enumConsts.erase(folded);
+        m_ambiguousLiterals.erase(folded);
         m_realConsts.erase(folded);
         m_types.erase(folded);
         return true;
@@ -10169,10 +10170,8 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             continue;
         }
         for (const auto& name : port.names) {
-            if (!m_scope.emplace(name.first, VarInfo{}).second) {
-                port.flp->v3error("VHDL: duplicate declaration of '" + name.second + "'");
-                continue;
-            }
+            // A port is a declaration, so it hides a name a used package publishes
+            if (!reserveName(name.first, name.second, port.flp)) continue;
             // An inout port is a net: V3Tristate connects its drivers and converts it to
             // the input plus output-enable/output pins of the two-state model.
             const VVarType varType = port.dir == PortMode::INOUT ? VVarType::WIRE : VVarType::PORT;
