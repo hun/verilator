@@ -56,6 +56,61 @@ int main(int argc, char** argv) {
         }
     }
 
+    // std_logic_arith comparisons widen an unsigned operand to one bit more than its
+    // width before comparing as signed, and compare a signed operand with an integer at
+    // the signed operand's width, so the integer truncates to that width.
+    const auto truncSigned = [](int value, int width) {
+        const int modulus = 1 << width;
+        int result = value % modulus;
+        if (result < 0) result += modulus;
+        if (result >= (modulus >> 1)) result -= modulus;
+        return result;
+    };
+    for (int ub = 0; ub < 16; ++ub) {
+        for (int sb = 0; sb < 16; ++sb) {
+            for (int wb = 0; wb < 8; ++wb) {
+                for (int xb = 0; xb < 8; ++xb) {
+                    for (int iv = -16; iv <= 15; ++iv) {
+                        topp->u4 = ub;
+                        topp->s4 = sb;
+                        topp->u3 = wb;
+                        topp->s3 = xb;
+                        topp->i = iv;
+                        topp->eval();
+                        const int s4v = truncSigned(sb, 4);
+                        const int s3v = truncSigned(xb, 3);
+                        const int i4 = truncSigned(iv, 4);
+                        const struct {
+                            const char* name;
+                            int got;
+                            int want;
+                        } cmps[] = {
+                            {"lt_uu", static_cast<int>(topp->lt_uu), ub < wb},
+                            {"lt_ss", static_cast<int>(topp->lt_ss), s4v < s3v},
+                            {"lt_us", static_cast<int>(topp->lt_us), ub < s4v},
+                            {"eq_us", static_cast<int>(topp->eq_us), ub == s4v},
+                            {"lt_su", static_cast<int>(topp->lt_su), s4v < ub},
+                            {"lt_ui", static_cast<int>(topp->lt_ui), ub < iv},
+                            {"lt_iu", static_cast<int>(topp->lt_iu), iv < ub},
+                            {"eq_ui", static_cast<int>(topp->eq_ui), ub == iv},
+                            {"lt_si", static_cast<int>(topp->lt_si), s4v < i4},
+                            {"lt_is", static_cast<int>(topp->lt_is), i4 < s4v},
+                            {"eq_si", static_cast<int>(topp->eq_si), s4v == i4},
+                        };
+                        for (const auto& cmp : cmps) {
+                            if (cmp.got != cmp.want) {
+                                std::printf("%%Error: %s u4=%d s4=%d u3=%d s3=%d i=%d got %d"
+                                            " expected %d\n",
+                                            cmp.name, ub, s4v, wb, s3v, iv, cmp.got, cmp.want);
+                                ++fails;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     topp->final();
     delete topp;
 

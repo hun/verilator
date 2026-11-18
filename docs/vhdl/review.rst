@@ -83,8 +83,9 @@ Concurrent statements and generate           Supported  Conditional assignment w
                                                          ``else`` is a latch holding the target
 ``numeric_std`` and ``std_logic_1164``       Partial    Arithmetic and conversions; not every
                                                          function; see library gaps
-``std_logic_arith``, ``std_logic_signed``    Partial    Conversions and ``shl``/``shr`` work;
-                                                         signed operators on ``std_logic_vector``
+``std_logic_arith``, ``std_logic_signed``    Partial    Conversions, comparisons and
+                                                         ``shl``/``shr`` work; signed
+                                                         operators on ``std_logic_vector``
                                                          are modelled unsigned
 ``math_real``                                Partial    Locally static constants only
 Access, protected, file, textio runtime      Excluded   File contents can be read at
@@ -109,7 +110,8 @@ Where the implementation is sound
 - ``numeric_std`` arithmetic follows VHDL for widths, sign extension, division,
   ``mod``/``rem``, ``resize``, and the shift/rotate functions on ``unsigned``
   and ``signed``. Overflow and runtime range checks are intentionally absent;
-  integer arithmetic is 32-bit. ``std_logic_arith``'s ``shl``/``shr`` are
+  integer arithmetic is 32-bit. ``std_logic_arith``'s comparisons widen an
+  unsigned operand by one bit and compare as signed, and its ``shl``/``shr`` are
   logical for both signednesses.
 - Slicing, indexing, ascending and descending ranges, records, and aggregate
   targets are value-tested. A two-dimensional element target is typed one array

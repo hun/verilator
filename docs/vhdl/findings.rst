@@ -524,6 +524,17 @@ ____
     - resolved: they are lowered as intrinsics, logical for both signednesses.
       ``t_vhdl_arith_conv`` value-checks them, and the GHDL ``sns01``/``sns02``
       cases pass.
+  * - N96
+    - mixed ``unsigned``/``signed`` comparisons and an unsigned operand compared
+      with a negative integer, as ``ieee.std_logic_arith``'s comparison functions
+      define them
+    - a mixed comparison was refused, and an integer was converted to the
+      unsigned operand's width, so ``unsigned(x) = -1`` matched when ``x`` was all
+      ones. ``std_logic_arith`` widens the unsigned operand by one bit and compares
+      as signed, for an integer operand too, so a negative value never aliases the
+      unsigned bit pattern
+    - ``t_vhdl_arith_conv`` value-checks every mixed and integer comparison; the
+      corpus ``sns01/cmp*`` units lint
   * - N94
     - an unconstrained record port whose actuals associate only individual
       elements: ``i.x => a, i.y => b``

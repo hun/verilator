@@ -370,6 +370,7 @@ class Lowering final {
     std::set<std::string> m_ambiguousTypes;  // Type names imported from two packages
     std::set<std::string> m_ambiguousLiterals;  // Enumeration literals from two types
     bool m_stdLogicSigned = false;  // `use ieee.std_logic_signed.all` is in effect
+    bool m_stdLogicArith = false;  // `use ieee.std_logic_arith.all` is in effect
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
@@ -3183,15 +3184,41 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             // to a constant, or resize a dynamic one exactly as the arithmetic path does
             const bool lhsInt = lt.isInt();
             const VType& vectorT = lhsInt ? rt : lt;
-            AstNodeExpr*& intOperand = lhsInt ? lp : rp;
-            int64_t value = 0;
-            if (evalInt(lhsInt ? *expr.a : *expr.b, value)) {
-                intOperand->deleteTree();
-                intOperand = makeVectorConst(flp, vectorT, value);
+            // std_logic_arith compares an unsigned operand as a signed value one bit
+            // wider, so a negative integer is less than every unsigned value instead of
+            // matching its two's-complement bit pattern
+            if (m_stdLogicArith && vectorT.isVector() && vectorT.signing == VSigning::UNSIGNED) {
+                const VType arithType
+                    = vectorType(flp, vectorT.kwd, VSigning::SIGNED, vectorT.width + 1);
+                lp = resizeExpr(lp, arithType, flp);
+                rp = resizeExpr(rp, arithType, flp);
+                lt = arithType;
+                rt = arithType;
             } else {
-                intOperand = resizeExpr(intOperand, vectorT, flp);
+                AstNodeExpr*& intOperand = lhsInt ? lp : rp;
+                int64_t value = 0;
+                if (evalInt(lhsInt ? *expr.a : *expr.b, value)) {
+                    intOperand->deleteTree();
+                    intOperand = makeVectorConst(flp, vectorT, value);
+                } else {
+                    intOperand = resizeExpr(intOperand, vectorT, flp);
+                }
+                (lhsInt ? lt : rt) = vectorT;
             }
-            (lhsInt ? lt : rt) = vectorT;
+        } else if (m_stdLogicArith && lt.isVector() && rt.isVector()
+                   && lt.signing != VSigning::NOSIGN && rt.signing != VSigning::NOSIGN
+                   && lt.isSigned() != rt.isSigned()) {
+            // std_logic_arith's mixed comparison widens the unsigned operand by one bit
+            // before comparing as signed, so the unsigned value never aliases a negative
+            // signed value
+            const int unsignedWidth = lt.isSigned() ? rt.width : lt.width;
+            const int signedWidth = lt.isSigned() ? lt.width : rt.width;
+            const VType arithType = vectorType(flp, lt.kwd, VSigning::SIGNED,
+                                               std::max(unsignedWidth + 1, signedWidth));
+            lp = resizeExpr(lp, arithType, flp);
+            rp = resizeExpr(rp, arithType, flp);
+            lt = arithType;
+            rt = arithType;
         }
         // A bare bit-string literal is typeless: a comparison like `-vs >= "110"`
         // resolves it to the signedness of the real operand so a signed/unsigned
@@ -9313,6 +9340,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
 
 void Lowering::importPackage(const std::string& name) {
     if (name == "std_logic_signed") m_stdLogicSigned = true;
+    if (name == "std_logic_arith") m_stdLogicArith = true;
     if (!m_packagesp) return;
     const auto pkgIt = m_packagesp->packages.find(name);
     if (pkgIt == m_packagesp->packages.end()) return;  // Standard package: intrinsics
@@ -9404,6 +9432,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_ambiguousTypes.clear();
     m_arrayDtypes.clear();
     m_stdLogicSigned = false;
+    m_stdLogicArith = false;
     m_scope.clear();
     m_aliases.clear();
     m_subprograms.clear();
