@@ -8804,6 +8804,8 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         }
     };
     AstNodeDType* const bitdtp = findBasic(stmt.flp, VBasicDTypeKwd::LOGIC);
+    std::set<int64_t> covered;
+    bool bad = false;
     for (const auto& item : stmt.caseItems) {
         std::vector<AstConst*> cops;
         if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
@@ -8812,6 +8814,10 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
             cleanup();
             selectorp->deleteTree();
             return nullptr;
+        }
+        // An exhaustive case needs no fallthrough value, as in a lowered case statement
+        if (!known && !cops.empty() && !addChoiceValues(cops, covered, "case statement")) {
+            bad = true;
         }
         if (known && kept) {
             for (AstConst* const cop : cops) cop->deleteTree();
@@ -8853,6 +8859,15 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         resultp = branch.resultp;
         branch.resultp = nullptr;
         break;
+    }
+    if (!resultp && !known && !bad && choicesComplete(selectorp->dtypep(), covered)) {
+        // Every value of the selector is covered, so no fallthrough value is ever used;
+        // any arm's value serves as the chain's default
+        for (Branch& branch : branches) {
+            if (!branch.resultp) continue;
+            resultp = branch.resultp->cloneTree(false);
+            break;
+        }
     }
     if (!resultp) {
         if (known) {
@@ -11243,10 +11258,14 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         return;
     }
     if (stmt.kind == Concurrent::CALL) {
-        // A concurrent procedure call is lowered with continuous assignments
+        // A concurrent procedure call is one combinational process: its locals are
+        // intermediates and the signal actuals are driven continuously
         ++m_concurrentProc;
-        if (AstNode* const callp = lowerProcedureCall(*stmt.value, true)) m_modp->addStmtsp(callp);
+        AstNode* const callp = lowerProcedureCall(*stmt.value, true);
         --m_concurrentProc;
+        if (callp) {
+            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, callp});
+        }
         return;
     }
     if (stmt.kind == Concurrent::GEN_FOR) {
