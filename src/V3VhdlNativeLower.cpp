@@ -5946,7 +5946,7 @@ AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const
             partp = selp;
         }
         AstNode* assignp = nullptr;
-        if (variable || m_initial) {
+        if (variable) {
             assignp = new AstAssign{flp, lhsp, partp};
         } else if (concurrentProc) {
             assignp = new AstAssignW{flp, lhsp, partp};
@@ -5967,7 +5967,7 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         return nullptr;
     }
     if (stmt.target->kind == Expr::AGG_POSITIONAL || stmt.target->kind == Expr::AGG_NAMED) {
-        return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable || m_initial,
+        return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable,
                                     m_concurrentProc);
     }
     // A bare `x <= unaffected;` leaves the target unchanged, so emit nothing
@@ -5996,8 +5996,9 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         return new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
                              new AstAssignW{stmt.flp, lhsp, rhsp}};
     }
-    // Only variable assignments update immediately; a signal write is nonblocking
-    if (variable || m_initial) return new AstAssign{stmt.flp, lhsp, rhsp};
+    // Only variable assignments update immediately; a signal write waits for the
+    // delta even in the time-zero activation (IEEE 1076-2008 10.5)
+    if (variable) return new AstAssign{stmt.flp, lhsp, rhsp};
     return new AstAssignDly{stmt.flp, lhsp, rhsp};
 }
 

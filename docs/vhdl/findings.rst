@@ -575,6 +575,14 @@ ______
       so the trip count is the value the range had at loop entry (IEEE
       1076-2008 8.9)
     - ``t_vhdl_loop_bound``
+  * - N104
+    - the time-zero activation wrote signals with blocking assignments: a
+      process that assigned ``a`` and then read it in its first activation
+      saw the new value
+    - a signal write is non-blocking even in the time-zero activation, so a
+      read in the same activation still sees the old value until the delta
+      (IEEE 1076-2008 10.5)
+    - ``t_vhdl_init_delta``
 
 ____
 Open
@@ -612,13 +620,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N104
-    - the time-zero activation writes signals with blocking assignments: a
-      process that assigns ``a`` and then reads it in its first activation sees
-      the new value
-    - the initial prefix is lowered with ``AstAssign`` where the VHDL read must
-      still see the old value until the delta (IEEE 1076-2008 10.5). Test:
-      ``t_vhdl_init_delta``
   * - N105
     - ``process (all)`` is not sensitive to a signal read only in an
       assignment target's index: a RAM write whose address alone changes never
