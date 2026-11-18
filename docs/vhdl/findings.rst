@@ -598,6 +598,13 @@ ______
     - an entity-level signal is a signal: only a variable declaration is
       classified as a variable, so the sensitivity pass no longer skips it
     - ``t_vhdl_sens_entity``
+  * - N107
+    - a bare ``wait;`` after a timed wait was dropped, and the process
+      restarted: a testbench that stopped after three edges kept counting
+    - a bare wait reached at run time sets a flag that gates every later
+      activation, so the process suspends for good (IEEE 1076-2008 8.1); a
+      wait of any other form inside a body is refused instead of dropped
+    - ``t_vhdl_wait_bare``
 
 ____
 Open
@@ -635,11 +642,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N107
-    - a bare ``wait;`` after a timed wait is dropped, and the process restarts:
-      a testbench that stops after three edges keeps counting
-    - the timed-process model repeats the body; the trailing bare wait must
-      suspend forever (IEEE 1076-2008 8.1). Test: ``t_vhdl_wait_bare``
   * - N108
     - a report message made only of logic characters is silently dropped, so
       ``report "0101" severity failure`` neither prints nor ends the run

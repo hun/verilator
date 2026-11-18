@@ -351,6 +351,9 @@ class Lowering final {
     bool m_edgeAsPrev = false;
     std::map<AstVar*, AstVar*> m_edgePrevVars;  // Edge signal -> its previous value
     int m_edgeSeq = 0;  // Disambiguates the previous-value variables
+    //! Set while a wait process lowers its body: a bare `wait;` reached at run time
+    //! sets this flag, which gates every later activation
+    AstVar* m_suspendFlagp = nullptr;
     int m_varSeq = 0;  // Disambiguates a process's own variables module-wide
     //! Active loop, with the flags its exit/next conditions latch
     struct LoopFrame final {
@@ -1058,6 +1061,7 @@ class Lowering final {
     //! and a slice its bounds (IEEE 1076-2008 8.4); the target name is only written
     static void collectTargetReadNames(const Expr& expr, std::set<std::string>& names);
     static bool usesExitNext(const std::vector<StmtP>& stmts);
+    static bool usesBareWait(const std::vector<StmtP>& stmts);
     AstNodeExpr* loopGuard(FileLine* flp) const;
     AstNode* lowerWhile(const Stmt& stmt);
     AstVar* newLoopFlag(FileLine* flp, const char* what);
@@ -6109,6 +6113,16 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     }
     if (stmt.kind == Stmt::FOR) return lowerFor(stmt);
     if (stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) return lowerWhile(stmt);
+    if (stmt.kind == Stmt::WAIT) {
+        // A bare wait reached at run time suspends the process for good (IEEE
+        // 1076-2008 8.1); any other wait inside a body has no model here
+        if (stmt.waitForever && m_suspendFlagp) {
+            return new AstAssign{stmt.flp, new AstVarRef{stmt.flp, m_suspendFlagp, VAccess::WRITE},
+                                 bitConst(stmt.flp, '1')};
+        }
+        unsupportedError(stmt.flp, "wait statement inside a process body");
+        return nullptr;
+    }
     // exit/next are handled by lowerStmtList, which owns their flags
     return nullptr;
 }
@@ -6201,6 +6215,8 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
             nodep = new AstIf{stmtp->flp, guardp, nodep, nullptr};
         }
         headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+        // A wait suspends the process at once: the rest of this list never runs
+        if (stmtp->kind == Stmt::WAIT) break;
     }
     if (runCondp) runCondp->deleteTree();
     return headp;
@@ -6337,6 +6353,22 @@ bool Lowering::usesExitNext(const std::vector<StmtP>& stmts) {
     return false;
 }
 
+//! Whether a statement list (recursively) contains a bare `wait;`
+bool Lowering::usesBareWait(const std::vector<StmtP>& stmts) {
+    for (const StmtP& stmtp : stmts) {
+        if (!stmtp) continue;
+        if (stmtp->kind == Stmt::WAIT && stmtp->waitForever) return true;
+        for (const auto& branch : stmtp->branches) {
+            if (usesBareWait(branch.second)) return true;
+        }
+        for (const auto& item : stmtp->caseItems) {
+            if (usesBareWait(item.second)) return true;
+        }
+        if (usesBareWait(stmtp->body)) return true;
+    }
+    return false;
+}
+
 //! Condition under which the rest of the enclosing loops may still run
 AstNodeExpr* Lowering::loopGuard(FileLine* flp) const {
     AstNodeExpr* guardp = nullptr;
@@ -6394,12 +6426,25 @@ void Lowering::lowerWaitProcess(const Process& process) {
         break;
     }
     const std::vector<StmtP>& bodyStmts = process.body;
+    // A bare `wait;` in the body, other than the process's own first wait, suspends
+    // the process when reached (IEEE 1076-2008 8.1): a flag gates every later
+    // activation, and the reached wait sets it
+    m_suspendFlagp = nullptr;
+    const bool bareWaitInBody = !waitp->waitForever && usesBareWait(bodyStmts);
+    const auto makeSuspendFlag = [&]() {
+        m_suspendFlagp
+            = new AstVar{flp, VVarType::VAR, "vhdlwait_" + std::to_string(++m_loopSeq) + "__done",
+                         findBasic(flp, VBasicDTypeKwd::LOGIC)};
+        m_modp->addStmtsp(m_suspendFlagp);
+    };
     if (waitp->delay) {
+        if (bareWaitInBody) makeSuspendFlag();
         // A timed wait suspends the process until the delay expires and the process then
         // runs again from the top, so its whole body repeats
         AstNode* bodyp = lowerStmtRange(process.body, 0, waitIndex);
         AstNode* const delayp = lowerDelay(*waitp->delay, flp);
         if (!delayp) {
+            m_suspendFlagp = nullptr;
             restoreScope(saved);
             return;
         }
@@ -6409,9 +6454,16 @@ void Lowering::lowerWaitProcess(const Process& process) {
             bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, postp);
         }
         AstLoop* const loopp = new AstLoop{flp};
-        loopp->addStmtsp(new AstLoopTest{flp, loopp, new AstConst{flp, 1}});
+        // The repeated body stops for good when it reaches a bare wait
+        AstNodeExpr* runp = new AstConst{flp, 1};
+        if (m_suspendFlagp) {
+            runp = new AstNot{flp, new AstVarRef{flp, m_suspendFlagp, VAccess::READ}};
+            runp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        }
+        loopp->addStmtsp(new AstLoopTest{flp, loopp, runp});
         if (bodyp) loopp->addStmtsp(bodyp);
         m_modp->addStmtsp(new AstInitial{flp, loopp});
+        m_suspendFlagp = nullptr;
         restoreScope(saved);
         return;
     }
@@ -6461,6 +6513,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
     }
     // Each activation runs the statements after the wait, then those before it
     m_initial = false;
+    if (bareWaitInBody && !singleShot) makeSuspendFlag();
     AstNode* const afterp = lowerStmtRange(bodyStmts, waitIndex + 1, stopIndex);
     AstNode* const preActp = singleShot ? nullptr : lowerStmtRange(bodyStmts, 0, waitIndex);
     AstNode* bodyp = afterp;
@@ -6485,6 +6538,12 @@ void Lowering::lowerWaitProcess(const Process& process) {
         }
         AstNode* const gatedp = new AstIf{flp, condp, innerp, nullptr};
         bodyp = new AstIf{flp, notOncep, gatedp, nullptr};
+    } else if (m_suspendFlagp && bodyp) {
+        // A reached bare wait set the flag: every later activation is gated off
+        AstNodeExpr* const notDonep
+            = new AstNot{flp, new AstVarRef{flp, m_suspendFlagp, VAccess::READ}};
+        notDonep->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        bodyp = new AstIf{flp, condp, new AstIf{flp, notDonep, bodyp, nullptr}, nullptr};
     } else if (bodyp) {
         bodyp = new AstIf{flp, condp, bodyp, nullptr};
     } else {
@@ -6496,6 +6555,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
     } else {
         itemsp->deleteTree();
     }
+    m_suspendFlagp = nullptr;
     restoreScope(saved);
 }
 
