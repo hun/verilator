@@ -741,6 +741,13 @@ ______
       predefined logic marks now answer the discrete attribute set
       (IEEE 1076-2008 16.2.2)
     - ``t_vhdl_attr_scalar``, ``t_vhdl_attr_val_bad``
+  * - N124
+    - division, ``mod`` and ``rem`` by zero silently yielded 0
+    - a static zero divisor is reported where the operator lowers (IEEE
+      1076-2008 9.1; subset row 4.5), and a dynamic one gets a module-level
+      check that reports and ends the run when it reaches zero, the same
+      run-time check the enumeration bounds use
+    - ``t_vhdl_div_zero_bad``
 
 ____
 Open
@@ -778,10 +785,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N124
-    - division, ``mod`` and ``rem`` by zero silently yield 0
-    - the subset row 4.5 says a zero divisor is a run-time error; the runtime
-      helpers return 0 and the frontend emits no guard
   * - N125
     - an uninitialized integer object starts at 0 rather than ``T'left``
       (-2**31)

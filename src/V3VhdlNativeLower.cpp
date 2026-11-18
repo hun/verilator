@@ -1124,6 +1124,8 @@ class Lowering final {
     }
     //! Report every unresolved signal that more than one emitted assignment drives
     void checkDrivers();
+    //! Emit `if (cond) $error(message); $finish;` as a module-level run-time check
+    void addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message);
     bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
     AstNode* lowerStmt(const Stmt& stmt);
     AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
@@ -3542,6 +3544,23 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         return nullptr;
     }
     if (lt.isInt() && rt.isInt()) {
+        // IEEE 1076-2008 9.1: dividing by zero is an error (subset row 4.5)
+        if (op == "/" || op == "mod" || op == "rem") {
+            int64_t divisor = 0;
+            if (evalInt(*expr.b, divisor) && divisor == 0) {
+                flp->v3error("VHDL: division by zero");
+                lp->deleteTree();
+                rp->deleteTree();
+                return nullptr;
+            }
+            if (m_modp) {
+                // A dynamic divisor can reach zero at run time, where the standard
+                // requires an error rather than a silent zero
+                AstNodeExpr* const zeroTestp
+                    = new AstEq{flp, rp->cloneTree(false), makeIntConst(flp, 0)};
+                addRuntimeError(flp, zeroTestp, "VHDL: division by zero");
+            }
+        }
         AstNodeExpr* resultp = nullptr;
         if (op == "+") {
             resultp = new AstAdd{flp, lp, rp};
@@ -4883,21 +4902,9 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
             if (m_modp) {
                 // A dynamic argument can reach the end literal at run time, where VHDL
                 // requires a bound-check failure rather than a wrap
-                AstNode* bodyp = new AstDisplay{flp,
-                                                VDisplayType::DT_ERROR,
-                                                "VHDL: '" + attribute + "' of the "
-                                                    + (succ ? "last" : "first")
-                                                    + " enumeration literal is outside the type",
-                                                nullptr,
-                                                nullptr,
-                                                'd'};
-                VTimescale unit = m_modp->timeunit();
-                if (unit.isNone()) unit = VTimescale{VTimescale::TS_1PS};
-                VN_AS(bodyp, Display)->fmtp()->timeunit(unit);
-                bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, new AstFinish{flp});
-                m_modp->addStmtsp(
-                    new AstAlways{flp, VAlwaysKwd::ALWAYS_COMB, nullptr,
-                                  new AstIf{flp, atLimitp->cloneTree(false), bodyp, nullptr}});
+                addRuntimeError(flp, atLimitp->cloneTree(false),
+                                "VHDL: '" + attribute + "' of the " + (succ ? "last" : "first")
+                                    + " enumeration literal is outside the type");
             }
             AstNodeExpr* const steppedp
                 = succ ? static_cast<AstNodeExpr*>(new AstAdd{flp, argp, enumConst(1)})
@@ -5914,6 +5921,16 @@ bool Lowering::choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& co
     }
     return false;
 }
+void Lowering::addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message) {
+    AstNode* bodyp = new AstDisplay{flp, VDisplayType::DT_ERROR, message, nullptr, nullptr, 'd'};
+    VTimescale unit = m_modp->timeunit();
+    if (unit.isNone()) unit = VTimescale{VTimescale::TS_1PS};
+    VN_AS(bodyp, Display)->fmtp()->timeunit(unit);
+    bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, new AstFinish{flp});
+    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS_COMB, nullptr,
+                                    new AstIf{flp, condp, bodyp, nullptr}});
+}
+
 void Lowering::checkDrivers() {
     // A composite signal's scalar subelements are separate signals (IEEE 1076-2008
     // 12.6.4), so drivers are compared per bit position. Each emitted always/initial
