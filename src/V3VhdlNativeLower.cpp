@@ -1062,6 +1062,7 @@ class Lowering final {
     static void collectTargetReadNames(const Expr& expr, std::set<std::string>& names);
     static bool usesExitNext(const std::vector<StmtP>& stmts);
     static bool usesBareWait(const std::vector<StmtP>& stmts);
+    static bool usesSeverityFailure(const std::vector<StmtP>& stmts);
     AstNodeExpr* loopGuard(FileLine* flp) const;
     AstNode* lowerWhile(const Stmt& stmt);
     AstVar* newLoopFlag(FileLine* flp, const char* what);
@@ -6217,6 +6218,23 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
         headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
         // A wait suspends the process at once: the rest of this list never runs
         if (stmtp->kind == Stmt::WAIT) break;
+        // Severity failure ends the run at the statement (IEEE 1076-2008 8.3):
+        // nothing after an unconditional report runs, and the statements after a
+        // failing assert run only when it did not fail
+        if (stmtp->severity != Stmt::SEV_FAILURE) continue;
+        if (stmtp->kind == Stmt::REPORT) break;
+        if (stmtp->kind != Stmt::ASSERT) continue;
+        const AstIf* const assertp = VN_CAST(nodep, If);
+        if (!assertp) continue;
+        AstNodeExpr* const passedp = new AstNot{stmtp->flp, assertp->condp()->cloneTree(false)};
+        passedp->dtypep(assertp->condp()->dtypep());
+        if (runCondp) {
+            AstNodeExpr* const andp = new AstAnd{stmtp->flp, runCondp, passedp};
+            andp->dtypep(passedp->dtypep());
+            runCondp = andp;
+        } else {
+            runCondp = passedp;
+        }
     }
     if (runCondp) runCondp->deleteTree();
     return headp;
@@ -6369,6 +6387,26 @@ bool Lowering::usesBareWait(const std::vector<StmtP>& stmts) {
     return false;
 }
 
+//! Whether a statement list (recursively) ends the run: a report or assert of
+//! severity failure (IEEE 1076-2008 8.3)
+bool Lowering::usesSeverityFailure(const std::vector<StmtP>& stmts) {
+    for (const StmtP& stmtp : stmts) {
+        if (!stmtp) continue;
+        if ((stmtp->kind == Stmt::REPORT || stmtp->kind == Stmt::ASSERT)
+            && stmtp->severity == Stmt::SEV_FAILURE) {
+            return true;
+        }
+        for (const auto& branch : stmtp->branches) {
+            if (usesSeverityFailure(branch.second)) return true;
+        }
+        for (const auto& item : stmtp->caseItems) {
+            if (usesSeverityFailure(item.second)) return true;
+        }
+        if (usesSeverityFailure(stmtp->body)) return true;
+    }
+    return false;
+}
+
 //! Condition under which the rest of the enclosing loops may still run
 AstNodeExpr* Lowering::loopGuard(FileLine* flp) const {
     AstNodeExpr* guardp = nullptr;
@@ -6406,7 +6444,19 @@ void Lowering::lowerWaitProcess(const Process& process) {
         }
     }
     if (!waitp) {
-        unsupportedError(flp, "process without a sensitivity list or wait statement");
+        // A severity-failure report or assert, when the process reaches it, ends
+        // the run (IEEE 1076-2008 8.3), which is a valid process stopper: the body
+        // runs once, at time zero, and the run ends at the failure
+        if (!usesSeverityFailure(process.body)) {
+            unsupportedError(flp, "process without a sensitivity list or wait statement");
+            return;
+        }
+        m_initial = true;
+        m_varVals.clear();
+        AstNode* const initp = lowerStmtList(process.body);
+        m_initial = false;
+        if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+        restoreScope(saved);
         return;
     }
     // A trailing bare wait makes the process single-shot: it suspends forever after

@@ -605,6 +605,22 @@ ______
       activation, so the process suspends for good (IEEE 1076-2008 8.1); a
       wait of any other form inside a body is refused instead of dropped
     - ``t_vhdl_wait_bare``
+  * - N108
+    - a report message made only of logic characters was silently dropped,
+      so ``report "0101" severity failure`` neither printed nor ended the run
+    - a report message is a string whatever its characters are (IEEE
+      1076-2008 8.3, 15.7): the parser keeps a string literal whole while it
+      parses one, so the message prints. A process whose only stopper is a
+      severity failure is a valid process: it runs once, at time zero
+    - ``t_vhdl_report_bits``
+  * - N109
+    - statements after an ``assert ... severity failure`` still executed in
+      the same pass: a second failure message printed, and an assignment
+      after the failure took effect
+    - severity failure ends the run at the statement (IEEE 1076-2008 8.3):
+      nothing after an unconditional report is lowered, and the statements
+      after a failing assert run only when it did not fail
+    - ``t_vhdl_sev_stop``
 
 ____
 Open
@@ -642,21 +658,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N108
-    - a report message made only of logic characters is silently dropped, so
-      ``report "0101" severity failure`` neither prints nor ends the run
-    - the parser retypes any string literal whose characters are all logic
-      values as a bit-string literal, and the report lowering then drops the
-      non-string message (IEEE 1076-2008 8.3, 15.7). Test:
-      ``t_vhdl_report_bits``
-  * - N109
-    - statements after an ``assert ... severity failure`` still execute in the
-      same pass: a second failure message prints, and an assignment after the
-      failure takes effect
-    - severity failure must end the run at the assertion (IEEE 1076-2008 8.3);
-      the emitted finish lets the rest of the pass run first. A related gap:
-      a process whose only stopper is a severity-failure assert is refused as
-      a process without a wait. Test: ``t_vhdl_sev_stop``
   * - N110
     - legal forms refused today: a based literal with an exponent
       (``16#FF#E2``), positional ``open``, an instantiation with no maps,

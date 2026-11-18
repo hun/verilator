@@ -177,6 +177,8 @@ class Parser final {
     Lexer m_lexer;  // Token source
     Token m_cur;  // Current token
     bool m_failed = false;  // Stop after the first error
+    int m_stringContext = 0;  // Parsing a report message, which is a string
+                              // whatever its characters are
     std::string m_libname;  // Library of the current file
     bool m_inLibrary = false;  // Current file came from a library
     std::vector<EntityUnit> m_entities;  // Parsed design units
@@ -659,9 +661,10 @@ ExprP Parser::parsePrimary() {
         return node;
     }
     if (m_cur.kind == Token::STRING) {
-        // A string of logic characters is a bit-vector value, e.g. "1001" or "10--"
+        // A string of logic characters is a bit-vector value, e.g. "1001" or
+        // "10--", but a report message is a string whatever its characters are
         std::string bits;
-        bool allBits = true;
+        bool allBits = m_stringContext == 0;
         for (const char c : m_cur.text) {
             const char bit = c == '-' ? '-' : vhdlLogicBit(c);
             if (bit == 0) {
@@ -2353,7 +2356,9 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         conc->target = parseExpr();  // The condition
         if (!conc->target) return;
         if (acceptId("report")) {
+            ++m_stringContext;
             conc->value = parseExpr();
+            --m_stringContext;
             if (!conc->value) return;
         }
         conc->severity = parseSeverityValue();
@@ -2743,7 +2748,9 @@ StmtP Parser::parseSequentialStatement() {
         advance();
         auto stmt = std::make_unique<Stmt>(Stmt::REPORT);
         stmt->flp = flp;
+        ++m_stringContext;
         stmt->value = parseExpr();  // The message
+        --m_stringContext;
         if (!stmt->value) return nullptr;
         parseSeverity(*stmt);
         expectSym(";");
@@ -2756,7 +2763,9 @@ StmtP Parser::parseSequentialStatement() {
         stmt->value = parseExpr();  // The condition
         if (!stmt->value) return nullptr;
         if (acceptId("report")) {
+            ++m_stringContext;
             stmt->message = parseExpr();
+            --m_stringContext;
             if (!stmt->message) return nullptr;
         }
         parseSeverity(*stmt);
