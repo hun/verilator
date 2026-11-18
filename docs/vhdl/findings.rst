@@ -678,6 +678,12 @@ ______
       12.6.4), while element and record-member writes to one signal do not
       collide, and std_logic and the arrays built from it stay resolved
     - ``t_vhdl_driver_bad``
+  * - N116
+    - a port or generic map that mixed positional and named associations was
+      accepted, and the named formals were then ignored
+    - an association list is refused as soon as its form changes, so it is
+      either all positional or all named (IEEE 1076-2008 6.5.7.2)
+    - ``t_vhdl_assoc_mix_bad``
 
 ____
 Open
@@ -715,11 +721,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N116
-    - a port or generic map that mixes positional and named associations is
-      accepted, and the named formals are ignored
-    - IEEE 1076-2008 6.5.7.2 forbids the mix; the lowering maps association k
-      to port k. Needs an analysis-time check and a ``*_bad`` test
   * - N117
     - a port actual of the wrong width is silently resized, and no port
       type/subtype conformance is checked at all

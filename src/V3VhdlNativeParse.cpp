@@ -1893,6 +1893,7 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
         error(std::string{"expected '(' after '"} + what + " map'");
         return;
     }
+    int mixMode = 0;  // 1: the list is positional; 2: it is named
     for (;;) {
         if (m_failed) return;
         PortAssoc assoc;
@@ -1922,6 +1923,13 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             m_lexer.restore(savedState);
         }
         if (named) {
+            // IEEE 1076-2008 6.5.7.2: the associations are all positional or all named
+            if (mixMode == 1) {
+                error(std::string{"named association after a positional one in a "} + what
+                      + " map (IEEE 1076-2008 6.5.7.2)");
+                return;
+            }
+            mixMode = 2;
             Token formalTok;
             if (!takeId(formalTok)) return;
             assoc.formal = formalTok.text;
@@ -1963,9 +1971,21 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
         } else if (isId("open")) {
             // A positional association may leave the formal open (IEEE 1076-2008
             // 6.5.7.1), which the lowering resolves to the formal's default
+            if (mixMode == 2) {
+                error(std::string{"positional association after a named one in a "} + what
+                      + " map (IEEE 1076-2008 6.5.7.2)");
+                return;
+            }
+            mixMode = 1;
             advance();
         } else {
             // Positional association: the actual maps to the next item in order
+            if (mixMode == 2) {
+                error(std::string{"positional association after a named one in a "} + what
+                      + " map (IEEE 1076-2008 6.5.7.2)");
+                return;
+            }
+            mixMode = 1;
             assoc.actual = parseExpr();
             if (!assoc.actual) return;
         }
