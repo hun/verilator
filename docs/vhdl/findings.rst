@@ -621,6 +621,12 @@ ______
       nothing after an unconditional report is lowered, and the statements
       after a failing assert run only when it did not fail
     - ``t_vhdl_sev_stop``
+  * - N111
+    - ``abs`` on a ``numeric_std`` ``signed`` value was refused as
+      ``abs of a non-integer value``
+    - the absolute value compares and negates a signed vector in place, as
+      ``numeric_std`` defines it (IEEE 1076-2008 Annex C)
+    - ``t_vhdl_abs_signed``
 
 ____
 Open
@@ -666,11 +672,6 @@ golden when the diagnostic lands.
     - each is legal VHDL-2008 that GHDL accepts and simulates; the bundle
       surfaces the refusals one at a time. IEEE 1076-2008 15.5, 6.5.7.1, 6.8,
       11.8, 15.10, 12.4, 15.6. Test: ``t_vhdl_legal_forms``
-  * - N111
-    - ``abs`` on a ``numeric_std`` ``signed`` value is refused as
-      ``abs of a non-integer value``
-    - ``numeric_std`` defines ``"abs"`` for a signed operand (IEEE 1076-2008
-      Annex C); only the integer form is lowered. Test: ``t_vhdl_abs_signed``
   * - N112
     - ``case`` completeness, duplicate choices and overlapping ranges are not
       checked; a ``with ... select`` without ``others`` is accepted; a second

@@ -2763,19 +2763,24 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
                                || expr.text == "nand" || expr.text == "nor" || expr.text == "xnor";
         if (reduction) return makeReduction(flp, operandp, expr.text);
         if (expr.text == "abs") {
-            if (!type.isInt()) {
+            // numeric_std defines "abs" for a signed operand (IEEE 1076-2008
+            // Annex C), which compares and negates in place
+            const bool signedVec = type.isVector() && type.isSigned();
+            if (!type.isInt() && !signedVec) {
                 unsupportedError(flp, "abs of a non-integer value");
                 operandp->deleteTree();
                 return nullptr;
             }
             // |x| is x when x is not negative, and -x otherwise
-            AstNodeExpr* const zerop = makeIntConst(flp, 0);
+            AstNodeExpr* const zerop = type.isInt()
+                                           ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
+                                           : makeVectorConst(flp, type, 0);
             AstNodeExpr* const ltZeroP = new AstLtS{flp, operandp->cloneTree(false), zerop};
             ltZeroP->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
             AstNegate* const negp = new AstNegate{flp, operandp->cloneTree(false)};
-            negp->dtypep(type.dtp);
+            negp->dtypep(operandp->dtypep());
             AstCond* const resultp = new AstCond{flp, ltZeroP, negp, operandp};
-            resultp->dtypep(type.dtp);
+            resultp->dtypep(operandp->dtypep());
             return resultp;
         }
         if (expr.text == "??") {
