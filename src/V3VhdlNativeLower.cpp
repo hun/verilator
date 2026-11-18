@@ -10329,8 +10329,9 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         for (const PortDecl& port : entityp->ports) {
             const bool unconstrainedRange
                 = !port.type.hasRange && port.type.constraintMark.empty();
-            const bool isRecordPort = unconstrainedRange && !unconstrainedPort(port)
-                                      && m_designp->unconstrainedRecordMarks.count(port.type.mark);
+            const bool isRecordPort
+                = unconstrainedRange && !unconstrainedPort(port)
+                  && m_designp->unconstrainedRecordMembers.count(port.type.mark);
             if (!unconstrainedPort(port) && !isRecordPort) continue;
             PortBounds bounds;
             const bool ok = isRecordPort ? deriveRecordBounds(*entityp, conc, port, bounds)
@@ -11100,16 +11101,16 @@ static bool memberTypeUnconstrained(const TypeSpec& type) {
     return unconstrainedMark && !type.hasRange && type.constraintMark.empty();
 }
 
-void collectUnconstrainedRecordMarks(const DesignLibrary& library, std::set<std::string>& out) {
+void collectUnconstrainedRecordMembers(const DesignLibrary& library, UnconstrainedRecordMap& out) {
     const auto scan = [&](const std::vector<TypeDecl>& types) {
         for (const TypeDecl& decl : types) {
             if (decl.kind != TypeDecl::RECORD) continue;
+            std::set<std::string> members;
             for (const TypeDecl::Member& member : decl.members) {
-                if (memberTypeUnconstrained(member.type)) {
-                    out.insert(decl.name);
-                    break;
-                }
+                if (!memberTypeUnconstrained(member.type)) continue;
+                for (const auto& name : member.names) members.insert(name.first);
             }
+            if (!members.empty()) out[decl.name] = std::move(members);
         }
     };
     for (const PackageUnit& pkg : library.packages) scan(pkg.types);
@@ -11129,8 +11130,21 @@ void collectPhysicalUnits(const DesignLibrary& library, Design& design) {
     for (const EntityUnit& entity : library.entities) scan(entity.types);
 }
 
-bool hasUnconstrainedPorts(const EntityUnit& entity,
-                           const std::set<std::string>& unconstrainedRecordMarks) {
+bool recordPortFullyConstrained(const PortDecl& port, const UnconstrainedRecordMap& members) {
+    const auto it = members.find(port.type.mark);
+    if (it == members.end()) return false;
+    for (const std::string& member : it->second) {
+        const bool named
+            = std::any_of(port.type.memberConstraints.begin(), port.type.memberConstraints.end(),
+                          [&](const TypeSpec::MemberConstraint& constraint) {
+                              return constraint.name == member;
+                          });
+        if (!named) return false;
+    }
+    return true;
+}
+
+bool hasUnconstrainedPorts(const EntityUnit& entity, const UnconstrainedRecordMap& members) {
     for (const PortDecl& port : entity.ports) {
         const std::string& mark = port.type.mark;
         const bool unconstrainedMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
@@ -11138,8 +11152,8 @@ bool hasUnconstrainedPorts(const EntityUnit& entity,
                                        || mark == "signed";
         if (unconstrainedMark && !port.type.hasRange && port.type.constraintMark.empty())
             return true;
-        if (!port.type.hasRange && port.type.constraintMark.empty()
-            && unconstrainedRecordMarks.count(mark))
+        if (!port.type.hasRange && port.type.constraintMark.empty() && members.count(mark)
+            && !recordPortFullyConstrained(port, members))
             return true;
     }
     return false;
@@ -11147,15 +11161,15 @@ bool hasUnconstrainedPorts(const EntityUnit& entity,
 
 //! Report why an unconstrained-port entity with no instance cannot be modelled, at the
 //! offending port, matching the message a top-level use of the type would give
-void reportUnspecializedPorts(const EntityUnit& entity,
-                              const std::set<std::string>& unconstrainedRecordMarks) {
+void reportUnspecializedPorts(const EntityUnit& entity, const UnconstrainedRecordMap& members) {
     for (const PortDecl& port : entity.ports) {
         const std::string& mark = port.type.mark;
         const bool unconstrainedMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
                                        || mark == "bit_vector" || mark == "unsigned"
                                        || mark == "signed";
         if ((!port.type.hasRange && port.type.constraintMark.empty()
-             && (unconstrainedMark || unconstrainedRecordMarks.count(mark)))) {
+             && (unconstrainedMark
+                 || (members.count(mark) && !recordPortFullyConstrained(port, members))))) {
             unsupportedError(port.flp, "unconstrained type '" + mark + "'");
             return;
         }

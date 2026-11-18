@@ -50,6 +50,9 @@ struct PortBounds final {
 };
 using PortBoundsMap = std::map<std::string, PortBounds>;
 
+//! Record type mark -> the names of its unconstrained array elements
+using UnconstrainedRecordMap = std::map<std::string, std::set<std::string>>;
+
 //! Elaborated package declarations, shared by every unit that uses them
 class PackageTable final {
 public:
@@ -84,7 +87,7 @@ struct Design final {
     std::map<std::string, const Architecture*> archs;  // Folded entity name -> architecture
     std::map<std::string, AstModule*> specializations;  // Generic binding key -> module
     std::set<std::string> instantiated;  // Entities named by at least one instance
-    std::set<std::string> unconstrainedRecordMarks;  // Record marks with an unconstrained member
+    UnconstrainedRecordMap unconstrainedRecordMembers;  // Unconstrained record elements
     // Physical unit name -> multiple of its type's step unit, and the names two physical
     // types give different multiples to, which no literal can name without its type
     std::map<std::string, int64_t> unitFactors;
@@ -93,17 +96,18 @@ struct Design final {
     int specDepth = 0;  // Generic specialization recursion depth
 };
 
+//! Whether a port spec fixes every unconstrained element of its record type
+bool recordPortFullyConstrained(const PortDecl& port, const UnconstrainedRecordMap& members);
+
 //! Whether an entity port's index range is fixed by each instance, not the entity
-bool hasUnconstrainedPorts(const EntityUnit& entity,
-                           const std::set<std::string>& unconstrainedRecordMarks);
+bool hasUnconstrainedPorts(const EntityUnit& entity, const UnconstrainedRecordMap& members);
 
 //! Report why an unconstrained-port entity with no instance cannot be modelled
-void reportUnspecializedPorts(const EntityUnit& entity,
-                              const std::set<std::string>& unconstrainedRecordMarks);
+void reportUnspecializedPorts(const EntityUnit& entity, const UnconstrainedRecordMap& members);
 
-//! Record type marks whose declaration has an element of an unconstrained array type
-void collectUnconstrainedRecordMarks(const DesignLibrary& library,
-                                     std::set<std::string>& out) VL_MT_DISABLED;
+//! Record the unconstrained elements of every record type declared in the library
+void collectUnconstrainedRecordMembers(const DesignLibrary& library,
+                                       UnconstrainedRecordMap& out) VL_MT_DISABLED;
 
 //! Record the physical unit names declared by the packages and entities of the library
 void collectPhysicalUnits(const DesignLibrary& library, Design& design) VL_MT_DISABLED;

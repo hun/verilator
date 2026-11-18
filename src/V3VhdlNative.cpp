@@ -238,7 +238,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     }
     for (const auto& entry : archByEntity) design.archs[entry.first] = entry.second;
     // Record ports whose element widths come from the actual, like unconstrained arrays
-    vhdlnative::collectUnconstrainedRecordMarks(library, design.unconstrainedRecordMarks);
+    vhdlnative::collectUnconstrainedRecordMembers(library, design.unconstrainedRecordMembers);
 
     // Elaborate every entity after the entities its architecture instantiates: an instance
     // binds the ports its child's own elaboration declares, so in source order a user written
@@ -281,7 +281,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
                                 + "' has no architecture; cannot elaborate it");
             continue;
         }
-        if (vhdlnative::hasUnconstrainedPorts(entity, design.unconstrainedRecordMarks)) {
+        if (vhdlnative::hasUnconstrainedPorts(entity, design.unconstrainedRecordMembers)) {
             // Only an instance's actuals fix the port ranges
             portUnelaborated.push_back(&entity);
             continue;
@@ -328,7 +328,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
             AstModule* const modp = modules[entityp->name];
             VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
         } else {
-            vhdlnative::reportUnspecializedPorts(*entityp, design.unconstrainedRecordMarks);
+            vhdlnative::reportUnspecializedPorts(*entityp, design.unconstrainedRecordMembers);
         }
     }
 }

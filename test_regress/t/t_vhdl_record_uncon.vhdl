@@ -73,7 +73,9 @@ entity t is
     uy : out std_logic_vector(3 downto 0);
     vx : out std_logic_vector(2 downto 0);
     vy : out std_logic_vector(1 downto 0);
-    mo : out std_logic_vector(3 downto 0)
+    mo : out std_logic_vector(3 downto 0);
+    r  : in  mixed_u(anyv(3 downto 0));
+    ro : out std_logic_vector(3 downto 0)
   );
 end;
 
@@ -108,4 +110,7 @@ begin
       i => m,
       o => mo
     );
+
+  -- A top-level record port whose subtype fixes its unconstrained element
+  ro <= r.fixed xor r.anyv when r.flag = '1' else r.fixed;
 end;

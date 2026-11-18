@@ -510,6 +510,14 @@ ______
       member works too
     - ``t_vhdl_record_uncon``; the corpus ``comp05/inter02`` and
       ``comp05/inter03`` units pass
+  * - N97
+    - a record port whose declared subtype constrains one of its unconstrained
+      elements: ``rec_out : out test_rec(vec_unbound(n-1 downto 0))``
+    - a record mark with an unconstrained element was always treated as
+      unconstrained, even when the port spec fixed that element, so the entity
+      was parked as an unspecialized-port entity and reported. A port is now
+      unconstrained only when its spec leaves at least one such element unnamed
+    - ``t_vhdl_record_uncon``; the corpus ``issue2119`` unit passes
 
 ____
 Open
@@ -544,13 +552,6 @@ ____
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N97
-    - a record port whose declared subtype constrains one of its unconstrained
-      elements: ``rec_out : out test_rec(vec_unbound(n-1 downto 0))``
-    - a record mark with an unconstrained element is treated as unconstrained
-      even when the port spec fixes that element, so the entity is reported as
-      having an unconstrained type instead of lowering. The classification has
-      to read the spec's member constraints. Reproducer: GHDL ``synth/issue2119``.
 
 ___________
 Verification

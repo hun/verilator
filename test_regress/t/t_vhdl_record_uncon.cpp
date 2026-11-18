@@ -29,6 +29,8 @@ int main(int argc, char** argv) {
                             topp->c = c;
                             topp->d = d;
                             topp->f = f;
+                            // mixed_u packs fixed (MSB), anyv, flag (LSB)
+                            topp->r = (w << 5) | (a << 1) | f;
                             topp->eval();
                             const int wantMo = f ? (w ^ a) : w;
                             const struct {
@@ -41,6 +43,7 @@ int main(int argc, char** argv) {
                                 {"vx", static_cast<int>(topp->vx), c},
                                 {"vy", static_cast<int>(topp->vy), d},
                                 {"mo", static_cast<int>(topp->mo), wantMo},
+                                {"ro", static_cast<int>(topp->ro), wantMo},
                             };
                             for (const auto& check : checks) {
                                 if (check.got != check.want) {
