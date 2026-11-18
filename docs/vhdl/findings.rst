@@ -553,6 +553,14 @@ ______
       a dynamic one selects between the two shifted values on the count's
       sign. Rotates already handled it
     - ``t_vhdl_shift_neg``
+  * - N100
+    - a qualified predefined scalar was re-typed as an unsigned vector:
+      ``integer'(-5) / 2`` folded to 2147483645 and ``integer'(-1) < 0``
+      compared as constant-false unsigned
+    - the qualified expression resolves its mark through the type table
+      before the vector fallthrough, so a scalar mark keeps its scalar type
+      (IEEE 1076-2008 9.3.6)
+    - ``t_vhdl_qual_int``
 
 ____
 Open
@@ -590,14 +598,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N100
-    - a qualified predefined scalar is re-typed as an unsigned vector:
-      ``integer'(-5) / 2`` folds to 2147483645 and ``integer'(-1) < 0``
-      is a constant-false unsigned comparison
-    - the QUAL lowering falls through to ``vectorType`` for the predefined
-      scalar marks, both in the static fold and at run time; IEEE 1076-2008
-      9.3.6 keeps the mark's type. The model reports it as
-      ``%Warning-UNSIGNED``. Test: ``t_vhdl_qual_int``
   * - N101
     - a don't-care in a constant is not a wildcard: ``std_match(x, pat)`` with
       ``pat`` a constant ``"1-0"`` compares the ``-`` bit as data

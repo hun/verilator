@@ -2725,6 +2725,15 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         if (!valuep) return nullptr;
         const VType valueType = typeOfDType(valuep->dtypep());
         if (declared != m_types.end()) return resizeExpr(valuep, declared->second, flp);
+        // A predefined scalar mark keeps its scalar type (IEEE 1076-2008 9.3.6),
+        // so `integer'(x)` stays an integer instead of becoming a vector
+        TypeSpec markSpec;
+        markSpec.flp = flp;
+        markSpec.mark = expr.text;
+        VType scalar;
+        if (formalType(markSpec, scalar) && !scalar.isVector()) {
+            return resizeExpr(valuep, scalar, flp);
+        }
         VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
         VSigning signing = VSigning::NOSIGN;
         if (expr.text == "bit_vector" || expr.text == "bit") kwd = VBasicDTypeKwd::BIT;
