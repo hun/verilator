@@ -851,6 +851,15 @@ ______
       a literal folds by text, so `INIT = ""` selects a generate branch without
       needing a packed value
     - ``t_vhdl_string_generic``
+  * - N135
+    - an unconstrained vector generic (`Polynomial_g : std_logic_vector`), which
+      open-logic's PRBS declares and binds to a bit-string literal
+    - such a generic takes its bounds from the actual at each instance, as a port
+      of the same type does, and registers as a constant of the actual's type. A
+      conversion operand that is a vector designator no longer folds to an integer
+      first: `to_integer(unsigned(v))` saw a non-vector value when `v` was a bound
+      generic
+    - ``t_vhdl_vector_generic``
 
 ____
 Open

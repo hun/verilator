@@ -4227,10 +4227,16 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
         return nullptr;
     }
     // A constant operand folds first: a real expression inside it never reaches the
-    // model, which has no real type, and the conversion of a constant is a constant
+    // model, which has no real type, and the conversion of a constant is a constant.
+    // A vector-valued designator must not fold to an integer, or the conversion would
+    // see a non-vector value.
     int64_t folded = 0;
-    AstNodeExpr* valuep = evalInt(*expr.args[0], folded) ? makeIntConst(flp, folded)
-                                                         : lowerExpr(*expr.args[0], nullptr);
+    VType operandType;
+    const bool vectorOperand = typeOfDesignator(*expr.args[0], operandType)
+                               && operandType.isVector();
+    AstNodeExpr* valuep = (!vectorOperand && evalInt(*expr.args[0], folded))
+                              ? makeIntConst(flp, folded)
+                              : lowerExpr(*expr.args[0], nullptr);
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
     if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {
@@ -10072,6 +10078,16 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
 
 //! Register the entity's generics as constants; bindings hold the bound actuals and
 //! the rest fall back to their defaults. A probe binds only what a range needs.
+//! An unconstrained vector generic: its bounds come from the actual at each instance
+static bool unconstrainedVectorSpec(const TypeSpec& spec) {
+    const std::string& mark = spec.mark;
+    const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                            || mark == "bit_vector" || mark == "unsigned" || mark == "signed"
+                            || mark == "u_unsigned" || mark == "u_signed";
+    return vectorMark && !spec.hasRange && spec.constraintMark.empty()
+           && spec.indexConstraints.empty() && spec.memberConstraints.empty();
+}
+
 bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                                 const GenericBindings* bindings, bool probe) {
     bool ok = true;
@@ -10157,8 +10173,14 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                         m_ownedConsts.push_back(
                             std::unique_ptr<AstConst>(it->second.valuep->cloneTree(false)));
                         m_constValues[name.first] = m_ownedConsts.back().get();
-                        VType declared;
-                        if (resolveType(gen.type, declared)) m_constTypes[name.first] = declared;
+                        if (unconstrainedVectorSpec(gen.type)) {
+                            m_constTypes[name.first] = typeOfDType(it->second.valuep->dtypep());
+                        } else {
+                            VType declared;
+                            if (resolveType(gen.type, declared)) {
+                                m_constTypes[name.first] = declared;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -10764,8 +10786,20 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         // module scope, so take it with this instance's bindings and the entity's packages
         m_moduleScope = saveScope();
         VType declared;
-        const bool haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
-                              && resolveType(gen.type, declared);
+        bool haveType = false;
+        if (unconstrainedVectorSpec(gen.type)) {
+            // An unconstrained vector generic takes its bounds from the actual, as a
+            // port of that type does
+            AstNodeExpr* const valuep = lowerExpr(*assocp->actual, nullptr);
+            if (valuep) {
+                declared = typeOfDType(valuep->dtypep());
+                valuep->deleteTree();
+                haveType = declared.isVector() && declared.width > 0;
+            }
+        } else {
+            haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
+                       && resolveType(gen.type, declared);
+        }
         restoreScope(saved);
         m_imported = savedImported;
         if (!haveType && isBuiltinGenericMark(gen.type.mark)) {
