@@ -748,6 +748,25 @@ ______
       check that reports and ends the run when it reaches zero, the same
       run-time check the enumeration bounds use
     - ``t_vhdl_div_zero_bad``
+  * - N125
+    - an uninitialized integer object starts at 0 rather than ``T'left``
+      (-2**31)
+    - zero is kept as the documented starting value, like the logic-value
+      collapse: `vhdl_synth_subset.md` 5.1 now says so, arguing that emitting
+      ``T'left`` would surprise the zero-initialized C++/SV user and that a
+      synthesizable design initializes or resets its state
+    - documented; no test
+  * - N126
+    - ``vhdl_synth_subset.md`` disagreed with the implementation in both
+      directions: rows marked D/X were implemented, rows marked S were hollow
+    - the tier table now matches the shipped frontend: the implemented forms
+      moved to S (deferred constants, entity statement part, conditional
+      sequential assignment, ``unaffected``, matching ordering, ``std_match``,
+      ``'element``, ``integer_vector``, generic package instantiation, timed
+      waits), the flattened-label and missing-signal rows say what the model
+      really does, and ``boolean'image`` returns lower case per IEEE 1076-2008
+      16.2.2 with ``t_vhdl_image_attr`` re-pinned
+    - ``t_vhdl_image_attr``
 
 ____
 Open
@@ -785,24 +804,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N125
-    - an uninitialized integer object starts at 0 rather than ``T'left``
-      (-2**31)
-    - IEEE 1076-2008 6.4.2.1; a design decision is needed first: keep zero
-      initialization and document it like the two-state logic model, or emit
-      ``T'left``
-  * - N126
-    - ``vhdl_synth_subset.md`` disagrees with the implementation in both
-      directions: rows marked D/X are implemented (conditional sequential
-      assignment, ``unaffected``, matching ordering, ``std_match``, ``'image``,
-      ``'element``, ``integer_vector``, generic package instantiation,
-      deferred constants, entity statement part, timed testbench statements),
-      and rows marked S are hollow (static range checks, the missing-signal
-      diagnosis, generate/block label hierarchy)
-    - the tier table must be refreshed against the shipped feature set before
-      the next tier decision; ``boolean'image`` also returns ``"TRUE"`` where
-      IEEE 1076-2008 16.2.2 requires lower case, and
-      ``t_vhdl_image_attr.vhdl`` pins the wrong value
 ___________
 Verification
 ___________

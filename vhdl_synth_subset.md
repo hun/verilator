@@ -55,15 +55,16 @@ Vivado column: `Y` = supported, `P` = supported with restrictions, `N` = not
 supported, `-` = not stated in UG901.
 
 **Supported set at a glance.** VHDL-2008 synthesizable RTL: entities and
-architectures, packages, components and direct instantiation, constant and type
+architectures, packages (including generic package instantiations and deferred
+constants), components and direct instantiation, constant and type
 generics, logic and numeric types, records, one-dimensional arrays (including
 arrays of arrays), processes and concurrent assignments, generate statements,
 static loops, pure functions and procedures, `std_logic_1164` and `numeric_std`,
-and the standard attributes. Deferred: configurations, dynamic loops, waits
-beyond a top-level clock edge, matching ordering operators, multi-dimensional
-arrays, generic packages and generic subprograms, and VHDL-2019. Excluded: access,
-protected, and file types; real objects; timing constructs; fixed-point and
-floating-point packages; external names; and user-defined resolution functions.
+and the standard attributes. Deferred: configurations, dynamic loops, general
+waits, multi-dimensional arrays, generic subprograms, and VHDL-2019. Excluded:
+access, protected, and file types; real objects; timing constructs; fixed-point
+and floating-point packages; external names; and user-defined resolution
+functions.
 
 The tiers are about the target feature set, not about current implementation
 status. The current state is tracked in `handoff.md` and the plan.
@@ -97,9 +98,9 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `entity` + one architecture | Y | S | An entity with no reachable architecture is an error. |
 | Architecture declarative part | Y | S | Signals, constants, types, subtypes, aliases, components, attributes, subprograms. |
 | Multiple architectures for one entity | Y | S* | Use the last analyzed architecture as the default; an explicit configuration selects another. |
-| Entity statement part (passive statements) | N | X | UG901 Table 15. |
+| Entity statement part (passive statements) | N | S* | Emitted into the module; a concurrent assertion reports on every evaluation and `severity failure` ends the run. |
 | `package` and `package body` | Y | S | Types, subtypes, constants, subprograms, component declarations. |
-| Deferred constant (`constant` in package, value in body) | N | X | UG901 Table 15. |
+| Deferred constant (`constant` in package, value in body) | N | S | The body completes the specification's value. |
 | `context` declaration/reference | Y | S | VHDL-2008. |
 | Component declaration | Y | S | Ports and generics are validated against the bound entity. |
 | Component instantiation with default binding | Y | S | Search `work` first, then the configured libraries. |
@@ -135,7 +136,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Generic referencing another generic | Y (2008) | S | |
 | Generic type parameters (VHDL-2008) | Y | S | Per-binding type specialization; a generic type is monomorphized at each binding. |
 | Generic subprogram parameters (VHDL-2008) | Y | O | Requires a function-pointer-like lowering or full specialization. |
-| Generic package instantiation (VHDL-2008) | Y | D | A package instance must be bound to the actual generic values; ignoring the instance is not acceptable once its types are used. |
+| Generic package instantiation (VHDL-2008) | Y | S | A package instance is bound to the actual generic values and published under its own name. |
 | Array-element override in a generic map (`g(1) => x`) | N | X | UG901 says use an aggregate actual (`g => (x, y)`). |
 | `open` in a generic map | - | O | Uses the formal default. |
 | Unconstrained top-level entity port | N (recommended against) | X | No single width exists; report a clear no-top diagnostic. |
@@ -155,7 +156,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `unsigned`, `signed` (`numeric_std`) | Y | S | Same underlying logic vector with explicit signedness. |
 | `unsigned`, `signed` (`std_logic_arith`) | Y | D | Legacy Synopsys package; conversions are partially implemented today. |
 | `numeric_bit` types | Y | D | `unsigned`/`signed` based on `bit`. |
-| `boolean_vector`, `integer_vector` (VHDL-2008) | Y | D | |
+| `integer_vector` (VHDL-2008) | Y | S | An array of `integer` with the use's bounds. |
 | User-defined enumeration types | Y | S | Literal order defines `'pos`; explicit encoding follows declaration order. |
 | Records | Y | S | Nested records, constants, member selection, positional/named aggregates. UG901: a record field cannot carry an attribute. |
 | One-dimensional arrays | Y | S | Including arrays of vectors, arrays of records, and arrays of arrays. |
@@ -202,7 +203,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Mixed array/scalar logical operands | Y (2008) | S | Scalar is replicated across the array. |
 | Relational `=`, `/=`, `<`, `<=`, `>`, `>=` | Y | S | VHDL result type is `boolean`. |
 | Matching equality/inequality `?=`, `?/=` | Y (2008) | S | Don't-care positions in literals; no wildcard means same-value equality. |
-| Matching ordering `?<`, `?<=`, `?>`, `?>=` | Y (2008) | D | Ordering forms of the matching operators. |
+| Matching ordering `?<`, `?<=`, `?>`, `?>=` | Y (2008) | S | Lowered as the plain ordering; a don't-care operand is refused. |
 | Explicit condition operator `??` | Y (2008) | S | |
 | Implicit scalar condition (`if s then`, `s` is `std_logic`) | - | S* | Compatibility extension; standard VHDL requires `??`. Accepted only for scalar logic types. |
 | Concatenation `&` | Y | S | Arrays and scalars; result width is the sum. |
@@ -234,7 +235,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Allocators | N | X | |
 | Static expressions | Y | S | Folded during elaboration, including ranges, generic values, and attributes. |
 | `others` in aggregates | Y | S | |
-| `unaffected` | Y | D | VHDL-2008 assignment value. |
+| `unaffected` | Y | S | VHDL-2008 assignment value; lowers to a read of the target. |
 | `open` | Y | S | Port/generic association. |
 | Null array / zero-width array | - | X | Rejected cleanly; no zero-width hardware object. |
 
@@ -256,14 +257,14 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `wait until <clock edge>` | Y | S | Only as a top-level wait in a process with no sensitivity list; statements before the wait re-execute after each wakeup. |
 | `wait until <general boolean condition>` | Y | D | A non-clock condition needs a real event/level lowering; not in the baseline. |
 | `wait on <signal> until <condition>` | Y | D | UG901 supports one signal in both the list and the condition; multiple waits are not supported. |
-| `wait for <time>` | N | X | UG901 does not support it. Deferred behind `--timing` would reintroduce non-synthesis semantics; not in the subset. |
+| `wait for <time>` | N | S* | Modelled only in a testbench-shaped process whose body repeats; there is no scheduled-update semantics. |
 | Multiple wait statements in one process | N | X | |
 | Wait statement together with a sensitivity list | N | X | |
 | Wait-based latch | N | X | UG901 explicitly disallows latch descriptions from waits. |
 | `assert` | P | S* | Static conditions are evaluated at elaboration. Runtime assertions are optional (Section 5.6). |
 | `report` | - | I | A literal message prints; `severity failure` ends the run (IEEE 1076-2008 8.3). A non-literal message is dropped. |
 | Procedure call statement | Y | S | |
-| Conditional sequential signal/variable assignment (VHDL-2008) | Y | D | `sig <= a when c else b;` |
+| Conditional sequential signal/variable assignment (VHDL-2008) | Y | S | `sig <= a when c else b;` |
 | Delay/`after` on a signal assignment | P (delay ignored) | X | Verilator rejects a nonzero delay unless a future `--timing` mode is enabled; silently ignoring it would change simulation behavior. |
 | `transport`, `inertial`, `reject` | N | X | |
 | `force`, `release` | - | X | Verification-only, no hardware meaning. |
@@ -273,7 +274,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 
 | Feature | Vivado | Tier | Notes |
 |---|---|---|---|
-| Process with an explicit sensitivity list | Y | S* | The list is honored exactly. Unlike Vivado synthesis, Verilator does not auto-add missing signals; a missing signal is a real simulation difference and should be diagnosed when detectable. `process(all)` is the supported way to ask for inference. |
+| Process with an explicit sensitivity list | Y | S* | The list is honored exactly. Unlike Vivado synthesis, Verilator does not auto-add missing signals, and a missing signal is not diagnosed; `process(all)` is the supported way to ask for inference. |
 | `process(all)` (VHDL-2008) | Y | S | Sensitivity is the set of signals read by the lowered body; process variables are excluded. A clock edge inside `process(all)` is deferred. |
 | Process with a top-level clock-edge wait | Y | S | `wait until rising_edge(clk)`, `falling_edge`, and the `'event` form; statements before the wait re-execute after each wakeup. |
 | Process with a sensitivity list that contains a clock plus asynchronous controls | Y | S | Async reset/set branch before the clock edge, synchronous logic inside it. |
@@ -291,7 +292,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `elsif ... generate` / `else ... generate` (VHDL-2008) | Y | S | |
 | `case ... generate` (VHDL-2008) | Y | D | |
 | Generate declarative part | Y | S | Local signals, constants, types, and instances. |
-| Generate hierarchy / labels | Y | S | Labels become hierarchy components and VCD scopes. |
+| Generate hierarchy / labels | Y | S* | Labels disambiguate the generated names; the design is flattened, so they are not separate VCD scopes. |
 | Block statement | Y (2008) | S | Flattened with a unique scope suffix; local declarations and nested concurrent statements work. |
 | Block statement with port/generic/guard header | - | D | Guarded blocks and `disconnect` are excluded. |
 | Concurrent signal assignment `after`, `transport`, `guarded`, waveform | N | X | UG901 Table 15. |
@@ -326,7 +327,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `std_logic_1164` `to_X01`, `to_X01Z`, `to_UX01` | - | O | Constant-level mapping; runtime values are already 0/1. A tristate driver keeps its `'Z'`. |
 | `std_logic_1164` `is_x` | - | X | A 2-state runtime cannot answer this faithfully for runtime signals. |
 | `ieee.numeric_std` | Y | S | `unsigned`/`signed`, arithmetic, comparison, shifts/rotates, `to_integer`, `to_unsigned`, `to_signed`, `resize`, `shift_left`, `shift_right`, `rotate_left`, `rotate_right`, `minimum`, `maximum`. Division/modulus/remainder/exponentiation follow VHDL semantics. |
-| `numeric_std` `std_match` | - | D | Useful for matching operators; works on 0/1/`-`. |
+| `numeric_std` `std_match` | - | S | Works on 0/1/`-`, including a `-` that arrives through a constant. |
 | `numeric_std` `to_01` | - | O | Constant-level mapping; runtime has no X to map. |
 | `numeric_std` `is_x` | - | X | Same limitation as the `std_logic_1164` version. |
 | `ieee.numeric_bit` | Y | D | Same operations on `bit`-based vectors. |
@@ -339,7 +340,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `ieee.math_real` | P | S* | Static constant calculations only, including the documented constants and functions. No runtime real objects. |
 | `ieee.textio` / `std.textio` | - | X | File I/O. |
 | User package | Y | S | Declaration + body; types, subtypes, constants, subprograms, components. |
-| Generic package instantiation (VHDL-2008) | Y | D | Section 4.2. |
+| Generic package instantiation (VHDL-2008) | Y | S | Section 4.2. |
 | `use` of specific declarations or `.all` | Y | S | |
 | Package-qualified names (`work.pkg.type`, `pkg.const`) | - | S | |
 
@@ -356,9 +357,9 @@ status. The current state is tracked in `handoff.md` and the plan.
 | `'event` | Y | S* | Supported on the clock/sensitivity signal in recognized clock idioms; other uses are deferred. |
 | `'stable` | - | D | Only in clock/sensitivity idioms if a lowering exists. |
 | `'last_value`, `'last_event`, `'transaction`, `'quiet`, `'delayed` | - | X | Simulation-only event attributes; no hardware meaning. |
-| `'image`, `'value` | - | X | String formatting/parsing; report/assert only. |
+| `'image` | - | S* | Folds to a string constant for an integer, an enumeration literal (lower case for `boolean`) and a character. `'value` is not modelled. |
 | `'base`, `'subtype` | - | D | Type marks in declarations; resolve during analysis. |
-| `'element` | - | D | Array element subtype. |
+| `'element` | - | S | Array element subtype, usable as a type mark. |
 | `'simple_name`, `'instance_name`, `'path_name` | - | X | String-valued; no model meaning. |
 | Attribute declaration/specification for a custom attribute | Y | I | Parsed and ignored. |
 | `ram_style`, `rom_style` | Y | I | No RAM/ROM mapping in Verilator. |
@@ -393,7 +394,7 @@ status. The current state is tracked in `handoff.md` and the plan.
 | Reading output ports | Y | S | Output port values may be read inside the entity. |
 | Expressions in port maps | Y | S | |
 | Slices in aggregates | Y | S | |
-| `boolean_vector`, `integer_vector` | Y | D | |
+| `boolean_vector` (VHDL-2008) | Y | D | An array of `boolean`. |
 | Generics referencing generics | Y | S | |
 | Generics in packages | Y | D | |
 | Relaxed function return conversion | Y | D | |
@@ -476,6 +477,12 @@ Consequences:
   it drives an `inout` port or a signal with a tristate driver. Anywhere else it
   resolves to 0. A design that needs a high-impedance bus uses an `inout` port
   or a signal with a `'Z'` driver; conflicting strong drivers remain two-state.
+- An object declared with neither a value nor a reset starts at 0 in the model,
+  including an `integer` (IEEE 1076-2008 6.4.2.1 gives an uninitialized integer
+  the value `T'left`, -2\*\*31). Emitting `T'left` would surprise the C++/SV
+  user who expects zero-initialized state, and every synthesizable design
+  initializes or resets its state anyway, so zero is the documented starting
+  value, like the logic-value collapse above.
 
 ### 5.2 Signals, variables, and scheduling
 
@@ -554,7 +561,7 @@ Consequences:
 - VHDL identifiers keep their source spelling on emitted `AstVar`/pin/instance
   names; a folded form is used for scope lookup. This is required for the
   case-sensitive Verilog boundary.
-- Generate labels and block labels become hierarchy components.
+- Generate and block labels disambiguate the emitted names; the design is flattened, so they are not separate VCD scopes.
 - Diagnostics use the existing `FileLine` mechanism and point at VHDL source
   locations. A construct that is outside the subset reports `Unsupported:` with
   the rule or feature name; it must not fall through to an assertion.
@@ -624,7 +631,7 @@ The following are always rejected, with a specific reason:
 | Protected types | Verification/OS-like state; no hardware meaning. |
 | File types, `textio`, `read`/`write`/`readline`/`writeline` | File I/O; no hardware meaning. |
 | `force`, `release` | Verification-only. |
-| `'image`, `'value`, string formatting | Report/assert only. |
+| `'value`, string parsing | `'image` folds to a constant; parsing a string at run time has no hardware meaning. |
 | Physical objects at runtime, `now` | No hardware meaning. |
 | Real objects (signals, ports, variables) | Synthesis excludes them; static calculations only. |
 | `after`, `transport`, `inertial`, `reject`, `wait for` | Timing semantics; not in the synthesis subset. |
@@ -665,7 +672,7 @@ Minimum corpus by feature area:
 - Packages: `std_logic_1164`, `numeric_std`, `numeric_bit`, legacy Synopsys
   packages, `math_real` static use.
 - Rejections: access/protected/file, timing, real objects, multi-dimensional
-  ports, user resolution, external names, deferred constants.
+  ports, user resolution, external names, run-time physical objects.
 - Mixed language: both directions, case sensitivity, parameter override,
   missing component, duplicate unified name.
 

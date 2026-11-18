@@ -18,5 +18,5 @@ architecture rtl of t is
   constant num_text : string := natural'image(count);
   constant flag_text : string := boolean'image(false);
 begin
-  o <= x"5A" when (num_text = "42") and (flag_text = "FALSE") else x"A5";
+  o <= x"5A" when (num_text = "42") and (flag_text = "false") else x"A5";
 end architecture rtl;

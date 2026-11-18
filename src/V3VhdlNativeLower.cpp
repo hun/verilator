@@ -4941,7 +4941,7 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
             if (expr.a->text == "boolean") {  // Resolves as a 1-bit logic type
                 bool condValue = false;
                 foldedAll = evalCond(*expr.args[0], condValue);
-                text = condValue ? "TRUE" : "FALSE";
+                text = condValue ? "true" : "false";
             } else if (evalInt(*expr.args[0], folded)) {
                 foldedAll = true;
                 if (typep->kind == VType::ENUM && folded >= 0
