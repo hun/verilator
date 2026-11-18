@@ -14,6 +14,8 @@ package ov_pkg is
   function pick(value : integer) return integer;
   function flag(value : natural) return integer;
   function flag(value : boolean) return integer;
+  function scale(value : integer) return integer;
+  function scale(value : real) return real;
 end package ov_pkg;
 
 package body ov_pkg is
@@ -40,6 +42,16 @@ package body ov_pkg is
       return 7;
     end if;
   end function flag;
+
+  function scale(value : integer) return integer is
+  begin
+    return value * 2;
+  end function scale;
+
+  function scale(value : real) return real is
+  begin
+    return value * 100.0;
+  end function scale;
 end package body ov_pkg;
 
 library ieee;
@@ -57,7 +69,9 @@ entity t is
     o_bool  : out integer;
     o_fold  : out integer;
     o_bits  : out std_logic_vector(2 downto 0);
-    o_sum   : out integer
+    o_sum   : out integer;
+    o_var2  : out integer;
+    o_lit2  : out integer
   );
 end entity t;
 
@@ -89,4 +103,7 @@ begin
   end generate gen;
 
   o_sum <= row_t'length;
+  -- An integer actual prefers the integer overload over the real one
+  o_var2 <= scale(count);
+  o_lit2 <= scale(3);
 end architecture rtl;

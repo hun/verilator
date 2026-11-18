@@ -7273,6 +7273,10 @@ bool Lowering::formalsExact(const Expr& call, const SubprogramDecl& sub) const {
         VType aType;
         VType fType;
         if (!actualType(*actualp, aType) || !formalType(formalp->type, fType)) return false;
+        // An integer actual may be associated with a real formal, but does not match it
+        // exactly: a universal integer literal or an integer object takes the integer
+        // overload when both are visible (IEEE 1076-2008 12.5)
+        if (fType.kind == VType::REAL && aType.kind == VType::INT) return false;
         if (!typesMatch(fType, aType)) return false;
     }
     return true;

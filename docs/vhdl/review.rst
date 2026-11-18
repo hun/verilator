@@ -159,7 +159,9 @@ unsigned behavior, while an arithmetic or comparison operator under
 ``std_logic_signed`` is refused. Explicit infix and prefix operators and
 subprogram overloads are selected by base parameter type, including
 ``unsigned`` versus ``signed``, distinct array types, and package-qualified
-type names. When one operand is polymorphic, the selected formal gives it a
+type names. An integer actual selects an integer overload over a real one; a
+real formal still accepts an integer literal when it is the only candidate.
+When one operand is polymorphic, the selected formal gives it a
 type; two polymorphic sized literals are resolved by width and result type.
 Multiple exact candidates are reported as ambiguous. Importing two packages
 that export the same type name unqualified is an error; the qualified mark

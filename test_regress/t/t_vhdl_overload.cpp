@@ -35,7 +35,9 @@ int main(int argc, char** argv) {
                   {"o_bool", static_cast<int>(topp->o_bool), 5},
                   {"o_fold", static_cast<int>(topp->o_fold), 215},
                   {"o_bits", static_cast<int>(topp->o_bits), 7},
-                  {"o_sum", static_cast<int>(topp->o_sum), 12}};
+                  {"o_sum", static_cast<int>(topp->o_sum), 12},
+                  {"o_var2", static_cast<int>(topp->o_var2), 14},
+                  {"o_lit2", static_cast<int>(topp->o_lit2), 6}};
     for (const auto& check : checks) {
         if (check.got != check.want) {
             std::printf("%%Error: %s=%d expected %d\n", check.name, check.got, check.want);

@@ -518,6 +518,25 @@ ______
       was parked as an unspecialized-port entity and reported. A port is now
       unconstrained only when its spec leaves at least one such element unnamed
     - ``t_vhdl_record_uncon``; the corpus ``issue2119`` unit passes
+  * - N43
+    - an aggregate that names part of its target in a choice range, as a
+      concatenation operand: ``(t_residue'left downto DIVIDEND_BITS => '0') &
+      unsigned(Dividend)``
+    - with no target type, the aggregate's width comes from its choices, but a
+      descending range was read as an ascending pair, so the span came out
+      negative and the operand was refused. A choice now covers the elements
+      between its bounds whichever way it names them, so the aggregate is that
+      many elements wide and the concatenation supplies the rest of the word. An
+      aggregate that really leaves a target element uncovered is still refused
+    - ``t_vhdl_agg_choice``; poc-divider lints and passes its 8235 checks
+  * - N98
+    - an overloaded call with an integer actual and both integer and real
+      declarations: ``ite(PIPELINED, STEPS, 0)`` in poc's ``utils``
+    - the exact-match pass treated an integer actual as exact for a real
+      formal, so both declarations matched and the call was reported ambiguous.
+      An integer actual now matches only an integer formal exactly; a real
+      formal still accepts it when it is the only candidate
+    - ``t_vhdl_overload``; poc-divider lints and passes its 8235 checks
 
 ____
 Open
@@ -539,10 +558,6 @@ ____
        droppable here. Not making it a top needs ``AstModule::isTop()``
        (``level() == 1``, set by ``V3LinkCells``), which is the middle end.
        Reproducer: ``test_regress/t/t_vhdl_spec_top_repro.vhdl``.
-   * - N43
-     - an aggregate that does not cover every element of its target
-     - the coverage rule (choices naming fewer elements than the target has, with
-       no ``others``) is not modelled. This is poc-divider's last error.
   * - N67
     - the simulation-only subset: a ``line`` variable *written* by a debug
       procedure through ``ieee.std_logic_textio`` (bit-serial; reading a file into
