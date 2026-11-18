@@ -3135,16 +3135,25 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     // never takes the character-code path an 8-bit operand context would give it.
     const bool logicalOp
         = op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor" || op == "xnor";
+    // A character literal is one character of a concatenated character array, but one
+    // logic element of a concatenated logic or bit vector, even an eight-bit one
+    const auto characterArray = [&](const Expr& other) {
+        if (other.kind == Expr::STRING_LIT) return true;
+        VType otherType;
+        return actualType(other, otherType) && otherType.kind == VType::ARRAY;
+    };
     if (bChar && !aChar) {
         lp = lowerExpr(*expr.a, nullptr);
         if (!lp) return nullptr;
         const VType lctx = typeOfDType(lp->dtypep());
-        rp = lowerExpr(*expr.b, logicalOp ? nullptr : &lctx);
+        const bool charCode = op != "&" || characterArray(*expr.a);
+        rp = lowerExpr(*expr.b, logicalOp || !charCode ? nullptr : &lctx);
     } else if (aChar && !bChar) {
         rp = lowerExpr(*expr.b, nullptr);
         if (!rp) return nullptr;
         const VType rctx = typeOfDType(rp->dtypep());
-        lp = lowerExpr(*expr.a, logicalOp ? nullptr : &rctx);
+        const bool charCode = op != "&" || characterArray(*expr.b);
+        lp = lowerExpr(*expr.a, logicalOp || !charCode ? nullptr : &rctx);
     } else if (aEnumLit != bEnumLit) {
         // Resolve a bare enumeration literal from the type of the other operand, which is
         // how two visible enumeration types can share a literal name
