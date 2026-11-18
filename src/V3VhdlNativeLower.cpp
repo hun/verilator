@@ -636,9 +636,11 @@ class Lowering final {
     //! Derive an unconstrained port's range from its associations at one instance
     bool derivePortBounds(const EntityUnit& entity, const Concurrent& conc, const PortDecl& port,
                           PortBounds& out);
-    //! Derive an unconstrained record port's element ranges from its whole record actual
+    //! Derive an unconstrained record port's element ranges from its associations
     bool deriveRecordBounds(const EntityUnit& entity, const Concurrent& conc, const PortDecl& port,
                             PortBounds& out);
+    //! The record type a port declares, from the parent's scope or the child's packages
+    bool resolvePortRecordType(const EntityUnit& entity, const PortDecl& port, VType& out) const;
     //! Resolve a generic type association such as `std_logic_vector(3 downto 0)`
     bool resolveTypeActual(const Expr& actual, VType& out);
     bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
@@ -10126,9 +10128,32 @@ bool Lowering::derivePortBounds(const EntityUnit& entity, const Concurrent& conc
     return true;
 }
 
+bool Lowering::resolvePortRecordType(const EntityUnit& entity, const PortDecl& port,
+                                     VType& out) const {
+    if (port.type.hasRange || !port.type.constraintMark.empty()) return false;
+    const auto typeIt = m_types.find(port.type.mark);
+    if (typeIt != m_types.end() && typeIt->second.kind == VType::RECORD) {
+        out = typeIt->second;
+        return true;
+    }
+    // The parent can name a record's elements without importing the package that declares
+    // the record, so fall back to the child's own context.
+    if (m_packagesp) {
+        for (const auto& use : entity.uses) {
+            const auto pkgIt = m_packagesp->packages.find(use.second);
+            if (pkgIt == m_packagesp->packages.end()) continue;
+            const auto fieldIt = pkgIt->second.types.find(port.type.mark);
+            if (fieldIt != pkgIt->second.types.end() && fieldIt->second.kind == VType::RECORD) {
+                out = fieldIt->second;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& conc,
                                   const PortDecl& port, PortBounds& out) {
-    FileLine* const flp = conc.flp;
     const std::string& portName = port.names.front().first;
     int targetIndex = -1;
     int index = 0;
@@ -10141,50 +10166,134 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
     const bool positional
         = std::any_of(conc.associations.begin(), conc.associations.end(),
                       [](const PortAssoc& assoc) { return assoc.formal.empty(); });
-    const PortAssoc* assocp = nullptr;
+    std::vector<const PortAssoc*> assocs;
     for (size_t i = 0; i < conc.associations.size(); ++i) {
         const PortAssoc& assoc = conc.associations[i];
         if (positional ? static_cast<int>(i) == targetIndex
                        : assoc.formal == port.names.front().first) {
-            assocp = &assoc;
+            assocs.push_back(&assoc);
         }
     }
-    if (!assocp || !assocp->actual) {
-        unsupportedError(flp, "unconstrained record port with no whole association");
+    const bool anyWhole = std::any_of(assocs.begin(), assocs.end(), [](const PortAssoc* assocp) {
+        return assocp->formalMember.empty();
+    });
+    const bool anyMember = std::any_of(assocs.begin(), assocs.end(), [](const PortAssoc* assocp) {
+        return !assocp->formalMember.empty();
+    });
+    if (anyWhole && anyMember) {
+        unsupportedError(conc.flp, "mixing whole-port and record-member associations");
         return false;
     }
-    VType actualType;
-    if (!typeOfDesignator(*assocp->actual, actualType)) {
-        AstNodeExpr* const valuep = lowerExpr(*assocp->actual, nullptr);
-        if (!valuep) return false;
-        actualType = typeOfDType(valuep->dtypep());
-        valuep->deleteTree();
-    }
-    if (actualType.kind != VType::RECORD) {
-        unsupportedError(assocp->flp, "actual of an unconstrained record port is not a record");
+    if (anyWhole && assocs.size() > 1) {
+        conc.flp->v3error("VHDL: port '" + port.names.front().second
+                          + "' is associated more than once");
         return false;
     }
-    // The port's declared record fixes the element order the specialization must follow
+    // The port's declared record fixes the element order and its constrained elements.
+    // Each unconstrained element takes its range from the association that names it.
     VType baseType;
-    if (!resolveType(port.type, baseType) || baseType.kind != VType::RECORD) {
+    if (!resolvePortRecordType(entity, port, baseType)) {
         unsupportedError(port.flp, "unconstrained record port");
         return false;
     }
-    out.isRecord = true;
-    for (const VField& base : baseType.fields) {
-        const VField* actualp = nullptr;
-        for (const VField& f : actualType.fields) {
-            if (f.name == base.name) actualp = &f;
+    const size_t fieldCount = baseType.fields.size();
+    std::vector<int> lefts(fieldCount);
+    std::vector<int> rights(fieldCount);
+    std::vector<bool> ascendings(fieldCount);
+    std::vector<bool> have(fieldCount, false);
+    std::vector<bool> seen(fieldCount, false);
+    const auto fieldIndex = [&](const std::string& name) {
+        for (size_t i = 0; i < fieldCount; ++i) {
+            if (baseType.fields[i].name == name) return static_cast<int>(i);
         }
-        if (!actualp || !actualp->type || !actualp->type->isVector()) {
-            unsupportedError(assocp->flp,
-                             "unconstrained record port element has no vector actual");
+        return -1;
+    };
+    const auto actualTypeOf = [&](const Expr& actual, VType& type) {
+        if (typeOfDesignator(actual, type)) return true;
+        AstNodeExpr* const valuep = lowerExpr(actual, nullptr);
+        if (!valuep) return false;
+        type = typeOfDType(valuep->dtypep());
+        valuep->deleteTree();
+        return true;
+    };
+    const auto setMember = [&](const int field, const VType& type) {
+        lefts[field] = type.left;
+        rights[field] = type.right;
+        ascendings[field] = type.ascending;
+        have[field] = true;
+    };
+    for (const PortAssoc* const assocp : assocs) {
+        if (assocp->hasFormalRange) {
+            unsupportedError(assocp->flp, "part of a port that is not a bit vector");
             return false;
         }
-        out.memberNames.push_back(base.name);
-        out.memberLeft.push_back(actualp->type->left);
-        out.memberRight.push_back(actualp->type->right);
-        out.memberAscending.push_back(actualp->type->ascending);
+        if (!assocp->formalMember.empty()) {
+            const int field = fieldIndex(assocp->formalMember);
+            if (field < 0) {
+                assocp->flp->v3error("VHDL: record port '" + port.names.front().second
+                                     + "' has no element '" + assocp->formalMemberSpelling + "'");
+                return false;
+            }
+            if (seen[field]) {
+                assocp->flp->v3error("VHDL: record port '" + port.names.front().second
+                                     + "' element '" + assocp->formalMemberSpelling
+                                     + "' is associated more than once");
+                return false;
+            }
+            seen[field] = true;
+            if (baseType.fields[field].width != 0) continue;  // range from the declaration
+            if (!assocp->actual) {
+                unsupportedError(assocp->flp, "open record-member port association");
+                return false;
+            }
+            VType actualType;
+            if (!actualTypeOf(*assocp->actual, actualType)) return false;
+            if (!actualType.isVector()) {
+                unsupportedError(assocp->flp, "record port element actual is not a vector");
+                return false;
+            }
+            setMember(field, actualType);
+            continue;
+        }
+        // A whole record actual fixes every unconstrained element's range
+        if (!assocp->actual) {
+            unsupportedError(assocp->flp, "open unconstrained record port with no default value");
+            return false;
+        }
+        VType actualType;
+        if (!actualTypeOf(*assocp->actual, actualType)) return false;
+        if (actualType.kind != VType::RECORD) {
+            unsupportedError(assocp->flp,
+                             "actual of an unconstrained record port is not a record");
+            return false;
+        }
+        for (size_t field = 0; field < fieldCount; ++field) {
+            seen[field] = true;
+            if (baseType.fields[field].width != 0) continue;
+            const VField* actualp = nullptr;
+            for (const VField& f : actualType.fields) {
+                if (f.name == baseType.fields[field].name) actualp = &f;
+            }
+            if (!actualp || !actualp->type || !actualp->type->isVector()) {
+                unsupportedError(assocp->flp,
+                                 "unconstrained record port element has no vector actual");
+                return false;
+            }
+            setMember(static_cast<int>(field), *actualp->type);
+        }
+    }
+    out.isRecord = true;
+    for (size_t field = 0; field < fieldCount; ++field) {
+        if (baseType.fields[field].width != 0) continue;
+        if (!have[field]) {
+            unsupportedError(port.flp, "unconstrained record port element '"
+                                           + baseType.fields[field].name + "' has no association");
+            return false;
+        }
+        out.memberNames.push_back(baseType.fields[field].name);
+        out.memberLeft.push_back(lefts[field]);
+        out.memberRight.push_back(rights[field]);
+        out.memberAscending.push_back(ascendings[field]);
     }
     return true;
 }
@@ -10267,28 +10376,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                                return name.first == portp->name();
                                            });
             if (!match) continue;
-            // Only a declared record type names elements, and its mark carries no range: a
-            // vector's or a generic type's range would need values that are not in the
-            // enclosing scope this instance is lowered in
-            if (port.type.hasRange || !port.type.constraintMark.empty()) return none;
-            const auto typeIt = m_types.find(port.type.mark);
-            if (typeIt != m_types.end() && typeIt->second.kind == VType::RECORD) {
-                return typeIt->second;
-            }
-            // The parent can name a record's elements without importing the package that
-            // declares the record, so fall back to the child's own context.
-            if (m_packagesp) {
-                for (const auto& use : entityp->uses) {
-                    const auto pkgIt = m_packagesp->packages.find(use.second);
-                    if (pkgIt == m_packagesp->packages.end()) continue;
-                    const auto fieldIt = pkgIt->second.types.find(port.type.mark);
-                    if (fieldIt != pkgIt->second.types.end()
-                        && fieldIt->second.kind == VType::RECORD) {
-                        return fieldIt->second;
-                    }
-                }
-            }
-            return none;
+            VType found;
+            return resolvePortRecordType(*entityp, port, found) ? found : VType{};
         }
         return none;
     };
@@ -10321,8 +10410,22 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         }
         const VType portType = typeOfDType(portp->dtypep());
         // The packed vector of a record port does not name its elements, so an aggregate
-        // actual or default takes the record type the port is declared with
-        const VType recPortType = recordPortType(portp);
+        // actual or default takes the record type the port is declared with. An
+        // unconstrained record port takes the element ranges this instance fixed.
+        VType recPortType = recordPortType(portp);
+        const auto boundsIt = portBounds.find(portp->name());
+        if (boundsIt != portBounds.end() && boundsIt->second.isRecord
+            && recPortType.kind == VType::RECORD) {
+            const PortBounds& bounds = boundsIt->second;
+            for (size_t i = 0; i < bounds.memberNames.size(); ++i) {
+                for (VField& field : recPortType.fields) {
+                    if (field.name != bounds.memberNames[i]) continue;
+                    setRecordField(flp, field, bounds.memberLeft[i], bounds.memberRight[i],
+                                   bounds.memberAscending[i]);
+                }
+            }
+            finalizeRecordFields(flp, recPortType);
+        }
         const VType& aggType = recPortType.kind == VType::RECORD ? recPortType : portType;
         if (assocs.empty()) {
             // An unassociated input takes its declared default; otherwise it is open

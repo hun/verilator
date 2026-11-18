@@ -1,4 +1,0 @@
-%Error: t/t_vhdl_record_ind_unsup.vhdl:53:1: VHDL actual of an unconstrained record port is not a record is not supported yet
-        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_record_ind_unsup.vhdl:23:1: VHDL unconstrained type 'pair_u' is not supported yet
-%Error: Exiting due to

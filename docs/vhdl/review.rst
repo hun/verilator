@@ -275,9 +275,9 @@ Verification gaps
   frontend selector and therefore exercised the GHDL path even in a native run.
   Retiring the selector exposed the difference: one of them,
   ``t_vhdl_record_ind``, relied on unconstrained record specialization from
-  element-only actuals, which the in-tree frontend does not support. Its
-  constrained shape is now the positive test, and the unsupported shape is
-  pinned by ``t_vhdl_record_ind_unsup``.
+  element-only actuals, which the in-tree frontend did not support. The
+  constrained shape is the positive test, and the element-only shape is now
+  value-checked by ``t_vhdl_record_uncon``.
 - Removing the external frontend halved the maintenance surface; the remaining
   single frontend still needs its own analyzer-grade tests, not only
   acceptance tests.

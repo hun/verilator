@@ -500,6 +500,16 @@ ______
     - they are lowered as intrinsics, logical for both signednesses. The GHDL
       ``sns01``/``sns02`` cases pass
     - ``t_vhdl_arith_conv``
+  * - N94
+    - an unconstrained record port associated only by its elements:
+      ``i.x => a, i.y => b``
+    - the specialization only knew a whole record actual, so no element fixed
+      the member ranges and the port was reported as an unconstrained type. Each
+      association that names an element now fixes that element's range, and the
+      declared record keeps its constrained elements, so an actual with a scalar
+      member works too
+    - ``t_vhdl_record_uncon``; the corpus ``comp05/inter02`` and
+      ``comp05/inter03`` units pass
 
 ____
 Open
@@ -534,13 +544,13 @@ ____
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N94
-    - an unconstrained record port whose actuals associate only individual
-      elements: ``i.x => a, i.y => b``
-    - no whole-record actual fixes the member ranges, so the port is reported as
-      an unconstrained type. The constrained association form works;
-      ``t_vhdl_record_ind_unsup`` pins the refusal. Supporting it needs the
-      member bounds derived from the element actuals during specialization.
+  * - N97
+    - a record port whose declared subtype constrains one of its unconstrained
+      elements: ``rec_out : out test_rec(vec_unbound(n-1 downto 0))``
+    - a record mark with an unconstrained element is treated as unconstrained
+      even when the port spec fixes that element, so the entity is reported as
+      having an unconstrained type instead of lowering. The classification has
+      to read the spec's member constraints. Reproducer: GHDL ``synth/issue2119``.
 
 ___________
 Verification
