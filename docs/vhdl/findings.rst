@@ -545,6 +545,14 @@ ______
       value; any other operator still takes the character-code context an 8-bit
       operand gives it, which a string or ``character`` comparison needs
     - ``t_vhdl_char_lit_vec``
+  * - N102
+    - a negative shift count was the wrong shift: ``"1011" sll (-1)`` gave
+      all zeros instead of the ``srl 1`` value
+    - the count selects the direction (IEEE 1076-2008 9.2.4): a static
+      negative count lowers as the opposite operator with its magnitude, and
+      a dynamic one selects between the two shifted values on the count's
+      sign. Rotates already handled it
+    - ``t_vhdl_shift_neg``
 
 ____
 Open
@@ -596,13 +604,6 @@ golden when the diagnostic lands.
     - the wildcard mask is built only from bit-string *literal* operands, so a
       ``'-'`` that arrives through a constant is lost (IEEE 1076-2008 16.8.3,
       9.2.3). Test: ``t_vhdl_std_match_const``
-  * - N102
-    - a negative shift count is the wrong shift: ``"1011" sll (-1)`` gives
-      all zeros or ``sll 1`` instead of ``srl 1``
-    - the count's sign is never negated for ``sll``/``srl``/``sla``/``sra``
-      (``src/V3VhdlNativeLower.cpp`` passes the raw amount to the AST shift);
-      IEEE 1076-2008 9.2.4 defines the negative count as the opposite shift.
-      Rotates already handle it. Test: ``t_vhdl_shift_neg``
   * - N103
     - a run-time ``for`` loop re-reads its bound every iteration: a loop whose
       body decrements the bound runs 2 iterations where VHDL runs 4; a bound

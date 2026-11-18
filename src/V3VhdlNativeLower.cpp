@@ -1002,6 +1002,10 @@ class Lowering final {
     //! The signal's edge, from its level and whether it changed
     AstNodeExpr* edgeFromChanged(FileLine* flp, AstVar* varp, bool rising);
     AstNodeExpr* makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp, bool left);
+    //! The shifted value for one direction, consuming its operands. `op` is one of
+    //! sll/srl/sla/sra, already normalized to the direction the count names
+    AstNodeExpr* makeShift(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp,
+                           const std::string& op, const VType& vt);
     AstNodeExpr* makeMod(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
                          bool sign);
     AstNodeExpr* makeRem(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
@@ -3410,49 +3414,32 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             rp->deleteTree();
             return nullptr;
         }
-        AstNodeDType* const dtp = lp->dtypep();
-        const int width = dtp->width();
         if (op == "rol" || op == "ror") return makeRotate(flp, lp, rp, op == "rol");
-        // A predefined `bit_vector` shift fills the vacated positions with the array's
-        // edge element: sra with the leftmost, sla with the rightmost (IEEE 1076-2008
-        // 9.2.3). The numeric_std vector types keep their own shift semantics.
-        const bool edgeFill = lt.kwd == VBasicDTypeKwd::BIT || lt.isPredefinedVector();
-        AstNodeExpr* resultp = nullptr;
-        if (op == "sll") {
-            resultp = new AstShiftL{flp, lp, rp, width};
-        } else if (op == "sra") {
-            resultp = edgeFill ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, lp, rp, width})
-                      : lt.isSigned()
-                          ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, lp, rp, width})
-                          : static_cast<AstNodeExpr*>(new AstShiftR{flp, lp, rp, width});
-        } else if (op == "sla" && edgeFill) {
-            // (value << n) | (rightmost_element & ((1 << n) - 1)). The mask subtraction
-            // wraps for n >= width, which fills the whole result with the edge element.
-            AstConst* const onep = new AstConst{flp, V3Number{flp, width, 1u}};
-            onep->dtypep(dtp);
-            AstSel* const lsbp = new AstSel{flp, lp->cloneTree(false), 0, 1};
-            lsbp->dtypep(findBasic(flp, VBasicDTypeKwd::BIT));
-            AstReplicate* const fillValuep
-                = new AstReplicate{flp, lsbp, static_cast<uint32_t>(width)};
-            fillValuep->dtypep(dtp);
-            AstNodeExpr* const maskShiftp
-                = new AstShiftL{flp, onep->cloneTree(false), rp->cloneTree(false), width};
-            maskShiftp->dtypep(dtp);
-            AstNodeExpr* const maskp = new AstSub{flp, maskShiftp, onep};
-            maskp->dtypep(dtp);
-            AstAnd* const fillp = new AstAnd{flp, fillValuep, maskp};
-            fillp->dtypep(dtp);
-            AstNodeExpr* const shiftedp = new AstShiftL{flp, lp, rp, width};
-            shiftedp->dtypep(dtp);
-            AstOr* const resultOrp = new AstOr{flp, shiftedp, fillp};
-            resultOrp->dtypep(dtp);
-            resultp = resultOrp;
-        } else if (op == "sla") {
-            resultp = new AstShiftL{flp, lp, rp, width};
-        } else {
-            resultp = new AstShiftR{flp, lp, rp, width};
+        // A negative count is the opposite shift (IEEE 1076-2008 9.2.4)
+        const std::string oppositeOp = op == "sll"   ? "srl"
+                                       : op == "srl" ? "sll"
+                                       : op == "sla" ? "sra"
+                                                     : "sla";
+        int64_t count = 0;
+        if (staticIntFold(expr.b, count)) {
+            if (count < 0) {
+                rp->deleteTree();
+                rp = makeIntConst(flp, -count);
+                return makeShift(flp, lp, rp, oppositeOp, lt);
+            }
+            return makeShift(flp, lp, rp, op, lt);
         }
-        resultp->dtypep(dtp);
+        // A dynamic count selects its direction: the count itself when it is
+        // non-negative, and `0 - count`, which is non-negative, the other way
+        AstNodeExpr* const testp = new AstGteS{flp, rp, makeIntConst(flp, 0)};
+        testp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        AstNodeExpr* const negp = new AstSub{flp, makeIntConst(flp, 0), rp->cloneTree(false)};
+        negp->dtypep(intType(flp).dtp);
+        AstNodeExpr* const forwardp
+            = makeShift(flp, lp->cloneTree(false), rp->cloneTree(false), op, lt);
+        AstNodeExpr* const backwardp = makeShift(flp, lp, negp, oppositeOp, lt);
+        AstCond* const resultp = new AstCond{flp, testp, forwardp, backwardp};
+        resultp->dtypep(forwardp->dtypep());
         return resultp;
     }
     if (op == "**") {
@@ -3687,6 +3674,53 @@ AstNodeExpr* Lowering::makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExp
     innerp->dtypep(dtp);
     outerp->dtypep(dtp);
     AstNodeExpr* const resultp = new AstOr{flp, innerp, outerp};
+    resultp->dtypep(dtp);
+    return resultp;
+}
+
+//! The shifted value for one direction, consuming its operands. A predefined
+//! `bit_vector` or logic-vector shift fills the vacated positions with the
+//! array's edge element: sra with the leftmost, sla with the rightmost (IEEE
+//! 1076-2008 9.2.3). The numeric_std vector types keep their own shift semantics.
+AstNodeExpr* Lowering::makeShift(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp,
+                                 const std::string& op, const VType& vt) {
+    AstNodeDType* const dtp = valuep->dtypep();
+    const int width = dtp->width();
+    const bool edgeFill = vt.kwd == VBasicDTypeKwd::BIT || vt.isPredefinedVector();
+    AstNodeExpr* resultp = nullptr;
+    if (op == "sll") {
+        resultp = new AstShiftL{flp, valuep, amountp, width};
+    } else if (op == "sra") {
+        resultp = edgeFill ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, valuep, amountp, width})
+                  : vt.isSigned()
+                      ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, valuep, amountp, width})
+                      : static_cast<AstNodeExpr*>(new AstShiftR{flp, valuep, amountp, width});
+    } else if (op == "sla" && edgeFill) {
+        // (value << n) | (rightmost_element & ((1 << n) - 1)). The mask subtraction
+        // wraps for n >= width, which fills the whole result with the edge element.
+        AstConst* const onep = new AstConst{flp, V3Number{flp, width, 1u}};
+        onep->dtypep(dtp);
+        AstSel* const lsbp = new AstSel{flp, valuep->cloneTree(false), 0, 1};
+        lsbp->dtypep(findBasic(flp, VBasicDTypeKwd::BIT));
+        AstReplicate* const fillValuep = new AstReplicate{flp, lsbp, static_cast<uint32_t>(width)};
+        fillValuep->dtypep(dtp);
+        AstNodeExpr* const maskShiftp
+            = new AstShiftL{flp, onep->cloneTree(false), amountp->cloneTree(false), width};
+        maskShiftp->dtypep(dtp);
+        AstNodeExpr* const maskp = new AstSub{flp, maskShiftp, onep};
+        maskp->dtypep(dtp);
+        AstAnd* const fillp = new AstAnd{flp, fillValuep, maskp};
+        fillp->dtypep(dtp);
+        AstNodeExpr* const shiftedp = new AstShiftL{flp, valuep, amountp, width};
+        shiftedp->dtypep(dtp);
+        AstOr* const resultOrp = new AstOr{flp, shiftedp, fillp};
+        resultOrp->dtypep(dtp);
+        resultp = resultOrp;
+    } else if (op == "sla") {
+        resultp = new AstShiftL{flp, valuep, amountp, width};
+    } else {
+        resultp = new AstShiftR{flp, valuep, amountp, width};
+    }
     resultp->dtypep(dtp);
     return resultp;
 }
