@@ -6458,7 +6458,8 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
             }
             continue;
         }
-        AstNode* nodep = lowerStmt(*stmtp);
+        AstNode* const stmtNodep = lowerStmt(*stmtp);
+        AstNode* nodep = stmtNodep;
         updateVarVals(*stmtp);
         if (!nodep) continue;
         // Statements after a conditional exit/next only run when it was not taken
@@ -6475,7 +6476,9 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
         if (stmtp->severity != Stmt::SEV_FAILURE) continue;
         if (stmtp->kind == Stmt::REPORT) break;
         if (stmtp->kind != Stmt::ASSERT) continue;
-        const AstIf* const assertp = VN_CAST(nodep, If);
+        // The assertion's own If carries the failure condition; `nodep` may already be
+        // wrapped by a preceding run condition or loop guard
+        const AstIf* const assertp = VN_CAST(stmtNodep, If);
         if (!assertp) continue;
         AstNodeExpr* const passedp = new AstNot{stmtp->flp, assertp->condp()->cloneTree(false)};
         passedp->dtypep(assertp->condp()->dtypep());
