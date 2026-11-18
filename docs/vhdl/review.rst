@@ -180,7 +180,11 @@ the ``std_logic_vector`` ones. Explicit infix and prefix operators and
 subprogram overloads are selected by base parameter type, including
 ``unsigned`` versus ``signed``, distinct array types, and package-qualified
 type names. An integer actual selects an integer overload over a real one; a
-real formal still accepts an integer literal when it is the only candidate.
+real formal still accepts an integer literal when it is the only candidate. A
+generic of type ``real`` binds like a real constant: its value folds at
+elaboration, so the model never carries a floating type. A call of a package
+subprogram through a library-qualified name (``work.pkg.f(...)``) resolves to
+that package, as an unqualified call does after a ``use``.
 When one operand is polymorphic, the selected formal gives it a
 type; two polymorphic sized literals are resolved by width and result type. A
 type declaration may take its element range from an object of the same

@@ -133,6 +133,8 @@ PackageTable::~PackageTable() = default;
 struct GenericBinding final {
     bool isInt = false;
     int64_t intValue = 0;
+    bool isReal = false;
+    double realValue = 0.0;
     bool isString = false;
     std::string stringValue;
     bool isType = false;
@@ -1537,15 +1539,27 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         return true;
     }
     case Expr::INDEX: {
-        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        // The callee may be qualified (`ieee.math_real.round(...)`), whose selected name
+        // is the function itself
+        if (!expr.a || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::SELECTED))
+            return false;
         const Expr* returnp = nullptr;
         if (pushPureCall(expr, returnp)) {
             const bool folded = evalInt(*returnp, value);
             popPureCall();
             if (folded) return true;
         }
-        if (expr.args.size() != 1) return false;
         const std::string& fn = expr.a->text;
+        if (expr.args.size() == 2) {
+            int64_t lhs = 0;
+            int64_t rhs = 0;
+            if ((fn != "min" && fn != "max") || !evalInt(*expr.args[0], lhs)
+                || !evalInt(*expr.args[1], rhs))
+                return false;
+            value = fn == "min" ? std::min(lhs, rhs) : std::max(lhs, rhs);
+            return true;
+        }
+        if (expr.args.size() != 1) return false;
         // real(integer) is integral, so it folds as an integer and the real expression
         // around it stays inside the constant folders
         if (fn == "real") return evalInt(*expr.args[0], value);
@@ -1752,15 +1766,27 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
         return true;
     }
     case Expr::INDEX: {
-        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        // The callee may be qualified (`ieee.math_real.round(...)`), whose selected name
+        // is the function itself
+        if (!expr.a || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::SELECTED))
+            return false;
         const Expr* returnp = nullptr;
         if (pushPureCall(expr, returnp)) {
             const bool folded = evalReal(*returnp, value);
             popPureCall();
             if (folded) return true;
         }
-        if (expr.args.size() != 1) return false;
         const std::string& fn = expr.a->text;
+        if (expr.args.size() == 2) {
+            double lhs = 0.0;
+            double rhs = 0.0;
+            if ((fn != "min" && fn != "max") || !evalReal(*expr.args[0], lhs)
+                || !evalReal(*expr.args[1], rhs))
+                return false;
+            value = fn == "min" ? std::min(lhs, rhs) : std::max(lhs, rhs);
+            return true;
+        }
+        if (expr.args.size() != 1) return false;
         double operand = 0.0;
         if (!evalReal(*expr.args[0], operand)) return false;
         if (fn == "real") {
@@ -2985,7 +3011,14 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return makeStringConst(flp, expr.spelling);
     }
     case Expr::BINARY: return lowerBinary(expr, context);
-    case Expr::INDEX:
+    case Expr::INDEX: {
+        // A qualified call `package.name(...)`: a selected callee whose prefix names a
+        // package, rather than an element of a record field
+        std::string packageName;
+        if (expr.a && expr.a->kind == Expr::SELECTED && expr.a->a
+            && packageNameOf(*expr.a->a, packageName)) {
+            return lowerFunctionCall(expr, context);
+        }
         if (expr.a && expr.a->kind == Expr::NAME) {
             if (expr.a->text == "rising_edge" || expr.a->text == "falling_edge") {
                 return lowerEdgeCall(expr);
@@ -3042,6 +3075,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             }
         }
         return lowerDesignator(expr, false);
+    }
     case Expr::CALL: {
         // An operator-symbol call to a unary reduction, e.g. `"or"(a)`
         const std::string& name = expr.text;
@@ -7388,10 +7422,13 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
                                             const VType* contextp) {
     std::string name;
     std::vector<const SubprogramRef*> refs;
-    if (call.a && call.a->kind == Expr::SELECTED && call.a->a && call.a->a->kind == Expr::NAME) {
-        // A qualified call `package.name(...)`: consult that package
+    std::string packageName;
+    if (call.a && call.a->kind == Expr::SELECTED && call.a->a
+        && packageNameOf(*call.a->a, packageName)) {
+        // A qualified call `package.name(...)`, or `work.package.name(...)`: consult
+        // that package
         name = call.a->text;
-        importPackage(call.a->a->text);
+        importPackage(packageName);
         const auto it = m_subprograms.find(name);
         if (it != m_subprograms.end())
             for (const SubprogramRef& ref : it->second) refs.push_back(&ref);
@@ -10145,6 +10182,23 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                 }
                 continue;
             }
+            if (gen.type.mark == "real") {
+                if (bindings) {
+                    const auto it = bindings->find(name.first);
+                    if (it != bindings->end() && it->second.isReal) {
+                        if (!probe) m_realConsts[name.first] = it->second.realValue;
+                        continue;
+                    }
+                }
+                double realDefault = 0.0;
+                if (gen.init && evalReal(*gen.init, realDefault)) {
+                    if (!probe) m_realConsts[name.first] = realDefault;
+                } else if (!probe) {
+                    ok = false;  // No default, so only a binding can elaborate the base
+                    unbound = true;
+                }
+                continue;
+            }
             if (gen.type.mark == "string") {
                 const Expr* actualp = nullptr;
                 if (bindings) {
@@ -10737,6 +10791,18 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             bindings[items[k].folded] = binding;
             continue;
         }
+        if (gen.type.mark == "real") {
+            // A real generic is an elaboration-time value, like a real constant
+            GenericBinding binding;
+            if (!evalReal(*assocp->actual, binding.realValue)) {
+                unsupportedError(assocp->flp, "real generic actual");
+                freeBindings(bindings);
+                return nullptr;
+            }
+            binding.isReal = true;
+            bindings[items[k].folded] = binding;
+            continue;
+        }
         if (gen.type.mark == "string") {
             const Expr* const actualp = assocp ? assocp->actual.get() : gen.init.get();
             if (!actualp) {
@@ -10869,6 +10935,12 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             key += std::to_string(entry.second.intValue);
         } else if (entry.second.isString) {
             key += entry.second.stringValue;
+        } else if (entry.second.isReal) {
+            // A real is an elaboration-time value with no constant node; the shortest
+            // representation that round-trips keeps distinct values apart
+            char text[40];
+            std::snprintf(text, sizeof(text), "%.17g", entry.second.realValue);
+            key += text;
         } else if (entry.second.subp) {
             // Unique per actual subprogram declaration within this run
             key += "subp:" + std::to_string(reinterpret_cast<uintptr_t>(entry.second.subp));

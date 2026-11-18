@@ -860,6 +860,27 @@ ______
       first: `to_integer(unsigned(v))` saw a non-vector value when `v` was a bound
       generic
     - ``t_vhdl_vector_generic``
+  * - N136
+    - a generic of type `real` (`FreqClkHz_g : real` in open-logic's strobe
+      generator), which the binder refused because a real has no packed form
+    - a real generic is an elaboration-time value like a real constant: the binder
+      keeps the double, the entity registers it where `evalReal` finds it, and the
+      instance key carries its shortest round-tripping text so two instances with
+      different ratios specialize separately. The body's
+      `integer(round(FreqClkHz_g / FreqStrobeHz_g))` then folds, and no floating
+      type reaches the model
+    - ``t_vhdl_real_generic``
+  * - N137
+    - a call of a package subprogram through a library-qualified name,
+      `work.olo_base_pkg_math.min(...)`: open-logic's strobe generator computes its
+      period that way
+    - the instance resolver accepted only `package.name(...)`, so the prefix chain
+      of `work.package.name(...)` fell through to the plain-name lookup, found
+      nothing (the package was not imported) and failed silently; the same helper
+      that recognizes a package prefix for type marks now recognizes it for calls.
+      `min` and `max` of two reals or two integers also fold, since `ieee.math_real`
+      and open-logic declare them without a body the frontend can read
+    - ``t_vhdl_real_generic``
 
 ____
 Open
