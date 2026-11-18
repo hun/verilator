@@ -2583,24 +2583,27 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
         } else {
             for (;;) {
                 if (m_failed) return;
-                // A bare name is a sensitivity signal; any other item makes the process
-                // combinational over every signal it reads (IEEE 1800-2023 11.1.3)
+                // A bare name is a sensitivity signal; a selected, indexed or sliced name
+                // denotes one of its subelement signals (IEEE 1076-2008 11.3)
                 const auto saved = m_lexer.state();
                 const Token item = m_cur;
                 const Token after = m_lexer.next();
                 m_lexer.restore(saved);
-                const bool simple = item.kind == Token::ID && after.kind == Token::SYM
-                                    && (after.text == "," || after.text == ")");
-                if (!simple) {
-                    // IEEE 1076-2008 11.3 takes signal names; an element or selected name
-                    // would need per-element events the model does not have, so it is
-                    // refused rather than silently widened to process(all)
-                    unsupported("sensitivity item that is not a bare signal name");
+                if (item.kind != Token::ID) {
+                    unsupported("sensitivity item that is not a signal name");
                     return;
                 }
-                Token nameTok;
-                if (!takeId(nameTok)) return;
-                process.sensitivity.push_back(nameTok.text);
+                const bool simple
+                    = after.kind == Token::SYM && (after.text == "," || after.text == ")");
+                if (simple) {
+                    Token nameTok;
+                    if (!takeId(nameTok)) return;
+                    process.sensitivity.push_back(nameTok.text);
+                } else {
+                    ExprP elemp = parsePrimary();
+                    if (!elemp) return;
+                    process.sensitivityElems.push_back(std::move(elemp));
+                }
                 if (!acceptSym(",")) break;
             }
             expectSym(")");

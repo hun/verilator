@@ -9327,8 +9327,9 @@ void Lowering::lowerProcess(const Process& process) {
     // sensitivity; a signal-element event and multi-sensitivity edges compare with the
     // previous value, which needs the previous-value variables maintained below.
     const bool hasEdges = stmtsContainEdge(process.body);
-    m_edgeAsLevel = hasEdges && sensVars.size() == 1;
-    m_edgeAsPrev = hasEdges && sensVars.size() > 1;
+    const std::size_t sensCount = sensVars.size() + process.sensitivityElems.size();
+    m_edgeAsLevel = hasEdges && sensCount == 1;
+    m_edgeAsPrev = hasEdges && sensCount > 1;
     if (lowerFlopIdiom(process)) {
         restoreScope(saved);
         return;
@@ -9386,6 +9387,33 @@ void Lowering::lowerProcess(const Process& process) {
         AstSenItem* const itemp
             = new AstSenItem{process.flp, type, new AstVarRef{process.flp, varp, VAccess::READ}};
         itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+    }
+    // An element designator denotes a subelement signal: the process runs when that
+    // element changes, so the element expression is its sensitivity item
+    bool sensBad = false;
+    for (const ExprP& elemp : process.sensitivityElems) {
+        const Expr* namep = elemp.get();
+        while (namep && namep->kind != Expr::NAME) namep = namep->a.get();
+        if (namep && (varNames.count(namep->text) || m_variables.count(namep->text))) {
+            process.flp->v3error("VHDL: sensitivity element '" + elemp->spelling
+                                 + "' is not a signal");
+            sensBad = true;
+            break;
+        }
+        AstNodeExpr* const exprp = lowerDesignator(*elemp, false);
+        if (!exprp) {
+            sensBad = true;
+            break;
+        }
+        AstSenItem* const itemp = new AstSenItem{process.flp, VEdgeType::ET_CHANGED, exprp};
+        itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+    }
+    if (sensBad) {
+        if (itemsp) itemsp->deleteTree();
+        if (bodyp) bodyp->deleteTree();
+        if (initp) initp->deleteTree();
+        restoreScope(saved);
+        return;
     }
     if (bodyp) {
         m_modp->addStmtsp(new AstAlways{process.flp, VAlwaysKwd::ALWAYS,

@@ -107,8 +107,8 @@ Where the implementation is sound
   drivers on the same bit, integer literals and constants respect their ranges,
   ``'val`` is bounds-checked, division by zero is reported, associations cannot
   mix forms, port actuals must conform, and illegal identifiers, reserved
-  words, non-bare sensitivity items and a wait in a sensitized process are
-  refused. The findings table records each one with its test.
+  words and a wait in a sensitized process are refused. The findings table
+  records each one with its test.
 
 - Elaboration is the strongest part: generic binding and specialization,
   unconstrained ports, generate unrolling, package bodies and deferred
@@ -117,7 +117,8 @@ Where the implementation is sound
 - The clocked-process model is correct for the supported idioms: explicit
   sensitivity lists, ``rising_edge``/``falling_edge`` and ``'event`` clock
   tests, synchronous and asynchronous resets, ``wait until`` splitting,
-  ``process(all)`` read inference, and time-zero activation. The asynchronous
+  ``process(all)`` read inference, element sensitivity items such as
+  ``process(rec.field, v(0))``, and time-zero activation. The asynchronous
   reset idiom is emitted as a true edge-triggered block.
 - ``numeric_std`` arithmetic follows VHDL for widths, sign extension, division,
   ``mod``/``rem``, ``resize``, and the shift/rotate functions on ``unsigned``

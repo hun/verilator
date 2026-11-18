@@ -96,8 +96,9 @@ lowered value:
   every operator is the same associative one (9.1);
 - a use clause carries the one declaration it names, if any, so the lowering can
   import that declaration instead of the whole package (12.4);
-- a sensitivity element that is not a bare signal name is refused rather than
-  widened to `process(all)`.
+- a sensitivity item may name a signal element (a selected, indexed or sliced
+  name); the element designator is its own sensitivity item, so the process
+  runs on that element's events and not on another element's (11.3).
 
 ___________
 Elaboration

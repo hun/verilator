@@ -728,10 +728,10 @@ ______
   * - N122
     - a sensitivity item that is not a bare name was silently turned into
       ``process(all)``, changing the semantics of an exact list
-    - a sensitivity element that is not a bare signal name is refused: the
-      model has no per-element events, so widening the list silently is the
-      wrong answer (IEEE 1076-2008 11.3)
-    - ``t_vhdl_sens_item_unsup``
+    - the element is no longer widened to ``process(all)``; it is its own
+      sensitivity item, so the process runs on that element's events only
+      (N127, which replaces the temporary refusal)
+    - ``t_vhdl_sens_elem``
   * - N123
     - ``T'val`` out of range silently yielded a value that matched no literal,
       and the predefined scalar marks refused most attributes (``bit'high``,
@@ -767,6 +767,16 @@ ______
       really does, and ``boolean'image`` returns lower case per IEEE 1076-2008
       16.2.2 with ``t_vhdl_image_attr`` re-pinned
     - ``t_vhdl_image_attr``
+  * - N127
+    - a sensitivity element that was not a bare name was refused, so a process
+      written as ``process(rec.field, v(i))`` (neorv32's CPU blocks) could not
+      be lowered
+    - a selected, indexed or sliced name denotes a subelement signal: its
+      lowered designator is the sensitivity item, so the process runs when that
+      element changes and not when another element of the same signal does
+      (IEEE 1076-2008 11.3). The count of items also drives the edge/level
+      decision, as for bare names
+    - ``t_vhdl_sens_elem``
 
 ____
 Open
@@ -775,7 +785,7 @@ ____
 The two findings left here need more than a frontend change: N15 wants
 ``AstModule::isTop()`` from the middle end, and N67 is the simulation-only
 subset. The conformance review against IEEE 1076-2008 with GHDL and nvc as the
-reference simulators (findings N99..N126) is closed; every one of those is in
+reference simulators (findings N99..N127) is closed; every one of those is in
 the Closed table with the test that pins it.
 
 .. list-table::
