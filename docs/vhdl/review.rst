@@ -185,9 +185,11 @@ When one operand is polymorphic, the selected formal gives it a
 type; two polymorphic sized literals are resolved by width and result type. A
 type declaration may take its element range from an object of the same
 declarative part, resolved once that part's objects are in scope, and a
-subprogram's local type may be bounded by a constant of that subprogram. An
-aggregate actual has no type of its own, so it takes the base type the
-enclosing expression needs: the typed operand of an operator is the context of
+subprogram's local type may be bounded by a constant of that subprogram. When an
+inlined call has a statement sink, its array locals are real variables, so a
+body that rewrites them element by element folds in linear space instead of
+copying its value per write. An aggregate actual has no type of its own, so it
+takes the base type the enclosing expression needs: the typed operand of an operator is the context of
 an untyped operand beside it, and the context selects the overload whose return
 type matches. A choice that names an object's ``'range`` gives the aggregate its
 width where it is the only thing that can.

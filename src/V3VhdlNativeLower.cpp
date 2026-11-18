@@ -239,6 +239,7 @@ class Lowering final {
         bool lvalue = false;  // exprp denotes a writable location (an out/inout parameter)
         bool readable = true;  // False for an out signal parameter, whose reads are rejected
         VType type;  // Resolved type of the bound value, for attributes of the name
+        AstVar* materializedp = nullptr;  // A local held by a real variable, not an expression
     };
     using InlineEnv = std::map<std::string, InlineBinding>;  // Bindings while inlining
     using InlineCont = std::function<AstNodeExpr*(InlineEnv&)>;  // Continuation for inlining
@@ -273,6 +274,39 @@ class Lowering final {
     int m_procVarSeq = 0;  // Disambiguates procedure local variables
     const VType* m_funcRetp = nullptr;  // Return-type context for function bodies
     std::map<std::string, VarInfo> m_scope;  // Signals and ports by folded name
+    //! Statements produced while lowering an expression, emitted before the statement
+    AstNode* m_pendingStmtp = nullptr;
+    //! Whether this point has a statement sink, so a local array can become a variable
+    bool m_materializeLocals = false;
+    int m_localVarSeq = 0;  // Distinguishes materialized locals of separate calls
+    //! Non-zero while the evaluator lowers several continuations of one statement
+    int m_runtimeBranchDepth = 0;
+    int m_unusedDepth = 0;  // For a scope that has to exist unconditionally
+    struct RuntimeBranchScope final {
+        int& depth;
+        explicit RuntimeBranchScope(int& d) : depth(d) { ++depth; }
+        ~RuntimeBranchScope() { --depth; }
+    };
+    void addPendingStmt(AstNode* nodep) {
+        m_pendingStmtp = m_pendingStmtp
+                             ? AstNode::addNext<AstNode, AstNode>(m_pendingStmtp, nodep)
+                             : nodep;
+    }
+    AstNode* takePendingStmts() {
+        AstNode* const pendingp = m_pendingStmtp;
+        m_pendingStmtp = nullptr;
+        return pendingp;
+    }
+    //! Prepend the statements an inlined call produced to `bodyp`
+    AstNode* takePendingFor(AstNode* bodyp) {
+        AstNode* const pendingp = takePendingStmts();
+        if (!pendingp) return bodyp;
+        return bodyp ? AstNode::addNext<AstNode, AstNode>(pendingp, bodyp) : pendingp;
+    }
+    void discardPendingStmts() {
+        if (m_pendingStmtp) m_pendingStmtp->deleteTree();
+        m_pendingStmtp = nullptr;
+    }
     // Symbolic values of process variables, for slice widths from their relations
     std::map<std::string, ExprP> m_varVals;
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
@@ -827,7 +861,14 @@ class Lowering final {
         copy->charValue = expr.charValue;
         copy->bits = expr.bits;
         copy->formalNames = expr.formalNames;
-        if (expr.a) copy->a = substVars(*expr.a, depth + 1);
+        // A type attribute reads the declared type, not the tracked value, so its prefix
+        // keeps its name: `v(v'high downto 1)` after `v := f(x)` still names `v`
+        const bool staticAttr
+            = expr.kind == Expr::ATTR
+              && (expr.text == "range" || expr.text == "reverse_range" || expr.text == "high"
+                  || expr.text == "low" || expr.text == "left" || expr.text == "right"
+                  || expr.text == "length" || expr.text == "ascending");
+        if (expr.a) copy->a = staticAttr ? cloneExpr(*expr.a) : substVars(*expr.a, depth + 1);
         if (expr.b) copy->b = substVars(*expr.b, depth + 1);
         if (expr.c) copy->c = substVars(*expr.c, depth + 1);
         for (const ExprP& argp : expr.args) {
@@ -1131,6 +1172,8 @@ class Lowering final {
     void addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message);
     bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
     AstNode* lowerStmt(const Stmt& stmt);
+    //! One concurrent assignment, with the statements an inlined call's locals produced
+    void emitConcurrentAssign(const Concurrent& stmt);
     AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
     AstNode* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin, std::size_t end);
     AstNode* lowerIf(const Stmt& stmt);
@@ -6532,6 +6575,10 @@ AstNode* Lowering::lowerStmtList(const std::vector<StmtP>& stmts) {
 
 AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin,
                                   std::size_t end) {
+    // A statement list is a sink, so a local array of an inlined function becomes a
+    // variable here rather than a rebuilt expression
+    const bool savedMaterialize = m_materializeLocals;
+    m_materializeLocals = true;
     AstNode* headp = nullptr;
     // Conditions that must hold for the following statements to run, set by exit/next
     AstNodeExpr* runCondp = nullptr;
@@ -6567,7 +6614,12 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
             continue;
         }
         AstNode* const stmtNodep = lowerStmt(*stmtp);
+        // Statements the call's materialized locals produced run before this statement
+        AstNode* const pendingp = takePendingStmts();
         AstNode* nodep = stmtNodep;
+        if (pendingp) {
+            nodep = stmtNodep ? AstNode::addNext<AstNode, AstNode>(pendingp, stmtNodep) : pendingp;
+        }
         updateVarVals(*stmtp);
         if (!nodep) continue;
         // Statements after a conditional exit/next only run when it was not taken
@@ -6599,6 +6651,7 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
         }
     }
     if (runCondp) runCondp->deleteTree();
+    m_materializeLocals = savedMaterialize;
     return headp;
 }
 
@@ -8596,13 +8649,35 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
             initp = makeVectorConst(decl.flp, declType, 0);
         }
         if (!initp) return fail(nullptr);
+        // An element write rebuilds an array local's whole value, and each read of the
+        // local copies that value into the rebuild, so its expression can grow by a
+        // factor per write (open-logic's ppcOr). Where the call has a statement sink the
+        // local becomes a real variable and its writes are statements.
+        const bool materialize = m_materializeLocals && decl.kind == Decl::VARIABLE && resolved
+                                 && declType.kind == VType::ARRAY && declType.dtp;
         bool first = true;
         for (const auto& name : decl.names) {
+            if (materialize) {
+                AstVar* const varp = new AstVar{
+                    decl.flp, VVarType::VAR,
+                    "vhdlfn_" + std::to_string(++m_localVarSeq) + "__" + name.first,
+                    declType.dtp};
+                m_modp->addStmtsp(varp);
+                addPendingStmt(new AstAssign{
+                    decl.flp, new AstVarRef{decl.flp, varp, VAccess::WRITE},
+                    resizeExpr(initp->cloneTree(false), declType, decl.flp)});
+                InlineBinding binding{new AstVarRef{decl.flp, varp, VAccess::READ}, true, true};
+                binding.type = declType;
+                binding.materializedp = varp;
+                env[name.first] = std::move(binding);
+                continue;
+            }
             InlineBinding binding{first ? initp : initp->cloneTree(false), false, true};
             binding.type = resolved ? declType : typeOfDType(binding.exprp->dtypep());
             env[name.first] = std::move(binding);
             first = false;
         }
+        if (materialize) initp->deleteTree();
     }
     // A type no declaration follows still belongs to the part
     for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
@@ -8698,6 +8773,19 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 AstNodeExpr* const valuep
                     = lowerExpr(*stmt.value, it->second.type.dtp ? &it->second.type : nullptr);
                 if (!valuep) return nullptr;
+                if (it->second.materializedp) {
+                    // The evaluator lowers both sides of a run-time branch, so a
+                    // statement here would run on both paths
+                    if (m_runtimeBranchDepth > 0) {
+                        unsupportedError(flp, "array local assigned under a run-time condition");
+                        return nullptr;
+                    }
+                    // A real variable takes the assignment as a statement
+                    addPendingStmt(new AstAssign{
+                        flp, new AstVarRef{flp, it->second.materializedp, VAccess::WRITE},
+                        resizeExpr(valuep, it->second.type, flp)});
+                    continue;
+                }
                 it->second.exprp->deleteTree();
                 it->second.exprp = valuep;
                 continue;
@@ -8725,6 +8813,26 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             if (it == activeEnv().end()) {
                 unsupportedError(flp, "assignment to an element outside the inlined subprogram");
                 return nullptr;
+            }
+            if (it->second.materializedp) {
+                // The evaluator lowers both sides of a run-time branch, so a statement
+                // here would run on both paths
+                if (m_runtimeBranchDepth > 0) {
+                    unsupportedError(flp, "array local assigned under a run-time condition");
+                    return nullptr;
+                }
+                // A real variable takes one element assignment as one statement, with no
+                // rebuild of the value around it
+                AstNodeExpr* const lhsp = lowerDesignator(target, true);
+                if (!lhsp) return nullptr;
+                const VType elemType = typeOfDType(lhsp->dtypep());
+                AstNodeExpr* const valuep = lowerExpr(*stmt.value, &elemType);
+                if (!valuep) {
+                    lhsp->deleteTree();
+                    return nullptr;
+                }
+                addPendingStmt(new AstAssign{flp, lhsp, resizeExpr(valuep, elemType, flp)});
+                continue;
             }
             // Each element write rebuilds the local's whole value, and a body that reads
             // the local back grows the rebuilt tree by that read too. The budget follows
@@ -8797,6 +8905,9 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             AstNodeExpr* const condExprp = stmt.value ? lowerCond(*stmt.value) : nullptr;
             if (stmt.value && !condExprp) return nullptr;
             AstNodeExpr* targetp = nullptr;
+            // A conditional exit lowers the rest of the body as well, and only one of
+            // the two paths runs
+            const RuntimeBranchScope exitScope{stmt.value ? m_runtimeBranchDepth : m_unusedDepth};
             if (!stmt.loopLabel.empty()) {
                 // A label selects that active loop; the innermost match wins
                 const InlineCont* foundp = nullptr;
@@ -8882,10 +8993,17 @@ AstNodeExpr* Lowering::evalFuncBranches(const Stmt& stmt, std::size_t branchInde
                    : evalFuncBlock({}, 0, activeEnv(), cont, exitContp, depth);
     }
     InlineEnv thenEnv = cloneInlineEnv(activeEnv());
-    AstNodeExpr* thenp = evalFuncBlock(branch.second, 0, thenEnv, cont, exitContp, depth);
-    AstNodeExpr* elsep = branchIndex + 1 < stmt.branches.size()
-                             ? evalFuncBranches(stmt, branchIndex + 1, cont, exitContp, depth)
-                             : evalFuncBlock({}, 0, activeEnv(), cont, exitContp, depth);
+    AstNodeExpr* thenp = nullptr;
+    AstNodeExpr* elsep = nullptr;
+    {
+        // Both paths are lowered here, so a statement one of them emits would run on
+        // both
+        const RuntimeBranchScope scope{m_runtimeBranchDepth};
+        thenp = evalFuncBlock(branch.second, 0, thenEnv, cont, exitContp, depth);
+        elsep = branchIndex + 1 < stmt.branches.size()
+                    ? evalFuncBranches(stmt, branchIndex + 1, cont, exitContp, depth)
+                    : evalFuncBlock({}, 0, activeEnv(), cont, exitContp, depth);
+    }
     deleteInlineEnv(thenEnv);
     if (!thenp || !elsep) {
         if (!V3Error::errorCount()) {
@@ -8959,7 +9077,11 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         kept = true;
         Branch branch;
         branch.env = cloneInlineEnv(activeEnv());
-        branch.resultp = evalFuncBlock(item.second, 0, branch.env, cont, exitContp, depth);
+        {
+            // Every matching arm is lowered, so an arm's statements would all run
+            const RuntimeBranchScope scope{m_runtimeBranchDepth};
+            branch.resultp = evalFuncBlock(item.second, 0, branch.env, cont, exitContp, depth);
+        }
         if (known) {
             for (AstConst* const cop : cops) cop->deleteTree();
         } else if (!cops.empty()) {
@@ -9069,7 +9191,8 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
             std::swap(left, right);
             up = !up;
         }
-    } else if (!staticInt(stmt.b, left) || !staticInt(stmt.c, right)) {
+    } else if (!staticIntFold(stmt.b, left) || !staticIntFold(stmt.c, right)) {
+        // A bound may be a local constant whose initializer folds only through a call
         unsupportedError(flp, "function loop range that is not static");
         return nullptr;
     }
@@ -9343,7 +9466,16 @@ AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::si
             fallsThroughp = restFalls;
             return headp;
         }
-        add(lowerStmt(stmt));
+        const bool savedMaterialize = m_materializeLocals;
+        m_materializeLocals = true;
+        AstNode* const stmtNodep = lowerStmt(stmt);
+        AstNode* const pendingp = takePendingStmts();
+        m_materializeLocals = savedMaterialize;
+        if (pendingp) {
+            add(stmtNodep ? AstNode::addNext<AstNode, AstNode>(pendingp, stmtNodep) : pendingp);
+        } else {
+            add(stmtNodep);
+        }
     }
     fallsThroughp = true;
     return headp;
@@ -11573,10 +11705,30 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         lowerProcess(*stmt.process);
         return;
     }
+    emitConcurrentAssign(stmt);
+}
+
+//! One concurrent assignment, with the statements an inlined call's locals produced
+void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
+    // The assignment body is a statement list, so an inlined function's array local can
+    // be a real variable here; a failure leaves statements behind, so they are dropped
+    struct MaterializeScope final {
+        Lowering* const self;
+        const bool saved;
+        explicit MaterializeScope(Lowering* s) : self(s), saved(s->m_materializeLocals) {
+            self->m_materializeLocals = true;
+        }
+        ~MaterializeScope() {
+            self->m_materializeLocals = saved;
+            self->discardPendingStmts();
+        }
+    } const scope{this};
     if (stmt.kind == Concurrent::SEL_ASSIGN) {
         AstNode* const casep = lowerSelected(stmt);
         if (!casep) return;
-        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, casep});
+        if (AstNode* const allp = takePendingFor(casep)) {
+            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, allp});
+        }
         return;
     }
     if (stmt.target->kind == Expr::AGG_POSITIONAL || stmt.target->kind == Expr::AGG_NAMED) {
@@ -11586,8 +11738,8 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         }
         AstNode* const bodyp
             = lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, false, true);
-        if (bodyp) {
-            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, bodyp});
+        if (AstNode* const allp = takePendingFor(bodyp)) {
+            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, allp});
         }
         return;
     }
@@ -11631,8 +11783,9 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
             lhsp->deleteTree();
             return;
         }
-        m_modp->addStmtsp(
-            new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, new AstSenTree{stmt.flp, itemsp}, bodyp});
+        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS,
+                                        new AstSenTree{stmt.flp, itemsp},
+                                        takePendingFor(bodyp)});
         lhsp->deleteTree();
         return;
     }
@@ -11646,8 +11799,8 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         // A missing else or an unaffected branch makes the target hold its value
         AstNode* const bodyp = lowerLatchedAlternatives(stmt, ltype, lhsp);
         lhsp->deleteTree();
-        if (bodyp) {
-            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS_LATCH, nullptr, bodyp});
+        if (AstNode* const allp = takePendingFor(bodyp)) {
+            m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS_LATCH, nullptr, allp});
         }
         return;
     }
@@ -11694,7 +11847,8 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
             }
             bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
         }
-        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, bodyp});
+        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr,
+                                        takePendingFor(bodyp)});
         return;
     }
     if (stmt.delay && !staticZeroDelay(stmt.delay)) {
@@ -11706,11 +11860,12 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
             return;
         }
         AstNode* const bodyp = AstNode::addNext<AstNode, AstNode>(delayp, assignp);
-        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, bodyp});
+        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr,
+                                        takePendingFor(bodyp)});
         return;
     }
     m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
-                                    new AstAssignW{stmt.flp, lhsp, rhsp}});
+                                    takePendingFor(new AstAssignW{stmt.flp, lhsp, rhsp})});
 }
 
 //######################################################################

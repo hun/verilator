@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: a function loop that never terminates statically
+# DESCRIPTION: Verilator: an array local of an inlined function
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,13 +10,14 @@
 import vltest_bootstrap
 import vhdl_frontend
 
-test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_fn_write_cost_bad.vhdl'
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_fn_array_local.vhdl'
 
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=[
+                 *vhdl_frontend.flags(), '--language', 'vhdl', '--exe', test.pli_filename])
 
-
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+test.execute()
 
 test.passes()

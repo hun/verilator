@@ -822,6 +822,24 @@ ______
       node count, so a body whose value grows per write is refused with the
       existing diagnostic instead of being folded
     - ``t_vhdl_fn_write_cost_bad``
+  * - N132
+    - a folded function that rewrites an array local could exhaust memory, and a
+      loop bound that names a local constant initialized by a call was refused
+      (open-logic's ``ppcOr``, which the priority arbiter calls)
+    - when the call has a statement sink, an array local is a real variable, so
+      an element write is one statement instead of a rebuild of the whole value
+      that copies it on every read; the budget still bounds the value-driven
+      fold, and a write under a condition that does not fold is refused because
+      the evaluator lowers both paths of such a condition. A loop bound now folds
+      through a constant's initializer
+    - ``t_vhdl_fn_array_local``, ``t_vhdl_fn_cond_array_bad``
+  * - N133
+    - ``v(v'high downto 1)`` was refused after ``v := ppcOr(inp)``: the tracked
+      value replaced the name inside the type attribute
+    - a type attribute such as ``'high`` or ``'range`` describes the declared
+      type, not the tracked value, so its prefix keeps its name when the tracked
+      values are substituted
+    - ``t_vhdl_var_attr_slice``
 
 ____
 Open
