@@ -82,6 +82,23 @@ are skipped. Every construct the frontend does not model is refused at parse
 time with a diagnostic naming the construct, which is why most unsupported
 features surface before any lowering happens.
 
+The parser also carries the checks that need the source form rather than a
+lowered value:
+
+- the lexer checks the basic identifier spelling of IEEE 1076-2008 15.4.2
+  (leading, trailing and doubled underscores), and a declared name may not be a
+  reserved word (15.10). A reserved word that the grammar itself uses -- an
+  attribute name, `others` -- stays legal, so the name reader and the
+  name-taking helper are separate;
+- an association list is either all positional or all named (6.5.7.2), and a
+  positional `open` is an unconnected actual like the named form;
+- a chain of logical operators of one precedence level needs parentheses unless
+  every operator is the same associative one (9.1);
+- a use clause carries the one declaration it names, if any, so the lowering can
+  import that declaration instead of the whole package (12.4);
+- a sensitivity element that is not a bare signal name is refused rather than
+  widened to `process(all)`.
+
 ___________
 Elaboration
 ___________
@@ -159,23 +176,50 @@ validated by the filter.
 **Statements.** ``lowerStmt`` dispatches to the lowering for each form. A
 process with a sensitivity list becomes a V3 always block; a process that
 suspends on a wait is split at the wait, with the statements before it emitted
-as a time-zero prefix and the rest as the repeated body. A ``for`` loop whose
+as a time-zero prefix and the rest as the repeated body. A bare ``wait;``
+reached at run time sets a flag that gates every later activation, so the
+process suspends for good; a wait of any other form inside a lowered body is
+refused, since a sensitized process cannot contain one. A ``for`` loop whose
 range folds is unrolled with the index as a compile-time constant; a range that
 does not fold becomes a runtime loop over a fresh integer variable that the body
-reads and writes through the scope. A ``wait for`` or an ``after`` delay becomes
-an ``AstDelay`` scaled to the module's time unit, defaulting to one picosecond
-when the design has no timescale.
+reads and writes through the scope, with the bound captured into a temporary at
+entry so the trip count cannot change. A ``wait for`` or an ``after`` delay
+becomes an ``AstDelay`` scaled to the module's time unit, defaulting to one
+picosecond when the design has no timescale.
+
+**Choice lists.** Every case and selected-assignment choice list is validated as
+it lowers: a value covered twice (an overlapping range is one), a second
+``others`` arm, and a list without ``others`` that does not cover every value
+the selector can take are reported (IEEE 1076-2008 10.9, 11.5). Coverage is
+computed from the lowered constants: an enumeration's literals, both values of a
+scalar, or every combination of a vector up to 16 bits.
 
 **Concurrent statements.** ``emitConcurrent`` lowers each statement into the
 module. An instantiation either drives the entity's base module or, when it
 binds generics or fixes unconstrained ports, a specialization cloned per
 binding. A concurrent assignment is a continuous assignment, unless it carries
 an ``after`` clause, in which case it is a timed always that waits and then
-drives.
+drives. A whole-port association compares the actual's type with the formal's
+before connecting it, and an unassociated or ``open`` input takes the port's
+declared default.
+
+**Driver count.** Once every statement has been emitted, ``checkDrivers`` walks
+the module and counts, per bit position, which statement drives each bit of a
+signal whose type has no resolution function: two statements on the same bit are
+reported (IEEE 1076-2008 12.6.4). Bit positions matter because a composite
+signal's scalar subelements are separate signals, so element and record-member
+writes do not collide; a static element index is folded for the comparison,
+while a dynamic one conservatively covers the whole signal. `std_logic` and the
+arrays built from it are resolved and exempt.
 
 **Reports and termination.** ``report`` lowers to a display; ``std.env.finish``
 lowers to ``$finish``. A report whose message is not a literal is dropped, since
-only a literal is modelled.
+only a literal is modelled, but a literal message is a string whatever its
+characters are -- the parser keeps a message whole instead of retyping it as a
+bit string. A report or assertion of ``severity failure`` ends the run at the
+statement: the statements after it are not lowered, and after a failing
+assertion they run only when it did not fail. A process whose only stopper is
+such a failure runs once, at time zero.
 
 _______________
 What it may not do

@@ -31,9 +31,11 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 211 VHDL tests; all pass. The GHDL ``synth``
+The regression suite contains 239 VHDL tests; all pass. The GHDL ``synth``
 testsuite corpus is used as a breadth check with ``--lint-only`` on 1139
-case/top pairs:
+case/top pairs (measured before the conformance review added its diagnostics,
+which are stricter than the sweep's baseline; the counts below have not been
+re-measured since):
 
 ========================================  =====
 Result                                    Count
@@ -47,7 +49,7 @@ NO_TOP                                       13
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 211 regression tests, 20 ported corpus designs
+value-checked evidence is the 239 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
@@ -98,6 +100,16 @@ Mixed VHDL/SystemVerilog sources             Excluded   One language per invocat
 Where the implementation is sound
 =================================
 
+- The conformance review against IEEE 1076-2008 (findings N99..N126, all closed
+  with GHDL/nvc-confirmed tests) removed the silent value divergences and added
+  the analysis-time checks the frontend lacked: case and selected choice lists
+  must be complete and free of duplicates, an unresolved signal may not have two
+  drivers on the same bit, integer literals and constants respect their ranges,
+  ``'val`` is bounds-checked, division by zero is reported, associations cannot
+  mix forms, port actuals must conform, and illegal identifiers, reserved
+  words, non-bare sensitivity items and a wait in a sensitized process are
+  refused. The findings table records each one with its test.
+
 - Elaboration is the strongest part: generic binding and specialization,
   unconstrained ports, generate unrolling, package bodies and deferred
   constants, record and array packing, and component binding are exercised by
@@ -136,7 +148,10 @@ The remaining divergences come from the two-state model: ``is_x`` is always
 false, and a signal cannot hold a metavalue. ``'Z'`` is preserved for a
 tristate driver and resolves to zero anywhere else. Array ordering of
 metavalue constants uses the two-state order, not the IEEE 1164 enumeration
-order. These are documented model limits, not silent miscompilations.
+order. An object that the source neither initializes nor resets starts at 0 in
+the model, including an ``integer``, where IEEE 1076-2008 6.4.2.1 gives it
+``T'left``; :file:`vhdl_synth_subset.md` 5.1 documents the choice. These are
+documented model limits, not silent miscompilations.
 
 The former overload and bound-check divergences are closed:
 
@@ -156,7 +171,11 @@ rejected because VHDL defines no ordering for it.
 Two library caveats deserve emphasis. Unknown standard packages are treated as
 intrinsics instead of being refused; ``std_logic_unsigned`` matches the modeled
 unsigned behavior, while an arithmetic or comparison operator under
-``std_logic_signed`` is refused. Explicit infix and prefix operators and
+``std_logic_signed`` is refused. Arithmetic on a ``std_logic_vector`` is itself
+refused unless ``std_logic_unsigned``, ``std_logic_arith`` or
+``std_logic_signed`` is visible, since the predefined operators have bit and
+boolean elements; shifts stay legal because ``std_logic_1164`` (2008) declares
+the ``std_logic_vector`` ones. Explicit infix and prefix operators and
 subprogram overloads are selected by base parameter type, including
 ``unsigned`` versus ``signed``, distinct array types, and package-qualified
 type names. An integer actual selects an integer overload over a real one; a
@@ -194,6 +213,11 @@ Remaining feature gaps
 - ``std_logic`` resolution between strong tristate drivers is not modelled.
   Conflicting enabled values resolve to 1 rather than ``'X'``. User-defined
   resolution functions remain out of scope.
+- The driver count is conservative for a dynamic index: a write such as
+  ``mem(addr) <= d`` is taken to cover the whole signal, so two processes writing
+  through non-static indices to one unresolved memory are reported even when
+  their elements would never collide. ``std_logic`` and the arrays built from it
+  are resolved, so a resolved bus is unaffected.
 - Arithmetic and comparison under ``use ieee.std_logic_signed.all`` are
   refused with ``Unsupported:``; ``std_logic_unsigned`` is modeled.
 - ``report`` with a non-literal message is dropped.

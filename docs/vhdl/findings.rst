@@ -808,7 +808,9 @@ Verification
 ___________
 
 Each run was checked with the full VHDL suite (``test_regress``,
-``t_vhdl_*.py``): 211 tests, no failures.
+``t_vhdl_*.py``): 239 tests, no failures. The conformance review added 28 tests
+to the original 211, one or more per closed finding below, including the
+negative tests the new diagnostics required.
 
 The corpus lints and runs clean: 20 designs, no lint errors, and every run
 passes, including the harnesses added for the rpu ALU, the rpu register set, the

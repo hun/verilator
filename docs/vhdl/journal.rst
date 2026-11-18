@@ -380,6 +380,55 @@ sim_jtag does. And an instantiation may name its entity with a selected name:
 bit-serial's UART instantiates `work.uart_pkg.uart_fifo`, and the lookahead that
 tells an instantiation from a procedure call only looked one token ahead.
 
+____________________________________
+The conformance review, N99 to N126
+____________________________________
+
+A review against IEEE 1076-2008, with GHDL and nvc as references, produced
+thirteen reproducer tests that failed on the tree and a table of further
+findings. All twenty-eight are now closed, and the suite went from 211 to 239
+tests.
+
+The value fixes came first, each a lowering-local change: a scalar character
+literal combined with a vector stays a logic value rather than its ASCII code; a
+qualified scalar keeps its type instead of becoming an unsigned vector; a
+don't-care that arrives through a constant wildcards a matching operator by
+looking at the lowered constant's x bits; a negative shift count selects the
+opposite direction (a static count lowers as the opposite operator, a dynamic one
+selects on the sign); a runtime loop bound is captured into a temporary at entry;
+a signal write in the time-zero activation is non-blocking; `process(all)` reads
+the target's index and entity-declared signals are signals; a bare `wait;`
+reached at run time sets a flag that gates every later activation; and `abs` on
+`numeric_std` `signed` compares and negates in place.
+
+Three of the review's own claims needed correcting against the simulators. The
+two inout tests declared `signal bus`, which is a reserved word -- GHDL refuses
+it, and the tests were renamed rather than the check weakened. The review read
+`std_logic_vector` shifts as needing a numeric package; `std_logic_1164` (2008)
+declares them, which the existing shift test pins, so only arithmetic is gated.
+And the driver-count finding needed a per-bit model rather than a per-signal one:
+a composite signal's scalar subelements are separate signals in VHDL, so element
+and record-member writes must not collide. The emitted statements are counted per
+bit position, with each select's index folded; a dynamic index conservatively
+covers the whole signal.
+
+The diagnostics came second, one analysis-time check per finding. The parser now
+checks identifier spelling and keeps reserved words out of declared names while
+still letting the grammar use them (`other`, attribute names), refuses mixed
+association lists and non-associative operator chains, carries a use clause's
+single declaration name, and refuses a sensitivity element that is not a bare
+signal name. The lowering validates choice lists, integer literal and constant
+ranges, `'val` bounds (including the static evaluator, which had bypassed the
+attribute path), port actual conformance, and division by zero; a run-time error
+that reports and finishes is now one helper, shared by the enumeration bound
+check and the zero-divisor check. Two constructs the subset excludes got their
+`Unsupported:` refusals: run-time physical objects, and a wait inside a lowered
+body other than the bare wait its own process suspends on.
+
+The documentation closed the review: the subset document's tier table now matches
+the shipped frontend, zero initialization is documented next to the logic-value
+collapse, and `boolean'image` returns lower case, with the image test re-pinned.
+
 _______
 Commits
 _______
@@ -507,3 +556,53 @@ _______
      - Resolve VHDL operator and subprogram overloads by type
    * - ``9cdd8ce``
      - Resolve the remaining VHDL overload limits
+   * - ``ea6fb28``
+     - Combine VHDL scalar character literals element-wise
+   * - ``ab02761``
+     - Support VHDL negative shift counts
+   * - ``a526a06``
+     - Keep VHDL qualified scalar types
+   * - ``20e82e3``
+     - Wildcard VHDL don't-cares through constants
+   * - ``91a70b8``
+     - Fix VHDL runtime loop bounds at loop entry
+   * - ``87184bd``
+     - Delay VHDL time-zero signal writes by a delta
+   * - ``ab0138e``
+     - Fix VHDL process(all) sensitivity to target indices and entity signals
+   * - ``cc2a155``
+     - Suspend VHDL wait processes on a reached bare wait
+   * - ``1ee62fc``
+     - End VHDL runs at severity failure
+   * - ``dee2500``
+     - Support VHDL abs on signed vectors
+   * - ``ff95598``
+     - Accept VHDL legal forms refused by the parser
+   * - ``67cb8a5``
+     - Check VHDL case and selected choice lists
+   * - ``5f05806``
+     - Refuse VHDL logical operator chains without parentheses
+   * - ``1b3ebde``
+     - Refuse VHDL reserved words and malformed identifiers
+   * - ``2589028``
+     - Report VHDL unresolved signals with several drivers
+   * - ``75f02ec``
+     - Refuse VHDL association lists that mix forms
+   * - ``eee409d``
+     - Check VHDL port actual conformance
+   * - ``91e1060``
+     - Check VHDL integer literals and constant ranges
+   * - ``b3fd4ed``
+     - Require a VHDL package for std_logic_vector arithmetic
+   * - ``b793471``
+     - Refuse VHDL run-time physical objects
+   * - ``660ac5e``
+     - Refuse VHDL waits and element sensitivity in a sensitized process
+   * - ``3311cb7``
+     - Check VHDL 'val bounds and predefined scalar attributes
+   * - ``962f388``
+     - Report VHDL division by zero
+   * - ``b1f8e22``
+     - Refresh the VHDL subset document and boolean image
+   * - ``c80fcaf``
+     - Close the VHDL conformance review
