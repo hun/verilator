@@ -772,12 +772,11 @@ ____
 Open
 ____
 
-N99 and up come from a conformance review against IEEE 1076-2008 with GHDL and
-nvc as the reference simulators, not from the external corpus. Every value the
-tests check is the one GHDL reports, and each test below fails on the current
-tree for the divergence it pins; the fix closes the finding by making its test
-pass. The findings that need a new diagnostic get their ``*_bad``/``*_unsup``
-golden when the diagnostic lands.
+The two findings left here need more than a frontend change: N15 wants
+``AstModule::isTop()`` from the middle end, and N67 is the simulation-only
+subset. The conformance review against IEEE 1076-2008 with GHDL and nvc as the
+reference simulators (findings N99..N126) is closed; every one of those is in
+the Closed table with the test that pins it.
 
 .. list-table::
    :header-rows: 1
