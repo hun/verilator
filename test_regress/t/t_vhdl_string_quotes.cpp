@@ -22,9 +22,9 @@ int main(int argc, char** argv) {
         std::printf("%%Error: len=%u expected 7\n", static_cast<unsigned>(topp->len));
         ++fails;
     }
-    if (topp->inner != 34) {
-        std::printf("%%Error: inner=%u expected 34 (a quote)\n",
-                    static_cast<unsigned>(topp->inner));
+    // The quote character is code 34, and "a""" is two characters
+    if (topp->inner != 34 + 34 + 2) {
+        std::printf("%%Error: inner=%u expected 70\n", static_cast<unsigned>(topp->inner));
         ++fails;
     }
     topp->final();

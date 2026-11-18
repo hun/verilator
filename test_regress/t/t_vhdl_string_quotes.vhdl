@@ -20,9 +20,10 @@ end entity;
 
 architecture rtl of t is
   constant Quoted_c : string := "a ""b"" c";
+  constant Trailing_c : string := "a""";
   constant Whole_c : string := "got """ & "X" & """";
 begin
   len <= Quoted_c'length;
   -- The character between the quotes of Quoted_c is the quote itself
-  inner <= character'pos(Quoted_c(3));
+  inner <= character'pos(Quoted_c(3)) + character'pos('"') + Trailing_c'length;
 end architecture;

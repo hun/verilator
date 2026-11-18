@@ -929,10 +929,9 @@ ______
     - the pair names one value once the nine-valued type is modelled with two states, so
       it is a single choice; the duplicate is accepted (and dropped) only when the two
       alternatives are written differently, which keeps `when '1' | '1'` the error the
-      standard requires
-    - the end-to-end check is `corpus/olo-rate-limit` in the corpus repository: the
-      trigger needs the full open-logic package set and could not be reduced to a
-      standalone test
+      standard requires. The selector must not be static, or the case folds before its
+      choices are collected
+    - ``t_vhdl_case_metavalue``
 
 ____
 Open
