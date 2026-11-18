@@ -789,6 +789,21 @@ ______
       it needs, and a choice that is an object's ``'range`` contributes its
       bounds when the aggregate derives its width
     - ``t_vhdl_agg_choice_actual``
+  * - N129
+    - a type whose element range names an object of the same declarative part
+      (``type row_t is array (natural range <>) of std_logic_vector(data'range)``)
+      or a subprogram local type bounded by a local constant (open-logic's
+      ``ppcOr``)
+    - a part registers its types before its objects exist, so a ``'range``
+      prefix that the part declares itself was unknown, and a subprogram
+      registered all its local types before binding the constants they name.
+      A type that waits for an object is deferred until the part's ports and
+      objects are in scope, and a subprogram registers its local types in
+      source order, so each sees the constants before it. A package also
+      publishes the subprograms its own ``use`` clauses made visible, as it
+      already published their types and constants, so ``ppcOr`` can reach
+      ``log2ceil`` when only the logic package is imported
+    - ``t_vhdl_type_bound_object``
 
 ____
 Open

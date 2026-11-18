@@ -623,6 +623,9 @@ class Lowering final {
     static bool exprNamesAny(const Expr& expr, const std::set<std::string>& names);
     static bool typeDeclNamesAny(const TypeDecl& decl, const std::set<std::string>& names);
     static bool typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string>& names);
+    //! Whether a range attribute of the type names an object the part has not declared yet
+    bool typeDeclNeedsLaterObject(const TypeDecl& decl) const;
+    bool exprNeedsLaterObject(const Expr& expr) const;
     //! Make a package visible; `only` names one declaration to import instead
     void importPackage(const std::string& name, const std::string& only = "");
     //! Record integer constants that a type declaration may depend on
@@ -2179,6 +2182,52 @@ bool Lowering::typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string
     return false;
 }
 
+//! Whether an expression reads the range of a name that is not in scope yet. A type in a
+//! declarative part is registered before that part's objects exist, so
+//! `array (...) of std_logic_vector(sig'range)` has to wait for `sig`
+bool Lowering::exprNeedsLaterObject(const Expr& expr) const {
+    if (expr.kind == Expr::ATTR && (expr.text == "range" || expr.text == "reverse_range")
+        && expr.a && expr.a->kind == Expr::NAME) {
+        const std::string& name = expr.a->text;
+        const bool known = activeEnv().count(name) || m_scope.count(name) || m_consts.count(name)
+                           || m_preConsts.count(name) || m_constValues.count(name)
+                           || m_constTypes.count(name) || m_enumConsts.count(name)
+                           || m_types.count(name);
+        if (!known) return true;
+    }
+    if (expr.a && exprNeedsLaterObject(*expr.a)) return true;
+    if (expr.b && exprNeedsLaterObject(*expr.b)) return true;
+    if (expr.c && exprNeedsLaterObject(*expr.c)) return true;
+    for (const ExprP& argp : expr.args) {
+        if (argp && exprNeedsLaterObject(*argp)) return true;
+    }
+    return false;
+}
+
+bool Lowering::typeDeclNeedsLaterObject(const TypeDecl& decl) const {
+    const auto specNeeds = [this](const TypeSpec& spec) {
+        if (spec.left && exprNeedsLaterObject(*spec.left)) return true;
+        if (spec.right && exprNeedsLaterObject(*spec.right)) return true;
+        for (const TypeSpec::MemberConstraint& member : spec.memberConstraints) {
+            if (member.lo && exprNeedsLaterObject(*member.lo)) return true;
+            if (member.hi && exprNeedsLaterObject(*member.hi)) return true;
+        }
+        return false;
+    };
+    std::vector<const TypeSpec*> specs;
+    specs.push_back(&decl.base);
+    specs.push_back(&decl.index);
+    for (const TypeSpec& extra : decl.indexes) specs.push_back(&extra);
+    for (const TypeDecl::Member& member : decl.members) specs.push_back(&member.type);
+    for (const TypeSpec* const specp : specs) {
+        if (specNeeds(*specp)) return true;
+        for (const TypeSpec& nested : specp->indexConstraints) {
+            if (specNeeds(nested)) return true;
+        }
+    }
+    return false;
+}
+
 void Lowering::registerTypes(const std::vector<TypeDecl>& types, const std::vector<Decl>& decls) {
     ++m_deferSeq;  // A part inlined while this one is emitted defers types of its own
     std::set<std::string> deferredNames;
@@ -2199,7 +2248,8 @@ void Lowering::registerTypes(const std::vector<TypeDecl>& types, const std::vect
         // A type naming a type this part already deferred cannot be resolved either: the
         // deferred one is registered only once the part's constants have values
         if ((!unpublished.empty() && typeDeclNamesAny(typeDecl, unpublished))
-            || (!deferredNames.empty() && typeDeclMarksAny(typeDecl, deferredNames))) {
+            || (!deferredNames.empty() && typeDeclMarksAny(typeDecl, deferredNames))
+            || typeDeclNeedsLaterObject(typeDecl)) {
             m_deferredTypes[typeDecl.name] = DeferredType{&typeDecl, m_deferSeq};
             deferredNames.insert(typeDecl.name);
             continue;
@@ -8486,7 +8536,20 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
         return nullp;
     };
 
-    for (const TypeDecl& typeDecl : subp->types) registerType(typeDecl);
+    // A local type may name a constant of the same declarative part, so the types register
+    // in source order here, once the constants before them are bound
+    std::vector<const TypeDecl*> pendingTypes;
+    for (const TypeDecl& typeDecl : subp->types) pendingTypes.push_back(&typeDecl);
+    const auto registerTypesBefore = [this, &pendingTypes](int lineno) {
+        for (auto it = pendingTypes.begin(); it != pendingTypes.end();) {
+            if ((*it)->flp->lineno() > lineno) {
+                ++it;
+                continue;
+            }
+            registerType(**it);
+            it = pendingTypes.erase(it);
+        }
+    };
     registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
     // An alias denotes its designator; its subtype mark gives it bounds of its own. An
     // alias with a signature renames a subprogram, so it is registered as one instead of
@@ -8512,6 +8575,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
     }
     // Locals are bound to values; assignments rebuild the whole bound expression
     for (const Decl& decl : subp->decls) {
+        registerTypesBefore(decl.flp->lineno());
         VType declType;
         const bool resolved = resolveType(decl.type, declType);
         AstNodeExpr* initp = nullptr;
@@ -8529,6 +8593,8 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
             first = false;
         }
     }
+    // A type no declaration follows still belongs to the part
+    for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
     VType retType;
     const VType* const outerRetp = m_funcRetp;
     // An unconstrained array return type takes its width from the body and the context
@@ -9146,13 +9212,27 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
         return nullp;
     };
 
-    for (const TypeDecl& typeDecl : subp->types) registerType(typeDecl);
+    // A local type may name a constant of the same declarative part, so the types register
+    // in source order here, once the constants before them are emitted
+    std::vector<const TypeDecl*> pendingTypes;
+    for (const TypeDecl& typeDecl : subp->types) pendingTypes.push_back(&typeDecl);
+    const auto registerTypesBefore = [this, &pendingTypes](int lineno) {
+        for (auto it = pendingTypes.begin(); it != pendingTypes.end();) {
+            if ((*it)->flp->lineno() > lineno) {
+                ++it;
+                continue;
+            }
+            registerType(**it);
+            it = pendingTypes.erase(it);
+        }
+    };
     registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
     for (const AliasDecl& alias : subp->aliases) registerAlias(alias);
 
     // Locals are real module variables reinitialized on every call, like automatics
     AstNode* initsp = nullptr;
     for (const Decl& decl : subp->decls) {
+        registerTypesBefore(decl.flp->lineno());
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
             continue;
@@ -9176,6 +9256,8 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
             initsp = initsp ? AstNode::addNext<AstNode, AstNode>(initsp, initp) : initp;
         }
     }
+    // A type no declaration follows still belongs to the part
+    for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
 
     bool fallsThrough = true;
     AstNode* const bodysp = lowerProcChain(rawPtrs(subp->body), 0, fallsThrough);
@@ -10105,7 +10187,17 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     info.ambiguousLiterals = m_ambiguousLiterals;
     info.realConsts = std::move(m_realConsts);
     info.owned = std::move(m_ownedConsts);
-    for (const SubprogramDecl& sub : pkg.subprograms) info.subprograms.push_back(&sub);
+    // A subprogram the unit's `use` clauses made visible publishes with it, as its types
+    // and constants do: open-logic's `ppcOr` calls `log2ceil` of the math package, and a
+    // module importing only the logic package still has to reach that call
+    for (const auto& entry : m_subprograms) {
+        for (const SubprogramRef& ref : entry.second) {
+            if (std::find(info.subprograms.begin(), info.subprograms.end(), ref.declp)
+                == info.subprograms.end()) {
+                info.subprograms.push_back(ref.declp);
+            }
+        }
+    }
     for (const AliasDecl& alias : pkg.aliases) {
         if (alias.hasSignature) info.subprogramAliases.push_back(&alias);
     }
