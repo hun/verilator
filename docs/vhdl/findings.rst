@@ -900,6 +900,13 @@ ______
     - the base module is deleted unless an instance binds it directly, which the
       lowering records; the cleanup also clears the module map entry it removes
     - ``t_vhdl_null_string``
+  * - N140
+    - `2**n` with an exponent that is not static: open-logic's first-bit decoder
+      computes its parallelism from generic-derived widths held in variables
+    - a power of two lowers as a left shift when the base folds to 2 and the exponent
+      does not, so the constant folder no longer needs the exponent; a static exponent
+      keeps the unrolled multiplication chain
+    - ``t_vhdl_pow2``
 
 ____
 Open

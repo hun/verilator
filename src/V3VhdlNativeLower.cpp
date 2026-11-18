@@ -3709,8 +3709,24 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     if (op == "**") {
         // A static exponent unrolls into a chain of multiplications
         int64_t exponent = 0;
-        if (!staticIntFold(expr.b, exponent) || exponent < 0 || exponent > 64) {
+        if (!staticIntFold(expr.b, exponent)) {
+            // A power of two with a run-time exponent is a shift, which is how a
+            // generic-derived width turns into a decoder size
+            int64_t base = 0;
+            if (staticIntFold(expr.a, base) && base == 2 && lt.isInt()) {
+                AstNodeExpr* const shiftp
+                    = new AstShiftL{flp, makeIntConst(flp, 1), rp, lt.width};
+                shiftp->dtypep(lt.dtp);
+                lp->deleteTree();
+                return shiftp;
+            }
             unsupportedError(flp, "non-static exponent");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+        if (exponent < 0 || exponent > 64) {
+            unsupportedError(flp, "exponent out of range");
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
