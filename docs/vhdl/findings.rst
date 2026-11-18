@@ -711,6 +711,13 @@ ______
       1076-2008 9.1). Shifts stay legal: std_logic_1164 (2008) declares the
       std_logic_vector ones, which the shift test pins against GHDL
     - ``t_vhdl_slv_arith_bad``
+  * - N120
+    - physical objects at run time (``variable d : time``, user physical
+      types) were accepted and modelled as integers
+    - the object-type gate also refuses a physical value at run time, since a
+      physical value is a count of its step unit only while elaborating
+      (subset 5.14); a delay and a static fold still use the 64-bit count
+    - ``t_vhdl_phys_obj_unsup``
 
 ____
 Open
@@ -748,11 +755,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N120
-    - physical objects at run time (``variable d : time``, user physical
-      types) are accepted and modeled as integers
-    - the subset excludes run-time physical objects outright (5.14); only
-      static folding is in scope. Needs the ``Unsupported:`` refusal
   * - N121
     - a ``wait`` inside a process with a sensitivity list is silently dropped,
       and the process runs on both clock edges instead

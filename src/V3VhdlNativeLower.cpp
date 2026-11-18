@@ -675,7 +675,7 @@ class Lowering final {
     //! `assert is_power_of_two(n)` folds, so its callee's body is never lowered.
     bool evalCond(const Expr& expr, bool& value) const;
     bool mentionsReal(const Expr& expr) const;
-    bool rejectRealObject(const VType& type, FileLine* flp, bool allowUnconstrained = false);
+    bool rejectUnmodelledObject(const VType& type, FileLine* flp, bool allowUnconstrained = false);
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);
     }
@@ -1856,9 +1856,15 @@ bool Lowering::mentionsReal(const Expr& expr) const {
 //! need a runtime floating type so it reports as unsupported instead of emitting a
 //! variable with no data type. Likewise reject an object whose type stayed unconstrained
 //! (null data type); ports defer their width to a binding, so they opt out.
-bool Lowering::rejectRealObject(const VType& type, FileLine* flp, bool allowUnconstrained) {
+bool Lowering::rejectUnmodelledObject(const VType& type, FileLine* flp, bool allowUnconstrained) {
     if (type.kind == VType::REAL) {
         unsupportedError(flp, "real variable, signal, or port");
+        return true;
+    }
+    // A physical value is a count of its step unit only while elaborating: the subset
+    // has no run-time physical object (5.14)
+    if (type.kind == VType::INT && type.kwd == VBasicDTypeKwd::LONGINT) {
+        unsupportedError(flp, "physical value at run time");
         return true;
     }
     if (!allowUnconstrained && !type.dtp) {
@@ -2557,7 +2563,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     if (mark == "real") {
         // A scalar handled only at elaboration: it has no width for a constraint to
         // bound, and any use that would need a runtime type (a variable, a port, ...)
-        // is rejected where it appears -- see rejectRealObject.
+        // is rejected where it appears -- see rejectUnmodelledObject.
         out = VType{};
         out.kind = VType::REAL;
         out.dtp = nullptr;
@@ -9007,7 +9013,7 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
         }
         VType ltype;
         if (!resolveType(decl.type, ltype)) return fail(nullptr);
-        if (rejectRealObject(ltype, decl.flp)) return fail(nullptr);
+        if (rejectUnmodelledObject(ltype, decl.flp)) return fail(nullptr);
         for (const auto& name : decl.names) {
             const std::string mangled
                 = "vhdlproc_" + std::to_string(++m_procVarSeq) + "__" + name.first;
@@ -9447,7 +9453,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
-        if (rejectRealObject(type, decl.flp)) continue;
+        if (rejectUnmodelledObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             // Mangle so the same variable name in two processes stays distinct
@@ -10014,7 +10020,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
-        if (rejectRealObject(type, decl.flp)) continue;
+        if (rejectUnmodelledObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             const std::string mangled
@@ -10084,7 +10090,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         } else if (!resolveType(port.type, type)) {
             continue;
         }
-        if (rejectRealObject(type, port.flp, /*allowUnconstrained:*/ true)) continue;
+        if (rejectUnmodelledObject(type, port.flp, /*allowUnconstrained:*/ true)) continue;
         if (!type.dtp) {
             unsupportedError(port.flp, "port of type '" + port.type.mark
                                            + "' has no resolvable index constraint");
@@ -10122,7 +10128,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
-        if (rejectRealObject(type, decl.flp)) continue;
+        if (rejectUnmodelledObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.first, type.dtp};
@@ -11120,7 +11126,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
         }
         VType type;
         if (!resolveType(decl.type, type)) continue;
-        if (rejectRealObject(type, decl.flp)) continue;
+        if (rejectUnmodelledObject(type, decl.flp)) continue;
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             const std::string mangled
