@@ -1387,6 +1387,14 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
             return true;
         }
         if (attribute == "val") {
+            // IEEE 1076-2008 16.2.2: 'val outside the type's range is an error
+            if (typep->kind == VType::ENUM) {
+                const int64_t count = static_cast<int64_t>(typep->literals.size());
+                if (position < 0 || position >= count) {
+                    expr.flp->v3error("VHDL: 'val outside the range of the type");
+                    return false;
+                }
+            }
             value = position;
             return true;
         }
@@ -4725,9 +4733,11 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         typep = &predefined;
         typeMark = true;
     }
-    if (!typep && (expr.a->text == "character" || expr.a->text == "boolean")) {
-        // `character` and `boolean` are predefined types the frontend models directly
-        // rather than as entries in m_types; resolve them so their attributes reach below
+    if (!typep
+        && (expr.a->text == "character" || expr.a->text == "boolean" || expr.a->text == "bit"
+            || expr.a->text == "std_logic" || expr.a->text == "std_ulogic")) {
+        // These predefined types are modelled directly rather than as entries in m_types;
+        // resolve them so their attributes reach below
         TypeSpec spec;
         spec.flp = flp;
         spec.mark = expr.a->text;
@@ -4735,6 +4745,42 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
             typep = &resolved;
             typeMark = true;
         }
+    }
+    // IEEE 1076-2008 16.2.2 gives every scalar type the discrete attribute set; the
+    // predefined logic marks are one-bit scalars whose '0' is position 0
+    if (typeMark
+        && (expr.a->text == "bit" || expr.a->text == "std_logic"
+            || expr.a->text == "std_ulogic")) {
+        if (attribute == "left" || attribute == "low") return bitConst(flp, '0');
+        if (attribute == "right" || attribute == "high") return bitConst(flp, '1');
+        if (attribute == "length") return makeIntConst(flp, 1);
+        if (attribute == "ascending") return bitConst(flp, '1');
+        if (expr.args.size() != 1) {
+            unsupportedError(flp, "attribute '" + attribute + "' without one argument");
+            return nullptr;
+        }
+        AstNodeExpr* const argp = lowerExpr(*expr.args[0], typep);
+        if (!argp) return nullptr;
+        if (attribute == "pos") return resizeExpr(argp, intType(flp), flp);
+        if (attribute == "val") {
+            const AstConst* const argConstp = VN_CAST(argp, Const);
+            if (argConstp) {
+                const int64_t position = static_cast<int64_t>(argConstp->num().toUInt());
+                argp->deleteTree();
+                if (position != 0 && position != 1) {
+                    flp->v3error("VHDL: 'val outside the range of the type");
+                    return nullptr;
+                }
+                return bitConst(flp, position == 0 ? '0' : '1');
+            }
+            return resizeExpr(argp, *typep, flp);
+        }
+        if (attribute == "succ" || attribute == "pred") {
+            unsupportedError(flp, "attribute '" + attribute + "' of a logic mark");
+            return nullptr;
+        }
+        unsupportedError(flp, "attribute '" + attribute + "' of a logic mark");
+        return nullptr;
     }
     if (!typep) {
         unsupportedError(flp, "attribute '" + attribute + "' of an unresolved name");
@@ -4790,25 +4836,34 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         }
         AstNodeExpr* argp = lowerExpr(*expr.args[0], nullptr);
         if (!argp) return nullptr;
+        // A static argument gives a constant result, which constants may use. The source
+        // is evaluated, since narrowing the lowered value to the type hides the constant.
+        int64_t staticPos = 0;
+        const bool isStatic = evalInt(*expr.args[0], staticPos);
         argp = resizeExpr(argp, *typep, flp);
-        // A static argument gives a constant result, which constants may use
-        const AstConst* const argConstp = VN_CAST(argp, Const);
-        const int position = argConstp ? static_cast<int>(argConstp->num().toUInt()) : 0;
+        const bool constArg = isStatic;
+        const int position = isStatic ? static_cast<int>(staticPos) : 0;
         if (attribute == "pos" || attribute == "to_integer") {
-            if (argConstp) {
+            if (constArg) {
                 argp->deleteTree();
                 return makeIntConst(flp, position);
             }
             return resizeExpr(argp, intType(flp), flp);
         }
         if (attribute == "val") {
-            if (argConstp) {
+            if (constArg) {
                 argp->deleteTree();
+                // IEEE 1076-2008 16.2.2: 'val outside the type's range is an error, not a
+                // value that matches no literal
+                if (position < 0 || position >= count) {
+                    flp->v3error("VHDL: 'val outside the range of the type");
+                    return nullptr;
+                }
                 return enumConst(position);
             }
             return resizeExpr(argp, *typep, flp);
         }
-        if ((attribute == "succ" || attribute == "pred") && argConstp) {
+        if ((attribute == "succ" || attribute == "pred") && constArg) {
             argp->deleteTree();
             if ((attribute == "succ" && position == count - 1)
                 || (attribute == "pred" && position == 0)) {

@@ -732,6 +732,15 @@ ______
       model has no per-element events, so widening the list silently is the
       wrong answer (IEEE 1076-2008 11.3)
     - ``t_vhdl_sens_item_unsup``
+  * - N123
+    - ``T'val`` out of range silently yielded a value that matched no literal,
+      and the predefined scalar marks refused most attributes (``bit'high``,
+      ``std_logic'left``)
+    - ``'val`` outside ``T'low``..``T'high`` is reported, both where the
+      attribute lowers and where the static evaluator folds it, and the
+      predefined logic marks now answer the discrete attribute set
+      (IEEE 1076-2008 16.2.2)
+    - ``t_vhdl_attr_scalar``, ``t_vhdl_attr_val_bad``
 
 ____
 Open
@@ -769,12 +778,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N123
-    - ``T'val`` out of range silently yields a value that matches no literal,
-      and the predefined scalar marks refuse most attributes (``bit'high``,
-      ``std_logic'left``)
-    - IEEE 1076-2008 16.2.2 requires an error outside ``T'low`` to ``T'high``
-      and gives every scalar type the attribute set
   * - N124
     - division, ``mod`` and ``rem`` by zero silently yield 0
     - the subset row 4.5 says a zero divisor is a run-time error; the runtime
