@@ -1054,6 +1054,9 @@ class Lowering final {
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
     static void collectExprNames(const Expr& expr, std::set<std::string>& names);
+    //! The names an assignment target reads: an indexed name evaluates its index
+    //! and a slice its bounds (IEEE 1076-2008 8.4); the target name is only written
+    static void collectTargetReadNames(const Expr& expr, std::set<std::string>& names);
     static bool usesExitNext(const std::vector<StmtP>& stmts);
     AstNodeExpr* loopGuard(FileLine* flp) const;
     AstNode* lowerWhile(const Stmt& stmt);
@@ -6274,6 +6277,25 @@ void Lowering::collectExprNames(const Expr& expr, std::set<std::string>& names) 
     }
 }
 
+void Lowering::collectTargetReadNames(const Expr& expr, std::set<std::string>& names) {
+    if (expr.kind == Expr::INDEX || expr.kind == Expr::SLICE) {
+        if (expr.kind == Expr::SLICE) {
+            if (expr.b) collectExprNames(*expr.b, names);
+            if (expr.c) collectExprNames(*expr.c, names);
+        }
+        for (const ExprP& argp : expr.args) {
+            if (argp) collectExprNames(*argp, names);
+        }
+        if (expr.a) collectTargetReadNames(*expr.a, names);
+    } else if (expr.kind == Expr::AGG_POSITIONAL || expr.kind == Expr::AGG_NAMED) {
+        for (const std::vector<ExprP>& choiceList : expr.choices) {
+            for (const ExprP& choicep : choiceList) {
+                if (choicep) collectExprNames(*choicep, names);
+            }
+        }
+    }
+}
+
 void Lowering::collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names) {
     for (const StmtP& stmtp : stmts) {
         if (!stmtp) continue;
@@ -6281,6 +6303,7 @@ void Lowering::collectReadNames(const std::vector<StmtP>& stmts, std::set<std::s
         if (stmtp->selector) collectExprNames(*stmtp->selector, names);
         if (stmtp->b) collectExprNames(*stmtp->b, names);
         if (stmtp->c) collectExprNames(*stmtp->c, names);
+        if (stmtp->target) collectTargetReadNames(*stmtp->target, names);
         for (const auto& branch : stmtp->branches) {
             if (branch.first) collectExprNames(*branch.first, names);
             collectReadNames(branch.second, names);
@@ -9684,7 +9707,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
-            m_variables.insert(name.first);
+            if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
             if (!decl.init) continue;
             AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
             AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);

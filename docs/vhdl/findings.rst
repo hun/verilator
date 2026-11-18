@@ -583,6 +583,21 @@ ______
       read in the same activation still sees the old value until the delta
       (IEEE 1076-2008 10.5)
     - ``t_vhdl_init_delta``
+  * - N105
+    - ``process (all)`` was not sensitive to a signal read only in an
+      assignment target's index: a RAM write whose address alone changed never
+      happened
+    - the read collector also walks each assignment target, collecting the
+      index of an indexed name and the bounds of a slice but not the written
+      name itself (IEEE 1076-2008 11.3 with 8.4)
+    - ``t_vhdl_sens_lhs``
+  * - N106
+    - ``process (all)`` was not sensitive to a signal declared in the entity's
+      declarative part: the value the process published stayed one event behind
+      the design
+    - an entity-level signal is a signal: only a variable declaration is
+      classified as a variable, so the sensitivity pass no longer skips it
+    - ``t_vhdl_sens_entity``
 
 ____
 Open
@@ -620,20 +635,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N105
-    - ``process (all)`` is not sensitive to a signal read only in an
-      assignment target's index: a RAM write whose address alone changes never
-      happens
-    - the read collector never looks at the target, and an indexed name
-      evaluates its index (IEEE 1076-2008 11.3 with 8.4). Test:
-      ``t_vhdl_sens_lhs``
-  * - N106
-    - ``process (all)`` is not sensitive to a signal declared in the entity's
-      declarative part: the value the process publishes stays one event behind
-      the design
-    - entity-level signals are inserted as variables, and the sensitivity pass
-      skips variables; only entity-level signals are affected. Test:
-      ``t_vhdl_sens_entity``
   * - N107
     - a bare ``wait;`` after a timed wait is dropped, and the process restarts:
       a testbench that stops after three edges keeps counting
