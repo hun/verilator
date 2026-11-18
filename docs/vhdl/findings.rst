@@ -568,6 +568,13 @@ ______
       don't-care bits are x bits (IEEE 1076-2008 16.8.3, 9.2.3), so a
       ``'-'`` that arrives through a constant wildcards the position it names
     - ``t_vhdl_std_match_const``
+  * - N103
+    - a run-time ``for`` loop re-read its bound every iteration: a loop whose
+      body decremented the bound ran 2 iterations where VHDL runs 4
+    - the non-static bound is captured into a temporary before the loop runs,
+      so the trip count is the value the range had at loop entry (IEEE
+      1076-2008 8.9)
+    - ``t_vhdl_loop_bound``
 
 ____
 Open
@@ -605,13 +612,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N103
-    - a run-time ``for`` loop re-reads its bound every iteration: a loop whose
-      body decrements the bound runs 2 iterations where VHDL runs 4; a bound
-      of 0 even yields a garbage count
-    - the discrete range is evaluated once at loop entry (IEEE 1076-2008 8.9);
-      the run-time loop lowering re-tests the live variable instead. Test:
-      ``t_vhdl_loop_bound``
   * - N104
     - the time-zero activation writes signals with blocking assignments: a
       process that assigns ``a`` and then reads it in its first activation sees

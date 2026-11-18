@@ -6588,7 +6588,7 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     int64_t right = 0;
     AstNodeExpr* const initp
         = staticInt(stmt.b, left) ? makeIntConst(flp, left) : lowerExpr(*stmt.b, &intT);
-    AstNodeExpr* const boundp
+    AstNodeExpr* boundp
         = staticInt(stmt.c, right) ? makeIntConst(flp, right) : lowerExpr(*stmt.c, &intT);
     if (!initp || !boundp) return nullptr;
     // The loop variable is an ordinary variable: the body reads and writes it through the
@@ -6599,6 +6599,16 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     const ScopeSave savedScope = saveScope();
     m_scope.erase(stmt.loopVar);
     m_scope[stmt.loopVar] = VarInfo{varp, intT};
+    // The discrete range is evaluated once, at loop entry (IEEE 1076-2008 8.9), so a
+    // bound the body writes must not re-read on every test: capture it first
+    AstNode* capturep = nullptr;
+    if (!VN_CAST(boundp, Const)) {
+        AstVar* const boundVarp
+            = new AstVar{flp, VVarType::VAR, "vhdlbound_" + std::to_string(++m_loopSeq), intT.dtp};
+        m_modp->addStmtsp(boundVarp);
+        capturep = new AstAssign{flp, new AstVarRef{flp, boundVarp, VAccess::WRITE}, boundp};
+        boundp = new AstVarRef{flp, boundVarp, VAccess::READ};
+    }
     AstLoop* const loopp = new AstLoop{flp};
     AstNodeExpr* const testp
         = up ? static_cast<AstNodeExpr*>(
@@ -6613,8 +6623,10 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     stepp->dtypep(intT.dtp);
     loopp->addStmtsp(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, stepp});
     restoreScope(savedScope);
-    return AstNode::addNext<AstNode, AstNode>(
+    AstNode* resultp = AstNode::addNext<AstNode, AstNode>(
         new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, initp}, loopp);
+    if (capturep) resultp = AstNode::addNext<AstNode, AstNode>(capturep, resultp);
+    return resultp;
 }
 
 //! The text of a literal report message, or a default when there is none
