@@ -1,0 +1,4 @@
+%Error: t/t_vhdl_port_conform_bad.vhdl:37:1: VHDL: actual of port 'p' does not conform to the port's type (IEEE 1076-2008 6.5.2.2)
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_port_conform_bad.vhdl:39:1: VHDL: actual of port 'p' does not conform to the port's type (IEEE 1076-2008 6.5.2.2)
+%Error: Exiting due to

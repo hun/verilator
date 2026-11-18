@@ -684,6 +684,14 @@ ______
     - an association list is refused as soon as its form changes, so it is
       either all positional or all named (IEEE 1076-2008 6.5.7.2)
     - ``t_vhdl_assoc_mix_bad``
+  * - N117
+    - a port actual of the wrong width was silently resized, and no port
+      type conformance was checked
+    - the whole-port association compares the actual's type with the formal's
+      before connecting it: a width mismatch, or an element-kind mismatch when
+      the actual is a designator of a known type, is reported (IEEE 1076-2008
+      6.5.2.2)
+    - ``t_vhdl_port_conform_bad``
 
 ____
 Open
@@ -721,11 +729,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N117
-    - a port actual of the wrong width is silently resized, and no port
-      type/subtype conformance is checked at all
-    - IEEE 1076-2008 6.5.2.2 requires the actual's type to match the formal;
-      GHDL refuses. One static check covers both halves
   * - N118
     - integer literals above 2**31-1 wrap silently (``4000000000`` becomes
       -294967296), and a constant is never checked against its declared

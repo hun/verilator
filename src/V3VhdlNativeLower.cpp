@@ -10940,6 +10940,23 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                 AstNodeExpr* valuep = driven ? lowerDesignator(*assoc.actual, true)
                                              : lowerExpr(*assoc.actual, &aggType);
                 if (!valuep) return nullptr;
+                // IEEE 1076-2008 6.5.2.2: the actual must conform to the formal's type,
+                // so a width or element-kind mismatch is reported rather than resized
+                const VType actualType = typeOfLowered(*assoc.actual, valuep);
+                bool conforms = true;
+                if (actualType.isVector() && portType.isVector()) {
+                    conforms = actualType.width == portType.width;
+                    if (conforms && assoc.actual->kind == Expr::NAME) {
+                        conforms = actualType.kwd == portType.kwd;
+                    }
+                }
+                if (!conforms) {
+                    assoc.flp->v3error("VHDL: actual of port '" + portp->name()
+                                       + "' does not conform to the port's type "
+                                         "(IEEE 1076-2008 6.5.2.2)");
+                    valuep->deleteTree();
+                    return nullptr;
+                }
                 actualp = resizeExpr(valuep, portType, flp);
             } else {
                 actualp = declaredDefault(portp, aggType, portType);
