@@ -669,6 +669,15 @@ ______
       such as an attribute name or `others`, stays legal
     - ``t_vhdl_ident_bad``; two inout tests used the reserved word `bus` as a
       signal name and were corrected
+  * - N115
+    - multiple drivers on an unresolved signal were accepted, and the model
+      was last-write-wins
+    - the emitted assignments are counted per bit position, since a composite
+      signal's scalar subelements are separate signals: two statements that
+      drive the same bit of an unresolved signal are reported (IEEE 1076-2008
+      12.6.4), while element and record-member writes to one signal do not
+      collide, and std_logic and the arrays built from it stay resolved
+    - ``t_vhdl_driver_bad``
 
 ____
 Open
@@ -706,12 +715,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N115
-    - multiple drivers on an unresolved signal are accepted with no
-      diagnostic, and the model is last-write-wins
-    - VHDL reports an elaboration error for several sources on an unresolved
-      signal (IEEE 1076-2008 12.6.4); GHDL refuses at elaboration. Needs a
-      driver count over the emitted assignments
   * - N116
     - a port or generic map that mixes positional and named associations is
       accepted, and the named formals are ignored

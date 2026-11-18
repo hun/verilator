@@ -9,9 +9,14 @@
 
 entity t is
   port (
-    a : in  bit;
-    b : in  bit;
-    y : out bit
+    a  : in  bit;
+    y1 : out bit;
+    y2 : out bit;
+    y3 : out bit;
+    y4 : out bit;
+    y5 : out bit;
+    y6 : out bit;
+    y7 : out bit
   );
 end;
 
@@ -19,21 +24,13 @@ architecture rtl of t is
   type op_t is (add, sub, mul);
 begin
   -- A case over an enumeration that misses one literal
-  proc_missing : process (a)
-  begin
-    case a is
-      when '0' => y <= '0';
-      when '1' => y <= '1';
-    end case;
-  end process;
-
   proc_enum_missing : process (a)
     variable o : op_t;
   begin
     o := add;
     case o is
-      when add => y <= '0';
-      when sub => y <= '1';
+      when add => y1 <= '0';
+      when sub => y1 <= '1';
     end case;
   end process;
 
@@ -41,9 +38,9 @@ begin
   proc_dup : process (a)
   begin
     case a is
-      when '0'        => y <= '0';
-      when '0'        => y <= '1';
-      when others     => y <= '0';
+      when '0'        => y2 <= '0';
+      when '0'        => y2 <= '1';
+      when others     => y2 <= '0';
     end case;
   end process;
 
@@ -53,9 +50,9 @@ begin
   begin
     n := 0;
     case n is
-      when 0 to 3 => y <= '0';
-      when 2      => y <= '1';
-      when others => y <= '0';
+      when 0 to 3 => y3 <= '0';
+      when 2      => y3 <= '1';
+      when others => y3 <= '0';
     end case;
   end process;
 
@@ -63,18 +60,18 @@ begin
   proc_two_others : process (a)
   begin
     case a is
-      when '0'    => y <= '0';
-      when others => y <= '1';
-      when others => y <= '0';
+      when '0'    => y4 <= '0';
+      when others => y4 <= '1';
+      when others => y4 <= '0';
     end case;
   end process;
 
-  -- A selected assignment without `others` that misses a value
-  y <= '0' when a = '1' else
-       '1';
+  -- A selected assignment with a duplicate choice
   sel_dup : with a select
-    y <= '0' when '1',
+    y5 <= '0' when '1',
          '1' when '1';
+
+  -- A selected assignment without `others` that misses a value
   sel_missing : with a select
-    y <= '0' when '1';
+    y6 <= '0' when '1';
 end;

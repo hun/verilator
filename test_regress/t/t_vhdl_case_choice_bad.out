@@ -1,8 +1,8 @@
-%Error: t/t_vhdl_case_choice_bad.vhdl:34:1: VHDL: case statement does not cover every value of its selector (IEEE 1076-2008 10.9)
+%Error: t/t_vhdl_case_choice_bad.vhdl:31:1: VHDL: case statement does not cover every value of its selector (IEEE 1076-2008 10.9)
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_case_choice_bad.vhdl:45:1: VHDL: duplicate choice in a case statement (IEEE 1076-2008 10.9, 11.5)
-%Error: t/t_vhdl_case_choice_bad.vhdl:57:1: VHDL: duplicate choice in a case statement (IEEE 1076-2008 10.9, 11.5)
-%Error: t/t_vhdl_case_choice_bad.vhdl:65:1: VHDL: more than one 'others' choice in a case statement
-%Error: t/t_vhdl_case_choice_bad.vhdl:77:1: VHDL: duplicate choice in a selected assignment (IEEE 1076-2008 10.9, 11.5)
-%Error: t/t_vhdl_case_choice_bad.vhdl:78:1: VHDL: selected assignment does not cover every value of its selector (IEEE 1076-2008 11.5)
+%Error: t/t_vhdl_case_choice_bad.vhdl:42:1: VHDL: duplicate choice in a case statement (IEEE 1076-2008 10.9, 11.5)
+%Error: t/t_vhdl_case_choice_bad.vhdl:54:1: VHDL: duplicate choice in a case statement (IEEE 1076-2008 10.9, 11.5)
+%Error: t/t_vhdl_case_choice_bad.vhdl:62:1: VHDL: more than one 'others' choice in a case statement
+%Error: t/t_vhdl_case_choice_bad.vhdl:72:1: VHDL: duplicate choice in a selected assignment (IEEE 1076-2008 10.9, 11.5)
+%Error: t/t_vhdl_case_choice_bad.vhdl:75:1: VHDL: selected assignment does not cover every value of its selector (IEEE 1076-2008 11.5)
 %Error: Exiting due to

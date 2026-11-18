@@ -377,6 +377,9 @@ class Lowering final {
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
+    //! Signals whose type has no resolution function: at most one driver (IEEE 1076-2008
+    //! 12.6.4), unlike std_logic and the arrays built from it
+    std::set<AstVar*> m_unresolvedSignals;
     std::map<std::string, AliasInfo> m_aliases;
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
     Design* const m_designp;  // Design context for generic specialization
@@ -1109,6 +1112,17 @@ class Lowering final {
     //! Whether the choices cover every value the selector can take; a selector too
     //! wide to enumerate needs an `others` arm (IEEE 1076-2008 10.9, 11.5)
     bool choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& covered) const;
+    //! Whether a type has a resolution function: std_logic and the arrays built from
+    //! it do, so several drivers are legal (IEEE 1076-2008 12.6.4)
+    static bool isResolvedType(const VType& type) {
+        if (type.typeName == "std_logic" || type.typeName == "std_logic_vector"
+            || type.typeName == "unsigned" || type.typeName == "signed") {
+            return true;
+        }
+        return type.kind == VType::ARRAY && type.elemp && type.elemp->typeName == "std_logic";
+    }
+    //! Report every unresolved signal that more than one emitted assignment drives
+    void checkDrivers();
     bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
     AstNode* lowerStmt(const Stmt& stmt);
     AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
@@ -5825,6 +5839,65 @@ bool Lowering::choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& co
     }
     return false;
 }
+void Lowering::checkDrivers() {
+    // A composite signal's scalar subelements are separate signals (IEEE 1076-2008
+    // 12.6.4), so drivers are compared per bit position. Each emitted always/initial
+    // statement and each bare continuous assignment is one driver; a write whose index
+    // is not static is taken to cover the whole signal. A declared initial value is not
+    // a driver.
+    struct Range final {
+        int lsb = 0;
+        int width = 0;
+        int driver = 0;
+    };
+    std::map<AstVar*, std::vector<Range>> ranges;
+    int driver = 0;
+    for (AstNode* stmtp = m_modp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
+        if (VN_IS(stmtp, InitialStatic) || VN_IS(stmtp, Var) || VN_IS(stmtp, Cell)) continue;
+        if (!VN_IS(stmtp, Always) && !VN_IS(stmtp, Initial) && !VN_IS(stmtp, AssignW)
+            && !VN_IS(stmtp, AssignDly) && !VN_IS(stmtp, Assign)) {
+            continue;
+        }
+        ++driver;
+        stmtp->foreach([&](AstVarRef* refp) {
+            if (refp->access() != VAccess::WRITE) return;
+            AstVar* const varp = refp->varp();
+            if (!m_unresolvedSignals.count(varp)) return;
+            Range range;
+            range.driver = driver;
+            range.width = varp->width();
+            // Compose the selects around the write, so a record element or array element
+            // covers only its own bits; the indices are folded here rather than later
+            const AstNode* nodep = refp;
+            while (const AstSel* const selp = VN_CAST(nodep->backp(), Sel)) {
+                if (selp->fromp() != nodep) break;
+                AstConst* const lsbp = foldStatic(const_cast<AstNodeExpr*>(selp->lsbp()));
+                if (!lsbp) break;
+                range.lsb += static_cast<int>(lsbp->toUInt());
+                lsbp->deleteTree();
+                range.width = selp->widthConst();
+                nodep = selp;
+            }
+            ranges[varp].push_back(range);
+        });
+    }
+    for (const auto& entry : ranges) {
+        const std::vector<Range>& vec = entry.second;
+        bool reported = false;
+        for (size_t i = 0; i < vec.size() && !reported; ++i) {
+            for (size_t j = i + 1; j < vec.size(); ++j) {
+                if (vec[i].driver == vec[j].driver) continue;
+                if (vec[i].lsb >= vec[j].lsb + vec[j].width) continue;
+                if (vec[j].lsb >= vec[i].lsb + vec[i].width) continue;
+                entry.first->v3error("VHDL: unresolved signal '" + entry.first->name()
+                                     + "' has more than one driver (IEEE 1076-2008 12.6.4)");
+                reported = true;
+                break;
+            }
+        }
+    }
+}
+
 AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
     AstNodeExpr* const selectorp = lowerExpr(*conc.selector, nullptr);
@@ -9921,6 +9994,9 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
+            if (decl.kind == Decl::SIGNAL && !isResolvedType(type)) {
+                m_unresolvedSignals.insert(varp);
+            }
             if (!decl.init) continue;
             AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
             AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
@@ -10006,6 +10082,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             varp->declTyped(true);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
+            if (!isResolvedType(type)) m_unresolvedSignals.insert(varp);
         }
     }
 
@@ -10023,6 +10100,9 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
+            if (decl.kind == Decl::SIGNAL && !isResolvedType(type)) {
+                m_unresolvedSignals.insert(varp);
+            }
             if (decl.init) {
                 AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
                 AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
@@ -10048,6 +10128,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     // The entity's own statement part drives the module as well
     for (const auto& stmtp : entity.stmts) emitConcurrent(*stmtp);
     for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
+    checkDrivers();
 
     m_modp = nullptr;
     m_scope.clear();
