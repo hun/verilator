@@ -268,6 +268,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         }
     }
     std::set<std::string> entityNames;
+    std::set<std::string> deletedModules;  // Base modules no instance ends up binding to
     std::vector<const vhdlnative::EntityUnit*> unelaborated;
     std::vector<const vhdlnative::EntityUnit*> portUnelaborated;
     for (const vhdlnative::EntityUnit* const entryp : order) {
@@ -306,16 +307,15 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
             });
         if (covered) {
             // Only the specializations are referenced; the empty base would look like a top
-            AstModule* const modp = modules[entityp->name];
-            VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
+            deletedModules.insert(entityp->name);
         } else if (design.instantiated.count(entityp->name)) {
             entityp->flp->v3error("VHDL: entity '" + entityp->spelling
                                   + "' has a generic without a default value, and no instance "
                                     "binds it");
-        } else if (AstModule* const modp = modules[entityp->name]) {
+        } else if (modules[entityp->name]) {
             // An entity no instance names is not part of the design: nothing binds its
             // generics, and an empty module would look like another top
-            VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
+            deletedModules.insert(entityp->name);
         }
     }
     // An entity with unconstrained ports elaborates only through its instances
@@ -326,10 +326,22 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
                 return entry.second && entry.first.compare(0, prefix.size(), prefix) == 0;
             });
         if (covered) {
-            AstModule* const modp = modules[entityp->name];
-            VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
+            deletedModules.insert(entityp->name);
         } else {
             vhdlnative::reportUnspecializedPorts(*entityp, design.unconstrainedRecordMembers);
+        }
+    }
+    // A base module no instance binds to is dead: it has no parent and would look like
+    // another top. An instance that binds nothing uses the base itself.
+    for (const auto& entry : modules) {
+        if (!design.instantiated.count(entry.first)) continue;
+        if (design.baseUsed.count(entry.first)) continue;
+        deletedModules.insert(entry.first);
+    }
+    for (const std::string& name : deletedModules) {
+        if (AstModule* const modp = modules[name]) {
+            modules[name] = nullptr;
+            VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
         }
     }
 }

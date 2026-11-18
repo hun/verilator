@@ -87,6 +87,7 @@ struct Design final {
     std::map<std::string, const Architecture*> archs;  // Folded entity name -> architecture
     std::map<std::string, AstModule*> specializations;  // Generic binding key -> module
     std::set<std::string> instantiated;  // Entities named by at least one instance
+    std::set<std::string> baseUsed;  // Entities whose base module an instance binds to
     UnconstrainedRecordMap unconstrainedRecordMembers;  // Unconstrained record elements
     // Physical unit name -> multiple of its type's step unit, and the names two physical
     // types give different multiples to, which no literal can name without its type

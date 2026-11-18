@@ -881,6 +881,25 @@ ______
       `min` and `max` of two reals or two integers also fold, since `ieee.math_real`
       and open-logic declare them without a body the frontend can read
     - ``t_vhdl_real_generic``
+  * - N138
+    - an empty string as a *value*: open-logic's RAM families declare
+      `InitString_g : string := ""` and pass it to an init function that reads
+      `InitString_g'left` and counts separators, so the generic had to be more than
+      text that only comparisons could see
+    - the empty string is the null string `1 to 0`: `VType::length()` is zero for a
+      null range, the generic default may be a bit-string literal (which is how `""`
+      parses) as well as a string literal, and an empty string registers no packed
+      value. A string formal takes its character elements from the declaration, so a
+      null actual still indexes as a character instead of a one-bit logic value,
+      which is what made `a(i) = ' '` a logic-context error
+    - ``t_vhdl_null_string``
+  * - N139
+    - an entity with all-default generics that an instance binds nothing to: its
+      base module has no parent, so a design with such an entity reported
+      ``MULTITOP`` even though every instance used a specialization
+    - the base module is deleted unless an instance binds it directly, which the
+      lowering records; the cleanup also clears the module map entry it removes
+    - ``t_vhdl_null_string``
 
 ____
 Open

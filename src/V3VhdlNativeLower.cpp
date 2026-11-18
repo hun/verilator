@@ -93,7 +93,13 @@ struct VType final {
                || (kind == ARRAY && signing == VSigning::NOSIGN && elemWidth == 1);
     }
     //! Number of elements of an array, or 1 for a scalar
-    int length() const { return isVector() ? std::abs(left - right) + 1 : 1; }
+    int length() const {
+        if (!isVector()) return 1;
+        // An ascending range that ends below its start (or a descending one that ends
+        // above it) has no elements: IEEE 1076-2008 5.3.2 calls it a null range
+        if (ascending ? right < left : right > left) return 0;
+        return std::abs(left - right) + 1;
+    }
     //! Bit offset of a declared array index from the least significant element;
     //! the right bound is the least significant element in either direction
     int indexOffset(int index) const { return ascending ? right - index : index - right; }
@@ -8208,7 +8214,15 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         InlineBinding binding{actualp, asLvalue, true};
         // The actual's VHDL type first: an array's element width and index bounds are gone
         // from its data type, and a formal indexing the actual needs both
-        if (!typeOfDesignator(actual, binding.type)) {
+        const bool haveActualType = typeOfDesignator(actual, binding.type);
+        // A string formal's element is a character whatever the actual is; a null actual
+        // has no element to take that width from, and a packed fallback type would give
+        // the formal one-bit elements
+        if (formalMark == "string"
+            && !(haveActualType && binding.type.kind == VType::ARRAY
+                 && binding.type.elemWidth == 8)) {
+            binding.type = stringType(formalp->flp, actualp->width() / 8);
+        } else if (!haveActualType) {
             if (ctxp) {
                 binding.type = *ctxp;
             } else {
@@ -10131,13 +10145,14 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
     bool unbound = false;  // A generic here has neither a binding nor a default
     const auto registerString
         = [&](FileLine* flp, const std::string& folded, const std::string& text) {
-              // An empty string has no packed value to register, but its text is still
-              // forwarded to the instances it is passed to
+              // The text is kept whatever its length: an empty string still carries it to
+              // the instances it is passed to, and comparisons fold on it
               m_stringConsts[folded] = text;
-              if (text.empty()) return;
               // A string generic's value is fixed at elaboration, so register it as a typed
               // constant of packed 8-bit character codes rather than a variable; that lets a
-              // reference fold, e.g. `if val = "one" generate`.
+              // reference fold, e.g. `if val = "one" generate`. An empty string is the
+              // null string `1 to 0`: it has no characters, but its bounds and length are
+              // still values the design can read.
               const VType type = stringType(flp, static_cast<int>(text.size()));
               AstConst* const valuep = makeStringConst(flp, text);
               m_ownedConsts.push_back(std::unique_ptr<AstConst>(valuep));
@@ -10200,18 +10215,18 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                 continue;
             }
             if (gen.type.mark == "string") {
-                const Expr* actualp = nullptr;
                 if (bindings) {
                     const auto it = bindings->find(name.first);
                     if (it != bindings->end() && it->second.isString) {
-                        actualp = nullptr;
                         if (!probe) registerString(gen.flp, name.first, it->second.stringValue);
                         continue;
                     }
                 }
-                if (gen.init && gen.init->kind == Expr::STRING_LIT) { actualp = gen.init.get(); }
-                if (actualp) {
-                    if (!probe) registerString(gen.flp, name.first, actualp->spelling);
+                // A default may also be an empty or logic-character string, which parses
+                // as a bit-string literal, or a constant that holds one
+                std::string defaultText;
+                if (gen.init && stringOperandText(*gen.init, defaultText)) {
+                    if (!probe) registerString(gen.flp, name.first, defaultText);
                 } else if (!probe) {
                     ok = false;  // No default, so only a binding can elaborate the base
                     unbound = true;
@@ -10902,7 +10917,11 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         }
         bindings[items[k].folded] = binding;
     }
-    if (bindings.empty() && portBounds.empty()) return basep;  // Nothing to bind
+    if (bindings.empty() && portBounds.empty()) {
+        // Nothing to bind: an instance uses the entity's own module
+        m_designp->baseUsed.insert(entity.name);
+        return basep;
+    }
     std::string key = entity.name;
     // The port-bounds part leads the key: V3VhdlNative.cpp looks for the prefix
     // "<entity>|ports" to tell that an unconstrained-port entity was specialized
@@ -11332,6 +11351,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         if (!entityp->generics.empty() || !portBounds.empty()) {
             modp = specializeInstance(conc, *entityp, modp, portBounds);
             if (!modp) return nullptr;
+        } else {
+            m_designp->baseUsed.insert(entityp->name);
         }
     }
     std::vector<AstVar*> ports;

@@ -184,7 +184,9 @@ real formal still accepts an integer literal when it is the only candidate. A
 generic of type ``real`` binds like a real constant: its value folds at
 elaboration, so the model never carries a floating type. A call of a package
 subprogram through a library-qualified name (``work.pkg.f(...)``) resolves to
-that package, as an unqualified call does after a ``use``.
+that package, as an unqualified call does after a ``use``. An empty string is the
+null string ``1 to 0``: its bounds and length are values, and a function that
+takes it loops over a null range.
 When one operand is polymorphic, the selected formal gives it a
 type; two polymorphic sized literals are resolved by width and result type. A
 type declaration may take its element range from an object of the same
