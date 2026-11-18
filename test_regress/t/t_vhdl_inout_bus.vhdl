@@ -34,12 +34,12 @@ entity t is
 end;
 
 architecture rtl of t is
-  signal bus : std_logic;
+  signal bus_s : std_logic;
 begin
   -- Two instances drive the same resolved signal. VHDL would resolve a
   -- conflicting 0 and 1 to 'X'; the two-state model resolves it to 1, and the
   -- test pins that documented divergence.
-  u1 : entity work.drv port map (en => en1, d => d1, io => bus);
-  u2 : entity work.drv port map (en => en2, d => d2, io => bus);
-  y <= bus & bus;
+  u1 : entity work.drv port map (en => en1, d => d1, io => bus_s);
+  u2 : entity work.drv port map (en => en2, d => d2, io => bus_s);
+  y <= bus_s & bus_s;
 end;

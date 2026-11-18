@@ -228,6 +228,14 @@ class Parser final {
         advance();
         return true;
     }
+    //! An identifier that becomes a declared name: a reserved word is never one
+    //! (IEEE 1076-2008 15.10), unlike an attribute name or a choice keyword
+    bool takeName(Token& out) {
+        if (!takeId(out)) return false;
+        if (!isReservedWord(out.text)) return true;
+        error("'" + out.text + "' is a reserved word, not an identifier");
+        return false;
+    }
     //! A subprogram may be named by an operator symbol, which the lexer reports as a
     //! string token. Only a subprogram may: a keyword can never be an identifier, so
     //! every other designator stays a plain ID.
@@ -1119,7 +1127,7 @@ void Parser::parseTypeSpec(TypeSpec& type) {
 void Parser::parseNameList(std::vector<std::pair<std::string, std::string>>& names) {
     for (;;) {
         Token nameTok;
-        if (!takeId(nameTok)) return;
+        if (!takeName(nameTok)) return;
         addName(names, nameTok);
         if (!acceptSym(",")) break;
     }
@@ -1232,7 +1240,7 @@ void Parser::parseGenericClauseInto(std::vector<GenericDecl>& generics) {
 
 void Parser::parseEntity(FileLine* flp) {
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     EntityUnit entity;
     entity.flp = flp;
     entity.name = nameTok.text;
@@ -1622,7 +1630,7 @@ void Parser::parseTypeDecl(Architecture& arch) { parseTypeDeclInto(arch.types); 
 
 void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     TypeDecl decl{TypeDecl::ARRAY};
     decl.flp = nameTok.flp;
     decl.name = nameTok.text;
@@ -1716,7 +1724,7 @@ void Parser::parseSubtypeDecl(Architecture& arch) { parseSubtypeInto(arch.types)
 
 void Parser::parseSubtypeInto(std::vector<TypeDecl>& types) {
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     TypeDecl decl{TypeDecl::SUBTYPE};
     decl.flp = nameTok.flp;
     decl.name = nameTok.text;
@@ -1734,7 +1742,7 @@ void Parser::parseSubtypeInto(std::vector<TypeDecl>& types) {
 //! Parse `alias name [: mark] is designator [ signature ];`
 void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     AliasDecl alias;
     alias.flp = nameTok.flp;
     alias.name = nameTok.text;
@@ -1767,7 +1775,7 @@ void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
 //! the interface list only shapes the association check this frontend does not model.
 void Parser::parseComponentDecl() {
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     (void)acceptId("is");
     for (;;) {
         if (m_failed) return;
@@ -1969,7 +1977,7 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
 
 void Parser::parseArchitecture(FileLine* flp) {
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     Architecture arch;
     arch.flp = flp;
     arch.name = nameTok.text;
@@ -2217,7 +2225,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
     if (isId("for")) {
         advance();
         Token varTok;
-        if (!takeId(varTok)) return;
+        if (!takeName(varTok)) return;
         auto gen = std::make_unique<Concurrent>(Concurrent::GEN_FOR);
         gen->flp = flp;
         gen->loopVar = varTok.text;
@@ -2952,7 +2960,7 @@ void Parser::skipLibraryClause() {
 void Parser::parsePackage(FileLine* flp, bool isBody) {
     if (isBody && !expectId("body")) return;
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     PackageUnit pkg;
     pkg.flp = flp;
     pkg.name = nameTok.text;
@@ -3083,7 +3091,7 @@ StmtP Parser::parseCase(FileLine* flp) {
 
 StmtP Parser::parseFor(FileLine* flp) {
     Token varTok;
-    if (!takeId(varTok)) return nullptr;
+    if (!takeName(varTok)) return nullptr;
     auto stmt = std::make_unique<Stmt>(Stmt::FOR);
     stmt->flp = flp;
     stmt->loopVar = varTok.text;
@@ -3130,7 +3138,7 @@ void Parser::parseConfiguration(FileLine* flp) {
     unit.libname = m_libname;
     unit.inLibrary = m_inLibrary;
     Token nameTok;
-    if (!takeId(nameTok)) return;
+    if (!takeName(nameTok)) return;
     unit.name = nameTok.text;
     unit.spelling = nameTok.spelling;
     if (!expectId("of")) return;

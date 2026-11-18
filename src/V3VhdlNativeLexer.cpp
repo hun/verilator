@@ -253,6 +253,18 @@ Token Lexer::scanToken() {
         tok.kind = Token::ID;
         tok.spelling = m_text.substr(start, m_pos - start);
         tok.text = tok.spelling;
+        // IEEE 1076-2008 15.4.2: a basic identifier starts with a letter, never has
+        // two underscores in a row and never ends with one
+        if (tok.spelling.front() == '_') {
+            tok.flp->v3error("VHDL identifier cannot begin with an underscore: '" + tok.spelling
+                             + "'");
+        } else if (tok.spelling.back() == '_') {
+            tok.flp->v3error("VHDL identifier cannot end with an underscore: '" + tok.spelling
+                             + "'");
+        } else if (tok.spelling.find("__") != std::string::npos) {
+            tok.flp->v3error("VHDL identifier cannot contain two underscores in a row: '"
+                             + tok.spelling + "'");
+        }
         // VHDL identifiers are case-insensitive; lookup uses the folded form
         std::transform(tok.text.begin(), tok.text.end(), tok.text.begin(), [](char ch) {
             return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));

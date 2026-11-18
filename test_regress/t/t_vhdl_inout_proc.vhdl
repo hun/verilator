@@ -43,8 +43,8 @@ entity t is
 end;
 
 architecture rtl of t is
-  signal bus : std_logic;
+  signal bus_s : std_logic;
 begin
-  u : entity work.drv port map (clk => clk, en => en, d => d, io => bus);
-  y <= bus;
+  u : entity work.drv port map (clk => clk, en => en, d => d, io => bus_s);
+  y <= bus_s;
 end;

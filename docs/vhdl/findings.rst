@@ -659,6 +659,16 @@ ______
       ``nand``/``nor`` chains and mixes such as ``a and b or c`` need
       parentheses (IEEE 1076-2008 9.1)
     - ``t_vhdl_nor_chain_bad``
+  * - N114
+    - illegal basic identifiers (leading, trailing or doubled underscore) and
+      reserved words used as identifiers were accepted
+    - the lexer checks the basic identifier spelling (IEEE 1076-2008 15.4.2),
+      and a declared name may not be a reserved word (15.10): the shared name
+      list, the design-unit, type, subtype, alias, component and loop-variable
+      names are checked, while a reserved word that the grammar itself uses,
+      such as an attribute name or `others`, stays legal
+    - ``t_vhdl_ident_bad``; two inout tests used the reserved word `bus` as a
+      signal name and were corrected
 
 ____
 Open
@@ -696,12 +706,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N114
-    - illegal basic identifiers (leading, trailing or doubled underscore) and
-      reserved words used as identifiers are accepted
-    - IEEE 1076-2008 15.4.2 and 15.10; GHDL refuses both. The reserved-word
-      table is exact but never consulted by the identifier reader. Needs
-      lexer checks and ``*_bad`` tests
   * - N115
     - multiple drivers on an unresolved signal are accepted with no
       diagnostic, and the model is last-write-wins
