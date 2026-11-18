@@ -692,6 +692,16 @@ ______
       the actual is a designator of a known type, is reported (IEEE 1076-2008
       6.5.2.2)
     - ``t_vhdl_port_conform_bad``
+  * - N118
+    - integer literals above 2**31-1 wrapped silently (``4000000000`` became
+      -294967296), and a constant was never checked against its declared
+      subtype range
+    - an integer literal that does not fit the 32-bit integer type is refused
+      where it is parsed (IEEE 1076-2008 15.5; the minimum, written as 2**31
+      under a unary minus, is allowed), and an integer constant's value is
+      checked against a declared subtype of ``integer`` (5.4). A physical
+      type, modelled as an integer, carries no such bounds and is skipped
+    - ``t_vhdl_int_lit_bad``, ``t_vhdl_const_range_bad``
 
 ____
 Open
@@ -729,13 +739,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N118
-    - integer literals above 2**31-1 wrap silently (``4000000000`` becomes
-      -294967296), and a constant is never checked against its declared
-      subtype range
-    - the subset (5.4) promises static range checks; GHDL reports the bounds
-      violation. Needs a static check in the constant emitter and a
-      ``*_bad`` test
   * - N119
     - arithmetic and shifts on ``std_logic_vector`` are accepted with no
       visible ``"+"``/shift overload, as unsigned

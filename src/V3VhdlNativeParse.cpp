@@ -676,6 +676,13 @@ ExprP Parser::parsePrimary() {
             node->kind = Expr::PHYS_LIT;
             advance();  // The unit name
         }
+        // IEEE 1076-2008 15.5: an integer literal is inside the integer type's range.
+        // The minimum is written as a literal 2**31 under a unary minus, so the bound
+        // allows that one value; above it the 32-bit model would wrap silently.
+        if (node->kind == Expr::INT_LIT && node->intValue > 2147483648LL) {
+            error("integer literal does not fit the 32-bit integer type");
+            return nullptr;
+        }
         return node;
     }
     if (m_cur.kind == Token::STRING) {

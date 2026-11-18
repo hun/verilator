@@ -9551,6 +9551,19 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
     if (intConstant) {
         int64_t value = 0;
         if (evalInt(*initp, value)) {
+            // IEEE 1076-2008 5.4: the value is within its declared subtype's bounds. Only
+            // a subtype of a predefined integer type carries bounds that are complete here
+            // (a physical type is modelled as an integer too, without them).
+            const auto subtypeIt = m_types.find(type.mark);
+            const bool integerSubtype = subtypeIt != m_types.end()
+                                        && subtypeIt->second.kind == VType::INT
+                                        && isPredefinedIntegerMark(subtypeIt->second.typeName);
+            if (integerSubtype
+                && (value < subtypeIt->second.intLow || value > subtypeIt->second.intHigh)) {
+                flp->v3error("VHDL: constant value is out of the range of subtype '" + type.mark
+                             + "' (IEEE 1076-2008 5.4)");
+                return;
+            }
             for (const auto& name : names) {
                 if (!reserveName(name.first, name.second, flp)) continue;
                 m_consts[name.first] = value;
