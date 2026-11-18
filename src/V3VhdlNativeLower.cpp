@@ -6244,14 +6244,11 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         lhsp->deleteTree();
         return nullptr;
     }
-    // A concurrent procedure call drives its signal actuals as continuous assignments
-    if (m_concurrentProc) {
-        return new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
-                             new AstAssignW{stmt.flp, lhsp, rhsp}};
-    }
     // Only variable assignments update immediately; a signal write waits for the
     // delta even in the time-zero activation (IEEE 1076-2008 10.5)
     if (variable) return new AstAssign{stmt.flp, lhsp, rhsp};
+    // A concurrent procedure call drives its signal actuals as continuous assignments
+    if (m_concurrentProc) return new AstAssignW{stmt.flp, lhsp, rhsp};
     return new AstAssignDly{stmt.flp, lhsp, rhsp};
 }
 
@@ -7052,13 +7049,9 @@ AstNode* Lowering::lowerReport(const Stmt& stmt) {
 }
 
 AstNode* Lowering::lowerAssert(const Stmt& stmt) {
-    AstNode* const bodyp = assertBody(stmt.flp, *stmt.value, stmt.message.get(), stmt.severity);
-    if (bodyp && m_concurrentProc) {
-        // A concurrent procedure call has no enclosing process; the assertion is
-        // evaluated continuously, like a concurrent assertion
-        return new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS_COMB, nullptr, bodyp};
-    }
-    return bodyp;
+    // A concurrent procedure call is already one combinational process, so its
+    // assertions run inside it
+    return assertBody(stmt.flp, *stmt.value, stmt.message.get(), stmt.severity);
 }
 
 AstNode* Lowering::assertBody(FileLine* flp, const Expr& condition, const Expr* message,

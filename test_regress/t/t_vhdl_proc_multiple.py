@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: a procedure with signal formals writes a variable from a concurrent call
+# DESCRIPTION: Verilator: three concurrent calls of a procedure with signal formals and slices
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -11,13 +11,10 @@ import vltest_bootstrap
 import vhdl_frontend
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_proc_var_write_bad.vhdl'
+test.top_filename = 't/t_vhdl_proc_multiple.vhdl'
 
-# GHDL accepts this source; the golden pins the frontend refusal
-
-
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+# The three calls are one combinational process each; the local variables of
+# the procedure are intermediates, so this compiles without internal errors
+test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'])
 
 test.passes()

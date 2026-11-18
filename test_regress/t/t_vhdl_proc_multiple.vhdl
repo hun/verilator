@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: a procedure with signal formals writes a variable
+-- DESCRIPTION: Verilator: three concurrent calls of a procedure with signal formals
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
