@@ -6314,6 +6314,17 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable,
                                     m_concurrentProc);
     }
+    // A slice whose bounds cross is a null array (IEEE 1076-2008 5.3.2): a loop that
+    // shifts a pipeline writes `p(2 to N)` and, with N=1, `p(2 to 1)`, which assigns
+    // nothing
+    if (stmt.target->kind == Expr::SLICE && stmt.target->b && stmt.target->c) {
+        int64_t left = 0;
+        int64_t right = 0;
+        if (staticIntFold(stmt.target->b, left) && staticIntFold(stmt.target->c, right)) {
+            const bool empty = stmt.target->text == "downto" ? left < right : left > right;
+            if (empty) return nullptr;
+        }
+    }
     // A bare `x <= unaffected;` leaves the target unchanged, so emit nothing
     if (stmt.alternatives.empty() && stmt.value && stmt.value->kind == Expr::UNAFFECTED) {
         return nullptr;
@@ -8715,10 +8726,11 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 unsupportedError(flp, "assignment to an element outside the inlined subprogram");
                 return nullptr;
             }
-            // Each element write rebuilds the local's whole value, so the fold is bounded by
-            // what it copies: a wide value costs its width per write, and the rebuilt tree
-            // grows with every write
-            m_funcWriteCost += 64 + it->second.exprp->width() / 64;
+            // Each element write rebuilds the local's whole value, and a body that reads
+            // the local back grows the rebuilt tree by that read too. The budget follows
+            // the value's size, which is what every write copies
+            m_funcWriteCost += 64 + it->second.exprp->width() / 64
+                               + it->second.exprp->nodeCount();
             if (m_funcWriteCost > (1 << 18)) {
                 unsupportedError(flp, "function body with too many element assignments");
                 return nullptr;

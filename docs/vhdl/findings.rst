@@ -804,6 +804,24 @@ ______
       already published their types and constants, so ``ppcOr`` can reach
       ``log2ceil`` when only the logic package is imported
     - ``t_vhdl_type_bound_object``
+  * - N130
+    - a null slice as an assignment target, e.g. the pipeline shift
+      ``p(2 to N) <= p(1 to N-1)`` with ``N=1`` (open-logic's arbiter)
+    - a slice whose bounds cross is the null array (IEEE 1076-2008 5.3.2), so the
+      statement assigns nothing and is dropped, as ``unaffected`` already is. A
+      null slice used as a value is still reported, since the model has no
+      zero-width value
+    - ``t_vhdl_slice_empty``
+  * - N131
+    - a folded function that rewrites an array local could exhaust memory before
+      the element-write budget stopped it (open-logic's ``ppcOr``, 30 GB at
+      ``3x8`` iterations)
+    - each element write rebuilds the local's whole value, and every read of the
+      local copies that value into the rebuild, so the budget has to follow the
+      copied tree's size and not only the value's width. The budget now adds the
+      node count, so a body whose value grows per write is refused with the
+      existing diagnostic instead of being folded
+    - ``t_vhdl_fn_write_cost_bad``
 
 ____
 Open
