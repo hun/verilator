@@ -503,12 +503,26 @@ ExprP Parser::parseExpr() { return parseLogical(); }
 ExprP Parser::parseLogical() {
     ExprP lhsp = parseRelation();
     if (!lhsp) return nullptr;
+    std::string previousOp;  // Operator of the unparenthesized chain parsed so far
     while (m_cur.kind == Token::ID
            && (m_cur.text == "and" || m_cur.text == "or" || m_cur.text == "xor"
                || m_cur.text == "nand" || m_cur.text == "nor" || m_cur.text == "xnor")) {
+        const std::string op = m_cur.text;
+        // IEEE 1076-2008 9.1: operators of one precedence level may not be mixed, and
+        // nand/nor are non-associative, so their chains need parentheses
+        if (!previousOp.empty()) {
+            const bool nonAssoc
+                = previousOp == "nand" || previousOp == "nor" || op == "nand" || op == "nor";
+            if (op != previousOp || nonAssoc) {
+                error("logical operators cannot be mixed or chained without parentheses "
+                      "(IEEE 1076-2008 9.1)");
+                return nullptr;
+            }
+        }
+        previousOp = op;
         ExprP node = std::make_unique<Expr>(Expr::BINARY);
         node->flp = m_cur.flp;
-        node->text = m_cur.text;
+        node->text = op;
         advance();
         ExprP rhsp = parseRelation();
         if (!rhsp) return nullptr;

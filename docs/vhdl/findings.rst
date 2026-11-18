@@ -651,6 +651,14 @@ ______
       values of a scalar, or all combinations of a vector up to 16 bits
       (IEEE 1076-2008 10.9, 11.5)
     - ``t_vhdl_case_choice_bad``
+  * - N113
+    - ``a nor b nor c`` and ``a nand b nand c`` without parentheses were
+      accepted
+    - a chain of logical operators of one precedence level without parentheses
+      is refused unless every operator is the same associative one, so
+      ``nand``/``nor`` chains and mixes such as ``a and b or c`` need
+      parentheses (IEEE 1076-2008 9.1)
+    - ``t_vhdl_nor_chain_bad``
 
 ____
 Open
@@ -688,12 +696,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N113
-    - ``a nor b nor c`` and ``a nand b nand c`` without parentheses are
-      accepted
-    - ``nor``/``nand`` are not associative and may not be chained
-      (IEEE 1076-2008 9.1); GHDL refuses. Needs a parse-time check and a
-      ``*_bad`` test
   * - N114
     - illegal basic identifiers (leading, trailing or doubled underscore) and
       reserved words used as identifiers are accepted
