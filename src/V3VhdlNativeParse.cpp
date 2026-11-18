@@ -2592,19 +2592,11 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
                 const bool simple = item.kind == Token::ID && after.kind == Token::SYM
                                     && (after.text == "," || after.text == ")");
                 if (!simple) {
-                    process.sensitivityAll = true;
-                    process.sensitivity.clear();
-                    int depth = 0;
-                    while (m_cur.kind != Token::END) {
-                        if (isSym(")")) {
-                            if (depth == 0) break;
-                            --depth;
-                        } else if (isSym("(")) {
-                            ++depth;
-                        }
-                        advance();
-                    }
-                    break;
+                    // IEEE 1076-2008 11.3 takes signal names; an element or selected name
+                    // would need per-element events the model does not have, so it is
+                    // refused rather than silently widened to process(all)
+                    unsupported("sensitivity item that is not a bare signal name");
+                    return;
                 }
                 Token nameTok;
                 if (!takeId(nameTok)) return;

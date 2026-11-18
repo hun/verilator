@@ -718,6 +718,20 @@ ______
       physical value is a count of its step unit only while elaborating
       (subset 5.14); a delay and a static fold still use the 64-bit count
     - ``t_vhdl_phys_obj_unsup``
+  * - N121
+    - a ``wait`` inside a process with a sensitivity list was silently
+      dropped, and the process ran on both clock edges instead
+    - a wait statement inside a lowered body is refused unless it is a bare
+      wait whose process suspends on it (IEEE 1076-2008 10.2), so the
+      sensitized form is a clean refusal
+    - ``t_vhdl_wait_sens_bad``
+  * - N122
+    - a sensitivity item that is not a bare name was silently turned into
+      ``process(all)``, changing the semantics of an exact list
+    - a sensitivity element that is not a bare signal name is refused: the
+      model has no per-element events, so widening the list silently is the
+      wrong answer (IEEE 1076-2008 11.3)
+    - ``t_vhdl_sens_item_unsup``
 
 ____
 Open
@@ -755,16 +769,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N121
-    - a ``wait`` inside a process with a sensitivity list is silently dropped,
-      and the process runs on both clock edges instead
-    - the subset row 4.6 requires a clean refusal; GHDL refuses the form.
-      Needs the check and a ``*_bad`` test
-  * - N122
-    - a sensitivity item that is not a bare name is silently turned into
-      ``process(all)``, changing the semantics of an exact list
-    - IEEE 1076-2008 11.3 allows any signal name as a sensitivity element;
-      selected and indexed names are refused or rewritten today
   * - N123
     - ``T'val`` out of range silently yields a value that matches no literal,
       and the predefined scalar marks refuse most attributes (``bit'high``,
