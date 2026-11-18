@@ -373,6 +373,7 @@ class Lowering final {
     std::set<std::string> m_ambiguousTypes;  // Type names imported from two packages
     std::set<std::string> m_ambiguousLiterals;  // Enumeration literals from two types
     bool m_stdLogicSigned = false;  // `use ieee.std_logic_signed.all` is in effect
+    bool m_stdLogicUnsigned = false;  // `use ieee.std_logic_unsigned.all` is in effect
     bool m_stdLogicArith = false;  // `use ieee.std_logic_arith.all` is in effect
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
@@ -3459,6 +3460,9 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             return nullptr;
         }
         if (op == "rol" || op == "ror") return makeRotate(flp, lp, rp, op == "rol");
+        // IEEE 1076-2008 9.2.3 gives the predefined shift operators bit and boolean
+        // elements; std_logic_1164 (2008) declares the std_logic_vector ones, so a
+        // std_logic_vector shifts without a numeric package
         // A negative count is the opposite shift (IEEE 1076-2008 9.2.4)
         const std::string oppositeOp = op == "sll"   ? "srl"
                                        : op == "srl" ? "sll"
@@ -3564,6 +3568,16 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     }
     if (!lt.isVector() || !rt.isVector() || lt.kwd != rt.kwd) {
         unsupportedError(flp, "arithmetic on non-numeric operands");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    // IEEE 1076-2008 9.1: the predefined arithmetic operators have bit and boolean
+    // elements, so a std_logic_vector needs one of the packages that declare them
+    if (lt.kwd == VBasicDTypeKwd::LOGIC && lt.signing == VSigning::NOSIGN && !m_stdLogicArith
+        && !m_stdLogicSigned && !m_stdLogicUnsigned) {
+        flp->v3error("VHDL: arithmetic on std_logic_vector needs a package that defines it "
+                     "(IEEE 1076-2008 9.1)");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -9734,6 +9748,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
 void Lowering::importPackage(const std::string& name, const std::string& only) {
     if (only.empty()) {
         if (name == "std_logic_signed") m_stdLogicSigned = true;
+        if (name == "std_logic_unsigned") m_stdLogicUnsigned = true;
         if (name == "std_logic_arith") m_stdLogicArith = true;
     }
     if (!m_packagesp) return;
@@ -9842,6 +9857,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_ambiguousTypes.clear();
     m_arrayDtypes.clear();
     m_stdLogicSigned = false;
+    m_stdLogicUnsigned = false;
     m_stdLogicArith = false;
     m_scope.clear();
     m_aliases.clear();

@@ -702,6 +702,15 @@ ______
       checked against a declared subtype of ``integer`` (5.4). A physical
       type, modelled as an integer, carries no such bounds and is skipped
     - ``t_vhdl_int_lit_bad``, ``t_vhdl_const_range_bad``
+  * - N119
+    - arithmetic on ``std_logic_vector`` was accepted with no visible ``"+"``
+      overload, modelled as unsigned
+    - an arithmetic operator on a std_logic_vector is refused unless
+      std_logic_unsigned, std_logic_arith or std_logic_signed is visible,
+      since the predefined operators have bit and boolean elements (IEEE
+      1076-2008 9.1). Shifts stay legal: std_logic_1164 (2008) declares the
+      std_logic_vector ones, which the shift test pins against GHDL
+    - ``t_vhdl_slv_arith_bad``
 
 ____
 Open
@@ -739,12 +748,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N119
-    - arithmetic and shifts on ``std_logic_vector`` are accepted with no
-      visible ``"+"``/shift overload, as unsigned
-    - IEEE 1076-2008 defines these operators only for ``bit``/``boolean``
-      elements; a ``std_logic_vector`` needs a package function. Needs a gate
-      on the visible package declarations
   * - N120
     - physical objects at run time (``variable d : time``, user physical
       types) are accepted and modeled as integers
