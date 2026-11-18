@@ -640,6 +640,17 @@ ______
       declaration stays refused; a use clause imports the one declaration it
       names (12.4); and ``'('`` stays a literal after a reserved word (15.6)
     - ``t_vhdl_legal_forms``
+  * - N112
+    - ``case`` completeness, duplicate and overlapping choices were not
+      checked; a ``with ... select`` without ``others`` was accepted; a second
+      ``others`` arm was silently dropped
+    - every case and selected choice list is checked as it lowers: a value
+      covered twice (which an overlapping range also is) and a second
+      ``others`` arm are reported, and a list without ``others`` must cover
+      every value the selector can take, an enumeration's literals, both
+      values of a scalar, or all combinations of a vector up to 16 bits
+      (IEEE 1076-2008 10.9, 11.5)
+    - ``t_vhdl_case_choice_bad``
 
 ____
 Open
@@ -677,13 +688,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N112
-    - ``case`` completeness, duplicate choices and overlapping ranges are not
-      checked; a ``with ... select`` without ``others`` is accepted; a second
-      ``others`` arm is dropped
-    - GHDL refuses all of these; the frontend models the uncovered values as a
-      hold. Needs the analysis-time check, then ``*_bad`` tests with goldens.
-      IEEE 1076-2008 10.9, 11.5
   * - N113
     - ``a nor b nor c`` and ``a nand b nand c`` without parentheses are
       accepted

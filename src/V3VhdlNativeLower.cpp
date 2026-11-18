@@ -1102,6 +1102,13 @@ class Lowering final {
                         const char* prefix);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
                            std::vector<AstConst*>& cops);
+    //! Add the values one choice list covers; a value already there is a duplicate
+    //! or overlapping choice (IEEE 1076-2008 10.9, 11.5)
+    static bool addChoiceValues(const std::vector<AstConst*>& cops, std::set<int64_t>& covered,
+                                const char* what);
+    //! Whether the choices cover every value the selector can take; a selector too
+    //! wide to enumerate needs an `others` arm (IEEE 1076-2008 10.9, 11.5)
+    bool choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& covered) const;
     bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
     AstNode* lowerStmt(const Stmt& stmt);
     AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
@@ -5787,6 +5794,37 @@ static bool astHasZ(AstNode* nodep) {
     return found;
 }
 
+bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, std::set<int64_t>& covered,
+                               const char* what) {
+    bool ok = true;
+    for (AstConst* const cop : cops) {
+        // A value too wide to enumerate is not tracked; such a selector needs `others`
+        if (cop->width() > 32) continue;
+        if (covered.insert(static_cast<int64_t>(cop->num().toUInt())).second) continue;
+        cop->v3error(std::string{"VHDL: duplicate choice in a "} + what
+                     + " (IEEE 1076-2008 10.9, 11.5)");
+        ok = false;
+    }
+    return ok;
+}
+
+bool Lowering::choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& covered) const {
+    VType enumType;
+    if (enumTypeOfDType(selDtp, enumType)) {
+        for (size_t i = 0; i < enumType.literals.size(); ++i) {
+            if (!covered.count(static_cast<int64_t>(i))) return false;
+        }
+        return true;
+    }
+    const VType type = typeOfDType(selDtp);
+    if (type.kind == VType::LOGIC || type.kind == VType::BIT) {
+        return covered.count(0) && covered.count(1);
+    }
+    if (type.isVector() && type.width > 0 && type.width <= 16) {
+        return covered.size() == (size_t{1} << type.width);
+    }
+    return false;
+}
 AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
     AstNodeExpr* const selectorp = lowerExpr(*conc.selector, nullptr);
@@ -5825,6 +5863,8 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     // equivalent if/elsif chain.
     if (tristate) {
         AstNodeExpr* restp = nullptr;
+        std::set<int64_t> covered;
+        bool bad = false;
         for (std::size_t i = conc.choices.size(); i-- > 0;) {
             AstNodeExpr* const valuep = values[i];
             values[i] = nullptr;
@@ -5840,12 +5880,17 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
             }
             if (cops.empty()) {  // The `others` alternative is the fall-through
                 if (restp) {
-                    valuep->deleteTree();  // A second `others` can never be selected
+                    // A second `others` can never be selected (IEEE 1076-2008 11.5)
+                    flp->v3error("VHDL: more than one 'others' choice in a selected "
+                                 "assignment");
+                    bad = true;
+                    valuep->deleteTree();
                 } else {
                     restp = valuep;
                 }
                 continue;
             }
+            if (!addChoiceValues(cops, covered, "selected assignment")) bad = true;
             AstNodeExpr* condp = nullptr;
             for (AstConst* const cop : cops) {
                 AstEq* const eqp = new AstEq{flp, selectorp->cloneTree(false), cop};
@@ -5866,18 +5911,25 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
         if (!restp) {
             // A selected assignment without `others` must be exhaustive; the
             // fall-through is then unreachable, but a conditional expression needs one.
-            if (!ltype.isVector()) {
-                flp->v3error("VHDL: selected assignment must cover every value");
+            if (bad || !choicesComplete(selDtp, covered)) {
+                flp->v3error("VHDL: selected assignment does not cover every value of "
+                             "its selector (IEEE 1076-2008 11.5)");
                 lhsp->deleteTree();
                 return nullptr;
             }
             restp = makeRepeatedConst(flp, ltype, '0');
+        } else if (bad) {
+            restp->deleteTree();
+            lhsp->deleteTree();
+            return nullptr;
         }
         // The caller wraps this in the conditional-assignment always
         return new AstAssignW{flp, lhsp, restp};
     }
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;
+    std::set<int64_t> covered;
+    bool bad = false;
     for (std::size_t i = 0; i < conc.choices.size(); ++i) {
         AstNodeExpr* const valuep = values[i];
         values[i] = nullptr;
@@ -5893,10 +5945,13 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
             return nullptr;
         }
         if (cops.empty() && currentp) {
-            // A second "others" alternative can never be selected
+            // A second "others" alternative can never be selected (IEEE 1076-2008 11.5)
+            flp->v3error("VHDL: more than one 'others' choice in a selected assignment");
+            bad = true;
             assignp->deleteTree();
             continue;
         }
+        if (!addChoiceValues(cops, covered, "selected assignment")) bad = true;
         AstCaseItem* const itemp = cops.empty() ? new AstCaseItem{flp, nullptr, assignp}
                                                 : new AstCaseItem{flp, cops.front(), assignp};
         for (size_t j = 1; j < cops.size(); ++j) itemp->addCondsp(cops[j]);
@@ -5905,6 +5960,16 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     }
     lhsp->deleteTree();
     if (!itemsp) {
+        selectorp->deleteTree();
+        return nullptr;
+    }
+    if (!bad && !currentp && !choicesComplete(selDtp, covered)) {
+        flp->v3error("VHDL: selected assignment does not cover every value of its selector "
+                     "(IEEE 1076-2008 11.5)");
+        bad = true;
+    }
+    if (bad) {
+        itemsp->deleteTree();
         selectorp->deleteTree();
         return nullptr;
     }
@@ -6143,6 +6208,8 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
     AstNodeDType* const selDtp = selectorp->dtypep();
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen
+    std::set<int64_t> covered;
+    bool bad = false;
     for (const auto& item : stmt.caseItems) {
         restoreVarVals(entryVals);
         AstNode* const bodyp = lowerStmtList(item.second);
@@ -6155,10 +6222,13 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
             return nullptr;
         }
         if (cops.empty() && currentp) {
-            // A second "others" alternative can never be selected
+            // A second "others" alternative can never be selected (IEEE 1076-2008 10.9)
+            flp->v3error("VHDL: more than one 'others' choice in a case statement");
+            bad = true;
             if (bodyp) bodyp->deleteTree();
             continue;
         }
+        if (!addChoiceValues(cops, covered, "case statement")) bad = true;
         AstCaseItem* const caseItemp = cops.empty() ? new AstCaseItem{flp, nullptr, bodyp}
                                                     : new AstCaseItem{flp, cops.front(), bodyp};
         for (size_t i = 1; i < cops.size(); ++i) caseItemp->addCondsp(cops[i]);
@@ -6167,6 +6237,16 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
             = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, caseItemp) : caseItemp;
     }
     if (!itemsp) {
+        selectorp->deleteTree();
+        return nullptr;
+    }
+    if (!bad && !currentp && !choicesComplete(selDtp, covered)) {
+        flp->v3error("VHDL: case statement does not cover every value of its selector "
+                     "(IEEE 1076-2008 10.9)");
+        bad = true;
+    }
+    if (bad) {
+        itemsp->deleteTree();
         selectorp->deleteTree();
         return nullptr;
     }
