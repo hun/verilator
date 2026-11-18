@@ -3065,16 +3065,21 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     const bool bChar = expr.b && expr.b->kind == Expr::CHAR_LIT;
     const bool aEnumLit = expr.a && expr.a->kind == Expr::NAME && m_enumConsts.count(expr.a->text);
     const bool bEnumLit = expr.b && expr.b->kind == Expr::NAME && m_enumConsts.count(expr.b->text);
+    // A logical operator combines a scalar character literal element-wise with the
+    // other operand (IEEE 1076-2008 9.2.2), so the literal stays a logic value and
+    // never takes the character-code path an 8-bit operand context would give it.
+    const bool logicalOp
+        = op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor" || op == "xnor";
     if (bChar && !aChar) {
         lp = lowerExpr(*expr.a, nullptr);
         if (!lp) return nullptr;
         const VType lctx = typeOfDType(lp->dtypep());
-        rp = lowerExpr(*expr.b, &lctx);
+        rp = lowerExpr(*expr.b, logicalOp ? nullptr : &lctx);
     } else if (aChar && !bChar) {
         rp = lowerExpr(*expr.b, nullptr);
         if (!rp) return nullptr;
         const VType rctx = typeOfDType(rp->dtypep());
-        lp = lowerExpr(*expr.a, &rctx);
+        lp = lowerExpr(*expr.a, logicalOp ? nullptr : &rctx);
     } else if (aEnumLit != bEnumLit) {
         // Resolve a bare enumeration literal from the type of the other operand, which is
         // how two visible enumeration types can share a literal name

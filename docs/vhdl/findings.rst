@@ -537,10 +537,25 @@ ______
       An integer actual now matches only an integer formal exactly; a real
       formal still accepts it when it is the only candidate
     - ``t_vhdl_overload``; poc-divider lints and passes its 8235 checks
+  * - N99
+    - a character literal in an 8-bit vector context became its ASCII code:
+      ``v and '1'`` yielded ``x"31"``
+    - a logical operator combines a scalar character literal element-wise with
+      the other operand (IEEE 1076-2008 9.2.2), so the literal keeps its logic
+      value; any other operator still takes the character-code context an 8-bit
+      operand gives it, which a string or ``character`` comparison needs
+    - ``t_vhdl_char_lit_vec``
 
 ____
 Open
 ____
+
+N99 and up come from a conformance review against IEEE 1076-2008 with GHDL and
+nvc as the reference simulators, not from the external corpus. Every value the
+tests check is the one GHDL reports, and each test below fails on the current
+tree for the divergence it pins; the fix closes the finding by making its test
+pass. The findings that need a new diagnostic get their ``*_bad``/``*_unsup``
+golden when the diagnostic lands.
 
 .. list-table::
    :header-rows: 1
@@ -567,7 +582,179 @@ ____
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-
+  * - N100
+    - a qualified predefined scalar is re-typed as an unsigned vector:
+      ``integer'(-5) / 2`` folds to 2147483645 and ``integer'(-1) < 0``
+      is a constant-false unsigned comparison
+    - the QUAL lowering falls through to ``vectorType`` for the predefined
+      scalar marks, both in the static fold and at run time; IEEE 1076-2008
+      9.3.6 keeps the mark's type. The model reports it as
+      ``%Warning-UNSIGNED``. Test: ``t_vhdl_qual_int``
+  * - N101
+    - a don't-care in a constant is not a wildcard: ``std_match(x, pat)`` with
+      ``pat`` a constant ``"1-0"`` compares the ``-`` bit as data
+    - the wildcard mask is built only from bit-string *literal* operands, so a
+      ``'-'`` that arrives through a constant is lost (IEEE 1076-2008 16.8.3,
+      9.2.3). Test: ``t_vhdl_std_match_const``
+  * - N102
+    - a negative shift count is the wrong shift: ``"1011" sll (-1)`` gives
+      all zeros or ``sll 1`` instead of ``srl 1``
+    - the count's sign is never negated for ``sll``/``srl``/``sla``/``sra``
+      (``src/V3VhdlNativeLower.cpp`` passes the raw amount to the AST shift);
+      IEEE 1076-2008 9.2.4 defines the negative count as the opposite shift.
+      Rotates already handle it. Test: ``t_vhdl_shift_neg``
+  * - N103
+    - a run-time ``for`` loop re-reads its bound every iteration: a loop whose
+      body decrements the bound runs 2 iterations where VHDL runs 4; a bound
+      of 0 even yields a garbage count
+    - the discrete range is evaluated once at loop entry (IEEE 1076-2008 8.9);
+      the run-time loop lowering re-tests the live variable instead. Test:
+      ``t_vhdl_loop_bound``
+  * - N104
+    - the time-zero activation writes signals with blocking assignments: a
+      process that assigns ``a`` and then reads it in its first activation sees
+      the new value
+    - the initial prefix is lowered with ``AstAssign`` where the VHDL read must
+      still see the old value until the delta (IEEE 1076-2008 10.5). Test:
+      ``t_vhdl_init_delta``
+  * - N105
+    - ``process (all)`` is not sensitive to a signal read only in an
+      assignment target's index: a RAM write whose address alone changes never
+      happens
+    - the read collector never looks at the target, and an indexed name
+      evaluates its index (IEEE 1076-2008 11.3 with 8.4). Test:
+      ``t_vhdl_sens_lhs``
+  * - N106
+    - ``process (all)`` is not sensitive to a signal declared in the entity's
+      declarative part: the value the process publishes stays one event behind
+      the design
+    - entity-level signals are inserted as variables, and the sensitivity pass
+      skips variables; only entity-level signals are affected. Test:
+      ``t_vhdl_sens_entity``
+  * - N107
+    - a bare ``wait;`` after a timed wait is dropped, and the process restarts:
+      a testbench that stops after three edges keeps counting
+    - the timed-process model repeats the body; the trailing bare wait must
+      suspend forever (IEEE 1076-2008 8.1). Test: ``t_vhdl_wait_bare``
+  * - N108
+    - a report message made only of logic characters is silently dropped, so
+      ``report "0101" severity failure`` neither prints nor ends the run
+    - the parser retypes any string literal whose characters are all logic
+      values as a bit-string literal, and the report lowering then drops the
+      non-string message (IEEE 1076-2008 8.3, 15.7). Test:
+      ``t_vhdl_report_bits``
+  * - N109
+    - statements after an ``assert ... severity failure`` still execute in the
+      same pass: a second failure message prints, and an assignment after the
+      failure takes effect
+    - severity failure must end the run at the assertion (IEEE 1076-2008 8.3);
+      the emitted finish lets the rest of the pass run first. A related gap:
+      a process whose only stopper is a severity-failure assert is refused as
+      a process without a wait. Test: ``t_vhdl_sev_stop``
+  * - N110
+    - legal forms refused today: a based literal with an exponent
+      (``16#FF#E2``), positional ``open``, an instantiation with no maps,
+      ``for i in <subtype> generate``, ``view`` used as an identifier, a use
+      clause naming one declaration, and ``'('`` as a character literal
+    - each is legal VHDL-2008 that GHDL accepts and simulates; the bundle
+      surfaces the refusals one at a time. IEEE 1076-2008 15.5, 6.5.7.1, 6.8,
+      11.8, 15.10, 12.4, 15.6. Test: ``t_vhdl_legal_forms``
+  * - N111
+    - ``abs`` on a ``numeric_std`` ``signed`` value is refused as
+      ``abs of a non-integer value``
+    - ``numeric_std`` defines ``"abs"`` for a signed operand (IEEE 1076-2008
+      Annex C); only the integer form is lowered. Test: ``t_vhdl_abs_signed``
+  * - N112
+    - ``case`` completeness, duplicate choices and overlapping ranges are not
+      checked; a ``with ... select`` without ``others`` is accepted; a second
+      ``others`` arm is dropped
+    - GHDL refuses all of these; the frontend models the uncovered values as a
+      hold. Needs the analysis-time check, then ``*_bad`` tests with goldens.
+      IEEE 1076-2008 10.9, 11.5
+  * - N113
+    - ``a nor b nor c`` and ``a nand b nand c`` without parentheses are
+      accepted
+    - ``nor``/``nand`` are not associative and may not be chained
+      (IEEE 1076-2008 9.1); GHDL refuses. Needs a parse-time check and a
+      ``*_bad`` test
+  * - N114
+    - illegal basic identifiers (leading, trailing or doubled underscore) and
+      reserved words used as identifiers are accepted
+    - IEEE 1076-2008 15.4.2 and 15.10; GHDL refuses both. The reserved-word
+      table is exact but never consulted by the identifier reader. Needs
+      lexer checks and ``*_bad`` tests
+  * - N115
+    - multiple drivers on an unresolved signal are accepted with no
+      diagnostic, and the model is last-write-wins
+    - VHDL reports an elaboration error for several sources on an unresolved
+      signal (IEEE 1076-2008 12.6.4); GHDL refuses at elaboration. Needs a
+      driver count over the emitted assignments
+  * - N116
+    - a port or generic map that mixes positional and named associations is
+      accepted, and the named formals are ignored
+    - IEEE 1076-2008 6.5.7.2 forbids the mix; the lowering maps association k
+      to port k. Needs an analysis-time check and a ``*_bad`` test
+  * - N117
+    - a port actual of the wrong width is silently resized, and no port
+      type/subtype conformance is checked at all
+    - IEEE 1076-2008 6.5.2.2 requires the actual's type to match the formal;
+      GHDL refuses. One static check covers both halves
+  * - N118
+    - integer literals above 2**31-1 wrap silently (``4000000000`` becomes
+      -294967296), and a constant is never checked against its declared
+      subtype range
+    - the subset (5.4) promises static range checks; GHDL reports the bounds
+      violation. Needs a static check in the constant emitter and a
+      ``*_bad`` test
+  * - N119
+    - arithmetic and shifts on ``std_logic_vector`` are accepted with no
+      visible ``"+"``/shift overload, as unsigned
+    - IEEE 1076-2008 defines these operators only for ``bit``/``boolean``
+      elements; a ``std_logic_vector`` needs a package function. Needs a gate
+      on the visible package declarations
+  * - N120
+    - physical objects at run time (``variable d : time``, user physical
+      types) are accepted and modeled as integers
+    - the subset excludes run-time physical objects outright (5.14); only
+      static folding is in scope. Needs the ``Unsupported:`` refusal
+  * - N121
+    - a ``wait`` inside a process with a sensitivity list is silently dropped,
+      and the process runs on both clock edges instead
+    - the subset row 4.6 requires a clean refusal; GHDL refuses the form.
+      Needs the check and a ``*_bad`` test
+  * - N122
+    - a sensitivity item that is not a bare name is silently turned into
+      ``process(all)``, changing the semantics of an exact list
+    - IEEE 1076-2008 11.3 allows any signal name as a sensitivity element;
+      selected and indexed names are refused or rewritten today
+  * - N123
+    - ``T'val`` out of range silently yields a value that matches no literal,
+      and the predefined scalar marks refuse most attributes (``bit'high``,
+      ``std_logic'left``)
+    - IEEE 1076-2008 16.2.2 requires an error outside ``T'low`` to ``T'high``
+      and gives every scalar type the attribute set
+  * - N124
+    - division, ``mod`` and ``rem`` by zero silently yield 0
+    - the subset row 4.5 says a zero divisor is a run-time error; the runtime
+      helpers return 0 and the frontend emits no guard
+  * - N125
+    - an uninitialized integer object starts at 0 rather than ``T'left``
+      (-2**31)
+    - IEEE 1076-2008 6.4.2.1; a design decision is needed first: keep zero
+      initialization and document it like the two-state logic model, or emit
+      ``T'left``
+  * - N126
+    - ``vhdl_synth_subset.md`` disagrees with the implementation in both
+      directions: rows marked D/X are implemented (conditional sequential
+      assignment, ``unaffected``, matching ordering, ``std_match``, ``'image``,
+      ``'element``, ``integer_vector``, generic package instantiation,
+      deferred constants, entity statement part, timed testbench statements),
+      and rows marked S are hollow (static range checks, the missing-signal
+      diagnosis, generate/block label hierarchy)
+    - the tier table must be refreshed against the shipped feature set before
+      the next tier decision; ``boolean'image`` also returns ``"TRUE"`` where
+      IEEE 1076-2008 16.2.2 requires lower case, and
+      ``t_vhdl_image_attr.vhdl`` pins the wrong value
 ___________
 Verification
 ___________
