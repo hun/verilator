@@ -6150,6 +6150,15 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
     VType choiceType;
     const bool choiceEnum = enumTypeOfDType(dtp, choiceType);
     if (!choiceEnum) choiceType = typeOfDType(dtp);
+    // A source spelling for the choices of one item, so a value shared by two different
+    // literals can be told apart from a choice written twice
+    const auto choiceText = [](const Expr& expr) -> std::string {
+        if (expr.kind == Expr::CHAR_LIT) return std::string{"'"} + expr.charValue + "'";
+        if (expr.kind == Expr::NAME) return expr.text;
+        if (expr.kind == Expr::INT_LIT) return std::to_string(expr.intValue);
+        return std::string{};
+    };
+    std::map<int64_t, std::string> seenValues;  // Value -> the text that named it
     for (const ExprP& choicep : choices) {
         if (choicep->kind == Expr::SLICE) {
             // A choice range expands to one case item per value
@@ -6186,6 +6195,20 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
             constp = foldedp;
         }
         if (constp->dtypep()->width() != dtp->width()) constp->dtypep(dtp);
+        // The nine-valued std_logic is modelled with two states, so two different literals
+        // can name one value ('0' and 'L', '1' and 'H'): the pair is a single choice then,
+        // not the duplicate the standard rejects (IEEE 1076-2008 10.9)
+        if (constp->width() <= 32) {
+            const int64_t value = static_cast<int64_t>(constp->num().toUInt());
+            const std::string text = choiceText(*choicep);
+            const auto seen = seenValues.find(value);
+            if (seen != seenValues.end() && !seen->second.empty() && !text.empty()
+                && seen->second != text) {
+                constp->deleteTree();
+                continue;
+            }
+            seenValues[value] = text;
+        }
         cops.push_back(constp);
     }
     return true;
@@ -11509,7 +11532,14 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                                  return name.first == portp->name();
                                              });
             if (!matches) continue;
+            // The default is written in the entity's scope, so its packages are visible
+            // there even when the instance does not import them
+            ScopeSave saved = saveScope();
+            const std::set<std::string> savedImported = m_imported;
+            for (const auto& use : entityp->uses) importPackage(use.pkg, use.decl);
             AstNodeExpr* defaultp = lowerExpr(*port.init, &aggType);
+            restoreScope(saved);
+            m_imported = savedImported;
             if (defaultp) defaultp = resizeExpr(defaultp, portType, flp);
             return defaultp;
         }

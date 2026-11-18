@@ -916,6 +916,23 @@ ______
       value gives the element count, and a member with a wider element (a string) keeps
       that element width, so its packed size is elements times element width
     - ``t_vhdl_record_const``
+  * - N142
+    - a doubled quote inside a string literal, which `olo_base_rate_limit` uses to quote
+      its `Mode_g` value in an assertion message
+    - the lexer closed the literal at the first doubled quote; a doubled quote is one
+      quote character and only a lone quote closes the literal (IEEE 1076-2008 15.7), so
+      the token now carries the unescaped text and `'length` counts one character for it
+    - ``t_vhdl_string_quotes``
+  * - N143
+    - a case over `std_logic` whose alternatives pair literals the two-state model
+      merges, `when '0' | 'L'` and `when '1' | 'H'`, as open-logic's `to01` writes
+    - the pair names one value once the nine-valued type is modelled with two states, so
+      it is a single choice; the duplicate is accepted (and dropped) only when the two
+      alternatives are written differently, which keeps `when '1' | '1'` the error the
+      standard requires
+    - the end-to-end check is `corpus/olo-rate-limit` in the corpus repository: the
+      trigger needs the full open-logic package set and could not be reduced to a
+      standalone test
 
 ____
 Open

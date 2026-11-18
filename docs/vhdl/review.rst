@@ -181,6 +181,9 @@ subprogram overloads are selected by base parameter type, including
 ``unsigned`` versus ``signed``, distinct array types, and package-qualified
 type names. An integer actual selects an integer overload over a real one; a
 real formal still accepts an integer literal when it is the only candidate. A
+string literal keeps a doubled quote as one quote character, and a case choice
+that pairs literals the two-state model merges (`'0'` with `'L'`) is one
+choice rather than a duplicate. A
 generic of type ``real`` binds like a real constant: its value folds at
 elaboration, so the model never carries a floating type. A call of a package
 subprogram through a library-qualified name (``work.pkg.f(...)``) resolves to

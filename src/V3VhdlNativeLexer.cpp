@@ -478,16 +478,29 @@ Token Lexer::scanToken() {
     }
     if (c == '"') {
         ++m_pos;
-        const size_t start = m_pos;
-        while (m_pos < m_text.size() && m_text[m_pos] != '"' && m_text[m_pos] != '\n') { ++m_pos; }
-        if (m_pos >= m_text.size() || m_text[m_pos] != '"') {
-            tok.flp->v3error("VHDL string literal is missing its closing '\"'");
-            tok.kind = Token::END;
-            return tok;
+        std::string text;
+        for (;;) {
+            if (m_pos >= m_text.size() || m_text[m_pos] == '\n') {
+                tok.flp->v3error("VHDL string literal is missing its closing '\"'");
+                tok.kind = Token::END;
+                return tok;
+            }
+            if (m_text[m_pos] != '"') {
+                text.push_back(m_text[m_pos++]);
+                continue;
+            }
+            // A doubled quote inside a literal is one quote character, and only a lone
+            // quote closes it (IEEE 1076-2008 15.7)
+            if (m_pos + 1 < m_text.size() && m_text[m_pos + 1] == '"') {
+                text.push_back('"');
+                m_pos += 2;
+                continue;
+            }
+            ++m_pos;  // The closing quote
+            break;
         }
         tok.kind = Token::STRING;
-        tok.text = m_text.substr(start, m_pos - start);
-        ++m_pos;
+        tok.text = std::move(text);
         return tok;
     }
     if (c == '(' || c == ')' || c == ';' || c == ':' || c == ',' || c == '.' || c == '='
