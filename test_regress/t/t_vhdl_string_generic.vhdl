@@ -1,76 +1,66 @@
--- DESCRIPTION: Verilator: VHDL string generics and their array attributes
+-- DESCRIPTION: Verilator: string generics selecting generate branches
 --
 -- This file ONLY is placed under the Creative Commons Public Domain.
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
 -- SPDX-License-Identifier: CC0-1.0
 
+-- A string generic's text is fixed at elaboration: comparing it with a literal in
+-- a generate condition selects the branch, for explicit bindings, for the default,
+-- and for an empty string (which has no packed value to compare).
+
 library ieee;
 use ieee.std_logic_1164.all;
 
-entity seq_unit is
-  generic (
-    seq : string
-  );
-  port (
-    idx   : in  integer range 0 to 7;
-    lo_o  : out integer;
-    hi_o  : out integer;
-    len_o : out integer;
-    bit_o : out std_logic
-  );
-end entity seq_unit;
+entity mode_gate is
+  generic (MODE : string := "PASS"; INIT : string := "x");
+  port (i : in std_logic_vector(3 downto 0); o : out std_logic_vector(3 downto 0);
+        empty : out std_logic);
+end entity;
 
-architecture rtl of seq_unit is
-
-  function to_bit (a : in character) return std_logic is
-    variable ret : std_logic;
-  begin
-    case a is
-      when '0' | '_' => ret := '0';
-      when '1' | '-' => ret := '1';
-      when others    => ret := 'X';
-    end case;
-    return ret;
-  end function to_bit;
-
+architecture rtl of mode_gate is
 begin
+  g_pass : if MODE = "PASS" generate
+    o <= i;
+  end generate;
 
-  lo_o  <= seq'low;
-  hi_o  <= seq'high;
-  len_o <= seq'length;
-  bit_o <= to_bit(seq(idx));
+  g_inv : if MODE /= "PASS" generate
+    o <= not i;
+  end generate;
 
-end architecture rtl;
+  g_empty : if INIT = "" generate
+    empty <= '1';
+  end generate;
 
+  g_set : if INIT /= "" generate
+    empty <= '0';
+  end generate;
+end architecture;
 
 library ieee;
 use ieee.std_logic_1164.all;
 
 entity t is
   port (
-    idx   : in  integer range 0 to 7;
-    lo0   : out integer;
-    hi0   : out integer;
-    len0  : out integer;
-    bit0  : out std_logic;
-    lo1   : out integer;
-    hi1   : out integer;
-    len1  : out integer;
-    bit1  : out std_logic
+    i     : in  std_logic_vector(3 downto 0);
+    o_pass : out std_logic_vector(3 downto 0);
+    o_inv  : out std_logic_vector(3 downto 0);
+    o_def  : out std_logic_vector(3 downto 0);
+    e_pass : out std_logic;
+    e_inv  : out std_logic
   );
-end entity t;
+end entity;
 
 architecture rtl of t is
 begin
+  u_pass : entity work.mode_gate
+    generic map (MODE => "PASS", INIT => "")
+    port map (i => i, o => o_pass, empty => e_pass);
 
-  -- Different lengths and contents; the specialization key must keep them apart.
-  -- u0 uses a positional generic association, u1 a named one.
-  u0 : entity work.seq_unit
-    generic map ("0_1-")
-    port map (idx => idx, lo_o => lo0, hi_o => hi0, len_o => len0, bit_o => bit0);
+  u_inv : entity work.mode_gate
+    generic map (MODE => "INV", INIT => "a,b")
+    port map (i => i, o => o_inv, empty => e_inv);
 
-  u1 : entity work.seq_unit
-    generic map (seq => "10_-0_")
-    port map (idx => idx, lo_o => lo1, hi_o => hi1, len_o => len1, bit_o => bit1);
-
-end architecture rtl;
+  u_def : entity work.mode_gate
+    generic map (INIT => "")
+    port map (i => i, o => o_def, empty => open);
+end architecture;

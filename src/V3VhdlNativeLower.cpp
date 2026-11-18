@@ -705,6 +705,8 @@ class Lowering final {
     //! attribute written without an index is the first, IEEE 1076-2008 16.2.3
     const VType* indexRangeLevel(const Expr& expr, const VType& type) const;
     bool evalInt(const Expr& expr, int64_t& value) const;
+    //! Text of a string operand whose characters are fixed at elaboration
+    bool stringOperandText(const Expr& expr, std::string& out) const;
     //! Evaluate a locally static real-valued expression
     bool evalReal(const Expr& expr, double& value) const;
     //! Evaluate a locally static condition: a literal, a comparison of literals, or a
@@ -1810,6 +1812,22 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
     }
 }
 
+//! Text of a string literal or of a string generic visible here
+bool Lowering::stringOperandText(const Expr& expr, std::string& out) const {
+    switch (expr.kind) {
+    case Expr::STRING_LIT: out = expr.spelling; return true;
+    case Expr::BITS_LIT: out = expr.bits; return true;
+    case Expr::PAREN: return expr.a && stringOperandText(*expr.a, out);
+    case Expr::NAME: {
+        const auto it = m_stringConsts.find(expr.text);
+        if (it == m_stringConsts.end()) return false;
+        out = it->second;
+        return true;
+    }
+    default: return false;
+    }
+}
+
 bool Lowering::evalCond(const Expr& expr, bool& value) const {
     switch (expr.kind) {
     case Expr::PAREN: return evalCond(*expr.a, value);
@@ -1861,6 +1879,16 @@ bool Lowering::evalCond(const Expr& expr, bool& value) const {
         }
         if (op != "=" && op != "/=" && op != "<" && op != "<=" && op != ">" && op != ">=") {
             return false;
+        }
+        if (op == "=" || op == "/=") {
+            // A string generic's text is fixed at elaboration, so comparing it with a
+            // literal folds even when it is empty and therefore has no packed value
+            std::string lhsText;
+            std::string rhsText;
+            if (stringOperandText(*expr.a, lhsText) && stringOperandText(*expr.b, rhsText)) {
+                value = (lhsText == rhsText) == (op == "=");
+                return true;
+            }
         }
         double lhs = 0.0;
         double rhs = 0.0;
@@ -10050,10 +10078,10 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
     bool unbound = false;  // A generic here has neither a binding nor a default
     const auto registerString
         = [&](FileLine* flp, const std::string& folded, const std::string& text) {
-              if (text.empty()) {
-                  unsupportedError(flp, "empty string generic");
-                  return;
-              }
+              // An empty string has no packed value to register, but its text is still
+              // forwarded to the instances it is passed to
+              m_stringConsts[folded] = text;
+              if (text.empty()) return;
               // A string generic's value is fixed at elaboration, so register it as a typed
               // constant of packed 8-bit character codes rather than a variable; that lets a
               // reference fold, e.g. `if val = "one" generate`.
@@ -10062,7 +10090,6 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
               m_ownedConsts.push_back(std::unique_ptr<AstConst>(valuep));
               m_constValues[folded] = m_ownedConsts.back().get();
               m_constTypes[folded] = type;
-              m_stringConsts[folded] = text;
           };
     for (const GenericDecl& gen : generics) {
         for (const auto& name : gen.names) {
@@ -10697,15 +10724,25 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
                 return nullptr;
             }
             std::string stringValue;
+            bool found = false;
             if (actualp->kind == Expr::STRING_LIT) {
                 stringValue = actualp->spelling;
+                found = true;
+            } else if (actualp->kind == Expr::BITS_LIT) {
+                // A string of logic characters parses as a bit-string literal, e.g.
+                // `InitString_g => ""` or `Mode_g => "1100"`
+                stringValue = actualp->bits;
+                found = true;
             } else if (actualp->kind == Expr::NAME) {
                 // A string generic passed on from the enclosing unit, so its text
                 // comes from that unit's generic
                 const auto outer = m_stringConsts.find(actualp->text);
-                if (outer != m_stringConsts.end()) stringValue = outer->second;
+                if (outer != m_stringConsts.end()) {
+                    stringValue = outer->second;
+                    found = true;
+                }
             }
-            if (stringValue.empty()) {
+            if (!found) {
                 unsupportedError(actualp->flp, "string generic actual");
                 freeBindings(bindings);
                 return nullptr;

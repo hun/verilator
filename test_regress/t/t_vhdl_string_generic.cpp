@@ -1,6 +1,6 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //
-// DESCRIPTION: Verilator: VHDL string generic test
+// DESCRIPTION: Verilator: string generics selecting generate branches
 //
 // This file ONLY is placed under the Creative Commons Public Domain.
 // SPDX-FileCopyrightText: 2026 Hannes Klas
@@ -17,42 +17,24 @@ int main(int argc, char** argv) {
     VM_PREFIX* const topp = new VM_PREFIX;
 
     int fails = 0;
-    const auto check = [&](int idx, const char* name, int got, int want) {
-        if (got != want) {
-            std::printf("%%Error: idx=%d %s=%d expected %d\n", idx, name, got, want);
+    for (unsigned v = 0; v < 16; ++v) {
+        topp->i = v;
+        topp->eval();
+        const unsigned pass = static_cast<unsigned>(topp->o_pass);
+        const unsigned inv = static_cast<unsigned>(topp->o_inv);
+        const unsigned def = static_cast<unsigned>(topp->o_def);
+        if (pass != v || def != v || inv != ((~v) & 0xfu)) {
+            std::printf("%%Error: i=%x pass=%x inv=%x def=%x\n", v, pass, inv, def);
             ++fails;
         }
-    };
-
-    // seq "0_1-" has index range 1 to 4; "10_-0_" has range 1 to 6
-    static const char seq0[] = {'x', '0', '_', '1', '-'};
-    static const char seq1[] = {'x', '1', '0', '_', '-', '0', '_'};
-    for (int idx = 1; idx <= 4; ++idx) {
-        topp->idx = idx;
-        topp->eval();
-        check(idx, "lo0", static_cast<int>(topp->lo0), 1);
-        check(idx, "hi0", static_cast<int>(topp->hi0), 4);
-        check(idx, "len0", static_cast<int>(topp->len0), 4);
-        const bool bit0 = seq0[idx] == '1' || seq0[idx] == '-';
-        check(idx, "bit0", static_cast<int>(topp->bit0), bit0);
-        const bool bit1 = seq1[idx] == '1' || seq1[idx] == '-';
-        check(idx, "bit1", static_cast<int>(topp->bit1), bit1);
+        if (topp->e_pass != 1 || topp->e_inv != 0) {
+            std::printf("%%Error: i=%x empty flags %d %d expected 1 0\n", v,
+                        static_cast<int>(topp->e_pass), static_cast<int>(topp->e_inv));
+            ++fails;
+        }
     }
-    for (int idx = 5; idx <= 6; ++idx) {
-        topp->idx = idx;
-        topp->eval();
-        const bool bit1 = seq1[idx] == '1' || seq1[idx] == '-';
-        check(idx, "bit1", static_cast<int>(topp->bit1), bit1);
-    }
-    topp->idx = 6;
-    topp->eval();
-    check(6, "lo1", static_cast<int>(topp->lo1), 1);
-    check(6, "hi1", static_cast<int>(topp->hi1), 6);
-    check(6, "len1", static_cast<int>(topp->len1), 6);
-
     topp->final();
     delete topp;
-
     if (fails) {
         std::printf("%%Error: %d failures\n", fails);
         return 1;

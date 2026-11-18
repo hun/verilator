@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL string generics and their array attributes
+# DESCRIPTION: Verilator: string generics selecting generate branches
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -12,8 +12,6 @@ import vhdl_frontend
 
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_string_generic.vhdl'
-
-
 
 test.compile(make_top_shell=False,
              make_main=False,

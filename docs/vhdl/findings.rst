@@ -840,6 +840,17 @@ ______
       type, not the tracked value, so its prefix keeps its name when the tracked
       values are substituted
     - ``t_vhdl_var_attr_slice``
+  * - N134
+    - a string generic bound to an empty string, or to a string of logic
+      characters, was refused: open-logic passes `InitString_g => ""` and forwards
+      it, and its RAM blocks then lost the instance entirely
+    - the generic binder treated an empty text as "no value" and only looked at
+      `Expr::STRING_LIT`, while a string of logic characters parses as a bit-string
+      literal. The binder now records the text for every string generic (empty
+      included) and reads both literal forms; a comparison of a string generic with
+      a literal folds by text, so `INIT = ""` selects a generate branch without
+      needing a packed value
+    - ``t_vhdl_string_generic``
 
 ____
 Open
