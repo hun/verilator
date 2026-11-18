@@ -404,6 +404,36 @@ Token Lexer::scanToken() {
                 result = result * base + digit;
             }
             value = result;
+            // A based literal may carry an exponent (IEEE 1076-2008 15.5):
+            // 16#FF#E2 is 255 * 16**2
+            if (peek(0) == 'e' || peek(0) == 'E') {
+                const bool negExp = peek(1) == '-';
+                const bool sign = negExp || peek(1) == '+';
+                const char after = sign ? peek(2) : peek(1);
+                if (std::isdigit(static_cast<unsigned char>(after))) {
+                    if (negExp) {
+                        tok.flp->v3error("VHDL based literal with a negative exponent");
+                        tok.kind = Token::END;
+                        return tok;
+                    }
+                    m_pos += 1 + (sign ? 1 : 0);
+                    int64_t exp = 0;
+                    while (m_pos < m_text.size()
+                           && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
+                               || m_text[m_pos] == '_')) {
+                        if (m_text[m_pos] != '_') exp = exp * 10 + (m_text[m_pos] - '0');
+                        ++m_pos;
+                    }
+                    for (int64_t i = 0; i < exp; ++i) {
+                        if (value > INT64_MAX / base) {
+                            tok.flp->v3error("VHDL based literal that overflows");
+                            tok.kind = Token::END;
+                            return tok;
+                        }
+                        value *= base;
+                    }
+                }
+            }
         } else if (!decimalValue(first, value)) {
             tok.flp->v3error("Malformed VHDL integer literal");
             tok.kind = Token::END;
@@ -418,7 +448,11 @@ Token Lexer::scanToken() {
         // Character literal ('0'); anything else is an attribute or qualification
         // mark. A mark immediately followed by '(' after a name, e.g. the `'('` in
         // std_logic'('1'), is a qualified expression, not the character literal '('.
-        if (peek(1) != '\n' && peek(2) == '\'' && !(peek(1) == '(' && m_prevEndsDesignator)) {
+        // A reserved word cannot name a mark (IEEE 1076-2008 15.10), so `'('` after
+        // one is the character literal, as a case choice writes it (15.6)
+        const bool qualifiedExpr
+            = peek(1) == '(' && m_prevEndsDesignator && (!m_prevId || !isReservedWord(m_prevText));
+        if (peek(1) != '\n' && peek(2) == '\'' && !qualifiedExpr) {
             tok.kind = Token::CHAR;
             tok.charValue = peek(1);
             m_pos += 3;
@@ -459,6 +493,8 @@ Token Lexer::next() {
     // Remember whether the token just handed back can precede an attribute or
     // qualified-expression apostrophe, so nextRaw() can disambiguate the `'` above.
     Token tok = nextRaw();
+    m_prevId = tok.kind == Token::ID;
+    m_prevText = tok.text;
     m_prevEndsDesignator = tok.kind == Token::ID || tok.kind == Token::CHAR
                            || tok.kind == Token::STRING
                            || (tok.kind == Token::SYM && (tok.sym == ')' || tok.sym == ']'));

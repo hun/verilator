@@ -627,6 +627,19 @@ ______
     - the absolute value compares and negates a signed vector in place, as
       ``numeric_std`` defines it (IEEE 1076-2008 Annex C)
     - ``t_vhdl_abs_signed``
+  * - N110
+    - legal forms refused: a based literal with an exponent (``16#FF#E2``),
+      positional ``open``, an instantiation with no maps, ``for i in <subtype>
+      generate``, ``view`` used as an identifier, a use clause naming one
+      declaration, and ``'('`` as a character literal
+    - each form is now parsed and modelled: the based literal scales by its
+      exponent (15.5); an ``open`` actual takes the formal's default
+      (6.5.7.1); an ``entity``-headed statement with no map is an
+      instantiation (6.8); a generate range may name a discrete subtype
+      (11.8); ``view`` is an ordinary identifier (15.10) while a view
+      declaration stays refused; a use clause imports the one declaration it
+      names (12.4); and ``'('`` stays a literal after a reserved word (15.6)
+    - ``t_vhdl_legal_forms``
 
 ____
 Open
@@ -664,14 +677,6 @@ golden when the diagnostic lands.
       a semaphore built for shared variables, and a string constant feeding a trace
       logger. A cycle model cannot represent them, so the refusal is deliberate; a
       design that only uses them in a simulation branch keeps everything else
-  * - N110
-    - legal forms refused today: a based literal with an exponent
-      (``16#FF#E2``), positional ``open``, an instantiation with no maps,
-      ``for i in <subtype> generate``, ``view`` used as an identifier, a use
-      clause naming one declaration, and ``'('`` as a character literal
-    - each is legal VHDL-2008 that GHDL accepts and simulates; the bundle
-      surfaces the refusals one at a time. IEEE 1076-2008 15.5, 6.5.7.1, 6.8,
-      11.8, 15.10, 12.4, 15.6. Test: ``t_vhdl_legal_forms``
   * - N112
     - ``case`` completeness, duplicate choices and overlapping ranges are not
       checked; a ``with ... select`` without ``others`` is accepted; a second

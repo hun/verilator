@@ -619,7 +619,8 @@ class Lowering final {
     static bool exprNamesAny(const Expr& expr, const std::set<std::string>& names);
     static bool typeDeclNamesAny(const TypeDecl& decl, const std::set<std::string>& names);
     static bool typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string>& names);
-    void importPackage(const std::string& name);
+    //! Make a package visible; `only` names one declaration to import instead
+    void importPackage(const std::string& name, const std::string& only = "");
     //! Record integer constants that a type declaration may depend on
     void preScanIntConstants(const std::vector<Decl>& decls);
     void emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
@@ -9564,20 +9565,26 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
     return ok;
 }
 
-void Lowering::importPackage(const std::string& name) {
-    if (name == "std_logic_signed") m_stdLogicSigned = true;
-    if (name == "std_logic_arith") m_stdLogicArith = true;
+void Lowering::importPackage(const std::string& name, const std::string& only) {
+    if (only.empty()) {
+        if (name == "std_logic_signed") m_stdLogicSigned = true;
+        if (name == "std_logic_arith") m_stdLogicArith = true;
+    }
     if (!m_packagesp) return;
     const auto pkgIt = m_packagesp->packages.find(name);
     if (pkgIt == m_packagesp->packages.end()) return;  // Standard package: intrinsics
     const PackageInfo& info = pkgIt->second;
+    // A single-declaration use makes only the declaration it names visible
+    const auto wants = [&](const std::string& key) { return only.empty() || key == only; };
     for (const auto& alias : info.aliases) {
+        if (!wants(alias.first)) continue;
         if (m_aliases.count(alias.first)) continue;
         m_aliases[alias.first] = alias.second;
     }
 
     const bool ownSpec = !m_unitName.empty() && name == m_unitName;
     for (const auto& type : info.types) {
+        if (!wants(type.first)) continue;
         if (ownSpec) {
             // A package body sees its own specification closer than any imported package
             m_types[type.first] = type.second;
@@ -9596,27 +9603,34 @@ void Lowering::importPackage(const std::string& name) {
         m_imported.insert(type.first);
     }
     for (const auto& constant : info.consts) {
+        if (!wants(constant.first)) continue;
         if (m_consts.count(constant.first) || m_constValues.count(constant.first)) continue;
         m_consts[constant.first] = constant.second;
         m_imported.insert(constant.first);
     }
     for (const auto& value : info.constValues) {
+        if (!wants(value.first)) continue;
         if (m_consts.count(value.first) || m_constValues.count(value.first)) continue;
         m_ownedConsts.push_back(std::unique_ptr<AstConst>(value.second->cloneTree(false)));
         m_constValues[value.first] = m_ownedConsts.back().get();
         m_imported.insert(value.first);
     }
     for (const auto& type : info.constTypes) {
+        if (!wants(type.first)) continue;
         if (m_constTypes.count(type.first)) continue;
         m_constTypes[type.first] = type.second;
     }
     for (const auto& realConst : info.realConsts) {
+        if (!wants(realConst.first)) continue;
         if (m_realConsts.count(realConst.first)) continue;
         m_realConsts[realConst.first] = realConst.second;
         m_imported.insert(realConst.first);
     }
-    m_ambiguousLiterals.insert(info.ambiguousLiterals.begin(), info.ambiguousLiterals.end());
+    if (only.empty()) {
+        m_ambiguousLiterals.insert(info.ambiguousLiterals.begin(), info.ambiguousLiterals.end());
+    }
     for (const auto& literal : info.enumConsts) {
+        if (!wants(literal.first)) continue;
         const auto existing = m_enumConsts.find(literal.first);
         if (existing != m_enumConsts.end()) {
             if (existing->second->dtypep() != literal.second->dtypep()) {
@@ -9629,6 +9643,7 @@ void Lowering::importPackage(const std::string& name) {
         m_imported.insert(literal.first);
     }
     for (const SubprogramDecl* const subp : info.subprograms) {
+        if (!wants(subp->name)) continue;
         std::vector<SubprogramRef>& refs = m_subprograms[subp->name];
         const bool known = std::any_of(refs.begin(), refs.end(),
                                        [=](const SubprogramRef& r) { return r.declp == subp; });
@@ -9637,7 +9652,10 @@ void Lowering::importPackage(const std::string& name) {
         m_imported.insert(subp->name);
     }
     // A synonym is resolved here, where the subprogram it designates is visible too
-    for (const AliasDecl* const aliasp : info.subprogramAliases) registerSubprogramAlias(*aliasp);
+    for (const AliasDecl* const aliasp : info.subprogramAliases) {
+        if (!wants(aliasp->name)) continue;
+        registerSubprogramAlias(*aliasp);
+    }
 }
 
 void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
@@ -9665,7 +9683,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // The packages named by the unit's `use` clauses are visible here as well, as they
     // are in an entity or an architecture. What the package declares itself wins: those
     // registrations overwrite, and `importPackage` never replaces a name it finds.
-    for (const auto& use : pkg.uses) importPackage(use.second);
+    for (const auto& use : pkg.uses) importPackage(use.pkg, use.decl);
     // A body is nested in its specification, so what the specification declares, and what
     // its own `use` clauses made visible to it, is visible in the body too. The
     // specification is always published first: lowerPackages runs a pass over the
@@ -9767,8 +9785,8 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     m_modp = modp;
 
     m_subprograms.clear();  // Packages published these only through importPackage
-    for (const auto& use : entity.uses) importPackage(use.second);
-    for (const auto& use : arch.uses) importPackage(use.second);
+    for (const auto& use : entity.uses) importPackage(use.pkg, use.decl);
+    for (const auto& use : arch.uses) importPackage(use.pkg, use.decl);
 
     // A type's range may call a pure function, so make the subprograms visible
     // before registering any type
@@ -10097,7 +10115,7 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         // precede this one already carry the value bound at this instance
         ScopeSave saved = saveScope();
         const std::set<std::string> savedImported = m_imported;
-        for (const auto& use : entity.uses) importPackage(use.second);
+        for (const auto& use : entity.uses) importPackage(use.pkg, use.decl);
         for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
         registerGenerics(entity.generics, &bindings, true);
         // The declared type may itself call a function, whose body evaluates against the
@@ -10364,7 +10382,7 @@ bool Lowering::resolvePortRecordType(const EntityUnit& entity, const PortDecl& p
     // the record, so fall back to the child's own context.
     if (m_packagesp) {
         for (const auto& use : entity.uses) {
-            const auto pkgIt = m_packagesp->packages.find(use.second);
+            const auto pkgIt = m_packagesp->packages.find(use.pkg);
             if (pkgIt == m_packagesp->packages.end()) continue;
             const auto fieldIt = pkgIt->second.types.find(port.type.mark);
             if (fieldIt != pkgIt->second.types.end() && fieldIt->second.kind == VType::RECORD) {
@@ -10611,6 +10629,24 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             if (field.name == member) return &field;
         return nullptr;
     };
+    // An unassociated or `open` input takes its declared default; anything else
+    // stays unconnected (IEEE 1076-2008 6.5.7.1)
+    auto declaredDefault = [&](const AstVar* const portp, const VType& aggType,
+                               const VType& portType) -> AstNodeExpr* {
+        if (!entityp || !portp->direction().isInput()) return nullptr;
+        for (const PortDecl& port : entityp->ports) {
+            if (!port.init) continue;
+            const bool matches = std::any_of(port.names.begin(), port.names.end(),
+                                             [&](const std::pair<std::string, std::string>& name) {
+                                                 return name.first == portp->name();
+                                             });
+            if (!matches) continue;
+            AstNodeExpr* defaultp = lowerExpr(*port.init, &aggType);
+            if (defaultp) defaultp = resizeExpr(defaultp, portType, flp);
+            return defaultp;
+        }
+        return nullptr;
+    };
     AstPin* pinsp = nullptr;
     for (size_t portIndex = 0; portIndex < ports.size(); ++portIndex) {
         AstVar* const portp = ports[portIndex];
@@ -10653,23 +10689,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         }
         const VType& aggType = recPortType.kind == VType::RECORD ? recPortType : portType;
         if (assocs.empty()) {
-            // An unassociated input takes its declared default; otherwise it is open
-            AstNodeExpr* defaultp = nullptr;
-            if (entityp && portp->direction().isInput()) {
-                for (const PortDecl& port : entityp->ports) {
-                    if (!port.init) continue;
-                    const bool matches
-                        = std::any_of(port.names.begin(), port.names.end(),
-                                      [&](const std::pair<std::string, std::string>& name) {
-                                          return name.first == portp->name();
-                                      });
-                    if (!matches) continue;
-                    defaultp = lowerExpr(*port.init, &aggType);
-                    if (defaultp) defaultp = resizeExpr(defaultp, portType, flp);
-                    break;
-                }
-            }
-            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), defaultp};
+            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(),
+                                            declaredDefault(portp, aggType, portType)};
             pinp->modVarp(portp);
             pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
             continue;
@@ -10750,7 +10771,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                 if (!actualp) return nullptr;
             }
         } else if (!partial) {
-            // The whole port connects to one actual
+            // The whole port connects to one actual; an `open` association leaves
+            // it unconnected, so an input takes its declared default
             const PortAssoc& assoc = *assocs.front();
             if (assoc.actual) {
                 const bool driven = portp->direction().isOutput() || portp->direction().isInout();
@@ -10758,6 +10780,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                              : lowerExpr(*assoc.actual, &aggType);
                 if (!valuep) return nullptr;
                 actualp = resizeExpr(valuep, portType, flp);
+            } else {
+                actualp = declaredDefault(portp, aggType, portType);
             }
         } else if (!portType.isVector() || portType.elemWidth != 1) {
             unsupportedError(flp, "part of a port that is not a bit vector");
@@ -10955,6 +10979,17 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
             left = reverse ? rangeTypep->right : rangeTypep->left;
             right = reverse ? rangeTypep->left : rangeTypep->right;
             up = reverse ? !rangeTypep->ascending : rangeTypep->ascending;
+        } else if (!stmt.hi && stmt.lo && stmt.lo->kind == Expr::NAME) {
+            // `for i in <subtype> generate` iterates the subtype's own bounds
+            // (IEEE 1076-2008 11.8), as a loop over a discrete subtype does
+            const auto subtypeIt = m_types.find(stmt.lo->text);
+            if (subtypeIt == m_types.end() || subtypeIt->second.kind != VType::INT) {
+                unsupportedError(stmt.flp, "generate over a name that is not a subtype");
+                return;
+            }
+            left = subtypeIt->second.intLow;
+            right = subtypeIt->second.intHigh;
+            up = left <= right;
         } else if (!staticInt(stmt.lo, left) || !staticInt(stmt.hi, right)) {
             unsupportedError(stmt.flp, "generate range that is not static");
             return;

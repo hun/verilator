@@ -39,8 +39,6 @@
 
 namespace vhdlnative {
 
-namespace {
-
 //! The VHDL reserved words, IEEE 1076-2008 15.10. A physical literal writes its unit as an
 //! identifier, and nothing else in the grammar puts an identifier directly after an abstract
 //! literal, so a reserved word in that position -- `1 to 10`, `0 sec then`, `5 mod 2` -- names
@@ -167,8 +165,6 @@ bool isReservedWord(const std::string& folded) {
     return false;
 }
 
-}  // namespace
-
 //######################################################################
 // Parser
 
@@ -188,7 +184,7 @@ class Parser final {
     std::vector<PackageInstance> m_packageInstances;  // Parsed generic-package instances
     std::vector<ContextUnit> m_contexts;  // Parsed context declarations
     // Packages named by the context clauses seen so far
-    std::vector<std::pair<std::string, std::string>> m_uses;
+    std::vector<UseClause> m_uses;  // Use clauses seen so far
     // Context declarations named by the context clauses seen so far
     std::vector<std::string> m_contextNames;
 
@@ -450,7 +446,7 @@ class Parser final {
     void parseFileDeclInto(std::vector<Decl>& decls);
     void parsePackage(FileLine* flp, bool isBody);
     void parseUseClause();
-    void parseUseClauseInto(std::vector<std::pair<std::string, std::string>>& uses);
+    void parseUseClauseInto(std::vector<UseClause>& uses);
     void skipLibraryClause();
     void parseRecordBody(TypeDecl& decl);
     void parseIndexConstraint(TypeSpec& type);
@@ -1000,10 +996,6 @@ void Parser::parseTypeSpec(TypeSpec& type) {
             type.mark.clear();
             return;
         }
-    }
-    if (markTok.text == "view") {  // IEEE 1800-2023 ch.17 interface view
-        unsupported("interface view");
-        return;
     }
     if (isId("range")) {
         advance();
@@ -1946,6 +1938,10 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
                 assoc.actual = parseExpr();
                 if (!assoc.actual) return;
             }
+        } else if (isId("open")) {
+            // A positional association may leave the formal open (IEEE 1076-2008
+            // 6.5.7.1), which the lowering resolves to the formal's default
+            advance();
         } else {
             // Positional association: the actual maps to the next item in order
             assoc.actual = parseExpr();
@@ -2159,7 +2155,9 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             if (m_cur.kind != Token::ID) break;
             advance();
         }
-        const bool mapped = (isId("port") || isId("generic")) && m_cur.text != "process";
+        // An `entity` head names an instantiation even with no map at all
+        const bool mapped = nameTok.text == "entity"
+                            || ((isId("port") || isId("generic")) && m_cur.text != "process");
         m_cur = nameTok;
         m_lexer.restore(saved);
         if (mapped) {
@@ -2904,12 +2902,13 @@ StmtP Parser::parseIf(FileLine* flp) {
     return stmt;
 }
 
-//! Record `use lib.pkg[.item];`; only whole-package uses make names visible
+//! Record `use lib.pkg[.item];`: `.all` imports the package, a name imports the
+//! one declaration it names (IEEE 1076-2008 12.4)
 void Parser::parseUseClause() { parseUseClauseInto(m_uses); }
 
-void Parser::parseUseClauseInto(std::vector<std::pair<std::string, std::string>>& uses) {
+void Parser::parseUseClauseInto(std::vector<UseClause>& uses) {
     advance();  // 'use'
-    for (;;) {  // `use clause, clause;` -- IEEE 1800-2023 13.3.1
+    for (;;) {  // `use clause, clause;` -- IEEE 1076-2008 12.4
         std::vector<std::string> parts;
         for (;;) {
             if (m_cur.kind != Token::ID) break;
@@ -2917,11 +2916,13 @@ void Parser::parseUseClauseInto(std::vector<std::pair<std::string, std::string>>
             advance();
             if (!acceptSym(".")) break;
         }
-        // `use [lib.]pkg.all`: record the package; the library is not modelled
-        if (parts.size() >= 2 && parts.back() == "all") {
-            const std::string pkg = parts[parts.size() - 2];
-            const std::string lib = parts.size() >= 3 ? parts[parts.size() - 3] : "";
-            uses.emplace_back(lib, pkg);
+        // `use [lib.]pkg.all` or `use [lib.]pkg.item`; the library is not modelled
+        if (parts.size() >= 2) {
+            UseClause use;
+            use.lib = parts.size() >= 3 ? parts[parts.size() - 3] : "";
+            use.pkg = parts[parts.size() - 2];
+            use.decl = parts.back() == "all" ? "" : parts.back();
+            uses.push_back(std::move(use));
         }
         if (!acceptSym(",")) break;
     }

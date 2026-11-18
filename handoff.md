@@ -9,14 +9,60 @@ Repo: `/home/hannes/git_extern/verilator`
 GHDL: `/home/hannes/.local/bin/ghdl` (7.0.0-dev, llvm 21.1.8)
 GHDL source/testsuite: `/home/hannes/git_extern/ghdl`
 
-## Resource limits (do this first)
+## Where things stand
 
-Always bound long runs, or the machine OOMs:
+Committed (all on branch `vhdl-native-frontend`, in order):
+
+| commit | finding | test |
+|---|---|---|
+| ea6fb28 | N99 char literal in a vector context | `t_vhdl_char_lit_vec` |
+| ab02761 | N102 negative shift counts | `t_vhdl_shift_neg` |
+| a526a06 | N100 qualified scalar types | `t_vhdl_qual_int` |
+| 20e82e3 | N101 don't-cares through constants | `t_vhdl_std_match_const` |
+| ab0138e | N105+N106 process(all) sensitivity | `t_vhdl_sens_lhs`, `t_vhdl_sens_entity` |
+| cc2a155 | N107 bare wait suspends | `t_vhdl_wait_bare` |
+| 1ee62fc | N108+N109 severity failure | `t_vhdl_report_bits`, `t_vhdl_sev_stop` |
+| dee2500 | N111 abs on signed | `t_vhdl_abs_signed` |
+
+Suite state: `t/t_vhdl_*.py`, **223 pass, 1 fails**: `t_vhdl_legal_forms`
+(N110). Every failure other than that one is gone.
+
+**Uncommitted in the working tree right now: the N110 fix, six of its
+seven sub-forms done, built and verified.** The last run of the test fails
+only on the seventh, with `%Error: unknown identifier 'K'` -- the (f) gap.
+The changed files are:
+`src/V3VhdlNativeAst.h`, `src/V3VhdlNativeLexer.cpp`,
+`src/V3VhdlNativeParse.cpp`, `src/V3VhdlNativeLower.cpp`. Their content:
+
+- (e) `view` as an identifier: the type-mark refusal in the parser's
+  `parseTypeSpec` was deleted; the three declarative-part guards that refuse
+  a *view declaration* (`isId("view")` at the start of a declarative item)
+  stay on purpose.
+- (g) `'('` as a character literal: the lexer now records whether the last
+  token was an identifier (`m_prevId`/`m_prevText`, saved in `Lexer::State`)
+  and consults `isReservedWord` (moved from the parser's anonymous namespace
+  to `vhdlnative` scope, declared in `V3VhdlNativeAst.h`), so `'('` after a
+  keyword lexes as the literal, while `mark'('1')` stays a qualification.
+- (a) a based literal with an exponent: `16#FF#E2` (lexer, after the
+  closing `#`; negative exponent errors).
+- (b) positional `open` in an association (`parseAssocList`), and the
+  lowering applies an open input's declared default through the
+  `declaredDefault` lambda in the port-map emitter.
+- (c) an instantiation with no maps at all: the instantiation lookahead
+  accepts a statement whose head token is `entity`.
+- (d) `for i in <subtype> generate`: the generate lowering reads a discrete
+  subtype's `intLow`/`intHigh` (mirrors `lowerFor`).
+- **NOT done: (f) `use work.legal_k.K;`** -- a use clause naming one
+  declaration. `parseUseClauseInto` (V3VhdlNativeParse.cpp, ~line 400)
+  only records `[lib.]pkg.all`; it must also record
+  `[lib.]pkg.decl` and the import must register that one declaration.
+
+## First steps of the new session
 
 ```sh
-ulimit -S -v 8388608         # soft 8 GiB address space per process
-make -j4 -C src
-test_regress/driver.py -j 4 ...
+ulimit -S -v 8388608        # soft limit; a bare ulimit -v would break ASAN/TSAN
+cd /home/hannes/git_extern/verilator-native
+make -j4 -C src             # always with this exact path; -C src from another cwd fails
 nodist/ghdl_synth_suite.py --jobs 8 ...
 ```
 
@@ -476,6 +522,7 @@ configuration-bound component; `issue1117/ent` moved ERROR -> PASS.
    Run `make cppcheck` where installed.
 
 ## Gotchas
+## Verified correct -- do not re-investigate
 
 - Set `ulimit -v 8388608` and cap `-j`/`--jobs` as above.
 - A VHDL array is packed flat with no dtype range of its own; anything that needs
@@ -558,3 +605,13 @@ configuration-bound component; `issue1117/ent` moved ERROR -> PASS.
 - The GHDL testsuite has expected-failure tests (`synth_failure`); they show up as
   `GHDL_ERROR`, not as regressions.
 - Do not edit `Changes`; maintainers update it near release.
+- Configuration specifications, `entity work.e(arch)` architecture selection.
+- String constants/generics of logic characters behave as strings; a report
+  message is now a string whatever its characters (N108).
+- `and`/`or` short-circuit for `boolean`/`bit` (IEEE 9.2.1).
+- `boolean'left/right/high/low`, `minimum`/`maximum`, rotates with negative
+  counts, `mod`/`rem`/`/` signs, `resize`, positive shift fills, array
+  equality and ordering, delta-cycle readback, procedure-body reads in
+  `process(all)` sensitivity, `port (a : in constant ...)` refusal (GHDL too).
+- N15 and N67 stay open in the findings table on purpose (middle-end lever /
+  simulation-only subset); do not spend time on them.

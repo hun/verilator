@@ -45,6 +45,9 @@ namespace vhdlnative {
 //! Map one VHDL logic value character to the 2-state model: '0', '1', 'x', 'z', or 0
 char vhdlLogicBit(char c);
 
+//! The VHDL reserved words, IEEE 1076-2008 15.10
+bool isReservedWord(const std::string& folded);
+
 //! Report a language construct outside the implemented subset at its source location
 void unsupportedError(FileLine* flp, const std::string& what);
 
@@ -66,6 +69,8 @@ class Lexer final {
     size_t m_pos = 0;  // Current offset
     int m_line = 1;  // Current line number
     bool m_prevEndsDesignator = false;  // Last token can precede an attribute/qualification mark
+    bool m_prevId = false;  // The last token was an identifier: `mark'(` needs one
+    std::string m_prevText;  // The last identifier, to tell a mark from a keyword
     int m_translateOff = 0;  // Comment pragma translate_off regions still open
 
     FileLine* newFileLine() const {
@@ -106,13 +111,19 @@ public:
         size_t pos;
         int line;
         bool prevEndsDesignator;
+        bool prevId;
+        std::string prevText;
         int translateOff;
     };
-    State state() const { return {m_pos, m_line, m_prevEndsDesignator, m_translateOff}; }
+    State state() const {
+        return {m_pos, m_line, m_prevEndsDesignator, m_prevId, m_prevText, m_translateOff};
+    }
     void restore(const State& st) {
         m_pos = st.pos;
         m_line = st.line;
         m_prevEndsDesignator = st.prevEndsDesignator;
+        m_prevId = st.prevId;
+        m_prevText = st.prevText;
         m_translateOff = st.translateOff;
     }
 
@@ -438,6 +449,14 @@ struct Concurrent final {
     Concurrent& operator=(const Concurrent&) = delete;
 };
 
+//! One use clause: `use [lib.]pkg.all` or `use [lib.]pkg.decl`, which makes one
+//! declaration visible rather than the whole package (IEEE 1076-2008 12.4)
+struct UseClause final {
+    std::string lib;  // Not modelled beyond the record
+    std::string pkg;  // Folded package name
+    std::string decl;  // The one declaration named; empty for `.all`
+};
+
 struct EntityUnit final {
     std::string name;  // Folded
     std::string spelling;
@@ -448,8 +467,8 @@ struct EntityUnit final {
     // Entity declarative items, visible in every architecture of the entity
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
-    // Packages named by the enclosing context clause: (library, package)
-    std::vector<std::pair<std::string, std::string>> uses;
+    // Packages named by the enclosing context clause
+    std::vector<UseClause> uses;
     // Context declarations named by the enclosing context clause
     std::vector<std::string> contextNames;
     // Generic constants, visible in the port clause and every architecture
@@ -470,7 +489,7 @@ struct Architecture final {
     std::vector<AliasDecl> aliases;
     std::vector<SubprogramDecl> subprograms;
     std::vector<std::unique_ptr<Concurrent>> stmts;
-    std::vector<std::pair<std::string, std::string>> uses;
+    std::vector<UseClause> uses;
     std::vector<std::string> contextNames;
 };
 
@@ -486,8 +505,8 @@ struct PackageUnit final {
     std::vector<Decl> decls;
     std::vector<TypeDecl> types;
     std::vector<AliasDecl> aliases;
-    // Packages made visible by the use clauses: (library, package)
-    std::vector<std::pair<std::string, std::string>> uses;
+    // Use clauses made visible around the package
+    std::vector<UseClause> uses;
     std::vector<std::string> contextNames;
     std::vector<SubprogramDecl> subprograms;  // Prototypes in a spec, bodies in a body
 };
@@ -500,7 +519,7 @@ struct PackageInstance final {
     FileLine* flp = nullptr;
     std::string baseName;  // Folded generic package being instantiated
     std::vector<PortAssoc> genericAssociations;
-    std::vector<std::pair<std::string, std::string>> uses;
+    std::vector<UseClause> uses;
     std::vector<std::string> contextNames;
 };
 
@@ -529,7 +548,7 @@ struct ConfigurationUnit final {
 struct ContextUnit final {
     std::string name;  // Folded
     FileLine* flp = nullptr;
-    std::vector<std::pair<std::string, std::string>> uses;
+    std::vector<UseClause> uses;
     std::vector<std::string> contextNames;  // Contexts this one references
 };
 
