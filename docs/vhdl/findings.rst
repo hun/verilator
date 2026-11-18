@@ -777,6 +777,18 @@ ______
       (IEEE 1076-2008 11.3). The count of items also drives the edge/level
       decision, as for bare names
     - ``t_vhdl_sens_elem``
+  * - N128
+    - a range-choice aggregate as an actual of an unconstrained formal, e.g.
+      ``Cnt + ite(Cnt(BITS) = '0', (Cnt'range => '1'), x)`` (poc's
+      ``arith_Counter_Free`` and ``misc_StrobeGenerator``)
+    - an aggregate has no type of its own, so overload selection matched every
+      declaration that takes its number of actuals and took the first, which
+      for poc's ``ite`` set was the ``boolean`` one. The typed operand of an
+      operator now gives a call or aggregate beside it its context
+      (IEEE 1076-2008 9.1), the context picks the declaration whose return type
+      it needs, and a choice that is an object's ``'range`` contributes its
+      bounds when the aggregate derives its width
+    - ``t_vhdl_agg_choice_actual``
 
 ____
 Open

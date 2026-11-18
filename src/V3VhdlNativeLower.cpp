@@ -1160,7 +1160,8 @@ class Lowering final {
     bool formalsExact(const Expr& call, const SubprogramDecl& sub) const;
     std::vector<const SubprogramDecl*> visibleSubprograms(const std::string& name) const;
     const SubprogramDecl* resolveCall(const Expr& call, bool function,
-                                      const SubprogramRef** foundpp = nullptr);
+                                      const SubprogramRef** foundpp = nullptr,
+                                      const VType* contextp = nullptr);
     //! A user-defined infix operator whose formals exactly match the operands
     AstNodeExpr* lowerUserOperator(const Expr& expr, const VType* context, bool& found);
     //! A user-defined prefix operator whose formal matches the operand
@@ -3183,14 +3184,43 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             rp = lowerExpr(*expr.b, nullptr);
         }
     } else {
-        lp = lowerExpr(*expr.a, nullptr);
-        if (!lp) return nullptr;
-        rp = lowerExpr(*expr.b, nullptr);
+        // A typed operand fixes the type of a call or aggregate beside it, e.g.
+        // `C <= C + ite(c, (C'range => '1'), x)` takes the unsigned ite (IEEE 1076-2008
+        // 9.1). Concatenation and shifts combine operands of different types, so they
+        // give no such context.
+        const bool sameType
+            = op == "+" || op == "-" || op == "*" || op == "/" || op == "=" || op == "/="
+              || op == "<" || op == "<=" || op == ">" || op == ">=" || logicalOp;
+        VType aType;
+        VType bType;
+        const bool aKnown = sameType && actualType(*expr.a, aType);
+        const bool bKnown = sameType && actualType(*expr.b, bType);
+        if (aKnown != bKnown) {
+            const bool lowerLeftFirst = aKnown;
+            AstNodeExpr* const knownp
+                = lowerExpr(lowerLeftFirst ? *expr.a : *expr.b, nullptr);
+            if (!knownp) return nullptr;
+            const VType known = typeOfLowered(lowerLeftFirst ? *expr.a : *expr.b, knownp);
+            const VType* const ctxp
+                = known.isVector() || known.kind == VType::ARRAY ? &known : nullptr;
+            if (lowerLeftFirst) {
+                lp = knownp;
+                rp = lowerExpr(*expr.b, ctxp);
+            } else {
+                rp = knownp;
+                lp = lowerExpr(*expr.a, ctxp);
+            }
+        } else {
+            lp = lowerExpr(*expr.a, nullptr);
+            if (!lp) return nullptr;
+            rp = lowerExpr(*expr.b, nullptr);
+        }
     }
     if (!rp) {
-        lp->deleteTree();
+        if (lp) lp->deleteTree();
         return nullptr;
     }
+    if (!lp) return nullptr;
     VType lt = typeOfLowered(*expr.a, lp);
     VType rt = typeOfLowered(*expr.b, rp);
     AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
@@ -5247,6 +5277,17 @@ bool Lowering::deriveAggregateType(const Expr& expr, VType& out) {
                     // A choice names its bounds in its own direction: `7 downto 4` covers
                     // the same elements as `4 to 7`, so only the span fixes the width
                     if (low > high) std::swap(low, high);
+                } else if (choicep->kind == Expr::ATTR
+                           && (choicep->text == "range" || choicep->text == "reverse_range")
+                           && choicep->a) {
+                    // The range of an object, e.g. `a'range`: its bounds come from the
+                    // prefix's own type, just as they do for a lowered choice
+                    VType rangeType;
+                    if (!typeOfDesignator(*choicep->a, rangeType) || !rangeType.isVector()) {
+                        return refuse();
+                    }
+                    low = std::min(rangeType.left, rangeType.right);
+                    high = std::max(rangeType.left, rangeType.right);
                 } else if (choicep->kind == Expr::NAME && choicep->text == "others") {
                     return refuse();
                 } else if (!staticIntFold(choicep, high)) {
@@ -7195,7 +7236,8 @@ bool Lowering::subprogramMatches(const Expr& call, const SubprogramDecl& sub,
 }
 
 const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
-                                            const SubprogramRef** foundpp) {
+                                            const SubprogramRef** foundpp,
+                                            const VType* contextp) {
     std::string name;
     std::vector<const SubprogramRef*> refs;
     if (call.a && call.a->kind == Expr::SELECTED && call.a->a && call.a->a->kind == Expr::NAME) {
@@ -7264,6 +7306,18 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
                 call.flp->v3error("VHDL: ambiguous call to '" + name + "'");
                 return nullptr;
             }
+        }
+        if (fitting.size() > 1 && contextp) {
+            // The result's context picks the declaration whose base type the enclosing
+            // expression needs: an operand of a typed operator takes that one type
+            // (IEEE 1076-2008 9.1), as does the actual of a typed formal
+            std::vector<const SubprogramRef*> contextual;
+            for (const SubprogramRef* const refp : fitting) {
+                VType retType;
+                if (!formalType(refp->declp->returnType, retType)) continue;
+                if (typesMatch(retType, *contextp)) contextual.push_back(refp);
+            }
+            if (!contextual.empty()) fitting = std::move(contextual);
         }
         matching = std::move(fitting);
     }
@@ -8395,7 +8449,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
             return nullptr;
         }
     } else {
-        subp = resolveCall(call, true, &refp);
+        subp = resolveCall(call, true, &refp, context);
         if (!subp) return nullptr;  // resolveCall reported why
     }
     // A subprogram that reads a file builds its result at elaboration
