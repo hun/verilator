@@ -4,10 +4,10 @@
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
 -- SPDX-License-Identifier: CC0-1.0
 
--- PoC's configuration package holds arrays of board descriptions, records whose members
--- are strings and vectors. The element type leaves those members unconstrained, so the
--- array constant has no width until its aggregate supplies one, and the frontend reports
--- that instead of taking the width from the first element.
+-- An array constant whose element type leaves a member unconstrained has no width until
+-- its aggregate supplies one; the frontend reports that rather than building a type of
+-- zero width from it. (An array whose elements are fully constrained does take its bounds
+-- from the aggregate: see t_vhdl_array_const.)
 
 package p is
   type t_rec is record

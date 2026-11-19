@@ -2120,6 +2120,21 @@ void Lowering::registerType(const TypeDecl& decl) {
         std::vector<int64_t> lefts(specs.size());
         std::vector<int64_t> rights(specs.size());
         std::vector<char> ascends(specs.size());
+        // The bounds of the index subtype itself, per level: an unconstrained array's
+        // constant takes one element per aggregate element from the subtype's low bound
+        std::vector<int64_t> indexLows(specs.size(), 0);
+        for (size_t k = 0; k < specs.size(); ++k) {
+            VType indexType;
+            const auto markIt = m_types.find(specs[k]->mark);
+            if (markIt != m_types.end() && markIt->second.kind == VType::INT) {
+                indexLows[k] = markIt->second.intLow;
+            } else if (markIt != m_types.end() && markIt->second.kind == VType::ENUM
+                       && !markIt->second.literals.empty()) {
+                indexLows[k] = 0;
+            } else if (predefinedIntegerType(flp, specs[k]->mark, indexType)) {
+                indexLows[k] = indexType.left;
+            }
+        }
         bool constrained = true;
         for (size_t k = 0; k < specs.size(); ++k) {
             if (!specs[k]->hasRange) {
@@ -2147,7 +2162,9 @@ void Lowering::registerType(const TypeDecl& decl) {
             ascends[k] = asc;
         }
         if (!constrained) {
-            // Every level survives, so a use supplies one index constraint per level
+            // Every level survives, so a use supplies one index constraint per level.
+            // The index subtype's low bound is kept: an array constant that states no
+            // constraint takes one element per aggregate element from it
             VType inner = elem;
             for (size_t k = specs.size(); k-- > 0;) {
                 VType arr;
@@ -2157,6 +2174,7 @@ void Lowering::registerType(const TypeDecl& decl) {
                 arr.kwd = inner.kwd;
                 arr.signing = VSigning::NOSIGN;
                 arr.width = 0;
+                arr.intLow = static_cast<int>(indexLows[k]);
                 inner = arr;
             }
             type = inner;
@@ -8206,9 +8224,11 @@ bool Lowering::formalType(const TypeSpec& spec, VType& out) const {
 bool Lowering::typesMatch(const VType& formal, const VType& actual) {
     // Universal integer literals also fit a real formal
     if (formal.kind == VType::REAL && actual.kind == VType::INT) return true;
-    if (!formal.typeName.empty() && !actual.typeName.empty()
-        && formal.typeName != actual.typeName) {
-        return false;
+    if (!formal.typeName.empty() && !actual.typeName.empty()) {
+        if (formal.typeName != actual.typeName) return false;
+        // The same base type under different constraints, which is what an unconstrained
+        // formal and a constrained actual are (IEEE 1076-2008 12.5)
+        return true;
     }
     if (formal.kind != actual.kind && !(formal.isVector() && actual.isVector())) return false;
     if (formal.kind == VType::INT || formal.kind == VType::REAL) return true;
@@ -10314,6 +10334,10 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         } else if (initp->kind == Expr::INDEX && initp->a) {
             callName = initp->a->text;
             namep = initp->a.get();
+        } else if (initp->kind == Expr::NAME) {
+            // A function may be called by naming it alone when its formals have defaults
+            callName = initp->text;
+            namep = initp;
         }
         if (!callName.empty()) {
             // A call qualified by a package name imports it, as resolving the call does
@@ -10364,6 +10388,32 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         if (declaredType.flp && resolveType(declaredType, constType)) {
             intConstant = constType.isInt();
             realConstant = constType.kind == VType::REAL;
+        }
+        // An array whose element type leaves a member unconstrained has no width until its
+        // aggregate fixes one, which is not modelled
+        if (!constType.dtp && constType.kind == VType::ARRAY
+            && (!constType.elemp || constType.elemp->width == 0)) {
+            unsupportedError(flp, "constant of an array of unconstrained elements");
+            return;
+        }
+        // An unconstrained array constant takes its bounds from its aggregate, one element
+        // per aggregate element from the index subtype's low bound (IEEE 1076-2008 9.3.3.2)
+        if (!constType.dtp && constType.kind == VType::ARRAY && initp && initp->kind == Expr::AGG_POSITIONAL && !initp->args.empty()
+            && !type.hasRange && type.constraintMark.empty() && type.indexConstraints.empty()) {
+            TypeSpec bounded = copySpec(type);
+            bounded.hasRange = true;
+            bounded.ascending = true;
+            bounded.left = std::unique_ptr<Expr>(new Expr{Expr::INT_LIT});
+            bounded.left->flp = flp;
+            bounded.left->intValue = constType.intLow;
+            bounded.right = std::unique_ptr<Expr>(new Expr{Expr::INT_LIT});
+            bounded.right->flp = flp;
+            bounded.right->intValue
+                = constType.intLow + static_cast<int64_t>(initp->args.size()) - 1;
+            if (resolveType(bounded, constType)) {
+                intConstant = constType.isInt();
+                realConstant = constType.kind == VType::REAL;
+            }
         }
     }
     // A packed constant of that many bits is copied once per write into it, so a memory
@@ -10786,6 +10836,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // module importing only the logic package still has to reach that call
     for (const auto& entry : m_subprograms) {
         for (const SubprogramRef& ref : entry.second) {
+            // A declaration only the body makes is private to it (IEEE 1076-2008 12.4),
+            // unless it completes one the specification published: poc's configuration
+            // declares `ite` in its body to avoid depending on the package that has it
             if (std::find(info.subprograms.begin(), info.subprograms.end(), ref.declp)
                 == info.subprograms.end()) {
                 info.subprograms.push_back(ref.declp);

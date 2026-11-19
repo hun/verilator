@@ -992,7 +992,8 @@ ______
   * - N151
     - a constant whose initializer calls a function that another package defines in its
       body, e.g. `constant tag_c : string := pkg_a.tag(3)`, reported "call to subprogram
-      whose body was not read" although the body exists
+      whose body was not read" although the body exists; a function named alone, without
+      arguments, is the same call and waits the same way
     - the specifications are emitted before any body, so a constant whose initializer is a
       call with no body yet waits for the pass that reads the bodies, as an integer
       constant already did; a call qualified by a package name imports that package first,
@@ -1009,8 +1010,27 @@ ______
   * - N153
     - a constant of an unconstrained array of records crashed the frontend when its type
       could not be resolved: the error path deleted a value that had not been lowered
-    - the error path deletes the value only when there is one, and the diagnostic stands
-      on its own; taking the bounds and the element type from the aggregate is open
+    - the error path deletes the value only when there is one, so the diagnostic stands on
+      its own
+    - ``t_vhdl_const_unresolved_unsup``
+  * - N154
+    - a constant of an unconstrained array type, e.g. poc's board list
+      `constant boards : t_board_vector := ((...), (...))`, has no width
+    - the aggregate supplies the bounds: one element per association from the index
+      subtype's low bound, which the array type records when it resolves unconstrained
+      (IEEE 1076-2008 9.3.3.2)
+    - ``t_vhdl_array_const``
+  * - N155
+    - an overload set whose string formals are unconstrained takes no constrained actual,
+      e.g. poc's `ite(cond, conf(a), conf(b))` where `conf` returns a
+      `string(1 to 64)` subtype: "no declaration accepts the actuals"
+    - two values of the same base type match whatever their constraints, so the base type
+      name decides before the element width does (IEEE 1076-2008 12.5)
+    - ``t_vhdl_overload_unconstrained``
+  * - N156
+    - an array constant whose element type leaves a member unconstrained was built with a
+      zero-width element and then failed inside the aggregate lowering
+    - the type is reported by name until an aggregate can fix the element's members
     - ``t_vhdl_const_unresolved_unsup``
 
 ____
@@ -1019,8 +1039,8 @@ ____
 
 The findings here need more than a frontend change: N15 wants
 ``AstModule::isTop()`` from the middle end, N67 is the simulation-only subset, and
-N154..N158 are the language features poc's configuration package uses before its
-blocks can be ported; each has a reproducer, none is modelled yet. The conformance review against IEEE 1076-2008 with GHDL and nvc as the
+N157..N159 are what poc's configuration package still needs before its blocks can be
+ported; each has a reproducer. The conformance review against IEEE 1076-2008 with GHDL and nvc as the
 reference simulators (findings N99..N127) is closed; every one of those is in
 the Closed table with the test that pins it.
 
@@ -1040,31 +1060,20 @@ the Closed table with the test that pins it.
        droppable here. Not making it a top needs ``AstModule::isTop()``
        (``level() == 1``, set by ``V3LinkCells``), which is the middle end.
        Reproducer: ``test_regress/t/t_vhdl_spec_top_repro.vhdl``.
-  * - N154
-    - a function whose formals all have defaults, called by naming it without arguments:
-      poc's `VENDOR = VENDOR_XILINX` is the call `VENDOR()` (``config.vhdl``), and the
-      frontend reads the name as a constant
-    - lowered as a call with no actuals, whose formals then take their defaults; the
-      same resolution ``resolveCall`` already does for a parenthesized call
-  * - N155
+  * - N157
+    - a declaration that hides an imported one of the same name and formal types
+      (IEEE 1076-2008 12.4): poc's configuration re-declares `ite` in its package body to
+      drop a dependency, and the call is reported ambiguous because the package that `use`
+      clauses made visible is re-published with the unit
+    - the hiding rule needs the publication of a unit's visible subprograms to keep what
+      its own declarations hide out of the package's interface; the reproducer is
+      ``config.vhdl`` in poc
+  * - N158
     - a character literal as an operand of a string concatenation, `'3' & mark_c`
       (``config.vhdl``); the frontend lowers character literals only in a logic context
     - the other operand fixes the result type as a string, which is what a context does
       for the literal today
-  * - N156
-    - a constant of an unconstrained array of records whose members are unconstrained,
-      the board tables of ``config.vhdl``; only the aggregate fixes the element type and
-      the bounds (the diagnostic of N153)
-    - the bounds come from the element count and the element record type from the first
-      aggregate element, as ``completeRecordType`` already does for a record constant
-  * - N157
-    - an overload set in which the string overloads take a slice actual,
-      `ite(cond, str(1 to n), ConstNUL)` in ``config.vhdl``: "no declaration of 'ite'
-      accepts the actuals"
-    - the actual's type is fixed by the formal's unconstrained string type, so the
-      unconstrained formals of the overload set have to accept a slice before the
-      overload is chosen
-  * - N158
+  * - N159
     - a slice whose bounds are equal and inverted, `d(d'left downto d'left -
       EMPTY_STATE_BITS + 1)` with zero state bits (``fifo_cc_got.vhdl``): "empty or
       reversed slice", reported while lowering a branch a static condition disables

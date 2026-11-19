@@ -14,6 +14,8 @@
 package pkg_a is
   function tag(i : integer) return string;
   function bits(i : integer) return std_logic_vector;
+  function version return integer;
+  function scaled(x : integer := 2) return integer;
 end package;
 
 package body pkg_a is
@@ -37,14 +39,30 @@ package body pkg_a is
     end if;
     return "0000";
   end function;
+
+  function version return integer is
+  begin
+    return 5;
+  end function;
+
+  function scaled(x : integer := 2) return integer is
+  begin
+    return x * 5;
+  end function;
 end package body;
 
 library ieee;
 use ieee.std_logic_1164.all;
 
+use work.pkg_a.all;
+
 package pkg_b is
   constant tag_c  : string := pkg_a.tag(3);
   constant bits_c : std_logic_vector(3 downto 0) := pkg_a.bits(3);
+  -- A function without arguments, and one whose only formal has a default, are called by
+  -- naming them alone (IEEE 1076-2008 4.3)
+  constant ver_c   : integer := version;
+  constant scale_c : integer := scaled;
 end package;
 
 library ieee;
@@ -62,7 +80,7 @@ end entity;
 architecture rtl of t is
   signal ok : std_logic;
 begin
-  ok <= '1' when tag_c = "3!" and bits_c = "0011" else '0';
+  ok <= '1' when tag_c = "3!" and bits_c = "0011" and ver_c = 5 and scale_c = 10 else '0';
 
   process (clk)
   begin
