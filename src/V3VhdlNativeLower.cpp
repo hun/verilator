@@ -449,6 +449,8 @@ class Lowering final {
     bool m_stdLogicSigned = false;  // `use ieee.std_logic_signed.all` is in effect
     bool m_stdLogicUnsigned = false;  // `use ieee.std_logic_unsigned.all` is in effect
     bool m_stdLogicArith = false;  // `use ieee.std_logic_arith.all` is in effect
+    bool m_numericStdUnsigned = false;  // `use ieee.numeric_std_unsigned.all`
+    bool m_numericStdSigned = false;  // `use ieee.numeric_std_signed.all`
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
@@ -1269,6 +1271,11 @@ class Lowering final {
     //! Whether a type conversion's target and operand types are closely related
     //! (IEEE 1076-2008 9.3.6)
     static bool conversionRelated(const VType& target, const VType& source);
+    //! Whether two operands of a logical operator have the same element type
+    bool logicalOperandsConform(const Expr& a, const Expr& b, const VType& aLowered,
+                                const VType& bLowered) const;
+    //! Whether two operands of a relational operator have related base types
+    bool relationalOperandsConform(const Expr& a, const Expr& b) const;
     bool formalsAccept(const Expr& call, const SubprogramDecl& sub) const;
     bool formalsExact(const Expr& call, const SubprogramDecl& sub) const;
     std::vector<const SubprogramDecl*> visibleSubprograms(const std::string& name) const;
@@ -3192,6 +3199,24 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             return eqp;
         }
         if (expr.text == "not") {
+            VType operandType;
+            if (!actualType(*expr.a, operandType)) operandType = type;
+            // `not` is predefined for bit, boolean and arrays of them; an integer,
+            // enumeration or character array has no such operator (IEEE 1076-2008 9.2.2)
+            const bool logicArray
+                = operandType.kind != VType::ARRAY || !operandType.elemp
+                  || (operandType.elemWidth == 1
+                      && (operandType.elemp->typeName.empty()
+                          || operandType.elemp->typeName == "std_ulogic"
+                          || operandType.elemp->typeName == "bit"
+                          || operandType.elemp->typeName == "boolean"));
+            if (operandType.kind == VType::INT || operandType.kind == VType::REAL
+                || operandType.kind == VType::ENUM || operandType.kind == VType::FILE
+                || operandType.kind == VType::LINE || !logicArray) {
+                flp->v3error("VHDL: 'not' operand is not a logic or bit value");
+                operandp->deleteTree();
+                return nullptr;
+            }
             AstNot* const notp = new AstNot{flp, operandp};
             notp->dtypep(type.dtp);
             return notp;
@@ -3614,6 +3639,19 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     if (!lp) return nullptr;
     VType lt = typeOfLowered(*expr.a, lp);
     VType rt = typeOfLowered(*expr.b, rp);
+    if (logicalOp && !logicalOperandsConform(*expr.a, *expr.b, lt, rt)) {
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<="
+                              || op == ">" || op == ">=" || op == "?=" || op == "?/="
+                              || op == "?<" || op == "?<=" || op == "?>" || op == "?>=";
+    if (relationalOp && !relationalOperandsConform(*expr.a, *expr.b)) {
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
     AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
 
     if (op == "?=" || op == "?/=") {
@@ -8211,6 +8249,11 @@ bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
     case Expr::SELECTED:
     case Expr::INDEX:
     case Expr::SLICE: {
+        if (expr.kind == Expr::INDEX && expr.a && expr.a->kind == Expr::NAME
+            && (expr.a->text == "rising_edge" || expr.a->text == "falling_edge")) {
+            out = VType::LOGIC;
+            return true;
+        }
         VType type;
         if (typeOfDesignator(expr, type)) {
             out = type.kind;
@@ -8235,6 +8278,13 @@ bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
     case Expr::ATTR: {
         if (expr.text == "length" || expr.text == "pos" || expr.text == "to_integer") {
             out = VType::INT;
+            return true;
+        }
+        // Signal attributes that yield a boolean
+        if (expr.text == "event" || expr.text == "active" || expr.text == "quiet"
+            || expr.text == "stable" || expr.text == "rising_edge"
+            || expr.text == "falling_edge") {
+            out = VType::LOGIC;
             return true;
         }
         if (expr.text == "high" || expr.text == "low" || expr.text == "left"
@@ -8504,6 +8554,13 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
         return false;
     }
     case Expr::INDEX: {
+        if (expr.a && expr.a->kind == Expr::NAME
+            && (expr.a->text == "rising_edge" || expr.a->text == "falling_edge")) {
+            out = VType{};
+            out.kind = VType::LOGIC;
+            out.typeName = "boolean";
+            return true;
+        }
         // A prefix that names a type mark is a conversion, not an index of a type object
         const bool typeMark
             = expr.a && expr.a->kind == Expr::NAME && m_types.count(expr.a->text) != 0;
@@ -8556,6 +8613,15 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
     case Expr::ATTR: {
         if (expr.text == "length" || expr.text == "pos" || expr.text == "to_integer") {
             out = intType(expr.flp);
+            return true;
+        }
+        // Signal attributes that yield a boolean
+        if (expr.text == "event" || expr.text == "active" || expr.text == "quiet"
+            || expr.text == "stable" || expr.text == "rising_edge"
+            || expr.text == "falling_edge") {
+            out = VType{};
+            out.kind = VType::LOGIC;
+            out.typeName = "boolean";
             return true;
         }
         if (expr.text == "high" || expr.text == "low" || expr.text == "left"
@@ -8851,6 +8917,94 @@ bool Lowering::conversionRelated(const VType& target, const VType& source) {
     }
     // A literal or aggregate has no type of its own; the mark types it
     return source.typeName.empty();
+}
+
+//! Whether two operands of a logical operator have the same element type. VHDL allows
+//! an array and a scalar of its element type, and a character literal is an element of
+//! either a logic or a bit array (IEEE 1076-2008 9.2.2).
+bool Lowering::logicalOperandsConform(const Expr& a, const Expr& b, const VType& aLowered,
+                                      const VType& bLowered) const {
+    // A comparison expression lowers to a logic bit but is a boolean; prefer the VHDL
+    // type where the expression has one, and fall back to the lowered dtype otherwise
+    VType aTyped;
+    VType bTyped;
+    const VType& aType = actualType(a, aTyped) ? aTyped : aLowered;
+    const VType& bType = actualType(b, bTyped) ? bTyped : bLowered;
+    const auto nonLogical = [](const VType& type) {
+        return type.kind == VType::INT || type.kind == VType::REAL || type.kind == VType::ENUM
+               || type.kind == VType::FILE || type.kind == VType::LINE;
+    };
+    if (nonLogical(aType) || nonLogical(bType)) {
+        a.flp->v3error("VHDL: logical operator operand is not a logic or bit value");
+        return false;
+    }
+    const auto elementName = [](const VType& type) -> std::string {
+        if (type.kind == VType::ARRAY && type.elemp) return type.elemp->typeName;
+        if (type.kind == VType::VECTOR) {
+            return type.kwd == VBasicDTypeKwd::BIT ? "bit" : "std_ulogic";
+        }
+        return type.typeName;
+    };
+    // A character literal is a logic or bit element, whichever the other operand needs
+    const std::string aName = a.kind == Expr::CHAR_LIT ? "" : elementName(aType);
+    const std::string bName = b.kind == Expr::CHAR_LIT ? "" : elementName(bType);
+    if (!aName.empty() && !bName.empty() && aName != bName) {
+        a.flp->v3error("VHDL: logical operator operands do not have the same element type");
+        return false;
+    }
+    return true;
+}
+
+//! Whether two operands of a relational operator have related base types. A numeric
+//! vector compares with an integer only where a package defines that operator; a scalar
+//! logic value and a number are unrelated (IEEE 1076-2008 9.2.3, 12.5).
+bool Lowering::relationalOperandsConform(const Expr& a, const Expr& b) const {
+    VType aType;
+    VType bType;
+    if (!actualType(a, aType) || !actualType(b, bType)) return true;
+    const bool aNumeric = aType.kind == VType::INT || aType.kind == VType::REAL;
+    const bool bNumeric = bType.kind == VType::INT || bType.kind == VType::REAL;
+    if (aNumeric && bNumeric) {
+        if (aType.kind != bType.kind) {
+            a.flp->v3error("VHDL: relational operator compares a real with an integer");
+            return false;
+        }
+        if (aType.kind == VType::INT && !aType.typeName.empty() && !bType.typeName.empty()
+            && aType.typeName != bType.typeName) {
+            a.flp->v3error("VHDL: relational operator operands do not have the same base type");
+            return false;
+        }
+        return true;
+    }
+    if (aNumeric || bNumeric) {
+        const VType& other = aNumeric ? bType : aType;
+        if (other.isVector()) {
+            const bool numericVector = other.typeName == "unsigned" || other.typeName == "signed"
+                                       || other.typeName == "u_unsigned"
+                                       || other.typeName == "u_signed";
+            if (numericVector) return true;
+            const bool logicVector = other.typeName == "std_logic_vector"
+                                     || other.typeName == "std_ulogic_vector";
+            if (logicVector
+                && (m_stdLogicArith || m_stdLogicUnsigned || m_stdLogicSigned
+                    || m_numericStdUnsigned || m_numericStdSigned)) {
+                return true;
+            }
+            if (other.typeName.empty()) return true;
+        }
+        a.flp->v3error("VHDL: relational operator operands do not have the same base type");
+        return false;
+    }
+    if (aType.isVector() && bType.isVector()) return true;
+    if (aType.isVector() || bType.isVector()) {
+        a.flp->v3error("VHDL: relational operator compares an array with a scalar");
+        return false;
+    }
+    if (!aType.typeName.empty() && !bType.typeName.empty() && aType.typeName != bType.typeName) {
+        a.flp->v3error("VHDL: relational operator operands do not have the same base type");
+        return false;
+    }
+    return true;
 }
 
 //! Whether every actual of a call can be associated with the formal it fills. A caller asks
@@ -11352,6 +11506,8 @@ void Lowering::importPackage(const std::string& name, const std::string& only) {
         if (name == "std_logic_signed") m_stdLogicSigned = true;
         if (name == "std_logic_unsigned") m_stdLogicUnsigned = true;
         if (name == "std_logic_arith") m_stdLogicArith = true;
+        if (name == "numeric_std_unsigned") m_numericStdUnsigned = true;
+        if (name == "numeric_std_signed") m_numericStdSigned = true;
     }
     if (!m_packagesp) return;
     const auto pkgIt = m_packagesp->packages.find(name);

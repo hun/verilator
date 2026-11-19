@@ -46,6 +46,8 @@ architecture rtl of t is
   type a_t is (ea0, ea1);
   type b_t is (eb0, eb1);
   signal lit_a : a_t;
+  signal int_s : integer;
+  constant text_c : string := "ab";
   signal slv8 : std_logic_vector(7 downto 0);
   constant bad_const : std_logic := 42;
   constant bad_time : time := time(5);
@@ -71,6 +73,13 @@ begin
   o_vec <= a4;
   o_un  <= slv8;
   o_bool <= b;
+  o_bool <= sel and b;
+  o_bool <= not int_s;
+  o_bool <= not text_c;
+  o_bool <= sel = int_s;
+  o_bool <= b = sel;
+  o_bool <= slv8 = b;
+  o_bool <= slv8 = sel;
 
   -- A declared return type does not convert the returned value
   o_ret <= bad_return;

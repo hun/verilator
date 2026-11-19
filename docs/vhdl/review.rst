@@ -21,12 +21,12 @@ The frontend covers a large and useful part of synthesizable VHDL-2008 and
 elaborates real designs, but its semantic analysis is deliberately shallow
 outside the pinned idioms. The main risk is not an unsupported construct: it is
 a construct that is accepted and lowered with a different meaning. Assignment,
-return, single-candidate call-actual, generic-actual and type conversion paths
-now check that a value belongs to the target type. The main remaining silent
-divergence is at operator level, where the operands of a logical or relational
-operator are not compared with each other (see `Type conformance`_ below).
-Several other divergences are listed in this assessment; they are the work
-that must land before the frontend can be trusted on arbitrary legal VHDL.
+return, single-candidate call-actual, generic-actual, type conversion and
+operator paths now check that a value belongs to the target type. The remaining
+silent divergences are narrow: a character or physical literal has no type of
+its own outside a context, ``std_logic`` and ``std_ulogic`` share one model
+name, and array-to-array conversion and comparison are coarse (see
+`Type conformance`_ below).
 
 The in-tree frontend is the only VHDL frontend. GHDL and nvc are used as
 reference simulators in tests, not as build-time frontends.
@@ -270,9 +270,11 @@ actuals and type conversions now check that a value belongs to the target's
 base type. The check is one predicate, ``valueConforms``, and it applies to
 plain, conditional, selected, latched and clocked assignments, signal and
 variable initial values, constants, inlined returns, generic associations and
-conversions. A single visible subprogram is no longer exempt from its formals'
-types. Every illegal program below is refused with a source-located diagnostic
-and pinned by ``t_vhdl_type_conf_bad``:
+conversions. The operands of logical and relational operators are checked by
+``logicalOperandsConform`` and ``relationalOperandsConform``. A single visible
+subprogram is no longer exempt from its formals' types. Every illegal program
+below is refused with a source-located diagnostic and pinned by
+``t_vhdl_type_conf_bad``:
 
 - a 4-bit vector assigned to an 8-bit vector of the same base type;
 - an integer literal assigned to ``std_logic``, and a vector assigned to an
@@ -283,9 +285,12 @@ and pinned by ``t_vhdl_type_conf_bad``:
 - ``f(5)`` where ``f`` declares a ``std_logic`` formal;
 - a string actual associated with an integer generic;
 - ``std_logic_vector(42)``, ``integer(slv_value)`` and ``time(5)``;
-- an enumeration literal that the target type does not declare.
+- an enumeration literal that the target type does not declare;
+- a logical operator on ``std_logic`` and ``boolean``, ``not`` on an integer
+  or a string, and ``std_logic_signal = integer_signal``,
+  ``boolean_signal = std_logic_signal`` or ``array = scalar``.
 
-The predicate also learned what VHDL permits, so the following stay accepted:
+The checks also learned what VHDL permits, so the following stay accepted:
 a universal integer literal takes an integer subtype or a real target, and an
 integral real literal such as ``25e6`` takes an integer subtype;
 ``std_logic_vector`` and ``std_ulogic_vector`` are related (IEEE 1164); ``+``
@@ -293,16 +298,18 @@ and ``-`` keep a physical type, and a physical value multiplied or divided by
 an integer or real keeps it; ``??`` yields boolean; a matching operator yields
 ``std_ulogic``; ``'high``/``'low``/``'left``/``'right`` return the prefix's
 scalar type, or an array's index (an integer here), while
-``'length``/``'pos``/``'to_integer`` return integer. Whole-port association was
-already checked by N117.
+``'length``/``'pos``/``'to_integer`` return integer. A logical operator may mix
+an array with a scalar of its element type, and a character literal takes the
+other operand's element type. A relational operator may compare an
+``unsigned``/``signed`` vector, or a legacy numeric-package vector, with an
+integer. ``'event``/``'active``/``'stable`` and ``rising_edge`` yield boolean.
+Whole-port association was already checked by N117.
 
 The remaining conformance holes are narrower:
 
-- Operator operands are not compared with each other. ``a and b`` with
-  ``a : std_logic`` and ``b : boolean``, ``not a`` with an integer operand, and
-  ``std_logic_signal = integer_signal`` are still accepted. This is the next
-  check, with the array/scalar mixing rule of IEEE 1076-2008 9.2.2 as the one
-  exception.
+- Relational operands that are both arrays are compared only by category, so
+  ``std_logic_vector = unsigned`` is still accepted. Only the vector/integer
+  case is gated by a visible numeric package.
 - A character or physical literal has no inferred type outside its context, so
   a character actual for an unrelated formal can pass.
 - ``std_logic`` and ``std_ulogic`` share the normalised ``std_ulogic`` type
@@ -365,9 +372,8 @@ is specialized. The core alone remains clean.
 Remaining feature gaps
 ======================
 
-- Operator-level type conformance is not checked: the operands of a logical
-  or relational operator are not compared with each other (see
-  `Type conformance`_).
+- Relational conformance is coarse when both operands are arrays: any two
+  array types compare (see `Type conformance`_).
 - ``std_logic`` resolution between strong tristate drivers is not modelled.
   Conflicting enabled values resolve to 1 rather than ``'X'``. User-defined
   resolution functions remain out of scope.
@@ -421,11 +427,11 @@ The lowering is where the cost sits. Measured on the current tree:
 ============================================  =====================================
 Measure                                       Value
 ============================================  =====================================
-Frontend source                               18,713 lines in 11 files
-``V3VhdlNativeLower.cpp``                     13,480 lines (72% of the frontend)
-``Lowering`` class declaration                1,094 lines, one class
-``Lowering`` member functions                 139; 14 are over 150 lines
-Largest functions                             692, 392, 356, 314, 291 lines
+Frontend source                               18,869 lines in 11 files
+``V3VhdlNativeLower.cpp``                     13,636 lines (72% of the frontend)
+``Lowering`` class declaration                1,101 lines, one class
+``Lowering`` member functions                 140; 14 are over 150 lines
+Largest functions                             705, 392, 374, 314, 307 lines
 Conditions and case labels in the lowering    about 2,200 and 131
 Explicit refusal sites                        227 in the lowering, 31 in the parser
 Direct STL container members in ``Lowering``  33 (46 ``m_`` data members)
@@ -539,8 +545,8 @@ Verification gaps
 - The VHDL suite has no dedicated CI job; it must be run explicitly. The suite
   is 276 tests, 41 of them negative; all pass.
 - The negative tests now cover assignment, initial value, constant, return,
-  single-candidate call, generic and conversion conformance in
-  ``t_vhdl_type_conf_bad``. Operator-level conformance is still unchecked and
+  single-candidate call, generic, conversion and operator conformance in
+  ``t_vhdl_type_conf_bad``. The remaining literal and array/array corners are
   untested.
 - No test drives a zero-width object through lowering, a metavalue case
   choice, or a ``bit`` ``inout``; the corpus found the resulting internal error
@@ -566,15 +572,11 @@ ______
 Order
 ______
 
-1. Add operator-level type conformance to the operands of logical and
-   relational operators, and extend ``t_vhdl_type_conf_bad`` with one case per
-   operator form. Assignment, return, call, generic and conversion checks
-   landed with that test; the operator check is the remaining soundness hole.
-2. Fix the metavalue-choice internal error, and refuse or model the eight
+1. Fix the metavalue-choice internal error, and refuse or model the eight
    middle-end leaks (zero-width objects, ``bit`` ``inout``, the
    ``BLKANDNBLK`` and ``ASSIGNIN`` rejects).
+2. Add a differential simulation harness and a CI job, treat lint-only corpus
+   counts as breadth, and add a scale test for the process path.
 3. Implement ``std_logic_signed`` arithmetic and comparison. The remaining
    value differences are the documented two-state model limits.
-4. Add a differential simulation harness and a CI job, treat lint-only corpus
-   counts as breadth, and add a scale test for the process path.
-5. Revisit the large-memory and neorv32 wrapper allocation failures.
+4. Revisit the large-memory and neorv32 wrapper allocation failures.
