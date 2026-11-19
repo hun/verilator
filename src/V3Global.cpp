@@ -199,7 +199,7 @@ void V3Global::readFiles() {
 
     if (vhdlMode) {
         // Check the emitted AST; its control-file directives are applied by V3LinkParse
-        V3VhdlLink::link(v3Global.rootp(), vhdlModules);
+        V3VhdlLink::link(vhdlModules);
     }
 
     V3Global::dumpCheckGlobalTree("cells", false, dumpTreeEitherLevel() >= 9);

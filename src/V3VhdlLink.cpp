@@ -22,7 +22,7 @@
 
 VL_DEFINE_DEBUG_FUNCTIONS;
 
-void V3VhdlLink::link(AstNetlist* nodep, const std::set<const AstNodeModule*>& vhdlModules) {
+void V3VhdlLink::link(const std::set<const AstNodeModule*>& vhdlModules) {
     if (!v3Global.opt.debugCheck()) return;
     // Only the modules this frontend emitted are subject to its contract; a mixed design
     // also holds SystemVerilog modules, whose nodes the width pass has not seen yet

@@ -22,7 +22,6 @@
 
 #include <set>
 
-class AstNetlist;
 class AstNodeModule;
 
 //! VHDL-specific check of the AST the frontend emitted.
@@ -33,8 +32,7 @@ class AstNodeModule;
 //! SystemVerilog modules that are still in parse shape at this point.
 class V3VhdlLink final {
 public:
-    static void link(AstNetlist* nodep,
-                     const std::set<const AstNodeModule*>& vhdlModules) VL_MT_DISABLED;
+    static void link(const std::set<const AstNodeModule*>& vhdlModules) VL_MT_DISABLED;
 };
 
 #endif  // Guard
