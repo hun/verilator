@@ -1124,6 +1124,25 @@ ______
     - a concatenation takes the type of the operand that has one; a literal beside an
       unsigned or signed vector stays unsigned or signed (IEEE 1076-2008 9.3.6)
     - ``t_vhdl_concat_signing``
+  * - N175
+    - an aggregate operand had to cover the other operand's width: poc's `arith_cca`
+      adds a carry bit with `ac + bc + (0 to 0 => c)`, which reported "aggregate that
+      does not cover every element", and `misc_Delay`'s `TAPS : natural_vector` generic
+      bound to `(1, 3, 5)` failed the same way, as did the `imax(TAPS)` call that indexes
+      it
+    - numeric_std's arithmetic operators take unconstrained array formals, so an
+      aggregate names its own index range (IEEE 1076-2008 9.3.3.3); a declared
+      unconstrained array generic and an unconstrained array formal take the bounds the
+      actual gives them, keeping the declared element type
+    - ``t_vhdl_agg_operand``
+  * - N174
+    - a record element of an array local could not take a positional aggregate: poc's
+      `arith_cca` fills `res : tLevels(0 to 31)` with `res(i) := (base, core, done)` and
+      returned "aggregate that does not cover every element", after which `LEVELS'length`
+      and the field selections were unresolved
+    - an element write uses the target's declared type, which keeps the record's fields,
+      instead of the lowered lvalue's packed vector (IEEE 1076-2008 9.3.2.3)
+    - ``t_vhdl_record_array``
   * - N173
     - poc's `arith_Adder_Wide` computed wrong sums: at `BITS=16`, `BLOCKS=4` it gave
       `0x0000 + 0x7777 + 1 = 0x7fb8` where GHDL gives `0x7778`, and only the carry-skip

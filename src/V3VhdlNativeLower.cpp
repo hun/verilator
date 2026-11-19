@@ -149,6 +149,8 @@ struct GenericBinding final {
     std::string stringValue;
     bool isType = false;
     VType typeValue;  // The actual type mark of a generic type parameter
+    bool hasValueType = false;
+    VType valueType;  // The declared type, specialized by the actual's bounds
     AstConst* valuep = nullptr;  // Typed constant; cloned when registered, else owned here
     const SubprogramDecl* subp = nullptr;  // The actual of a generic subprogram parameter
 };
@@ -1222,6 +1224,8 @@ class Lowering final {
     //! Emit `if (cond) $error(message); $finish;` as a module-level run-time check
     void addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message);
     bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
+    //! Bounds an unconstrained array target takes from an aggregate's own choices
+    void constrainAggregateType(const Expr& agg, VType& type) const;
     AstNode* lowerStmt(const Stmt& stmt);
     //! One concurrent assignment, with the statements an inlined call's locals produced
     void emitConcurrentAssign(const Concurrent& stmt);
@@ -2297,6 +2301,16 @@ void Lowering::registerType(const TypeDecl& decl) {
     m_ambiguousTypes.erase(decl.name);
 }
 
+//! Whether an aggregate fills the rest of its elements with an `others` association
+static bool aggregateHasOthers(const Expr& expr) {
+    for (const std::vector<ExprP>& choices : expr.choices) {
+        for (const ExprP& choicep : choices) {
+            if (choicep && choicep->kind == Expr::NAME && choicep->text == "others") return true;
+        }
+    }
+    return false;
+}
+
 //! Whether `expr` names any of `names` anywhere in it
 bool Lowering::exprNamesAny(const Expr& expr, const std::set<std::string>& names) {
     if (expr.kind == Expr::NAME && names.count(expr.text)) return true;
@@ -3066,7 +3080,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             if (!deriveAggregateType(expr, derived)) return nullptr;
             return lowerAggregate(expr, derived);
         }
-        return lowerAggregate(expr, *context);
+        VType aggType = *context;
+        constrainAggregateType(expr, aggType);
+        return lowerAggregate(expr, aggType);
     }
     case Expr::QUAL: {
         // A type qualification fixes the operand's type and keeps its width. A
@@ -3555,8 +3571,20 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             AstNodeExpr* const knownp = lowerExpr(lowerLeftFirst ? *expr.a : *expr.b, nullptr);
             if (!knownp) return nullptr;
             const VType known = typeOfLowered(lowerLeftFirst ? *expr.a : *expr.b, knownp);
+            // numeric_std's arithmetic operators take unconstrained array formals, so an
+            // aggregate operand keeps the bounds its own choices give it
+            // (IEEE 1076-2008 9.3.3.3): `ac + bc + (0 to 0 => c)` adds a one-element vector
+            const Expr& untyped = lowerLeftFirst ? *expr.b : *expr.a;
+            const bool arithmeticOp
+                = op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem";
+            const bool selfTypedAggregate
+                = arithmeticOp
+                  && (untyped.kind == Expr::AGG_POSITIONAL || untyped.kind == Expr::AGG_NAMED)
+                  && !aggregateHasOthers(untyped);
             const VType* const ctxp
-                = known.isVector() || known.kind == VType::ARRAY ? &known : nullptr;
+                = !selfTypedAggregate && (known.isVector() || known.kind == VType::ARRAY)
+                      ? &known
+                      : nullptr;
             if (lowerLeftFirst) {
                 lp = knownp;
                 rp = lowerExpr(*expr.b, ctxp);
@@ -6363,12 +6391,12 @@ bool Lowering::aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) con
     if (agg.kind == Expr::AGG_POSITIONAL) {
         // Positional associations take consecutive indices from zero
         for (size_t i = 0; i < agg.args.size(); ++i) {
-            if (!agg.choices[i].empty()) return false;
+            if (i < agg.choices.size() && !agg.choices[i].empty()) return false;
             include(0, static_cast<int64_t>(i));
         }
         return any;
     }
-    for (size_t i = 0; i < agg.args.size(); ++i) {
+    for (size_t i = 0; i < agg.args.size() && i < agg.choices.size(); ++i) {
         for (const ExprP& choicep : agg.choices[i]) {
             if (!choicep) continue;
             if (choicep->kind == Expr::NAME && choicep->text == "others") return false;
@@ -6385,6 +6413,27 @@ bool Lowering::aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) con
         }
     }
     return any;
+}
+
+void Lowering::constrainAggregateType(const Expr& agg, VType& type) const {
+    if (agg.kind != Expr::AGG_POSITIONAL && agg.kind != Expr::AGG_NAMED) return;
+    if (type.kind != VType::ARRAY || type.width > 0 || !type.elemp) return;
+    int64_t low = 0;
+    int64_t high = 0;
+    // An `others` association or a non-static choice leaves the length to the context
+    if (!aggregateBounds(agg, low, high)) return;
+    if (agg.kind == Expr::AGG_POSITIONAL) {
+        // Positional associations start at the index subtype's low bound
+        low += type.intLow;
+        high += type.intLow;
+    }
+    type.left = static_cast<int>(low);
+    type.right = static_cast<int>(high);
+    // An unconstrained index subtype is ascending, so the choices give ascending bounds
+    // (IEEE 1076-2008 9.3.3.3)
+    type.ascending = true;
+    type.width = type.elemWidth * (std::abs(type.left - type.right) + 1);
+    type.dtp = findVectorWidth(agg.flp, type.kwd, type.signing, type.width);
 }
 
 bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
@@ -8701,10 +8750,19 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
                   || formalMark == "bit_vector" || formalMark == "unsigned"
                   || formalMark == "signed" || formalMark == "u_unsigned"
                   || formalMark == "u_signed");
-        if (!predefinedUnconstrained && resolveType(formalp->type, formalType)
-            && (formalType.isVector() ? formalType.width > 0 : formalType.dtp != nullptr)) {
-            ctxp = &formalType;
+        bool haveFormalType = false;
+        if (!predefinedUnconstrained && resolveType(formalp->type, formalType)) {
+            if (formalType.isVector() && formalType.width <= 0) {
+                // An unconstrained array formal takes its bounds from the actual: an
+                // aggregate names its own range (IEEE 1076-2008 9.3.3.3), while a name
+                // brings its own through typeOfDesignator below
+                constrainAggregateType(actual, formalType);
+                haveFormalType = formalType.width > 0;
+            } else {
+                haveFormalType = formalType.isVector() || formalType.dtp != nullptr;
+            }
         }
+        if (haveFormalType) ctxp = &formalType;
         AstNodeExpr* actualp = asLvalue ? lowerDesignator(actual, true) : lowerExpr(actual, ctxp);
         if (!actualp) return false;
         InlineBinding binding{actualp, asLvalue, true};
@@ -9412,7 +9470,10 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 // rebuild of the value around it
                 AstNodeExpr* const lhsp = lowerDesignator(target, true);
                 if (!lhsp) return nullptr;
-                const VType elemType = typeOfDType(lhsp->dtypep());
+                // The declared type keeps a record element's fields; the lowered lvalue is
+                // the packed vector, which would turn `r(i) := (a, b, c)` into an array
+                // aggregate that covers no field
+                const VType elemType = typeOfTarget(target, lhsp);
                 AstNodeExpr* const valuep = lowerExpr(*stmt.value, &elemType);
                 if (!valuep) {
                     lhsp->deleteTree();
@@ -9451,7 +9512,10 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 summed->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
                 offsetp = summed;
             }
-            const VType elemType = typeOfDType(selp->dtypep());
+            // The declared element type keeps a record's fields; the lowered select is the
+            // packed vector, which would turn `r(i) := (a, b, c)` into an array aggregate
+            VType elemType;
+            if (!typeOfDesignator(target, elemType)) elemType = typeOfDType(selp->dtypep());
             AstNodeExpr* valuep = lowerExpr(*stmt.value, &elemType);
             if (!valuep) {
                 readp->deleteTree();
@@ -10842,7 +10906,10 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                         m_ownedConsts.push_back(
                             std::unique_ptr<AstConst>(it->second.valuep->cloneTree(false)));
                         m_constValues[name.first] = m_ownedConsts.back().get();
-                        if (unconstrainedVectorSpec(gen.type)) {
+                        if (it->second.hasValueType) {
+                            // The declared type, with the bounds this instance's actual gave
+                            m_constTypes[name.first] = it->second.valueType;
+                        } else if (unconstrainedVectorSpec(gen.type)) {
                             m_constTypes[name.first] = typeOfDType(it->second.valuep->dtypep());
                         } else {
                             VType declared;
@@ -11552,6 +11619,31 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         } else {
             haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
                        && resolveType(gen.type, declared);
+            if (haveType && declared.isVector() && declared.width <= 0) {
+                // A declared unconstrained array generic takes its bounds from the actual,
+                // as a predefined vector one does: poc's `TAPS : natural_vector` is an
+                // aggregate like `(1, 3, 5)` that names its own index range. Only the
+                // bounds come from the actual; the element type stays the declared one.
+                if (assocp->actual->kind == Expr::AGG_POSITIONAL
+                    || assocp->actual->kind == Expr::AGG_NAMED) {
+                    constrainAggregateType(*assocp->actual, declared);
+                } else {
+                    AstNodeExpr* const valuep = lowerExpr(*assocp->actual, nullptr);
+                    if (valuep) {
+                        const VType actualType = typeOfDType(valuep->dtypep());
+                        valuep->deleteTree();
+                        if (actualType.isVector() && actualType.width > 0) {
+                            declared.left = actualType.left;
+                            declared.right = actualType.right;
+                            declared.ascending = actualType.ascending;
+                            declared.width = actualType.width;
+                            declared.dtp = findVectorWidth(flp, declared.kwd, declared.signing,
+                                                           declared.width);
+                        }
+                    }
+                }
+                haveType = declared.width > 0;
+            }
         }
         restoreScope(saved);
         m_imported = savedImported;
@@ -11566,6 +11658,10 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             return nullptr;
         }
         GenericBinding binding;
+        if (declared.isVector()) {
+            binding.valueType = declared;
+            binding.hasValueType = true;
+        }
         bool bound = false;
         if (declared.isInt()) {
             bound = evalInt(*assocp->actual, binding.intValue);

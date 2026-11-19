@@ -165,6 +165,9 @@ The former overload and bound-check divergences are closed:
 - A type conversion has the type of its mark, constrained by its operand, so an
   operator declared over an unrelated type is no longer selected for the
   built-in operator; a user operator still wins where its formals match.
+- An element write and an aggregate operand use the declared type rather than the
+  packed vector: a record element of an array local takes a positional aggregate, and
+  an aggregate beside a wider vector keeps the bounds its own choices name.
 - A dynamic ``'succ``/``'pred`` of an end enumeration literal is checked at run
   time and reports an error and finishes; a static one is a frontend error.
 
