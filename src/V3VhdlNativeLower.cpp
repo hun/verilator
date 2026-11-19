@@ -1090,7 +1090,7 @@ class Lowering final {
     AstNodeExpr* lowerArrayRelation(FileLine* flp, const std::string& cmpOp, const VType& lt,
                                     const VType& rt, AstNodeExpr*& lp, AstNodeExpr*& rp,
                                     AstNodeDType* bitDtp);
-    AstNodeExpr* lowerConversion(const Expr& expr);
+    AstNodeExpr* lowerConversion(const Expr& expr, const VType* context);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
     bool sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
@@ -1192,6 +1192,9 @@ class Lowering final {
     AstNode* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin, std::size_t end);
     AstNode* lowerIf(const Stmt& stmt);
     AstNode* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
+    //! An assignment to a slice whose width is a run-time value: one guarded write per
+    //! possible width, since a selection node needs a static width
+    AstNode* lowerDynamicSliceAssign(const Stmt& stmt, bool variable);
     //! A sequential conditional assignment `v1 when c1 else ... vN` as a value expression;
     //! targetReadp supplies the value for an `unaffected` waveform (a read of the target)
     AstNodeExpr* lowerConditionalChain(FileLine* flp,
@@ -3116,7 +3119,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             // A user subprogram shadows a standard-package function of the same name
             if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, context);
             if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
-            if (isConversion(expr.a->text)) return lowerConversion(expr);
+            if (isConversion(expr.a->text)) return lowerConversion(expr, context);
             // A real has no synthesizable form, so a conversion to one is refused by name
             if (expr.a->text == "real") {
                 unsupportedError(flp, "conversion to a real value");
@@ -4333,16 +4336,31 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
     return nullptr;
 }
 
-AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
+AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     const std::string& name = expr.a->text;
     if (expr.args.size() == 2) {
         if (name == "to_unsigned" || name == "to_signed") {
+            int64_t width = 0;
+            const bool staticWidth
+                = staticIntFold(expr.args[1], width) && width > 0 && width <= 4096;
+            // A width only the consumer knows takes that width: to_unsigned pads with
+            // zeros, and the elements beyond the run-time width are never selected
+            if (!staticWidth && name == "to_unsigned" && context && context->isVector()
+                && context->width > 0) {
+                AstNodeExpr* const operandp = lowerExpr(*expr.args[0], nullptr);
+                if (!operandp) return nullptr;
+                if (!typeOfDType(operandp->dtypep()).isInt()) {
+                    unsupportedError(flp, "to_unsigned of a non-integer value");
+                    operandp->deleteTree();
+                    return nullptr;
+                }
+                return resizeExpr(operandp, *context, flp);
+            }
             AstNodeExpr* valuep = lowerExpr(*expr.args[0], nullptr);
             if (!valuep) return nullptr;
             const VType valueType = typeOfDType(valuep->dtypep());
-            int64_t width = 0;
-            if (!staticIntFold(expr.args[1], width) || width <= 0 || width > 4096) {
+            if (!staticWidth) {
                 unsupportedError(flp, "non-static or invalid conversion width");
                 valuep->deleteTree();
                 return nullptr;
@@ -4374,9 +4392,30 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
     VType operandType;
     const bool vectorOperand = typeOfDesignator(*expr.args[0], operandType)
                                && operandType.isVector();
+    // An operand that is itself a conversion, or a call whose return type is
+    // unconstrained, has no width of its own: it takes this conversion's context
+    bool operandNeedsContext = false;
+    if (expr.args[0]->kind == Expr::INDEX && expr.args[0]->a) {
+        const std::string& callee = expr.args[0]->a->text;
+        operandNeedsContext = isConversion(callee);
+        if (!operandNeedsContext && m_subprograms.count(callee)) {
+            for (const SubprogramDecl* const subp : visibleSubprograms(callee)) {
+                const std::string& retMark = subp->returnType.mark;
+                const bool unconstrainedRet
+                    = (retMark == "std_logic_vector" || retMark == "std_ulogic_vector"
+                       || retMark == "bit_vector" || retMark == "unsigned" || retMark == "signed"
+                       || retMark == "u_unsigned" || retMark == "u_signed"
+                       || retMark == "string")
+                      && !subp->returnType.hasRange
+                      && subp->returnType.constraintMark.empty();
+                if (unconstrainedRet) operandNeedsContext = true;
+            }
+        }
+    }
     AstNodeExpr* valuep = (!vectorOperand && evalInt(*expr.args[0], folded))
                               ? makeIntConst(flp, folded)
-                              : lowerExpr(*expr.args[0], nullptr);
+                              : lowerExpr(*expr.args[0],
+                                          operandNeedsContext ? context : nullptr);
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
     if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {
@@ -4389,6 +4428,11 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr) {
         return resizeExpr(valuep, intType(flp), flp);
     }
     if (!valueType.isVector()) {
+        // A conversion of a value whose width only the consumer knows, e.g. one that
+        // holds a run-time-width to_unsigned: the packed form is the same
+        if (context && context->isVector() && context->width > 0 && valueType.isInt()) {
+            return resizeExpr(valuep, *context, flp);
+        }
         unsupportedError(flp, "conversion of a non-vector value");
         valuep->deleteTree();
         return nullptr;
@@ -4755,6 +4799,95 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
     AstSel* const selp = new AstSel{flp, basep, offsetp, width};
     selp->dtypep(findVectorWidth(flp, baseType.kwd, baseType.signing, width));
     return selp;
+}
+
+//! Slice assignment with a run-time width: VHDL bounds the result by the source, so every
+//! width the arrays allow gets one guarded write with a static width and a run-time offset
+AstNode* Lowering::lowerDynamicSliceAssign(const Stmt& stmt, bool variable) {
+    FileLine* const flp = stmt.flp;
+    const Expr& slice = *stmt.target;
+    const bool ascendingSlice = slice.text != "downto";
+    AstNodeExpr* const basep = lowerDesignator(*slice.a, true);
+    if (!basep) return nullptr;
+    VType baseType;
+    if (!typeOfDesignator(*slice.a, baseType)) baseType = typeOfDType(basep->dtypep());
+    if (!baseType.isVector() || baseType.elemWidth <= 0) {
+        unsupportedError(flp, "slice of a non-array value with a run-time width");
+        basep->deleteTree();
+        return nullptr;
+    }
+    if (ascendingSlice != baseType.ascending) {
+        unsupportedError(flp, "slice against the array direction with non-static bounds");
+        basep->deleteTree();
+        return nullptr;
+    }
+    const int elemWidth = baseType.elemWidth;
+    const int maxCount = baseType.length();
+    if (maxCount <= 0) {
+        basep->deleteTree();
+        return nullptr;
+    }
+    AstNodeExpr* const rightp = lowerExpr(*slice.c, nullptr);
+    AstNodeExpr* const leftp = lowerExpr(*slice.b, nullptr);
+    if (!rightp || !leftp) {
+        basep->deleteTree();
+        if (rightp) rightp->deleteTree();
+        if (leftp) leftp->deleteTree();
+        return nullptr;
+    }
+    // The value is evaluated once and zero-extended, so every guarded write can take its
+    // own part of it (VHDL requires it to be exactly as wide as the slice)
+    VType wideType = vectorType(flp, baseType.kwd, baseType.signing, maxCount * elemWidth);
+    AstNodeExpr* valuep = lowerExpr(*stmt.value, &wideType);
+    if (!valuep) {
+        basep->deleteTree();
+        rightp->deleteTree();
+        leftp->deleteTree();
+        return nullptr;
+    }
+    valuep = resizeExpr(valuep, wideType, flp);
+    // The element count, captured once so every guard sees the same value
+    VType intT = intType(flp);
+    AstNodeExpr* countDiffp
+        = new AstSub{flp, ascendingSlice ? rightp->cloneTree(false) : leftp->cloneTree(false),
+                     ascendingSlice ? leftp->cloneTree(false) : rightp->cloneTree(false)};
+    countDiffp->dtypep(intT.dtp);
+    AstNodeExpr* const countp = new AstAdd{flp, countDiffp, makeIntConst(flp, 1)};
+    countp->dtypep(intT.dtp);
+    AstVar* const countVarp
+        = new AstVar{flp, VVarType::VAR, "vhdlslice_" + std::to_string(++m_loopSeq), intT.dtp};
+    m_modp->addStmtsp(countVarp);
+    AstNode* headp = new AstAssign{flp, new AstVarRef{flp, countVarp, VAccess::WRITE}, countp};
+    // The right operand is the selection's least significant element
+    AstNodeExpr* offsetp = rightp->cloneTree(false);
+    if (baseType.ascending) {
+        offsetp = new AstSub{flp, makeIntConst(flp, baseType.right), offsetp};
+    } else if (baseType.right != 0) {
+        offsetp = new AstSub{flp, offsetp, makeIntConst(flp, baseType.right)};
+    }
+    offsetp->dtypep(intT.dtp);
+    for (int i = 0; i < maxCount; ++i) {
+        AstNodeExpr* const condp
+            = new AstGt{flp, new AstVarRef{flp, countVarp, VAccess::READ}, makeIntConst(flp, i)};
+        condp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        AstNodeExpr* const offsetAddp
+            = new AstAdd{flp, offsetp->cloneTree(false), makeIntConst(flp, i * elemWidth)};
+        offsetAddp->dtypep(intT.dtp);
+        AstSel* const lhsp = new AstSel{flp, basep->cloneTree(false), offsetAddp, elemWidth};
+        lhsp->dtypep(findVectorWidth(flp, baseType.kwd, baseType.signing, elemWidth));
+        AstSel* const rhsp = new AstSel{flp, valuep->cloneTree(false),
+                                        makeIntConst(flp, i * elemWidth), elemWidth};
+        rhsp->dtypep(findVectorWidth(flp, baseType.kwd, baseType.signing, elemWidth));
+        AstNode* const assignp
+            = variable ? static_cast<AstNode*>(new AstAssign{flp, lhsp, rhsp})
+                       : static_cast<AstNode*>(new AstAssignDly{flp, lhsp, rhsp});
+        headp = AstNode::addNext<AstNode, AstNode>(headp, new AstIf{flp, condp, assignp, nullptr});
+    }
+    basep->deleteTree();
+    rightp->deleteTree();
+    leftp->deleteTree();
+    valuep->deleteTree();
+    return headp;
 }
 
 AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
@@ -6569,6 +6702,15 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
     if (stmt.alternatives.empty() && stmt.value && stmt.value->kind == Expr::UNAFFECTED) {
         return nullptr;
     }
+    // A slice whose width is only known at run time cannot be one selection node
+    if (stmt.target->kind == Expr::SLICE && stmt.target->a && stmt.target->b && stmt.target->c
+        && stmt.alternatives.empty()) {
+        int64_t count = 0;
+        if (!sliceWidth(*stmt.target->b, *stmt.target->c, stmt.target->text != "downto",
+                        count)) {
+            return lowerDynamicSliceAssign(stmt, variable);
+        }
+    }
     AstNodeExpr* lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return nullptr;
     const VType ltype = typeOfTarget(*stmt.target, lhsp);
@@ -7323,11 +7465,6 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
 
 AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     FileLine* const flp = stmt.flp;
-    // `exit` and `next` act on an iteration the unroller cannot see
-    if (usesExitNext(stmt.body)) {
-        unsupportedError(flp, "loop with 'exit' or 'next' whose range is not static");
-        return nullptr;
-    }
     const bool up = stmt.rangeAscending;
     VType intT = intType(flp);
     int64_t left = 0;
@@ -7355,22 +7492,42 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
         capturep = new AstAssign{flp, new AstVarRef{flp, boundVarp, VAccess::WRITE}, boundp};
         boundp = new AstVarRef{flp, boundVarp, VAccess::READ};
     }
+    // `exit` and `next` latch the same per-loop flags the unrolled path uses: the exit
+    // flag joins the loop test, so the loop stops after the iteration that set it, and
+    // the statements after an exit or next are guarded by their flag
+    LoopFrame frame;
+    frame.label = stmt.loopLabel;
+    frame.exitp = newLoopFlag(flp, "exit");
+    frame.nextp = newLoopFlag(flp, "next");
+    frame.guard = usesExitNext(stmt.body);
+    m_loops.push_back(frame);
     AstLoop* const loopp = new AstLoop{flp};
-    AstNodeExpr* const testp
+    AstNodeExpr* const rangep
         = up ? static_cast<AstNodeExpr*>(
                    new AstLte{flp, new AstVarRef{flp, varp, VAccess::READ}, boundp})
              : static_cast<AstNodeExpr*>(
                    new AstGte{flp, new AstVarRef{flp, varp, VAccess::READ}, boundp});
+    rangep->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    AstNodeExpr* const exitNotp
+        = new AstNot{flp, new AstVarRef{flp, frame.exitp, VAccess::READ}};
+    exitNotp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    AstNodeExpr* const testp = new AstAnd{flp, rangep, exitNotp};
     testp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     loopp->addStmtsp(new AstLoopTest{flp, loopp, testp});
-    if (AstNode* const bodyp = lowerStmtList(stmt.body)) loopp->addStmtsp(bodyp);
+    // The next flag only skips the rest of one iteration
+    if (frame.guard) loopp->addStmtsp(clearLoopFlag(flp, frame.nextp));
+    AstNode* const bodyp = lowerStmtList(stmt.body);
+    m_loops.pop_back();
+    if (bodyp) loopp->addStmtsp(bodyp);
     AstNodeExpr* const stepp
         = new AstAdd{flp, new AstVarRef{flp, varp, VAccess::READ}, new AstConst{flp, 1}};
     stepp->dtypep(intT.dtp);
     loopp->addStmtsp(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, stepp});
     restoreScope(savedScope);
     AstNode* resultp = AstNode::addNext<AstNode, AstNode>(
-        new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, initp}, loopp);
+        clearLoopFlag(flp, frame.exitp),
+        AstNode::addNext<AstNode, AstNode>(
+            new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, initp}, loopp));
     if (capturep) resultp = AstNode::addNext<AstNode, AstNode>(capturep, resultp);
     return resultp;
 }
@@ -8897,7 +9054,9 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
     // An unconstrained array return type takes its width from the body and the context
     const bool retSized = !isUnconstrainedMark(subp->returnType.mark) || subp->returnType.hasRange
                           || !subp->returnType.constraintMark.empty();
-    m_funcRetp = retSized && resolveType(subp->returnType, retType) ? &retType : nullptr;
+    // An unconstrained return type takes its width from the body, and a body that needs
+    // one (a conversion whose width is a run-time value) takes the caller's type
+    m_funcRetp = retSized && resolveType(subp->returnType, retType) ? &retType : context;
     const InlineCont noCont = [](InlineEnv&) -> AstNodeExpr* { return nullptr; };
     AstNodeExpr* resultp = evalFuncBlock(subp->body, 0, env, noCont, nullptr, 0);
     m_funcRetp = outerRetp;

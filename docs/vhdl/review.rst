@@ -182,7 +182,11 @@ subprogram overloads are selected by base parameter type, including
 type names. An integer actual selects an integer overload over a real one; a
 real formal still accepts an integer literal when it is the only candidate. A
 `string` formal accepts string actuals and string constants, and a discrete
-subtype names an array's index range (`unsigned(Addr_c)`). A
+subtype names an array's index range (`unsigned(Addr_c)`). A loop whose range is
+only known at run time runs as a loop and its `exit` latches a flag the loop test
+reads, a slice assignment whose width is a run-time value becomes one guarded
+write per width, and a conversion whose length is a run-time value takes the type
+its consumer needs. A
 string literal keeps a doubled quote as one quote character, and a case choice
 that pairs literals the two-state model merges (`'0'` with `'L'`) is one
 choice rather than a duplicate. A

@@ -956,6 +956,28 @@ ______
     - a string constant records its text alongside its packed value, read back from the
       packed characters, so it can be forwarded like a generic
     - ``t_vhdl_string_overload``
+  * - N147
+    - `exit` inside a loop whose range is not static, which open-logic's first-bit decoder
+      uses to leave its search of a variable number of bits
+    - the run-time loop now latches the same per-iteration flags the unrolled path uses:
+      the exit flag joins the loop test, so the loop stops after the iteration that set
+      it, and statements after an exit or next are guarded by their flag
+    - ``t_vhdl_runtime_loop``
+  * - N148
+    - a slice assignment whose width is a run-time value,
+      `v.Addr(stg)(inst)(AddrHighIdx_v downto AddrLowIdx_v) := ...`, which a selection node
+      cannot express because its width is static
+    - every width the target allows gets one guarded write with a static width and a
+      run-time offset, with the value evaluated once per assignment
+    - ``t_vhdl_runtime_loop``
+  * - N149
+    - a conversion whose length is a run-time value, as `toUslv(bit, AddrBits_v)` becomes
+      through `std_logic_vector(to_unsigned(input, len))`
+    - without a static width the conversion takes the consumer's type, and the consumer's
+      context is passed down through a nested conversion and into the body of an inlined
+      function whose return type is unconstrained; the elements beyond the run-time width
+      are never selected, which is what padding with zeros means
+    - ``t_vhdl_runtime_loop``
 
 ____
 Open
