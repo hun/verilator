@@ -978,6 +978,16 @@ ______
       function whose return type is unconstrained; the elements beyond the run-time width
       are never selected, which is what padding with zeros means
     - ``t_vhdl_runtime_loop``
+  * - N150
+    - an input port's default that names the entity's own generics, as open-logic's rate
+      limiter takes both the width and the default value of its configuration ports from
+      the period and sample-count generics
+    - a port associated by no actual lowers its declared default in the entity's
+      declarative region, with that region's packages imported and its generics registered
+      from the bindings of the instance being lowered; the bindings are kept until the
+      instance's port map is done, so an instance that binds only some generics gets the
+      others' defaults
+    - ``t_vhdl_generic_default``
 
 ____
 Open

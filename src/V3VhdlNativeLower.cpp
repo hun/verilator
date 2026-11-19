@@ -355,6 +355,9 @@ class Lowering final {
     size_t m_deferSeq = 0;  // Sequence number of the part being registered
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
     std::map<std::string, VType> m_constTypes;  // Type of each typed constant
+    //! The generic bindings of the instance whose port map lowers, so a port default
+    //! that names the entity's own generics sees the values this instance binds
+    GenericBindings m_instanceBindings;
     std::map<std::string, std::string> m_stringConsts;  // Folded name to its text
     //! One value inside a subprogram that reads a file at elaboration
     struct FileVal final {
@@ -676,6 +679,7 @@ class Lowering final {
                       const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk);
     bool registerGenerics(const std::vector<GenericDecl>& generics,
                           const GenericBindings* bindings, bool probe);
+    void freeInstanceBindings();  // Releases the bindings kept for one instance's ports
     AstModule* specializeInstance(const Concurrent& conc, const EntityUnit& entity,
                                   AstModule* basep, const PortBoundsMap& portBounds);
     //! Whether a port's index range comes from the instance rather than the entity
@@ -10435,6 +10439,13 @@ static bool unconstrainedVectorSpec(const TypeSpec& spec) {
            && spec.indexConstraints.empty() && spec.memberConstraints.empty();
 }
 
+void Lowering::freeInstanceBindings() {
+    for (auto& entry : m_instanceBindings) {
+        if (entry.second.valuep) entry.second.valuep->deleteTree();
+    }
+    m_instanceBindings.clear();
+}
+
 bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                                 const GenericBindings* bindings, bool probe) {
     bool ok = true;
@@ -11216,7 +11227,7 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
     if (bindings.empty() && portBounds.empty()) {
         // Nothing to bind: an instance uses the entity's own module
         m_designp->baseUsed.insert(entity.name);
-        return basep;
+        return basep;  // m_instanceBindings is already empty
     }
     std::string key = entity.name;
     // The port-bounds part leads the key: V3VhdlNative.cpp looks for the prefix
@@ -11267,7 +11278,8 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
     const auto found = cache.find(key);
     if (found != cache.end()) {
         AstModule* const cachedp = found->second;
-        freeBindings(bindings);
+        // The port map of this instance still lowers its defaults: keep the bindings
+        m_instanceBindings = std::move(bindings);
         return cachedp;  // Null when an earlier specialization of this key failed
     }
     if (++m_designp->specDepth > 32) {
@@ -11293,7 +11305,8 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         = child.emit(entity, *archIt->second, specp, bindings.empty() ? nullptr : &bindings,
                      portBounds.empty() ? nullptr : &portBounds);
     --m_designp->specDepth;
-    freeBindings(bindings);
+    // The port map of this instance still lowers its defaults: keep the bindings
+    m_instanceBindings = std::move(bindings);
     cache[key] = ok ? specp : nullptr;
     return ok ? specp : nullptr;
 }
@@ -11606,6 +11619,7 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
 //! An instantiation becomes an AstCell bound to the instantiated entity's module
 AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
+    freeInstanceBindings();
     if (!m_modulesp) {
         unsupportedError(flp, "instantiation without an elaborated design");
         return nullptr;
@@ -11707,10 +11721,13 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                              });
             if (!matches) continue;
             // The default is written in the entity's scope, so its packages are visible
-            // there even when the instance does not import them
+            // there even when the instance does not import them, and its generics carry
+            // the values this instance binds (IEEE 1076-2008 6.5.7.1)
             ScopeSave saved = saveScope();
             const std::set<std::string> savedImported = m_imported;
             for (const auto& use : entityp->uses) importPackage(use.pkg, use.decl);
+            for (const TypeDecl& typeDecl : entityp->types) registerType(typeDecl);
+            registerGenerics(entityp->generics, &m_instanceBindings, true);
             AstNodeExpr* defaultp = lowerExpr(*port.init, &aggType);
             restoreScope(saved);
             m_imported = savedImported;
@@ -11986,6 +12003,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     }
     AstCell* const cellp = new AstCell{
         flp, flp, conc.instanceLabel + m_genSuffix, modp->name(), pinsp, nullptr, nullptr};
+    freeInstanceBindings();
     return cellp;
 }
 

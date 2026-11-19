@@ -186,7 +186,8 @@ subtype names an array's index range (`unsigned(Addr_c)`). A loop whose range is
 only known at run time runs as a loop and its `exit` latches a flag the loop test
 reads, a slice assignment whose width is a run-time value becomes one guarded
 write per width, and a conversion whose length is a run-time value takes the type
-its consumer needs. A
+its consumer needs. An input port's default may name the entity's own generics,
+and an instance that binds only some of them fills in the rest. A
 string literal keeps a doubled quote as one quote character, and a case choice
 that pairs literals the two-state model merges (`'0'` with `'L'`) is one
 choice rather than a duplicate. A
