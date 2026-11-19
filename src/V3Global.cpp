@@ -106,7 +106,9 @@ void V3Global::readFiles() {
     }
     const bool forceVhdl = v3Global.opt.sourceLangVhdl();
     if ((anyVhdl && anySv) || (forceVhdl && anySv)) {
-        v3error("Cannot mix VHDL and SystemVerilog design sources in one invocation");
+        v3error("Cannot mix VHDL and SystemVerilog design sources in one invocation\n"
+                << "... Compile one language per invocation; use --lib-create to instantiate"
+                   " the VHDL hierarchy from a SystemVerilog run");
     }
     const bool vhdlMode = forceVhdl || anyVhdl;
     v3Global.vhdlMode(vhdlMode);

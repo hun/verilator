@@ -94,8 +94,9 @@ Access, protected, file, textio runtime      Excluded   File contents can be rea
                                                          elaboration; runtime objects are refused
 Timing, multiple waits, external names       Excluded   Single top-level wait and timed
                                                          testbench constructs are supported
-Mixed VHDL/SystemVerilog sources             Excluded   One language per invocation
-============================================  =========  =====================================
+Mixed VHDL/SystemVerilog sources             Partial    Library boundary via --lib-create; one
+                                                        language per invocation
+===========================================  =========  =====================================
 
 Where the implementation is sound
 =================================
@@ -285,7 +286,8 @@ Remaining feature gaps
 - VHDL-2019 features (interface views, conditional expressions, 64-bit
   integer) are not implemented.
 - Mixed VHDL/SystemVerilog design sources are rejected; only one language per
-  invocation is supported.
+  invocation is supported. A SystemVerilog top can instantiate a VHDL design
+  built with :vlopt:`--lib-create`, as :ref:`vhdl_usage` describes.
 
 Inout and tristate
 ==================
