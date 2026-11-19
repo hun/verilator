@@ -62,12 +62,13 @@ WP0 proves the seam end-to-end:
 - Per-file `V3VhdlParse::parseFile()` collects design units only; `finish()` binds
   `(library, entity)` to architectures and emits `AstModule`s with port `AstVar`s before
   `V3LinkCells`.
-- `V3VhdlLink` applies the `.vlt` directives that `V3LinkParse` would have applied
-  (`applyVarAttr`/`applyFTask`/`applyCoverageBlock`/`applyCase`) and checks the
-  post-width contract under `--debug-check`.
-- `process()` skips `V3LinkParse`…`V3WidthCommit` in VHDL mode and commits the width
-  invariants directly. `.vlt` control files stay on the SV parser; the standard package,
-  libmaps and hierarchical parameter files are skipped.
+- `V3VhdlLink` checks the post-width contract under `--debug-check`, on the modules the
+  frontend emitted; the `.vlt` directives are applied by `V3LinkParse`, which runs on VHDL
+  modules too.
+- `process()` runs the same front half for both languages (§3.5): the width pass leaves the
+  committed VHDL dtypes alone. `.vlt` control files stay on the SV parser; the standard
+  package, libmaps and hierarchical parameter files are read whenever a SystemVerilog
+  source is present.
 - Each design file is parsed by the frontend of its language and both feed one netlist, so
   mixed SystemVerilog/VHDL invocations elaborate (§3.5).
 
@@ -236,7 +237,8 @@ frontend plugs in at that boundary:
    sets `AstPin::modVarp`, port `pinNum`s, `VAccess`, and asserts the AST contract
    (Section 4).
 1. `process()` takes a source-language branch that skips the SV front-half passes and
-   continues at `wrapTop`.
+   continues at `wrapTop`. (M1 only; superseded — the front half now runs for both
+   languages, §3.5.)
 
 The VHDL frontend therefore has two entry points; no virtual interface is needed, because
 `readFiles()` selects one language per run:
@@ -314,7 +316,7 @@ instead of setting `VAccess` in the binder, but only if its assumptions hold (re
 | `src/V3VhdlSem*.{h,cpp}` | symbol tables, visibility, overload resolution, types, static evaluation |
 | `src/V3VhdlElab.{h,cpp}` | entity/architecture/component binding, generics, generate unrolling, array subtype specialization |
 | `src/V3VhdlLower.{h,cpp}` | VHDL AST → Verilator AST |
-| `src/V3VhdlLink.{h,cpp}` | pin/port binding, `VAccess`, control-directive application (`applyFTask`/`applyVarAttr`/`applyCoverageBlock`/`applyCase`, `FileLine::applyIgnores`), AST-contract assertion |
+| `src/V3VhdlLink.{h,cpp}` | AST-contract assertion over the emitted modules (control directives are `V3LinkParse`'s job since §3.5) |
 | `src/V3VhdlStdPkg.{h,cpp}` | `std_logic_1164` and `numeric_std` intrinsics |
 
 The frontend is single-threaded (`VL_MT_DISABLED`), like the existing parser. No new
