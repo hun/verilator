@@ -1125,14 +1125,16 @@ ______
       unsigned or signed vector stays unsigned or signed (IEEE 1076-2008 9.3.6)
     - ``t_vhdl_concat_signing``
   * - N173
-    - an element write into an `integer_vector` local left-justifies the value in the top
-      slot: a function that fills `res : integer_vector(3 downto 0)` and returns it stores
-      its last element at the top bits of the word instead of its low bits (`16` becomes
-      `0x10000000`), and poc's `arith_Adder_Wide` then plans its blocks from wrong widths
-      and adds incorrectly (`0x7fff + 1 = 0x87f8`)
-    - the element write must right-justify the value in its element slot; the read path
-      agrees with the write today, which is why the corruption only shows once the value
-      is consumed as a number
+    - poc's `arith_Adder_Wide` computes wrong sums: at `BITS=16`, `BLOCKS=4` it gives
+      `0x0000 + 0x7777 + 1 = 0x7fb8` where GHDL gives `0x7778`, while its block-width plan
+      and the rightmost block are right. The failure is specific to the default
+      carry-skip scheme: `SKIPPING=PLAIN` and `SKIPPING=PPN_KS` agree with GHDL, and
+      `ARCH=CAI` fails the same way as `ARCH=AAM`
+    - the carry-skip path recovers the block carries as
+      `c <= z(BLOCKS+M-2 downto M) xor p` with `c` and `p` declared over
+      `(BLOCKS-1 downto 1)`, and the block sums are selected from two addends by `c(i)`;
+      the same shape reconstructed by hand agrees with GHDL, so the divergence is in how
+      the real generate nests the block signals and their slice assignments
   * - N168
     - an impure function that the design calls while elaborating but whose body never
       reads a file, e.g. poc's `mem_InitMemory` in a signal initializer, was refused as a
