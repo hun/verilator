@@ -932,6 +932,30 @@ ______
       standard requires. The selector must not be static, or the case folds before its
       choices are collected
     - ``t_vhdl_case_metavalue``
+  * - N144
+    - a `string` formal that has to accept a string actual, which open-logic's
+      `choose(cond, a, b)` needs: its string overload was rejected and the call reported
+      "no declaration of 'choose' accepts the actuals"
+    - the formal's type was built with `unsigned` signing while every string value the
+      frontend builds uses `nosign`, so `typesMatch` rejected the pair; a `character` (a
+      string's element) had the same mismatch
+    - ``t_vhdl_string_overload``
+  * - N145
+    - a discrete subtype as an array index constraint, `unsigned(Addr_c)` with
+      `subtype Addr_c is integer range log2ceil(Depth_g) downto 0`, which open-logic's
+      packet FIFO uses for its pointers
+    - the vector type mark only accepted a written range; it now defers to the same
+      helper that resolves a subtype constraint, and that helper fills in the width and
+      data type when the constraint names an *integer* subtype rather than only copying
+      its bounds
+    - ``t_vhdl_subtype_constraint``
+  * - N146
+    - a string *constant* bound to a string generic (`RamStyle_g => SmallRamStyle_c`):
+      only a string generic's text was known, so the instance was refused with "string
+      generic actual is not supported"
+    - a string constant records its text alongside its packed value, read back from the
+      packed characters, so it can be forwarded like a generic
+    - ``t_vhdl_string_overload``
 
 ____
 Open

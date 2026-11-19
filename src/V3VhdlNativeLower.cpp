@@ -2498,24 +2498,20 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
             flp->v3error("VHDL: unknown subtype '" + spec.constraintMark + "'");
             return false;
         }
-        if (it->second.kind == VType::INT) {
-            type.left = it->second.left;
-            type.right = it->second.right;
-            type.ascending = it->second.ascending;
+        // The subtype's range constrains this type whatever the subtype itself is: an
+        // integer subtype gives an array's index range, as `unsigned(Addr_c)` uses it
+        type.left = it->second.left;
+        type.right = it->second.right;
+        type.ascending = it->second.ascending;
+        if (type.kind == VType::INT) {
             type.intLow = it->second.intLow;
             type.intHigh = it->second.intHigh;
-            return true;
-        }
-        if (type.isVector()) {
-            type.left = it->second.left;
-            type.right = it->second.right;
-            type.ascending = it->second.ascending;
+        } else if (type.isVector()) {
             type.width = type.elemWidth * type.length();
             type.dtp = type.kind == VType::ARRAY
                            ? findVectorWidth(flp, type.kwd, type.signing, type.width)
                            : findVector(flp, type.kwd, type.signing, type.left, type.right,
                                         type.ascending);
-            return true;
         }
         return true;
     }
@@ -2587,6 +2583,24 @@ TypeSpec Lowering::copySpec(const TypeSpec& spec) {
         out.indexConstraints.push_back(copySpec(nested));
     }
     return out;
+}
+
+//! Text of a packed string constant: one 8-bit character per element, first character
+//! in the most significant bits, as `makeStringConst` packs them
+static std::string stringTextOfConst(AstConst* constp) {
+    const int width = constp->width();
+    if (width <= 0 || width % 8 != 0) return std::string{};
+    const int length = width / 8;
+    std::string text;
+    for (int i = 0; i < length; ++i) {
+        unsigned code = 0;
+        const int base = (length - 1 - i) * 8;
+        for (int bit = 0; bit < 8; ++bit) {
+            if (constp->num().bitIs1(base + bit)) code |= 1u << bit;
+        }
+        text.push_back(static_cast<char>(code));
+    }
+    return text;
 }
 
 //! A record type whose members are unconstrained takes their bounds from the constant's
@@ -2826,26 +2840,19 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         unsupportedError(flp, "type '" + mark + "'");
         return false;
     }
-    if (!spec.hasRange) {
+    if (!spec.hasRange && spec.constraintMark.empty()) {
         unsupportedError(flp, "unconstrained type '" + mark + "'");
         return false;
     }
-    int64_t left = 0;
-    int64_t right = 0;
-    bool ascending = false;
-    if (!constraintBounds(spec, left, right, ascending)) {
-        unsupportedError(flp, "non-static array range");
-        return false;
-    }
-    const VBasicDTypeKwd kwd = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-    const VSigning signing = vectorSigning(mark);
-    out = vectorType(flp, kwd, signing,
-                     std::abs(static_cast<int>(left) - static_cast<int>(right)) + 1);
-    out.left = static_cast<int>(left);
-    out.right = static_cast<int>(right);
-    out.ascending = ascending;
-    out.dtp = findVector(flp, kwd, signing, out.left, out.right, out.ascending);
+    // The constraint is either a written range or a discrete subtype mark, as in
+    // `unsigned(Addr_c)`; `applyRange` resolves both
+    out = VType{};
+    out.kind = VType::VECTOR;
+    out.kwd = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+    out.signing = vectorSigning(mark);
+    out.elemWidth = 1;
     out.typeName = mark;
+    if (!applyRange(spec, out)) return false;
     return true;
 }
 
@@ -7992,19 +7999,22 @@ bool Lowering::formalType(const TypeSpec& spec, VType& out) const {
         out.typeName = mark == "bit" ? "bit" : (mark == "boolean" ? "boolean" : "std_ulogic");
         return true;
     }
+    // A character is a VHDL array element, not a numeric_std vector, so it signs like
+    // `stringType` builds one; mismatched signing would make every string actual fail to
+    // match a `string` formal
     if (mark == "character") {
-        out = vectorType(spec.flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8);
+        out = vectorType(spec.flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, 8);
         out.typeName = "character";
         return true;
     }
     if (mark == "string") {
         out.kind = VType::ARRAY;
         out.elemp = std::make_shared<VType>(
-            vectorType(spec.flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 8));
+            vectorType(spec.flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, 8));
         out.elemp->typeName = "character";
         out.elemWidth = 8;
         out.kwd = VBasicDTypeKwd::LOGIC;
-        out.signing = VSigning::UNSIGNED;
+        out.signing = VSigning::NOSIGN;
         out.typeName = "string";
         return true;
     }
@@ -10246,6 +10256,11 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
             std::unique_ptr<AstConst>(last ? constp : constp->cloneTree(false)));
         m_constValues[name.first] = m_ownedConsts.back().get();
         m_constTypes[name.first] = constType;
+        // A string value's text is what a string generic or a comparison needs, and a
+        // constant can be bound to a generic just as a generic can be forwarded
+        if (constType.kind == VType::ARRAY && constType.elemWidth == 8) {
+            m_stringConsts[name.first] = stringTextOfConst(m_ownedConsts.back().get());
+        }
     }
 }
 
