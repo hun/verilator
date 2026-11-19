@@ -8254,20 +8254,50 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
     }
     case Expr::INDEX: {
         if (typeOfDesignator(expr, out)) return true;
-        // The parser writes both an array index and a function call as INDEX; a call
-        // has a subprogram name as its prefix.
-        if (!expr.a || expr.a->kind != Expr::NAME || !m_subprograms.count(expr.a->text)) {
-            return false;
+        // The parser writes an array index, a function call, and a type conversion all as
+        // INDEX; the prefix says which.
+        if (!expr.a || expr.a->kind != Expr::NAME) return false;
+        if (m_subprograms.count(expr.a->text)) {
+            Expr call{Expr::CALL};
+            call.flp = expr.flp;
+            call.text = expr.a->text;
+            call.spelling = expr.a->spelling;
+            call.formalNames = expr.formalNames;
+            for (const ExprP& argp : expr.args) {
+                call.args.push_back(argp ? cloneExpr(*argp) : ExprP{});
+            }
+            return actualType(call, out);
         }
-        Expr call{Expr::CALL};
-        call.flp = expr.flp;
-        call.text = expr.a->text;
-        call.spelling = expr.a->spelling;
-        call.formalNames = expr.formalNames;
-        for (const ExprP& argp : expr.args) {
-            call.args.push_back(argp ? cloneExpr(*argp) : ExprP{});
+        // A type conversion carries its mark, and an unconstrained array mark takes the
+        // operand's bounds (IEEE 1076-2008 9.3.6). Overload resolution needs this: without
+        // it a user-defined operator over an unrelated type is selected for the built-in
+        // operator, as poc's `"xor"(T_POLARITY, std_logic_vector)` was for
+        // `std_logic_vector(z(...)) xor p`.
+        if (expr.args.size() != 1 || !expr.args[0]) return false;
+        VType operandType;
+        if (!actualType(*expr.args[0], operandType)) return false;
+        const auto declared = m_types.find(expr.a->text);
+        if (declared != m_types.end()) {
+            out = declared->second;
+            if (!out.dtp) {
+                out.width = operandType.width;
+                out.left = operandType.left;
+                out.right = operandType.right;
+                out.ascending = operandType.ascending;
+            }
+            return true;
         }
-        return actualType(call, out);
+        if (expr.a->text == "integer" || expr.a->text == "natural" || expr.a->text == "positive"
+            || expr.a->text == "to_integer") {
+            out = intType(expr.flp);
+            return true;
+        }
+        if (!isConversion(expr.a->text) || !operandType.isVector()) return false;
+        out = literalVectorType(expr.flp, expr.a->text, operandType.width);
+        out.left = operandType.left;
+        out.right = operandType.right;
+        out.ascending = operandType.ascending;
+        return true;
     }
     case Expr::ATTR:
         if (expr.text == "high" || expr.text == "low" || expr.text == "left"

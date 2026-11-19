@@ -162,6 +162,9 @@ The former overload and bound-check divergences are closed:
 - Two polymorphic operands are matched by their bit-string widths and the
   expected result type. If neither operand is a sized literal, the built-in
   operator applies as before.
+- A type conversion has the type of its mark, constrained by its operand, so an
+  operator declared over an unrelated type is no longer selected for the
+  built-in operator; a user operator still wins where its formals match.
 - A dynamic ``'succ``/``'pred`` of an end enumeration literal is checked at run
   time and reports an error and finishes; a static one is a frontend error.
 

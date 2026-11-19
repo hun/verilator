@@ -1125,16 +1125,17 @@ ______
       unsigned or signed vector stays unsigned or signed (IEEE 1076-2008 9.3.6)
     - ``t_vhdl_concat_signing``
   * - N173
-    - poc's `arith_Adder_Wide` computes wrong sums: at `BITS=16`, `BLOCKS=4` it gives
-      `0x0000 + 0x7777 + 1 = 0x7fb8` where GHDL gives `0x7778`, while its block-width plan
-      and the rightmost block are right. The failure is specific to the default
-      carry-skip scheme: `SKIPPING=PLAIN` and `SKIPPING=PPN_KS` agree with GHDL, and
-      `ARCH=CAI` fails the same way as `ARCH=AAM`
-    - the carry-skip path recovers the block carries as
-      `c <= z(BLOCKS+M-2 downto M) xor p` with `c` and `p` declared over
-      `(BLOCKS-1 downto 1)`, and the block sums are selected from two addends by `c(i)`;
-      the same shape reconstructed by hand agrees with GHDL, so the divergence is in how
-      the real generate nests the block signals and their slice assignments
+    - poc's `arith_Adder_Wide` computed wrong sums: at `BITS=16`, `BLOCKS=4` it gave
+      `0x0000 + 0x7777 + 1 = 0x7fb8` where GHDL gives `0x7778`, and only the carry-skip
+      schemes (`SKIPPING=CCC`) were affected. The block carries are recovered with
+      `c <= std_logic_vector(z(BLOCKS+M-2 downto M)) xor p`, and the model computed
+      `c = (z_slice = 0) ? p : not p`: a type conversion had no type of its own, so
+      overload resolution skipped its formal and selected poc's
+      `"xor"(left : T_POLARITY; right : std_logic_vector)` for two std_logic_vectors
+    - a type conversion carries its mark's type, with an unconstrained array mark taking
+      the operand's bounds (IEEE 1076-2008 9.3.6), so the built-in elementwise operator
+      stays selected and a user operator is chosen only when its formals match
+    - ``t_vhdl_operator_overload``
   * - N168
     - an impure function that the design calls while elaborating but whose body never
       reads a file, e.g. poc's `mem_InitMemory` in a signal initializer, was refused as a

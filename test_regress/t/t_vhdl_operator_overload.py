@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL operator and array-type overload resolution
+# DESCRIPTION: Verilator: a user operator over another type leaves the built-in one
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
