@@ -28,6 +28,7 @@
 #include "V3FileLine.h"
 #include "V3Global.h"
 #include "V3Os.h"
+#include "V3Stats.h"
 #include "V3VhdlNative.h"
 
 #include <string>
@@ -68,6 +69,14 @@ void V3VhdlParseImp::finish() {
         files.push_back(V3VhdlNativeFile{vfile.filename, vfile.libname, vfile.inLibrary});
     }
     V3VhdlNative::emit(m_rootp, files);
+    // The report counts the modules the sources produced, which the Verilog path counts
+    // while it links; VHDL mode skips that link, so count what the frontend emitted
+    uint64_t modules = 0;
+    for (AstNodeModule* modp = m_rootp->modulesp(); modp;
+         modp = VN_AS(modp->nextp(), NodeModule)) {
+        ++modules;
+    }
+    V3Stats::addStatSum(V3Stats::STAT_SOURCE_MODULES, modules);
 }
 
 //######################################################################
