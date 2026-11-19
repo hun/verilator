@@ -716,6 +716,9 @@ ExprP Parser::parsePrimary() {
         node->flp = m_cur.flp;
         if (allBits) {
             node->bits = std::move(bits);
+            // The same spelling is a std_logic_vector value in a logic context and a
+            // string in a string context, so the characters survive too
+            node->spelling = m_cur.text;
         } else {
             node->spelling = m_cur.text;
             node->text = m_cur.text;

@@ -603,6 +603,11 @@ class Lowering final {
         return typeOfDType(nodep->dtypep());
     }
 
+    //! Whether a value of this type is an aggregate, which never folds as an integer
+    static bool isAggregateType(const VType& type) {
+        return type.kind == VType::ARRAY || type.kind == VType::RECORD;
+    }
+
     AstConst* makeIntConst(FileLine* flp, int64_t value) const {
         const VType type = intType(flp);
         V3Number num{flp, type.width, static_cast<uint32_t>(value)};
@@ -1398,8 +1403,14 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
             if (argIt != m_pureCalls.back().args.end()) return evalInt(*argIt->second, value);
         }
         const auto bindIt = activeEnv().find(expr.text);
-        if (bindIt != activeEnv().end() && VN_IS(bindIt->second.exprp, Const)) {
-            value = static_cast<int64_t>(VN_AS(bindIt->second.exprp, Const)->num().toSInt());
+        if (bindIt != activeEnv().end() && VN_IS(bindIt->second.exprp, Const)
+            && !isAggregateType(bindIt->second.type)) {
+            // A fold is speculative and reports nothing, so a value that does not fit an
+            // integer is simply not folded (a string, or more than 64 bits)
+            const AstConst* const boundp = VN_AS(bindIt->second.exprp, Const);
+            if (boundp->num().isFourState() || boundp->width() > 64) return false;
+            value = boundp->num().isSigned() ? boundp->num().toSQuad()
+                                             : static_cast<int64_t>(boundp->num().toUQuad());
             return true;
         }
         const auto it = m_consts.find(expr.text);
@@ -2888,6 +2899,29 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         out.typeName = mark;
         return true;
     }
+    // The predefined arrays of a scalar element (IEEE 1076-2008 5.3.2.2): a use supplies
+    // the index range, as `integer_vector(0 to 1)` does in poc's memory package. The
+    // element is the scalar, so indexing yields an integer rather than a packed slice
+    if (mark == "integer_vector" || mark == "natural_vector" || mark == "positive_vector"
+        || mark == "boolean_vector" || mark == "time_vector") {
+        VType elem;
+        if (mark == "boolean_vector") {
+            elem.kind = VType::BOOLEAN;
+            elem.dtp = findBasic(flp, VBasicDTypeKwd::BIT);
+            elem.typeName = "boolean";
+        } else if (mark == "time_vector") {
+            elem = timeType(flp);
+        } else {
+            elem = intType(flp);
+        }
+        out = VType{};
+        out.kind = VType::ARRAY;
+        out.signing = VSigning::NOSIGN;
+        out.elemp = std::make_shared<VType>(elem);
+        out.elemWidth = elem.width;
+        out.typeName = mark;
+        return applyRange(spec, out);
+    }
     const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
                             || mark == "bit_vector" || mark == "unsigned" || mark == "signed";
     if (!vectorMark) {
@@ -2962,6 +2996,15 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return bitConst(flp, bit);
     }
     case Expr::BITS_LIT: {
+        // A string literal whose characters are all logic characters is a bit vector in a
+        // logic context, but a string in a character-array context: `"ZU"` is a legal
+        // std_logic_vector and a legal `string` (IEEE 1076-2008 9.3.2, 15.5)
+        if (context && !expr.spelling.empty()
+            && ((context->kind == VType::ARRAY && context->elemp
+                 && context->elemp->typeName == "character")
+                || context->typeName == "string")) {
+            return makeStringConst(flp, expr.spelling);
+        }
         const int width = static_cast<int>(expr.bits.size());
         AstNodeDType* dtp = nullptr;
         if (context && context->isVector() && context->width == width) {
@@ -3448,9 +3491,12 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     // A character literal is one character of a concatenated character array, but one
     // logic element of a concatenated logic or bit vector, even an eight-bit one
     const auto characterArray = [&](const Expr& other) {
-        if (other.kind == Expr::STRING_LIT) return true;
+        if (other.kind == Expr::STRING_LIT || other.kind == Expr::CHAR_LIT) return true;
         VType otherType;
-        return actualType(other, otherType) && otherType.kind == VType::ARRAY;
+        if (!actualType(other, otherType)) return false;
+        // A character is an element of a character array, so concatenating one with a
+        // character literal is a string rather than two logic elements
+        return otherType.kind == VType::ARRAY || otherType.typeName == "character";
     };
     if (bChar && !aChar) {
         lp = lowerExpr(*expr.a, nullptr);
@@ -6356,6 +6402,18 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
     };
     std::map<int64_t, std::string> seenValues;  // Value -> the text that named it
     for (const ExprP& choicep : choices) {
+        // A string literal whose characters are all logic characters is a bit vector in a
+        // logic context and one character per element of a string selector, as `"ZU"` is
+        // for a `string(3 to 4)` selector (IEEE 1076-2008 9.3.2, 15.5)
+        if (choicep->kind == Expr::BITS_LIT && !choicep->spelling.empty() && dtp
+            && dtp->width() == 8 * static_cast<int>(choicep->spelling.size())
+            && dtp->width() != static_cast<int>(choicep->bits.size())) {
+            AstNodeExpr* const stringp = makeStringConst(choicep->flp, choicep->spelling);
+            AstConst* const constp = VN_CAST(stringp, Const);
+            constp->dtypep(dtp);
+            cops.push_back(constp);
+            continue;
+        }
         if (choicep->kind == Expr::SLICE) {
             // A choice range expands to one case item per value
             int64_t left = 0;
@@ -6846,10 +6904,24 @@ AstNode* Lowering::lowerIf(const Stmt& stmt) {
     const auto entryVals = saveVarVals();
     for (std::size_t i = stmt.branches.size(); i-- > 0;) {
         const auto& branch = stmt.branches[i];
+        // A static condition decides its branch before it is lowered: a branch that cannot
+        // run may hold a null slice, which is legal but has no model form (IEEE 1076-2008
+        // 8.5), or a conversion the model cannot represent
+        bool staticValue = false;
+        const bool isStatic = branch.first && evalCond(*branch.first, staticValue);
         restoreVarVals(entryVals);
-        AstNode* bodyp = lowerStmtList(branch.second);
+        AstNode* bodyp = (isStatic && !staticValue) ? nullptr : lowerStmtList(branch.second);
         if (!branch.first) {
             elsesp = bodyp;
+            continue;
+        }
+        if (isStatic) {
+            if (staticValue) {
+                if (elsesp) elsesp->deleteTree();
+                elsesp = bodyp;
+            } else if (bodyp) {
+                bodyp->deleteTree();
+            }
             continue;
         }
         AstNodeExpr* const condp = lowerCond(*branch.first);
@@ -7818,7 +7890,6 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
     }
     std::string firstWhy;
     bool withoutBody = false;
-    bool impureSeen = false;
     std::vector<const SubprogramRef*> matching;
     for (const SubprogramRef* const refp : refs) {
         const SubprogramDecl& sub = *refp->declp;
@@ -7826,14 +7897,6 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
         if (!sub.hasBody) {
             withoutBody = true;
             continue;
-        }
-        if (function && sub.impure) {
-            // An impure function that reads a file builds its result at elaboration,
-            // so its call resolves like any other
-            if (!readsFile(sub)) {
-                impureSeen = true;
-                continue;
-            }
         }
         std::string why;
         if (!subprogramMatches(call, sub, why)) {
@@ -7886,8 +7949,6 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
     }
     if (withoutBody) {
         unsupportedError(call.flp, "call to subprogram '" + name + "' whose body was not read");
-    } else if (impureSeen) {
-        unsupportedError(call.flp, "impure function call '" + name + "'");
     } else if (!refs.empty() && !firstWhy.empty()) {
         unsupportedError(call.flp,
                          "arguments to '" + name + "' match no declaration: " + firstWhy);
@@ -8069,7 +8130,6 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
         if (!visibleSubprograms(expr.text).empty()) return false;
         return expr.a && actualType(*expr.a, out);
     case Expr::BINARY: {
-        if (!visibleSubprograms(expr.text).empty()) return false;
         const std::string& op = expr.text;
         if (op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">" || op == ">="
             || op == "?=" || op == "?/=" || op == "?<" || op == "?<=" || op == "?>"
@@ -8081,7 +8141,33 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
         }
         VType aType;
         VType bType;
-        if (!actualType(*expr.a, aType) || !actualType(*expr.b, bType)) return false;
+        const bool knownA = actualType(*expr.a, aType);
+        const bool knownB = actualType(*expr.b, bType);
+        // A user-declared operator decides the result type when its formals take both
+        // operands; an operand with no type of its own leaves that choice open, so only
+        // then does the operator stay unresolved
+        if (!visibleSubprograms(op).empty()) {
+            if (!knownA || !knownB) return false;
+            const SubprogramDecl* matchp = nullptr;
+            for (const SubprogramDecl* const subp : visibleSubprograms(op)) {
+                if (subp->kind != SubprogramDecl::FUNCTION || !subp->hasBody || subp->impure)
+                    continue;
+                const std::vector<std::pair<const FormalDecl*, std::string>> slots
+                    = formalSlots(*subp);
+                if (slots.size() != 2) continue;
+                VType formal0;
+                VType formal1;
+                if (!formalType(slots[0].first->type, formal0)
+                    || !formalType(slots[1].first->type, formal1)) {
+                    continue;
+                }
+                if (!typesMatch(formal0, aType) || !typesMatch(formal1, bType)) continue;
+                if (matchp) return false;  // Ambiguous: the lowerer reports it
+                matchp = subp;
+            }
+            if (matchp) return formalType(matchp->returnType, out);
+        }
+        if (!knownA || !knownB) return false;
         if (op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor"
             || op == "xnor") {
             if (aType.isVector() || bType.isVector()) {
@@ -8149,6 +8235,13 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
             out = VType{};
             out.kind = VType::INT;
             out.typeName = "integer";
+            return true;
+        }
+        // A constant whose value was lowered before its type folded keeps its VHDL type
+        // here, which is what an operator overload sees when it reads an operand
+        const auto constTypeIt = m_constTypes.find(expr.text);
+        if (constTypeIt != m_constTypes.end()) {
+            out = constTypeIt->second;
             return true;
         }
         if (m_realConsts.count(expr.text)) {
@@ -10463,6 +10556,37 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
             && (!constType.elemp || constType.elemp->width == 0)) {
             unsupportedError(flp, "constant of an array of unconstrained elements");
             return;
+        }
+        // An unconstrained array constant whose initializer is a value rather than an
+        // aggregate takes its length from that value, as a function returning an
+        // unconstrained array constrains it: poc's `RAM_Type_Depth` is
+        // `integer_vector := get_ram_type(...)` (IEEE 1076-2008 5.3.2)
+        if (!constType.dtp && constType.kind == VType::ARRAY && initp
+            && initp->kind != Expr::AGG_POSITIONAL && initp->kind != Expr::AGG_NAMED
+            && !type.hasRange && type.constraintMark.empty() && type.indexConstraints.empty()
+            && constType.elemWidth > 0) {
+            valuep = lowerExpr(*initp, nullptr);
+            if (!valuep) return;
+            if (AstConst* const foldedp = foldStatic(valuep)) {
+                if (foldedp != valuep) valuep->deleteTree();
+                valuep = foldedp;
+            }
+            const int length = valuep->width() / constType.elemWidth;
+            if (length > 0) {
+                TypeSpec bounded = copySpec(type);
+                bounded.hasRange = true;
+                bounded.ascending = true;
+                bounded.left = std::unique_ptr<Expr>(new Expr{Expr::INT_LIT});
+                bounded.left->flp = flp;
+                bounded.left->intValue = constType.intLow;
+                bounded.right = std::unique_ptr<Expr>(new Expr{Expr::INT_LIT});
+                bounded.right->flp = flp;
+                bounded.right->intValue = constType.intLow + length - 1;
+                if (resolveType(bounded, constType)) {
+                    intConstant = constType.isInt();
+                    realConstant = constType.kind == VType::REAL;
+                }
+            }
         }
         // An unconstrained array constant takes its bounds from its aggregate, one element
         // per aggregate element from the index subtype's low bound (IEEE 1076-2008 9.3.3.2)

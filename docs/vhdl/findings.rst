@@ -1056,28 +1056,73 @@ ______
     - corpus ``hdl-modules-ring-buffer``
   * - N160
     - a character literal as an operand of a string concatenation, `'3' & mark_c`
-      (poc's ``config.vhdl``); the frontend lowers character literals only in a logic
+      (poc's ``config.vhdl``); the frontend lowered character literals only in a logic
       context
-    - the other operand fixes the result type as a string, which is what a context does
-      for the literal today
+    - the other operand fixes the result type as a string, and a character is an element
+      of a character array, so the literal becomes its code (IEEE 1076-2008 9.3.3.3)
+    - ``t_vhdl_string_wide``
   * - N161
     - a slice whose bounds are equal and inverted, `d(d'left downto d'left -
       EMPTY_STATE_BITS + 1)` with zero state bits (poc's ``fifo_cc_got.vhdl``): "empty or
       reversed slice", reported while lowering a branch a static condition disables
-    - a null slice is legal (IEEE 1076-2008 8.5); the branch is not reachable when the
-      condition is static and false
+    - a branch a static condition disables is not lowered at all: a null slice is legal
+      (IEEE 1076-2008 8.5) but has no model form, and the branch cannot run
+    - ``t_vhdl_dead_branch``
   * - N162
-    - a string whose value is wider than 32 bits, `MY_DEVICE : string := "GENERIC"`,
-      reported "Value too wide for 32-bits expected in this context" when poc's
-      configuration binds it (`config.vhdl:95` holds a 32-character string)
-    - the value is consumed as an elaboration-time string constant, so the 32-bit limit
-      of the folding path is what to lift
+    - a fold over a string constant read the value as a 32-bit integer ("Value too wide
+      for 32-bits"): poc binds a 32-character device string, and any call taking it as an
+      actual tried to fold it as an integer first
+    - a fold is speculative and reports nothing, so a value that is an aggregate or wider
+      than 64 bits is simply not folded (IEEE 1076-2008 7.3.2)
+    - ``t_vhdl_string_wide``
   * - N163
-    - the predefined `integer_vector` (poc's ``mem.pkg.vhdl`` and the OCRAM entities it
-      declares): "type 'integer_vector' is not supported yet", then an aggregate without
-      a known target type
-    - a vector of integers has no packed form; the constant aggregates that use it fold
-      at elaboration time, so the type can stop being modelled rather than lowered
+    - the predefined `integer_vector` and its siblings: poc's memory package plans its RAM
+      use with a vector of integers, and the OCRAM entities index it to size their ranges
+    - the predefined arrays of a scalar element are an array type whose element is that
+      scalar, so indexing yields an integer (IEEE 1076-2008 5.3.2.2)
+    - ``t_vhdl_int_vector``
+  * - N164
+    - a constant of an unconstrained array type initialized by a function call,
+      `constant RAM_Type_Depth : integer_vector := get_ram_type(...)`, had no bounds
+    - the function result constrains the constant: its length comes from the value, as a
+      returned array constrains the result of an unconstrained function (IEEE 1076-2008
+      5.3.2)
+    - ``t_vhdl_int_vector``
+  * - N165
+    - a constant whose initializer lowers to a value rather than folding had no type for
+      overload resolution, so `U_High_Bit + 1` reported an ambiguous `+`
+    - the constant keeps the VHDL type it was declared with, which is what an operator
+      overload sees when it reads an operand
+    - ``t_vhdl_int_vector``
+  * - N166
+    - an operator expression was left untyped whenever the unit declared an operator of
+      the same symbol, even with both operands typed: poc's `*` and `+` over
+      `integer_vector` made `plan(0) * 72` ambiguous
+    - operands with a type of their own decide which operator applies; a user operator
+      whose formals take them gives the result type, otherwise the built-in one does
+      (IEEE 1076-2008 12.5)
+    - ``t_vhdl_int_vector``
+  * - N168
+    - an impure function that the design calls while elaborating but whose body never
+      reads a file, e.g. poc's `mem_InitMemory` in a signal initializer, was refused as a
+      run-time call
+    - a function whose body opens no file is inlined like a pure one; a function that
+      reads a file keeps its elaboration-time evaluation, and a signal read is rejected
+      where it appears
+    - ``t_vhdl_impure_inline``
+  * - N167
+    - a string literal whose characters are all logic characters was always a bit vector,
+      so a `case` choice `"ZU"` over a `string(3 to 4)` selector became a two-bit value
+      and the frontend crashed folding the choice
+    - the context decides: one character per element in a string context, one bit per
+      character in a logic context (IEEE 1076-2008 9.3.2, 15.5)
+    - ``t_vhdl_string_literal_ctx``
+  * - N169
+    - the same `integer_vector` plan, but with a Xilinx device: the carry chain switches
+      to a component (`arith_CarryChain_inc_Xilinx`) that poc ships only for an actual
+      vendor library, so the testcase needs an Altera part or that component
+    - it is a choice of the testcase configuration, not a frontend gap; recorded so the
+      next port of a poc memory block starts from an Altera device
   * - N67
     - the simulation-only subset: a ``line`` variable *written* by a debug
       procedure through ``ieee.std_logic_textio`` (bit-serial; reading a file into

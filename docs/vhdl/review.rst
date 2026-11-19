@@ -197,7 +197,13 @@ name. A declaration of a unit hides an imported one of the same profile, a packa
 publishes only what it declares, an inlined body keeps its package's private
 subprograms in scope, a design file's `use` clause belongs to one library unit and
 its secondaries, and an expression that converts through a real folds at elaboration
-time. A
+time. A branch a static condition disables is not lowered, a fold never reads an
+aggregate or a wide value as a 32-bit integer, the predefined arrays of a scalar
+(`integer_vector`) are an array of that scalar whose bounds a function result or an
+aggregate supplies, a lowered constant keeps its type for overload resolution, an
+operator is typed by its operands, a string literal of logic characters is one
+character per element in a string context, and an impure function whose body opens no
+file inlines at elaboration time. A
 string literal keeps a doubled quote as one quote character, and a case choice
 that pairs literals the two-state model merges (`'0'` with `'L'`) is one
 choice rather than a duplicate. A
