@@ -168,6 +168,16 @@ bool isReservedWord(const std::string& folded) {
 //######################################################################
 // Parser
 
+//! Append the clauses of `more` that `dest` does not already carry
+static void mergeUses(std::vector<UseClause>& dest, const std::vector<UseClause>& more) {
+    for (const UseClause& use : more) {
+        const bool known = std::any_of(dest.begin(), dest.end(), [&](const UseClause& other) {
+            return other.pkg == use.pkg && other.decl == use.decl;
+        });
+        if (!known) dest.push_back(use);
+    }
+}
+
 class Parser final {
     const std::string m_filename;  // File being parsed
     Lexer m_lexer;  // Token source
@@ -184,7 +194,11 @@ class Parser final {
     std::vector<PackageInstance> m_packageInstances;  // Parsed generic-package instances
     std::vector<ContextUnit> m_contexts;  // Parsed context declarations
     // Packages named by the context clauses seen so far
-    std::vector<UseClause> m_uses;  // Use clauses seen so far
+    std::vector<UseClause> m_uses;  // Use clauses seen since the last library unit
+    // The context clause of the library unit a secondary unit belongs to: a design file
+    // attaches its context clause to one library unit and the secondaries that follow it
+    // in the same file (IEEE 1076-2008 3.2)
+    std::vector<UseClause> m_libUses;
     // Context declarations named by the context clauses seen so far
     std::vector<std::string> m_contextNames;
 
@@ -2010,7 +2024,8 @@ void Parser::parseArchitecture(FileLine* flp) {
     arch.name = nameTok.text;
     arch.libname = m_libname;
     arch.inLibrary = m_inLibrary;
-    arch.uses = m_uses;
+    arch.uses = m_libUses;
+    mergeUses(arch.uses, m_uses);
     arch.contextNames = m_contextNames;
     if (!expectId("of")) return;
     Token entityTok;
@@ -2990,7 +3005,8 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
     pkg.libname = m_libname;
     pkg.inLibrary = m_inLibrary;
     pkg.isBody = isBody;
-    pkg.uses = m_uses;
+    pkg.uses = isBody ? m_libUses : m_uses;
+    if (isBody) mergeUses(pkg.uses, m_uses);
     pkg.contextNames = m_contextNames;
     if (!expectId("is")) return;
     if (isId("new")) {  // `package X is new G ...;` generic-package instance
@@ -3257,18 +3273,24 @@ void Parser::parseDesignFile() {
             FileLine* const flp = m_cur.flp;
             advance();
             parseEntity(flp);
+            m_libUses = m_uses;
+            m_uses.clear();
             continue;
         }
         if (isId("architecture")) {
             FileLine* const flp = m_cur.flp;
             advance();
             parseArchitecture(flp);
+            m_uses.clear();
             continue;
         }
         if (isId("package")) {
             FileLine* const flp = m_cur.flp;
             advance();
-            parsePackage(flp, isId("body"));
+            const bool isBody = isId("body");
+            parsePackage(flp, isBody);
+            if (!isBody) m_libUses = m_uses;
+            m_uses.clear();
             continue;
         }
         if (isId("default")) {  // A PSL directive
@@ -3288,6 +3310,8 @@ void Parser::parseDesignFile() {
             FileLine* const flp = m_cur.flp;
             advance();
             parseConfiguration(flp);
+            m_libUses = m_uses;
+            m_uses.clear();
             continue;
         }
         error("unexpected token '" + m_cur.text + "' at design-unit level");

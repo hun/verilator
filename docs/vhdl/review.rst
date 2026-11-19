@@ -193,7 +193,11 @@ the bodies, and a body sees the constants its own package body declares. A
 constant of an unconstrained array type takes its bounds from its aggregate, an
 overload accepts a constrained actual for an unconstrained formal of the same base
 type, and an array whose element type leaves a member unconstrained is reported by
-name. A
+name. A declaration of a unit hides an imported one of the same profile, a package
+publishes only what it declares, an inlined body keeps its package's private
+subprograms in scope, a design file's `use` clause belongs to one library unit and
+its secondaries, and an expression that converts through a real folds at elaboration
+time. A
 string literal keeps a doubled quote as one quote character, and a case choice
 that pairs literals the two-state model merges (`'0'` with `'L'`) is one
 choice rather than a duplicate. A

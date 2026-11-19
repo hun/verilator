@@ -123,6 +123,10 @@ struct PackageInfo final {
     std::set<std::string> ambiguousLiterals;  // Literals declared by more than one type
     std::map<std::string, double> realConsts;  // Elaboration-time reals, by folded name
     std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
+    // Declarations only the body makes: private to it, but visible while a body it
+    // declares is inlined (IEEE 1076-2008 12.4)
+    std::vector<const SubprogramDecl*> bodySubprograms;
+    std::vector<std::pair<std::string, std::string>> uses;  // Packages its `use` made visible
     std::vector<const AliasDecl*> subprogramAliases;  // Synonyms, re-registered on import
     std::vector<std::unique_ptr<AstConst>> owned;  // Owns the constants above
 };
@@ -215,6 +219,25 @@ static void addPhysicalUnits(const TypeDecl& decl, Design& design) {
     }
 }
 
+//! Whether the expression converts to a real somewhere: such a conversion has no form
+//! in the model, so the expression it belongs to must fold at elaboration time
+static bool mentionsRealConversion(const Expr& expr) {
+    switch (expr.kind) {
+    case Expr::INDEX:
+        if (expr.a && expr.a->kind == Expr::NAME && expr.a->text == "real") return true;
+        break;
+    case Expr::PAREN:
+    case Expr::UNARY: break;
+    default: break;
+    }
+    if (expr.a && mentionsRealConversion(*expr.a)) return true;
+    if (expr.b && mentionsRealConversion(*expr.b)) return true;
+    for (const ExprP& argp : expr.args) {
+        if (argp && mentionsRealConversion(*argp)) return true;
+    }
+    return false;
+}
+
 class Lowering final {
     AstNetlist* const m_rootp;  // Netlist to emit into
     AstModule* m_modp = nullptr;  // Module being emitted
@@ -227,6 +250,8 @@ class Lowering final {
         const SubprogramDecl* declp = nullptr;
         bool processLocal = false;
         int frame = -1;  // Active inline frame that owns it, or -1
+        bool imported = false;  // Came from another unit, so a local homograph hides it
+        bool ownSpec = false;  // This unit's own specification: the body completes it
     };
     //! Module-level declarations a process hides, restored when it ends
     struct ScopeSave final {
@@ -292,13 +317,15 @@ class Lowering final {
     int m_unusedDepth = 0;  // For a scope that has to exist unconditionally
     struct RuntimeBranchScope final {
         int& depth;
-        explicit RuntimeBranchScope(int& d) : depth(d) { ++depth; }
+        explicit RuntimeBranchScope(int& d)
+            : depth(d) {
+            ++depth;
+        }
         ~RuntimeBranchScope() { --depth; }
     };
     void addPendingStmt(AstNode* nodep) {
-        m_pendingStmtp = m_pendingStmtp
-                             ? AstNode::addNext<AstNode, AstNode>(m_pendingStmtp, nodep)
-                             : nodep;
+        m_pendingStmtp
+            = m_pendingStmtp ? AstNode::addNext<AstNode, AstNode>(m_pendingStmtp, nodep) : nodep;
     }
     AstNode* takePendingStmts() {
         AstNode* const pendingp = m_pendingStmtp;
@@ -673,6 +700,7 @@ class Lowering final {
     bool exprNeedsLaterObject(const Expr& expr) const;
     //! Make a package visible; `only` names one declaration to import instead
     void importPackage(const std::string& name, const std::string& only = "");
+    void importInlineScope(const std::string& name);
     //! Record integer constants that a type declaration may depend on
     void preScanIntConstants(const std::vector<Decl>& decls);
     void emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
@@ -2318,8 +2346,8 @@ bool Lowering::typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string
 //! declarative part is registered before that part's objects exist, so
 //! `array (...) of std_logic_vector(sig'range)` has to wait for `sig`
 bool Lowering::exprNeedsLaterObject(const Expr& expr) const {
-    if (expr.kind == Expr::ATTR && (expr.text == "range" || expr.text == "reverse_range")
-        && expr.a && expr.a->kind == Expr::NAME) {
+    if (expr.kind == Expr::ATTR && (expr.text == "range" || expr.text == "reverse_range") && expr.a
+        && expr.a->kind == Expr::NAME) {
         const std::string& name = expr.a->text;
         const bool known = activeEnv().count(name) || m_scope.count(name) || m_consts.count(name)
                            || m_preConsts.count(name) || m_constValues.count(name)
@@ -2564,7 +2592,8 @@ void Lowering::setRecordField(FileLine* flp, VField& field, int left, int right,
     constrained.right = right;
     constrained.ascending = ascending;
     constrained.width = elements * elemWidth;
-    constrained.dtp = findVectorWidth(flp, constrained.kwd, constrained.signing, constrained.width);
+    constrained.dtp
+        = findVectorWidth(flp, constrained.kwd, constrained.signing, constrained.width);
     field.type = std::make_shared<VType>(constrained);
     field.width = constrained.width;
 }
@@ -3127,6 +3156,16 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     }
     case Expr::BINARY: return lowerBinary(expr, context);
     case Expr::INDEX: {
+        // An expression that converts a real back to an integer folds whole at
+        // elaboration time: the real itself has no form in the model, but the integer
+        // result does. math_pkg's `floor_log2` is `natural(log2(real(value)))`
+        if (expr.a && expr.a->kind == Expr::NAME
+            && (expr.a->text == "natural" || expr.a->text == "positive"
+                || expr.a->text == "integer")
+            && mentionsRealConversion(expr)) {
+            int64_t foldedValue = 0;
+            if (evalInt(expr, foldedValue)) return makeIntConst(flp, foldedValue);
+        }
         // A qualified call `package.name(...)`: a selected callee whose prefix names a
         // package, rather than an element of a record field
         std::string packageName;
@@ -3458,17 +3497,16 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         // `C <= C + ite(c, (C'range => '1'), x)` takes the unsigned ite (IEEE 1076-2008
         // 9.1). Concatenation and shifts combine operands of different types, so they
         // give no such context.
-        const bool sameType
-            = op == "+" || op == "-" || op == "*" || op == "/" || op == "=" || op == "/="
-              || op == "<" || op == "<=" || op == ">" || op == ">=" || logicalOp;
+        const bool sameType = op == "+" || op == "-" || op == "*" || op == "/" || op == "="
+                              || op == "/=" || op == "<" || op == "<=" || op == ">" || op == ">="
+                              || logicalOp;
         VType aType;
         VType bType;
         const bool aKnown = sameType && actualType(*expr.a, aType);
         const bool bKnown = sameType && actualType(*expr.b, bType);
         if (aKnown != bKnown) {
             const bool lowerLeftFirst = aKnown;
-            AstNodeExpr* const knownp
-                = lowerExpr(lowerLeftFirst ? *expr.a : *expr.b, nullptr);
+            AstNodeExpr* const knownp = lowerExpr(lowerLeftFirst ? *expr.a : *expr.b, nullptr);
             if (!knownp) return nullptr;
             const VType known = typeOfLowered(lowerLeftFirst ? *expr.a : *expr.b, knownp);
             const VType* const ctxp
@@ -3823,8 +3861,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             // generic-derived width turns into a decoder size
             int64_t base = 0;
             if (staticIntFold(expr.a, base) && base == 2 && lt.isInt()) {
-                AstNodeExpr* const shiftp
-                    = new AstShiftL{flp, makeIntConst(flp, 1), rp, lt.width};
+                AstNodeExpr* const shiftp = new AstShiftL{flp, makeIntConst(flp, 1), rp, lt.width};
                 shiftp->dtypep(lt.dtp);
                 lp->deleteTree();
                 return shiftp;
@@ -4412,8 +4449,8 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
     // see a non-vector value.
     int64_t folded = 0;
     VType operandType;
-    const bool vectorOperand = typeOfDesignator(*expr.args[0], operandType)
-                               && operandType.isVector();
+    const bool vectorOperand
+        = typeOfDesignator(*expr.args[0], operandType) && operandType.isVector();
     // An operand that is itself a conversion, or a call whose return type is
     // unconstrained, has no width of its own: it takes this conversion's context
     bool operandNeedsContext = false;
@@ -4426,18 +4463,15 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
                 const bool unconstrainedRet
                     = (retMark == "std_logic_vector" || retMark == "std_ulogic_vector"
                        || retMark == "bit_vector" || retMark == "unsigned" || retMark == "signed"
-                       || retMark == "u_unsigned" || retMark == "u_signed"
-                       || retMark == "string")
-                      && !subp->returnType.hasRange
-                      && subp->returnType.constraintMark.empty();
+                       || retMark == "u_unsigned" || retMark == "u_signed" || retMark == "string")
+                      && !subp->returnType.hasRange && subp->returnType.constraintMark.empty();
                 if (unconstrainedRet) operandNeedsContext = true;
             }
         }
     }
     AstNodeExpr* valuep = (!vectorOperand && evalInt(*expr.args[0], folded))
                               ? makeIntConst(flp, folded)
-                              : lowerExpr(*expr.args[0],
-                                          operandNeedsContext ? context : nullptr);
+                              : lowerExpr(*expr.args[0], operandNeedsContext ? context : nullptr);
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
     if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {
@@ -4900,9 +4934,9 @@ AstNode* Lowering::lowerDynamicSliceAssign(const Stmt& stmt, bool variable) {
         AstSel* const rhsp = new AstSel{flp, valuep->cloneTree(false),
                                         makeIntConst(flp, i * elemWidth), elemWidth};
         rhsp->dtypep(findVectorWidth(flp, baseType.kwd, baseType.signing, elemWidth));
-        AstNode* const assignp
-            = variable ? static_cast<AstNode*>(new AstAssign{flp, lhsp, rhsp})
-                       : static_cast<AstNode*>(new AstAssignDly{flp, lhsp, rhsp});
+        AstNode* const assignp = variable
+                                     ? static_cast<AstNode*>(new AstAssign{flp, lhsp, rhsp})
+                                     : static_cast<AstNode*>(new AstAssignDly{flp, lhsp, rhsp});
         headp = AstNode::addNext<AstNode, AstNode>(headp, new AstIf{flp, condp, assignp, nullptr});
     }
     basep->deleteTree();
@@ -6728,8 +6762,7 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
     if (stmt.target->kind == Expr::SLICE && stmt.target->a && stmt.target->b && stmt.target->c
         && stmt.alternatives.empty()) {
         int64_t count = 0;
-        if (!sliceWidth(*stmt.target->b, *stmt.target->c, stmt.target->text != "downto",
-                        count)) {
+        if (!sliceWidth(*stmt.target->b, *stmt.target->c, stmt.target->text != "downto", count)) {
             return lowerDynamicSliceAssign(stmt, variable);
         }
     }
@@ -7530,8 +7563,7 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
              : static_cast<AstNodeExpr*>(
                    new AstGte{flp, new AstVarRef{flp, varp, VAccess::READ}, boundp});
     rangep->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-    AstNodeExpr* const exitNotp
-        = new AstNot{flp, new AstVarRef{flp, frame.exitp, VAccess::READ}};
+    AstNodeExpr* const exitNotp = new AstNot{flp, new AstVarRef{flp, frame.exitp, VAccess::READ}};
     exitNotp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     AstNodeExpr* const testp = new AstAnd{flp, rangep, exitNotp};
     testp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
@@ -7641,11 +7673,46 @@ void Lowering::setScope(const ScopeSave& saved) {
     m_subprograms = saved.subprograms;
 }
 
+//! Whether two declarations are one profile: a declaration of the same name and formal
+//! types is a homograph of the other (IEEE 1076-2008 4.5.2, 12.4)
+static bool homograph(const SubprogramDecl& lhs, const SubprogramDecl& rhs) {
+    if (lhs.kind != rhs.kind || lhs.formals.size() != rhs.formals.size()) return false;
+    if (lhs.returnType.mark != rhs.returnType.mark
+        || lhs.returnType.objectName != rhs.returnType.objectName) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.formals.size(); ++i) {
+        const FormalDecl& lf = lhs.formals[i];
+        const FormalDecl& rf = rhs.formals[i];
+        if (lf.names.size() != rf.names.size() || lf.mode != rf.mode) return false;
+        for (std::size_t n = 0; n < lf.names.size(); ++n) {
+            if (lf.names[n].first != rf.names[n].first) return false;
+        }
+        // The type mark decides, not the constraint written after it
+        if (lf.type.mark != rf.type.mark || lf.type.objectName != rf.type.objectName
+            || lf.type.elementMark != rf.type.elementMark
+            || lf.type.constraintMark != rf.type.constraintMark) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void Lowering::registerSubprograms(const std::vector<SubprogramDecl>& decls, int frame,
                                    bool processLocal) {
     for (const SubprogramDecl& decl : decls) {
         m_imported.erase(decl.name);  // The local declaration shadows the package member
-        m_subprograms[decl.name].push_back(SubprogramRef{&decl, processLocal, frame});
+        std::vector<SubprogramRef>& refs = m_subprograms[decl.name];
+        // A declaration of this unit hides an imported one of the same profile; the
+        // declaration a package body completes is its own, not one it hides
+        // (IEEE 1076-2008 12.4)
+        refs.erase(std::remove_if(refs.begin(), refs.end(),
+                                  [&](const SubprogramRef& ref) {
+                                      return ref.imported && !ref.ownSpec
+                                             && homograph(*ref.declp, decl);
+                                  }),
+                   refs.end());
+        refs.push_back(SubprogramRef{&decl, processLocal, frame});
     }
 }
 
@@ -7726,8 +7793,7 @@ bool Lowering::subprogramMatches(const Expr& call, const SubprogramDecl& sub,
 }
 
 const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
-                                            const SubprogramRef** foundpp,
-                                            const VType* contextp) {
+                                            const SubprogramRef** foundpp, const VType* contextp) {
     std::string name;
     std::vector<const SubprogramRef*> refs;
     std::string packageName;
@@ -8982,10 +9048,10 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
     m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
     InlineFrame& frameRef = m_inlineFrames.back();
     setScope(base);
-    // A body a package declares sees that package's constants, including the ones only its
-    // body declares; the caller may have imported only the specification
+    // A body a package declares sees that package's whole scope: the caller may have
+    // imported only the specification
     if (!subp->unitName.empty() && subp->unitName != m_unitName) {
-        importPackage(subp->unitName);
+        importInlineScope(subp->unitName);
     }
     m_inlineP = &env;
     const auto fail = [&](AstNodeExpr* nullp) -> AstNodeExpr* {
@@ -9057,12 +9123,11 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
             if (materialize) {
                 AstVar* const varp = new AstVar{
                     decl.flp, VVarType::VAR,
-                    "vhdlfn_" + std::to_string(++m_localVarSeq) + "__" + name.first,
-                    declType.dtp};
+                    "vhdlfn_" + std::to_string(++m_localVarSeq) + "__" + name.first, declType.dtp};
                 m_modp->addStmtsp(varp);
-                addPendingStmt(new AstAssign{
-                    decl.flp, new AstVarRef{decl.flp, varp, VAccess::WRITE},
-                    resizeExpr(initp->cloneTree(false), declType, decl.flp)});
+                addPendingStmt(
+                    new AstAssign{decl.flp, new AstVarRef{decl.flp, varp, VAccess::WRITE},
+                                  resizeExpr(initp->cloneTree(false), declType, decl.flp)});
                 InlineBinding binding{new AstVarRef{decl.flp, varp, VAccess::READ}, true, true};
                 binding.type = declType;
                 binding.materializedp = varp;
@@ -9236,8 +9301,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             // Each element write rebuilds the local's whole value, and a body that reads
             // the local back grows the rebuilt tree by that read too. The budget follows
             // the value's size, which is what every write copies
-            m_funcWriteCost += 64 + it->second.exprp->width() / 64
-                               + it->second.exprp->nodeCount();
+            m_funcWriteCost += 64 + it->second.exprp->width() / 64 + it->second.exprp->nodeCount();
             if (m_funcWriteCost > (1 << 18)) {
                 unsupportedError(flp, "function body with too many element assignments");
                 return nullptr;
@@ -9735,6 +9799,10 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
     InlineFrame& frameRef = m_inlineFrames.back();
     frameRef.liveScope = base;
     setScope(base);
+    // A body a package declares sees that package's whole scope, as a function's does
+    if (!subp->unitName.empty() && subp->unitName != m_unitName) {
+        importInlineScope(subp->unitName);
+    }
     m_inlineP = &env;
     const auto fail = [&](AstNode* nullp) -> AstNode* {
         deleteInlineEnv(env);
@@ -10398,8 +10466,9 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         }
         // An unconstrained array constant takes its bounds from its aggregate, one element
         // per aggregate element from the index subtype's low bound (IEEE 1076-2008 9.3.3.2)
-        if (!constType.dtp && constType.kind == VType::ARRAY && initp && initp->kind == Expr::AGG_POSITIONAL && !initp->args.empty()
-            && !type.hasRange && type.constraintMark.empty() && type.indexConstraints.empty()) {
+        if (!constType.dtp && constType.kind == VType::ARRAY && initp
+            && initp->kind == Expr::AGG_POSITIONAL && !initp->args.empty() && !type.hasRange
+            && type.constraintMark.empty() && type.indexConstraints.empty()) {
             TypeSpec bounded = copySpec(type);
             bounded.hasRange = true;
             bounded.ascending = true;
@@ -10731,7 +10800,15 @@ void Lowering::importPackage(const std::string& name, const std::string& only) {
         const bool known = std::any_of(refs.begin(), refs.end(),
                                        [=](const SubprogramRef& r) { return r.declp == subp; });
         if (known) continue;
-        refs.push_back(SubprogramRef{subp, false, -1});
+        // A declaration this unit makes itself hides an imported homograph, so importing
+        // it again must not undo that; the unit's own specification is the declaration
+        // its body completes (IEEE 1076-2008 12.4)
+        if (!ownSpec && std::any_of(refs.begin(), refs.end(), [&](const SubprogramRef& ref) {
+                return !ref.imported && homograph(*ref.declp, *subp);
+            })) {
+            continue;
+        }
+        refs.push_back(SubprogramRef{subp, false, -1, true, ownSpec});
         m_imported.insert(subp->name);
     }
     // A synonym is resolved here, where the subprogram it designates is visible too
@@ -10739,6 +10816,32 @@ void Lowering::importPackage(const std::string& name, const std::string& only) {
         if (!wants(aliasp->name)) continue;
         registerSubprogramAlias(*aliasp);
     }
+}
+
+//! Everything a package's body sees when it is inlined: the interface, the packages its
+//! `use` clauses named, and the subprograms only its body declares. A declaration of the
+//! body hides an imported homograph the caller had in scope (IEEE 1076-2008 12.4)
+void Lowering::importInlineScope(const std::string& name) {
+    importPackage(name);
+    if (!m_packagesp) return;
+    const auto pkgIt = m_packagesp->packages.find(name);
+    if (pkgIt == m_packagesp->packages.end()) return;
+    for (const auto& use : pkgIt->second.uses) importPackage(use.first, use.second);
+    // The unit's `use` clauses are visible in its body, but its own declarations hide
+    // the homographs they bring in (IEEE 1076-2008 12.4), so they become local again
+    const auto declareOwn = [&](const SubprogramDecl* subp) {
+        std::vector<SubprogramRef>& refs = m_subprograms[subp->name];
+        refs.erase(std::remove_if(refs.begin(), refs.end(),
+                                  [&](const SubprogramRef& ref) {
+                                      return ref.imported && homograph(*ref.declp, *subp);
+                                  }),
+                   refs.end());
+        const bool known = std::any_of(refs.begin(), refs.end(),
+                                       [=](const SubprogramRef& r) { return r.declp == subp; });
+        if (!known) refs.push_back(SubprogramRef{subp, false, -1});
+    };
+    for (const SubprogramDecl* const subp : pkgIt->second.subprograms) declareOwn(subp);
+    for (const SubprogramDecl* const subp : pkgIt->second.bodySubprograms) declareOwn(subp);
 }
 
 void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
@@ -10831,18 +10934,32 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     info.ambiguousLiterals = m_ambiguousLiterals;
     info.realConsts = std::move(m_realConsts);
     info.owned = std::move(m_ownedConsts);
-    // A subprogram the unit's `use` clauses made visible publishes with it, as its types
-    // and constants do: open-logic's `ppcOr` calls `log2ceil` of the math package, and a
-    // module importing only the logic package still has to reach that call
+    // Only what the unit declares publishes: a declaration its `use` clauses made
+    // visible is not part of its interface (IEEE 1076-2008 12.4). A declaration only the
+    // body makes is private to it, unless it completes one the specification published;
+    // poc's configuration declares `ite` in its body, and open-logic's `ppcOr` calls
+    // `log2ceil` of the math package, which is inlined with that package's scope
     for (const auto& entry : m_subprograms) {
         for (const SubprogramRef& ref : entry.second) {
-            // A declaration only the body makes is private to it (IEEE 1076-2008 12.4),
-            // unless it completes one the specification published: poc's configuration
-            // declares `ite` in its body to avoid depending on the package that has it
+            if (ref.imported) continue;
+            const bool completesSpec = std::any_of(
+                entry.second.begin(), entry.second.end(), [&](const SubprogramRef& other) {
+                    return other.ownSpec && homograph(*other.declp, *ref.declp);
+                });
+            if (pkg.isBody && !completesSpec) {
+                info.bodySubprograms.push_back(ref.declp);
+                continue;
+            }
             if (std::find(info.subprograms.begin(), info.subprograms.end(), ref.declp)
                 == info.subprograms.end()) {
                 info.subprograms.push_back(ref.declp);
             }
+        }
+    }
+    for (const auto& use : pkg.uses) {
+        const std::pair<std::string, std::string> entry{use.pkg, use.decl};
+        if (std::find(info.uses.begin(), info.uses.end(), entry) == info.uses.end()) {
+            info.uses.push_back(entry);
         }
     }
     for (const AliasDecl& alias : pkg.aliases) {
@@ -10877,6 +10994,17 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     }
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
     for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
+    for (const SubprogramDecl* const subp : info.bodySubprograms) {
+        if (std::find(dest.bodySubprograms.begin(), dest.bodySubprograms.end(), subp)
+            == dest.bodySubprograms.end()) {
+            dest.bodySubprograms.push_back(subp);
+        }
+    }
+    for (const auto& use : info.uses) {
+        if (std::find(dest.uses.begin(), dest.uses.end(), use) == dest.uses.end()) {
+            dest.uses.push_back(use);
+        }
+    }
     for (const AliasDecl* const aliasp : info.subprogramAliases) {
         dest.subprogramAliases.push_back(aliasp);
     }
@@ -12278,7 +12406,9 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
     struct MaterializeScope final {
         Lowering* const self;
         const bool saved;
-        explicit MaterializeScope(Lowering* s) : self(s), saved(s->m_materializeLocals) {
+        explicit MaterializeScope(Lowering* s)
+            : self(s)
+            , saved(s->m_materializeLocals) {
             self->m_materializeLocals = true;
         }
         ~MaterializeScope() {
@@ -12347,8 +12477,7 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
             return;
         }
         m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS,
-                                        new AstSenTree{stmt.flp, itemsp},
-                                        takePendingFor(bodyp)});
+                                        new AstSenTree{stmt.flp, itemsp}, takePendingFor(bodyp)});
         lhsp->deleteTree();
         return;
     }
@@ -12410,8 +12539,8 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
             }
             bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
         }
-        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr,
-                                        takePendingFor(bodyp)});
+        m_modp->addStmtsp(
+            new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, takePendingFor(bodyp)});
         return;
     }
     if (stmt.delay && !staticZeroDelay(stmt.delay)) {
@@ -12423,8 +12552,8 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
             return;
         }
         AstNode* const bodyp = AstNode::addNext<AstNode, AstNode>(delayp, assignp);
-        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr,
-                                        takePendingFor(bodyp)});
+        m_modp->addStmtsp(
+            new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, takePendingFor(bodyp)});
         return;
     }
     m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,

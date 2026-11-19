@@ -1032,53 +1032,52 @@ ______
       zero-width element and then failed inside the aggregate lowering
     - the type is reported by name until an aggregate can fix the element's members
     - ``t_vhdl_const_unresolved_unsup``
-
-____
-Open
-____
-
-The findings here need more than a frontend change: N15 wants
-``AstModule::isTop()`` from the middle end, N67 is the simulation-only subset, and
-N157..N159 are what poc's configuration package still needs before its blocks can be
-ported; each has a reproducer. The conformance review against IEEE 1076-2008 with GHDL and nvc as the
-reference simulators (findings N99..N127) is closed; every one of those is in
-the Closed table with the test that pins it.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 8 30 62
-
-   * - id
-     - symptom
-     - why it is open
-   * - N15
-     - ``%Warning-MULTITOP`` for an entity only ever instantiated with a generic
-       map
-     - the base module has no cell and looks like a second top. Deleting it is the
-       only frontend lever, and two gates (frontend counters, then the module's own
-       cell record) both leave 12 tests broken, so an uninstantiated module is not
-       droppable here. Not making it a top needs ``AstModule::isTop()``
-       (``level() == 1``, set by ``V3LinkCells``), which is the middle end.
-       Reproducer: ``test_regress/t/t_vhdl_spec_top_repro.vhdl``.
   * - N157
-    - a declaration that hides an imported one of the same name and formal types
-      (IEEE 1076-2008 12.4): poc's configuration re-declares `ite` in its package body to
-      drop a dependency, and the call is reported ambiguous because the package that `use`
-      clauses made visible is re-published with the unit
-    - the hiding rule needs the publication of a unit's visible subprograms to keep what
-      its own declarations hide out of the package's interface; the reproducer is
-      ``config.vhdl`` in poc
+    - a declaration that hides an imported one of the same profile left both visible:
+      poc's `config_private` re-declares `ite` in its package body to drop a dependency,
+      and the call was reported ambiguous
+    - a unit publishes only what it declares, since what its `use` clauses made visible is
+      not part of its interface; a declaration of the unit hides an imported homograph,
+      and a body inlines with its package's whole scope, the subprograms only its body
+      declares included (IEEE 1076-2008 12.4)
+    - ``t_vhdl_homograph``
   * - N158
+    - a `use` clause written before a package made its declarations visible to every later
+      design unit of the file, so an entity that never named that package saw a homograph
+      of its own and reported an ambiguity GHDL does not
+    - a design file attaches its context clause to one library unit and the secondary
+      units that follow it; the next library unit starts a new clause (IEEE 1076-2008 3.2)
+    - ``t_vhdl_homograph``
+  * - N159
+    - an expression that converts through a real was refused by name, so `math_pkg`'s
+      `floor_log2`, `natural(log2(real(value)))`, stopped a design that calls `log2`
+    - a real has no form in the model, but the expression it belongs to is an
+      elaboration-time integer and folds whole
+    - corpus ``hdl-modules-ring-buffer``
+  * - N160
     - a character literal as an operand of a string concatenation, `'3' & mark_c`
-      (``config.vhdl``); the frontend lowers character literals only in a logic context
+      (poc's ``config.vhdl``); the frontend lowers character literals only in a logic
+      context
     - the other operand fixes the result type as a string, which is what a context does
       for the literal today
-  * - N159
+  * - N161
     - a slice whose bounds are equal and inverted, `d(d'left downto d'left -
-      EMPTY_STATE_BITS + 1)` with zero state bits (``fifo_cc_got.vhdl``): "empty or
+      EMPTY_STATE_BITS + 1)` with zero state bits (poc's ``fifo_cc_got.vhdl``): "empty or
       reversed slice", reported while lowering a branch a static condition disables
     - a null slice is legal (IEEE 1076-2008 8.5); the branch is not reachable when the
       condition is static and false
+  * - N162
+    - a string whose value is wider than 32 bits, `MY_DEVICE : string := "GENERIC"`,
+      reported "Value too wide for 32-bits expected in this context" when poc's
+      configuration binds it (`config.vhdl:95` holds a 32-character string)
+    - the value is consumed as an elaboration-time string constant, so the 32-bit limit
+      of the folding path is what to lift
+  * - N163
+    - the predefined `integer_vector` (poc's ``mem.pkg.vhdl`` and the OCRAM entities it
+      declares): "type 'integer_vector' is not supported yet", then an aggregate without
+      a known target type
+    - a vector of integers has no packed form; the constant aggregates that use it fold
+      at elaboration time, so the type can stop being modelled rather than lowered
   * - N67
     - the simulation-only subset: a ``line`` variable *written* by a debug
       procedure through ``ieee.std_logic_textio`` (bit-serial; reading a file into
