@@ -1102,6 +1102,13 @@ ______
       whose formals take them gives the result type, otherwise the built-in one does
       (IEEE 1076-2008 12.5)
     - ``t_vhdl_int_vector``
+  * - N172
+    - an array indexed by an enumeration value, `DEFAULT_BLOCKING(ARCH)` with
+      `type t_vec is array (t_arch) of ...` (poc's `arith_Adder_Wide`): "non-integer index
+      is not supported yet"
+    - an enumeration value used as an index is its position (IEEE 1076-2008 9.3.6),
+      whether it is a literal, a constant, or a formal an inlined body bound to one
+    - ``t_vhdl_enum_index``
   * - N171
     - a subprogram declared in an entity or architecture did not see the constants
       declared before it in the same declarative part: poc's `arith_Adder_Wide` declares
@@ -1117,12 +1124,15 @@ ______
     - a concatenation takes the type of the operand that has one; a literal beside an
       unsigned or signed vector stays unsigned or signed (IEEE 1076-2008 9.3.6)
     - ``t_vhdl_concat_signing``
-  * - N172
-    - an array indexed by an enumeration value, `DEFAULT_BLOCKING(ARCH)` with
-      `type t_vec is array (t_arch) of ...` (poc's `arith_Adder_Wide`): "non-integer index
-      is not supported yet"
-    - the implicit conversion to the index subtype is the literal's position, which the
-      frontend already knows for an enumeration constant (IEEE 1076-2008 9.3.6)
+  * - N173
+    - an element write into an `integer_vector` local left-justifies the value in the top
+      slot: a function that fills `res : integer_vector(3 downto 0)` and returns it stores
+      its last element at the top bits of the word instead of its low bits (`16` becomes
+      `0x10000000`), and poc's `arith_Adder_Wide` then plans its blocks from wrong widths
+      and adds incorrectly (`0x7fff + 1 = 0x87f8`)
+    - the element write must right-justify the value in its element slot; the read path
+      agrees with the write today, which is why the corruption only shows once the value
+      is consumed as a number
   * - N168
     - an impure function that the design calls while elaborating but whose body never
       reads a file, e.g. poc's `mem_InitMemory` in a signal initializer, was refused as a

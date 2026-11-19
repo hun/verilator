@@ -205,7 +205,8 @@ operator is typed by its operands, a string literal of logic characters is one
 character per element in a string context, and an impure function whose body opens no
 file inlines at elaboration time, and a bit-string literal beside an unsigned or signed
 vector keeps that vector's signing, and a subprogram of a declarative part sees the
-constants declared before it. A
+constants declared before it, and an enumeration value indexes an array by its
+position. A
 string literal keeps a doubled quote as one quote character, and a case choice
 that pairs literals the two-state model merges (`'0'` with `'L'`) is one
 choice rather than a duplicate. A

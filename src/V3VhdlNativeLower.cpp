@@ -4811,21 +4811,17 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
                 return nullptr;
             }
             if (!typeOfDType(indexp->dtypep()).isInt()) {
-                // An enumeration literal as an index is its position, which the literal
-                // already carries (IEEE 1800-2023 6.9)
-                const bool enumIndex = expr.args[ai]->kind == Expr::NAME
-                                       && m_enumConsts.count(expr.args[ai]->text) != 0;
-                if (!enumIndex) {
+                // An enumeration value as an index is its position (IEEE 1076-2008 9.3.6):
+                // a literal, a constant, or a formal an inlined body bound to one
+                int64_t position = 0;
+                if (!evalInt(*expr.args[ai], position)) {
                     unsupportedError(flp, "non-integer index");
                     indexp->deleteTree();
                     curp->deleteTree();
                     return nullptr;
                 }
-                indexp = resizeExpr(indexp, intType(flp), flp);
-                if (!indexp) {
-                    curp->deleteTree();
-                    return nullptr;
-                }
+                indexp->deleteTree();
+                indexp = makeIntConst(flp, position);
             }
             // The right bound is the least significant element in either direction
             AstNodeExpr* offsetp = indexp;
