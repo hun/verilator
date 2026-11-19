@@ -3810,9 +3810,13 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             rp->deleteTree();
             return nullptr;
         }
-        const VBasicDTypeKwd kwd = lt.isVector() ? lt.kwd : rt.kwd;
-        const VSigning signing = lt.isVector() ? lt.signing : rt.signing;
-        const VType resultType = vectorType(flp, kwd, signing, lt.width + rt.width);
+        // A bit-string literal beside a numeric_std vector takes that vector's type, so
+        // `"0" & unsigned(x)` stays unsigned and can be added (IEEE 1076-2008 9.3.6)
+        const VType& named = !lt.isVector()                   ? rt
+                             : !rt.isVector()                 ? lt
+                             : lt.signing == VSigning::NOSIGN ? rt
+                                                              : lt;
+        const VType resultType = vectorType(flp, named.kwd, named.signing, lt.width + rt.width);
         AstConcat* const concatp = new AstConcat{flp, lp, rp};
         concatp->dtypep(resultType.dtp);
         return concatp;
@@ -11182,6 +11186,9 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     for (const Decl& decl : entity.decls) {
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
+            // A subprogram of this declarative part evaluates against what the unit has
+            // declared before it (IEEE 1076-2008 4.7)
+            m_moduleScope = saveScope();
             continue;
         }
         VType type;
@@ -11288,6 +11295,8 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     for (const Decl& decl : arch.decls) {
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
+            // A subprogram of the architecture sees the constants declared before it
+            m_moduleScope = saveScope();
             continue;
         }
         VType type;

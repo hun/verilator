@@ -1102,6 +1102,27 @@ ______
       whose formals take them gives the result type, otherwise the built-in one does
       (IEEE 1076-2008 12.5)
     - ``t_vhdl_int_vector``
+  * - N171
+    - a subprogram declared in an entity or architecture did not see the constants
+      declared before it in the same declarative part: poc's `arith_Adder_Wide` declares
+      a table and a function reading it, then a constant that calls the function, and the
+      table was reported unknown
+    - the scope a body evaluates against is refreshed after each constant of the
+      declarative part, as it already was for a package body (IEEE 1076-2008 4.7)
+    - ``t_vhdl_decl_scope``
+  * - N170
+    - a bit-string literal beside a numeric_std vector lost the vector's signing: poc's
+      `("0" & unsigned(not Request)) + TokenIn` was arithmetic on a plain array, reported
+      as needing a package that defines it
+    - a concatenation takes the type of the operand that has one; a literal beside an
+      unsigned or signed vector stays unsigned or signed (IEEE 1076-2008 9.3.6)
+    - ``t_vhdl_concat_signing``
+  * - N172
+    - an array indexed by an enumeration value, `DEFAULT_BLOCKING(ARCH)` with
+      `type t_vec is array (t_arch) of ...` (poc's `arith_Adder_Wide`): "non-integer index
+      is not supported yet"
+    - the implicit conversion to the index subtype is the literal's position, which the
+      frontend already knows for an enumeration constant (IEEE 1076-2008 9.3.6)
   * - N168
     - an impure function that the design calls while elaborating but whose body never
       reads a file, e.g. poc's `mem_InitMemory` in a signal initializer, was refused as a
