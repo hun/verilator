@@ -360,11 +360,24 @@ What the two runs exchange:
   single top level module and rules out :vlopt:`--timing` delays and
   :vlopt:`--sc`.
 
-One direction remains unsupported: a VHDL design instantiating
-SystemVerilog modules, or one invocation analyzing both languages. The
-library is the only boundary, and only a SystemVerilog top can sit above
-it. Parts that are each self-contained in one language can also be
-analyzed separately, for example to lint each in its own invocation:
+One direction remains unsupported: a VHDL design instantiating a
+SystemVerilog module. A VHDL instance binds only to entities analyzed with
+it, so
+
+.. code-block:: vhdl
+
+   u1 : svmod port map (a => i, y => o);
+
+fails with ``Cannot find VHDL entity 'svmod' for instance 'u1'``, even
+when :file:`svmod.sv` is on the command line (one invocation analyzes one
+language, as above). The library is the boundary, and only a
+SystemVerilog top can sit above it, so where the hierarchy allows it,
+restructure: instantiate the VHDL design from a SystemVerilog top (the
+two-run recipe above) or port the leaf module to VHDL. There is no
+wrapper that makes a VHDL top see a SystemVerilog module.
+
+Parts that are each self-contained in one language can also be analyzed
+separately, for example to lint each in its own invocation:
 
 .. code-block:: bash
 

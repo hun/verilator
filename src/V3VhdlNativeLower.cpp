@@ -12087,9 +12087,12 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     }
     const auto modIt = m_modulesp->find(conc.instanceName);
     if (modIt == m_modulesp->end()) {
-        // Same wording as the GHDL path, so one golden serves both frontends
-        flp->v3error("Cannot find VHDL entity or module '" + conc.instanceName + "' for instance '"
-                     + conc.instanceLabel + "'");
+        flp->v3error("Cannot find VHDL entity '" + conc.instanceName + "' for instance '"
+                     + conc.instanceLabel + "'\n"
+                     << flp->warnMore()
+                     << "... VHDL instantiates only entities analyzed with it; a SystemVerilog"
+                        " module must be instantiated from an SV top, with this hierarchy built"
+                        " by --lib-create");
         return nullptr;
     }
     AstModule* modp = modIt->second;

@@ -29,7 +29,7 @@ new value model and are out of scope.
 | WP5 std packages | partial intrinsic subset: `numeric_std`, `std_logic_misc`, `std_logic_arith` conversions, operator-symbol calls; no full package simulation |
 | WP6 test infrastructure | 52 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
 | WP7 hardening | ongoing: clean Unsupported/Error diagnostics, corpus triage, process-form rejection, control-file handling |
-| WP8 mixed language (M2) | not started |
+| WP8 mixed language (M2) | **M2 option 1 landed** (`test_regress/t/t_vhdl_lib_create.py`): a VHDL hierarchy is built with `--lib-create` and instantiated from an SV run, no frontend change needed. The reverse direction (VHDL instantiating SV) is analysed in §3.5: frontend-only lib-stub synthesis, or a three-edit middle bypass |
 
 The active frontend runs `ghdl --file-to-xml --std=08` out of process, parses the XML into a
 minimal DOM (`V3VhdlXml`), and lowers the analyzed design units to a post-width-commit
@@ -101,8 +101,9 @@ The `ERROR` bucket is mostly real design errors in the corpus (unresolved instan
 missing architectures, unknown identifiers) plus six pre-existing core faults
 (`V3DfgSynthesize` width/read-only, `V3Tristate`). Remaining work, in priority order:
 
-1. WP8 cross-language binding: component-to-SystemVerilog-module lookup and
-   configurations. Mixed VHDL/SV invocations stay rejected until then.
+1. WP8 cross-language binding: the VHDL-under-SV flow is done (§3.5). VHDL
+   instantiating SystemVerilog needs either frontend-synthesized lib stubs or the measured
+   three-edit middle bypass; mixed sources in one invocation stay rejected until then.
 2. Process forms: waits that are not a top-level clock edge (`wait on`, `wait for`,
    inside loops), clock edges inside `process(all)`, and process splitting when
    variables/ordering cannot be proven disjoint.
@@ -335,29 +336,87 @@ The M1 pipeline gate is run-global: if any VHDL **design** source is present, th
 invocation uses the VHDL frontend and `process()` runs the VHDL path (control `.vlt` files
 are still parsed by the SV parser, as described in §3.1). It cannot process SV modules
 through `V3Width` and pre-widthed VHDL modules in the same tree, because those passes walk
-the entire netlist. M0/M1 therefore reject mixed inputs with an explicit error, including
-VHDL files reached through `-v`/`-y` libraries.
+the entire netlist. Mixed inputs are therefore rejected with an explicit error, including
+VHDL files reached through `-v`/`-y` libraries; the message names the supported split flow.
 
-M2 options, in order of preference:
+#### Landed: library block boundary (VHDL hierarchy under an SV top)
 
-1. **Library block boundary.** Run the VHDL frontend on one VHDL hierarchy with a single
-   top entity and `--lib-create <name>`. That flow already emits C++, a Verilog wrapper
-   and a Makefile that builds the DPI library
-   (`docs/guide/exe_verilator.rst:1367-1385`). The SV top is then a pure-SV invocation
-   that instantiates the generated wrapper and links the library. No netlist is shared;
-   the ABI is the generated wrapper. The first M2 task is a proof of concept that a
-   VHDL-only AST flows through `--lib-create` unchanged and that the generated wrapper
-   can be instantiated from an SV run. No new output format is required.
+Run the VHDL frontend on one VHDL hierarchy with a single top entity and
+`--lib-create <name>` (`docs/guide/exe_verilator.rst:1367-1385`). The run emits C++, the
+wrapper `<name>.sv` — whose tail carries the control directive
+`verilator_lib -module "<name>"`, which is what makes any later run treat it as a pre-built
+library (`V3Control.cpp:319`) — and a Makefile that builds `lib<name>.a`/`.so`. The SV top
+is a pure-SV invocation that parses the wrapper, instantiates it by module name and links
+the library. No netlist is shared; the ABI is the generated wrapper.
+
+Proven and kept under test by `test_regress/t/t_vhdl_lib_create.py`: a VHDL counter is
+built into `libvhdlsub.a`, an SV top instantiates the wrapper and compares `q` against its
+own cycle count for ten cycles. `docs/vhdl/usage.rst` documents the two-run recipe, which
+was executed verbatim (`--timescale-override /1fs`, `-LDFLAGS ../obj_vhdl/libvhdlsub.a`,
+`obj_dir/Vtop`). The VHDL frontend needed **no** change: its AST is post-width-commit, so
+`V3ProtectLib`/`V3EmitV`/`V3EmitMk` are language-agnostic — including the primary-clock
+marking the wrapper's `seq_update` needs (`V3SchedPartition`). `--protect-lib` also runs on
+a VHDL design through the same pass; its consumer side is not tested.
+
+#### The reverse direction: measured blockers (2026-11-19)
+
+Making a VHDL design instantiate a SystemVerilog module needs one of the options
+below. The first breakage in each direction, as measured (not assumed):
+
+| Direction | First breakage | Owner |
+|---|---|---|
+| VHDL instance of an SV module | `V3VhdlNativeLower.cpp:12089`: the instance name is looked up in the VHDL entity map only, so an SV module is never considered | frontend |
+| SV cell of a VHDL entity, mixed sources | `V3VhdlLink.cpp:74`: the post-link contract check runs over the whole netlist and rejects SV `AstVar`s that still carry `childDTypep` | frontend |
+| same, check relaxed | `V3LinkDot.cpp:5525`: the primary resolve pass flags VHDL ports, which never get the `AstPort`/`user4` "in port list" bookkeeping | middle |
+| same | `V3Width`/`V3WidthCommit` never run on the SV half, so `assertDTypesResolved` fails | middle |
+
+`V3LinkCells` is *not* a blocker: an SV `AstCell` already binds to a VHDL entity by module
+name across the language boundary, and the VHDL cell of an unknown entity already binds to
+an SV module of that name. The blockers are the passes that assume SV parse shape and the
+frontend's own all-or-nothing pipeline gate.
+
+#### Options for the reverse direction
+
+1. **Library block boundary, VHDL side consuming the library (frontend only).** Build the
+   SV block with `--lib-create` in its own run, then let the VHDL frontend synthesize the
+   stub module the backend already consumes for `verilatorLib` modules: an `AstModule`
+   marked `verilatorLib(true)` holding the component's ports plus `protectlib_hash__V`
+   (`Const`, must equal the library's) and `handle__V`, both hard requirements of
+   `V3EmitCSyms.cpp:1538-1541`, and `AstCFunc(dpiImport)` for
+   `<lib>_protectlib_{check_hash,create,combo_update,seq_update,final}` called from
+   `AstAlways` blocks exactly as the wrapper's own `initial`/`always` blocks do. Nothing in
+   the middle or backend changes: `V3LinkCells.cpp:610` already skips pin elaboration for
+   such modules, `V3Name.cpp:88` renames them, and the ctor glue exists. Open questions,
+   in the order they must be answered: (a) can a frontend-authored `AstCFunc` with
+   `dpiImport` survive `V3EmitCImp`, whose import bookkeeping is set up at parse time — a
+   2–3 day spike; (b) the hash and the clock-port list are not derivable from VHDL source,
+   so the frontend must read them from the generated wrapper (text) or take a new option
+   (which lands in `V3Options`, outside `src/V3Vhdl*`); (c) it duplicates the lib ABI
+   contract in a second place, against the "one pattern globally" rule. `[INFERENCE]`
+   2–4 weeks with a viable spike.
+1. **Deferred component binding (frontend only, insufficient alone).** Emit an unbound
+   `AstCell` with `modName` in original spelling instead of erroring, keeping the
+   port-map validation against the component declaration that §3.5.1 specifies, so
+   `V3LinkCells` can bind it to an SV module. 1–2 days, but useless by itself: the SV
+   module still needs `V3Width`, so it only pays off together with option 3.
+1. **Per-module bypass (middle).** Mark VHDL-emitted modules and have the three objecting
+   sites skip them: scope `V3VhdlLink`'s contract check to VHDL modules, mark VHDL ports as
+   port-checked before `V3LinkDot`'s primary pass, and keep `V3Width`/`V3WidthCommit` off
+   VHDL modules while they run for the SV half. Measured, this is **three localized edits**,
+   not the invasive rewrite originally assumed — but two of them are in shared passes, they
+   need module provenance (a flag on `AstNodeModule`, i.e. a shared header), and a wrong
+   split silently miscompiles one language. This is the only path to genuinely mixed
+   elaboration and lints in one invocation.
 1. **Parse-level emission for VHDL leaf modules.** Emit VHDL modules in SV-parse shape
    (`AstRefDType` by name, explicit casts/resizes) and let the SV pipeline elaborate them.
    This reintroduces dependence on `V3Width` semantics and is only viable for leaf modules
    with simple ports; it must not be used for VHDL types that SV cannot express.
-1. **Per-module bypass.** Mark pre-elaborated modules and teach every front-half pass to
-   skip them. Invasive (touches `V3LinkDot`, `V3Param`, `V3Width` and their symbol tables),
-   high regression risk, not recommended.
 
-Mixed-language support is not implied by the M1 design; option 1 is the M2 target and
-requires a separately reviewed change.
+Options 1 and 2 are frontend-only and the current recommendation if the middle stays off
+limits; option 3 is the only complete one and is a separate, separately reviewed change.
+Where a design allows it, the cheapest answer is still to restructure: put an SV top above
+the VHDL hierarchy, as in the landed flow above, or port the leaf modules to VHDL. §3.5.1
+keeps the binding contract these options must satisfy.
 
 ### 3.5.1 Cross-language binding contract (UG901-compatible)
 
@@ -437,7 +496,7 @@ exit criteria below are unchanged.
 | WP5 | `std_logic_1164` + `numeric_std` intrinsics | Numeric test corpus matches GHDL for 0/1 (X/Z where defined) | 2–4 PM |
 | WP6 | Test infrastructure: VHDL sources in `test_regress`, differential harness against GHDL, AST-dump golden tests | CI runs VHDL tests; contract checker enabled under `--debug-check` | 2–4 PM |
 | WP7 | Hardening: diagnostics, unsupported-feature errors, performance, control-file interaction, cross-run determinism | No silent miscompiles; documented loss list enforced by tests | 2–4 PM |
-| WP8 (M2) | Mixed-language support per §3.5 (separately reviewed); first task is the `--lib-create` proof of concept | VHDL hierarchy compiled with `--lib-create`; its generated wrapper is instantiated from an SV run | 2–6 PM |
+| WP8 (M2) | Mixed-language support per §3.5 (separately reviewed). **Option 1 done**: `--lib-create` on a VHDL hierarchy, wrapper instantiated from an SV run. Remaining: VHDL instantiating SV, either by frontend-synthesized lib stubs or the measured three-edit middle bypass | VHDL hierarchy compiled with `--lib-create`; its generated wrapper is instantiated from an SV run (*met*, `t_vhdl_lib_create`); reverse direction has a decision and a spec | 2–6 PM |
 
 WP1–WP7 overlap, and their estimates are for the solid profile. The solid profile totals
 16–33 person-months; WP8 is M2 and excluded. The M1 demo profile (§2.1 `Demo` column) is
@@ -519,7 +578,7 @@ completes WP1–WP4, adds the full WP5 and WP7, and reaches the 16–33 person-m
 | Simulation | functional equivalence | random-vector differential runs against GHDL |
 | Regression | M1 design corpus | counter, shift register, FIFO, FSM, UART TX/RX, AXI-Lite slave, memory wrappers |
 | Negative | unsupported constructs | exact diagnostics, no silent acceptance |
-| Mixed language | M2 only: VHDL hierarchy instantiated from SV through the §3.5 `--lib-create` wrapper/library flow; mixed sources in one invocation are rejected in M1 | separate M2 test suite |
+| Mixed language | VHDL hierarchy instantiated from SV through the §3.5 `--lib-create` wrapper/library flow (`t_vhdl_lib_create`, both `vlt` and `vltmt`); mixed sources in one invocation are rejected, with `t_vhdl_mixed` pinning the message and `t_vhdl_unbound_component_bad` pinning the VHDL-side instance diagnostic | separate M2 test suite |
 | Control files | `.vlt` waiver and control directives still apply in VHDL runs (libmap/hier-params are skipped) | run the waiver corpus with VHDL sources; assert the expected waivers fire |
 
 Differential harness: compile the VHDL sources with GHDL, drive both models with the same
@@ -561,8 +620,10 @@ CI: new tests must not require GHDL for the default suite; gate differential tes
 1. `integer` representation: 32-bit `INT` with static checks (recommended) versus
    narrowed synthesis widths per subtype.
 1. Clocked-process recognition heuristics: `rising_edge`/`falling_edge`/`'event and clk = '1'` only (recommended) versus requiring user attributes.
-1. M2 mixed-language route: `--lib-create` wrapper plus linked library (recommended), parse-level
-   emission for VHDL leaf modules, or per-module bypass (§3.5). M1 rejects mixed inputs.
+1. M2 mixed-language route (§3.5): `--lib-create` wrapper plus linked library, landed for a VHDL
+   hierarchy under an SV top; the reverse direction is a frontend-only lib-stub synthesis, a
+   frontend-only deferred binding plus a three-edit middle bypass, or parse-level emission for
+   VHDL leaf modules. Mixed inputs in one invocation are still rejected.
 1. Frontend source: hand-written frontend (current recommendation) versus an out-of-process
    GPL helper that emits the analyzed, type-resolved GHDL IIR for Verilator to elaborate and
    lower. `ghdl --file-to-xml` carries `kind`, `file`/`line`/`col` on every node and resolved
