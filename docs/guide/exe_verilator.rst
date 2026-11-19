@@ -607,7 +607,13 @@ Summary:
    Select the language used by default when first processing each Verilog
    file. The language value must be "VAMS", "1364-1995", "1364-2001",
    "1364-2001-noconfig", "1364-2005", "1800-2005", "1800-2009",
-   "1800-2012", "1800-2017", "1800-2023", or "1800+VAMS".
+   "1800-2012", "1800-2017", "1800-2023", "1800+VAMS", or "vhdl".
+
+   The value "vhdl" makes VHDL the default, which is how a VHDL design in a
+   file whose extension does not select a language is analyzed; see
+   :ref:`vhdl_usage`. Design files may mix the two languages regardless of
+   this option, as each file is analyzed by the frontend of its own
+   language.
 
    Any language associated with a particular file extension (see the
    various +<lang>*\ ext+ options) will be used in preference to the
@@ -1417,7 +1423,9 @@ Summary:
 
    Designs compiled using this option cannot use :vlopt:`--timing` with delays,
    and cannot use :vlopt:`--sc`. The design must have a single top level module,
-   see :vlopt:`--top-module`.
+   see :vlopt:`--top-module`. A VHDL design can be built the same way, which
+   packages it behind the generated SystemVerilog wrapper; see
+   :ref:`vhdl_usage`.
 
    See also :vlopt:`--protect-lib`.
 
@@ -2708,3 +2716,7 @@ Summary:
    user-specified directories. This allows '-y "$(pwd)"' to be used if
    absolute filenames are desired for error messages instead of relative
    filenames.
+
+   An invocation that also analyzes VHDL sources does not read SystemVerilog
+   modules from these directories, so name those files on the command line;
+   see :ref:`vhdl_usage`.

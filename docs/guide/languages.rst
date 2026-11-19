@@ -65,6 +65,25 @@ Verilator implements a full IEEE 1800-2023 compliant preprocessor,
 including triple-quoted strings, and \`ifdef expressions.
 
 
+VHDL Support
+------------
+
+Verilator reads VHDL directly, through a frontend built into it; no external
+analyzer is needed. A file whose name ends in :file:`.vhd` or :file:`.vhdl`
+is analyzed as VHDL, a file with another extension when
+:vlopt:`--language vhdl <--language>` or :vlopt:`--default-language` asks
+for it.
+
+The two languages may be mixed in one invocation: both frontends feed one
+elaborated netlist, so a SystemVerilog module can instantiate a VHDL entity
+by name, and a VHDL entity can instantiate others below a SystemVerilog top.
+A VHDL design cannot instantiate a SystemVerilog module.
+
+What the VHDL frontend accepts, and where its model diverges from a VHDL
+simulator, is tabulated in :doc:`../vhdl/review`; :doc:`../vhdl/usage` shows
+the flow.
+
+
 Verilog AMS Support
 -------------------
 

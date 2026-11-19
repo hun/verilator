@@ -11,7 +11,8 @@ Welcome to Verilator!
 The Verilator package converts Verilog [#]_ and SystemVerilog [#]_ hardware
 description language (HDL) designs into a C++ or SystemC model that, after
 compiling, can be executed. Verilator is not a traditional simulator but a
-compiler.
+compiler. VHDL design files are read directly too, and may be mixed with
+SystemVerilog in one run; see :ref:`vhdl_usage`.
 
 Verilator is typically used as follows:
 
