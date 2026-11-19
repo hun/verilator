@@ -29,7 +29,7 @@ new value model and are out of scope.
 | WP5 std packages | partial intrinsic subset: `numeric_std`, `std_logic_misc`, `std_logic_arith` conversions, operator-symbol calls; no full package simulation |
 | WP6 test infrastructure | 52 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
 | WP7 hardening | ongoing: clean Unsupported/Error diagnostics, corpus triage, process-form rejection, control-file handling |
-| WP8 mixed language (M2) | **M2 option 1 landed** (`test_regress/t/t_vhdl_lib_create.py`): a VHDL hierarchy is built with `--lib-create` and instantiated from an SV run, no frontend change needed. The reverse direction (VHDL instantiating SV) is analysed in §3.5: frontend-only lib-stub synthesis, or a three-edit middle bypass |
+| WP8 mixed language (M2) | **M2 option 1 landed** (`test_regress/t/t_vhdl_lib_create.py`): a VHDL hierarchy is built with `--lib-create` and instantiated from an SV run, no frontend change needed. For the reverse direction, §3.5 now has measurements: running the VHDL AST through the normal SV front half (option 4) passes 269/275 runs and supports mixed elaboration in one invocation; the 6 remaining failures are frontend emission fixes |
 
 The active frontend runs `ghdl --file-to-xml --std=08` out of process, parses the XML into a
 minimal DOM (`V3VhdlXml`), and lowers the analyzed design units to a post-width-commit
@@ -101,9 +101,10 @@ The `ERROR` bucket is mostly real design errors in the corpus (unresolved instan
 missing architectures, unknown identifiers) plus six pre-existing core faults
 (`V3DfgSynthesize` width/read-only, `V3Tristate`). Remaining work, in priority order:
 
-1. WP8 cross-language binding: the VHDL-under-SV flow is done (§3.5). VHDL
-   instantiating SystemVerilog needs either frontend-synthesized lib stubs or the measured
-   three-edit middle bypass; mixed sources in one invocation stay rejected until then.
+1. WP8 cross-language binding: the VHDL-under-SV flow is done (§3.5). For VHDL
+   instantiating SystemVerilog, option 4 is now measured as the route: the VHDL AST already
+   survives the normal front half except for a handful of emission fixes, and mixed
+   elaboration in one invocation then works. Mixed sources stay rejected until that lands.
 2. Process forms: waits that are not a top-level clock edge (`wait on`, `wait for`,
    inside loops), clock edges inside `process(all)`, and process splitting when
    variables/ordering cannot be proven disjoint.
@@ -407,16 +408,70 @@ frontend's own all-or-nothing pipeline gate.
    need module provenance (a flag on `AstNodeModule`, i.e. a shared header), and a wrong
    split silently miscompiles one language. This is the only path to genuinely mixed
    elaboration and lints in one invocation.
-1. **Parse-level emission for VHDL leaf modules.** Emit VHDL modules in SV-parse shape
-   (`AstRefDType` by name, explicit casts/resizes) and let the SV pipeline elaborate them.
-   This reintroduces dependence on `V3Width` semantics and is only viable for leaf modules
-   with simple ports; it must not be used for VHDL types that SV cannot express.
+1. **Parse-level emission, SV pipeline consumes the VHDL AST.** Keep the committed AST but
+   make it something the normal front half can process (port-list nodes, explicit
+   casts/resizes so `V3Width` cannot redefine a VHDL idiom) and delete the VHDL-mode
+   pipeline bypass. Superseded assessment: this is not limited to leaf modules — measured
+   2026-11-19, it runs the whole suite and supports genuine mixed elaboration. **This is the
+   cheapest complete route; see the block below.**
 
-Options 1 and 2 are frontend-only and the current recommendation if the middle stays off
-limits; option 3 is the only complete one and is a separate, separately reviewed change.
-Where a design allows it, the cheapest answer is still to restructure: put an SV top above
-the VHDL hierarchy, as in the landed flow above, or port the leaf modules to VHDL. §3.5.1
-keeps the binding contract these options must satisfy.
+**Option 4 measured.** The committed AST is closer to SV-pipeline shape than the original
+assessment assumed. Three spike edits were enough to run the whole VHDL regression suite
+through the normal front half:
+
+1. the frontend emits the `AstPort` node the SV parser emits, ahead of each port `AstVar`
+   (`V3VhdlNativeLower.cpp`, the entity port loop). `V3LinkDot::visit(AstPort)` then does
+   the `user4`/`pinNum` bookkeeping that VHDL ports lacked — the `V3LinkDot.cpp:5525`
+   blocker disappears without touching that pass;
+2. `V3Global::readFiles` dispatches the parser per file and the mixed-source gate is gone;
+3. `process()` **deletes** the VHDL-mode `if (!vhdl)` bypass rather than extending it, so
+   `V3LinkParse`…`V3WidthCommit` run over the VHDL modules too.
+
+Result: **266 of 275** VHDL regression runs pass through the SV pipeline with only those
+three edits; **269 of 275** once the shift-fix snippet below is applied (baseline on the
+same command: 275/275). An SV top instantiating a VHDL entity *in one invocation* —
+`dut d (.clk(clk), .q(q))` with `dut.vhdl` on the same command line — elaborates and
+simulates correctly for ten cycles, which is the feature option 3 was meant to buy. Remaining
+failures, all in the frontend's emission, none needing a middle or backend edit:
+
+| Test(s) | Diagnostic | Cause and fix |
+|---|---|---|
+| `t_vhdl_enum`, `t_vhdl_enum_dyn` | `ENUMVALUE`: implicit conversion to enum from `logic[1:0]` | vector-valued expression assigned to an enum-typed signal; wrap it in an explicit cast at emission |
+| `t_vhdl_physical`, `t_vhdl_physical_units` | `WIDTHEXPAND`: `EQ` expects 64 bits, RHS `32'h0` has 32 | constant wider operand compared against a 32-bit zero; emit a width-matched constant |
+| `t_vhdl_tb` | `WIDTHTRUNC`: `LOOPTEST` expects 1 bit, condition `32'h1` has 32 | a `wait`-in-process loop condition; emit a 1-bit condition |
+| `t_vhdl_mixed` | golden mismatch | expected: that fixture pins the "mixed sources are rejected" message, which option 4 removes; re-point it at a positive test |
+
+One failure class was a *silent* miscompile and is the real risk: `sra` on a predefined
+`std_logic_vector` needs VHDL's edge fill, which the frontend encodes as `AstShiftRS` on an
+unsigned dtype; `V3Width` rewrites that into a logical shift (`12` became `4`) because SV
+types say an unsigned value shifts logically. Making the encoding width-stable fixes all
+three affected tests (`t_vhdl_slv_shift`, `t_vhdl_shift_edge`, `t_vhdl_shift_neg`) with a
+cast-based view, and is the pattern the rest needs:
+
+```cpp
+// VHDL sra on a predefined vector fills from the leftmost element; keep ShiftRS by
+// shifting a signed view so V3Width does not reinterpret it.
+AstNodeDType* const signedDtp
+    = findVector(flp, VBasicDTypeKwd::LOGIC, VSigning::SIGNED, width - 1, 0, false);
+AstNodeExpr* const shiftedp
+    = new AstShiftRS{flp, new AstCast{flp, valuep, signedDtp}, amountp, width};
+shiftedp->dtypep(signedDtp);
+resultp = new AstCast{flp, shiftedp, dtp};
+```
+
+Verdict: ~1–2 weeks `[INFERENCE]` of frontend work (casts/resizes at emission plus the
+width-stable shift idiom), then deleting the VHDL pipeline bypass; no pass logic changes.
+Its risk is exactly the class above — every place the frontend emits an idiom whose meaning
+`V3Width`/`V3Const` redefines — so the work must land with the full VHDL simulation suite
+green under the SV pipeline (it catches all observed cases). `V3Param` over the per-binding
+specialized generic modules and the `inout` ports (emitted as `WIRE` with `INOUT`) already
+pass under the spike, so those two are verification rather than open risk.
+
+Options 1 and 2 are frontend-only and strictly less capable. Option 4 is now the
+recommendation; option 3 stays on the table only if some VHDL construct turns out to be
+inexpressible in width-stable AST. Where a design allows it, the cheapest answer is still to
+restructure: put an SV top above the VHDL hierarchy, as in the landed flow above, or port
+the leaf modules to VHDL. §3.5.1 keeps the binding contract these options must satisfy.
 
 ### 3.5.1 Cross-language binding contract (UG901-compatible)
 
