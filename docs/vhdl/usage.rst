@@ -306,7 +306,8 @@ name:
 
 .. code-block:: bash
 
-   verilator --binary top.sv sim_main.cpp dut.vhdl
+   verilator --cc --exe --build -j 0 top.sv sim_main.cpp dut.vhdl
+   obj_dir/Vtop
 
 where :file:`dut.vhdl` declares ``entity mixed_dut``. The instance binds
 like any other module instance: the port names are the entity's, folded to
