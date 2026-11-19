@@ -29,7 +29,7 @@ new value model and are out of scope.
 | WP5 std packages | partial intrinsic subset: `numeric_std`, `std_logic_misc`, `std_logic_arith` conversions, operator-symbol calls; no full package simulation |
 | WP6 test infrastructure | 52 `t_vhdl_*` regression tests; GHDL `synth` corpus runner; no differential GHDL-vs-Verilator simulation harness yet |
 | WP7 hardening | ongoing: clean Unsupported/Error diagnostics, corpus triage, process-form rejection, control-file handling |
-| WP8 mixed language (M2) | **M2 option 1 landed** (`test_regress/t/t_vhdl_lib_create.py`): a VHDL hierarchy is built with `--lib-create` and instantiated from an SV run, no frontend change needed. For the reverse direction, §3.5 now has measurements: running the VHDL AST through the normal SV front half (option 4) passes 269/275 runs and supports mixed elaboration in one invocation; the 6 remaining failures are frontend emission fixes |
+| WP8 mixed language (M2) | **Mixed invocations work.** Both frontends feed one netlist, so an SV design instantiates VHDL entities by name in a single run (`t_vhdl_mixed`); the VHDL AST now goes through the normal front half, and 275/275 VHDL regression runs pass that way. The `--lib-create` library boundary also works (`t_vhdl_lib_create`). A VHDL instance still binds only to VHDL entities |
 
 The active frontend runs `ghdl --file-to-xml --std=08` out of process, parses the XML into a
 minimal DOM (`V3VhdlXml`), and lowers the analyzed design units to a post-width-commit
@@ -68,7 +68,8 @@ WP0 proves the seam end-to-end:
 - `process()` skips `V3LinkParse`…`V3WidthCommit` in VHDL mode and commits the width
   invariants directly. `.vlt` control files stay on the SV parser; the standard package,
   libmaps and hierarchical parameter files are skipped.
-- Mixed SV/VHDL sources are rejected with an error.
+- Each design file is parsed by the frontend of its language and both feed one netlist, so
+  mixed SystemVerilog/VHDL invocations elaborate (§3.5).
 
 Verified at WP0: an entity with an empty architecture produces a C++ model that compiles
 and runs (`--binary`); port types (`std_logic`, `std_logic_vector`, `unsigned`, `signed`,
@@ -101,10 +102,10 @@ The `ERROR` bucket is mostly real design errors in the corpus (unresolved instan
 missing architectures, unknown identifiers) plus six pre-existing core faults
 (`V3DfgSynthesize` width/read-only, `V3Tristate`). Remaining work, in priority order:
 
-1. WP8 cross-language binding: the VHDL-under-SV flow is done (§3.5). For VHDL
-   instantiating SystemVerilog, option 4 is now measured as the route: the VHDL AST already
-   survives the normal front half except for a handful of emission fixes, and mixed
-   elaboration in one invocation then works. Mixed sources stay rejected until that lands.
+1. WP8 cross-language binding: mixed invocations are done (§3.5) — one netlist, the VHDL AST
+   through the normal front half, and entities instantiable from SystemVerilog. What stays
+   open is a VHDL design instantiating a SystemVerilog module, which needs the deferred
+   binding below.
 2. Process forms: waits that are not a top-level clock edge (`wait on`, `wait for`,
    inside loops), clock edges inside `process(all)`, and process splitting when
    variables/ordering cannot be proven disjoint.
@@ -187,7 +188,7 @@ are written.
 | Packages | full `std_logic_1164` and `numeric_std` intrinsic subset | partial: minimal `numeric_std` slice (`+`, `-`, `*`, `/`, `mod`, `rem`, `**`, `abs`, comparisons, shifts, rotates, `minimum`/`maximum`, `to_unsigned`/`to_signed`/`to_integer`/`resize`) |
 | Values | 9-state `std_logic` collapsed: `U`/`W`/`-` → X, `L` → 0, `H` → 1 | yes |
 | Drivers | one driver per signal; `inout` via tristate | yes |
-| Source language | **one language per invocation**; mixed SV/VHDL inputs are rejected in M0/M1 (see §3.5) | yes |
+| Source language | both languages in one invocation; a SystemVerilog design instantiates VHDL entities by name (§3.5) | yes |
 
 ### 2.2 Later milestones (M2+)
 
@@ -333,145 +334,92 @@ Verilator AST nodes are planned for M1; if one becomes unavoidable, it is added 
 
 ### 3.5 Mixed-language designs (M2)
 
-The M1 pipeline gate is run-global: if any VHDL **design** source is present, the whole
-invocation uses the VHDL frontend and `process()` runs the VHDL path (control `.vlt` files
-are still parsed by the SV parser, as described in §3.1). It cannot process SV modules
-through `V3Width` and pre-widthed VHDL modules in the same tree, because those passes walk
-the entire netlist. Mixed inputs are therefore rejected with an explicit error, including
-VHDL files reached through `-v`/`-y` libraries; the message names the supported split flow.
+One invocation analyzes both languages. Each design file goes to the frontend of its own
+language — by extension, or by `--language vhdl` for a VHDL file with another extension —
+and both feed one netlist, which the normal front half then elaborates. `readFiles` parses
+per file, `process()` has no VHDL-only branch, and the standard package, libmaps and
+hierarchical parameter files are read whenever a SystemVerilog source is present.
 
-#### Landed: library block boundary (VHDL hierarchy under an SV top)
+The VHDL frontend had to make its AST something those passes accept, which is a small,
+enumerable set of obligations rather than a per-pass bypass:
+
+- Emit the `AstPort` node the SystemVerilog parser emits, ahead of each port `AstVar`.
+  `V3LinkDot::visit(AstPort)` then records the pin number and marks the port, so
+  `V3LinkDot.cpp:5525` never sees an unmarked VHDL port.
+- Keep the committed widths, and make every idiom width-stable, because `V3Width` and
+  `V3Const` re-derive meaning from types. Anything the frontend encodes with a node whose
+  meaning depends on the operand's SV type is a silent miscompile. Fixed and covered:
+  `sra` on a predefined vector shifts through a signed view (`t_vhdl_slv_shift`,
+  `t_vhdl_shift_edge`, `t_vhdl_shift_neg`); integer operands of unequal width are extended
+  explicitly before the operator, so `time/integer` and `time/time` divide cleanly
+  (`t_vhdl_physical`, `t_vhdl_physical_units`); enum stepping happens in the type's vector
+  form with a cast back (`t_vhdl_enum`, `t_vhdl_enum_dyn`); a loop condition is one bit
+  (`t_vhdl_tb`).
+- Report which modules it emitted (`V3VhdlParse::modules()`), because `V3VhdlLink`'s
+  post-width contract check must not inspect the SystemVerilog modules of a mixed netlist,
+  which are still in parse shape when it runs.
+
+One known gap in mixed invocations: `V3LinkCells::resolveModule` keeps its VHDL-mode
+behaviour (`V3LinkCells.cpp:338`) and creates an `AstNotFoundModule` instead of reading a
+SystemVerilog source from `-y`/`-v` search directories, so every design file must be named
+on the command line. Relaxing that needs a mixed-mode flag, which the frontends can set when
+they see both languages.
+
+Results, all under test:
+
+- A SystemVerilog design instantiates VHDL entities by name in one invocation:
+  `t_vhdl_mixed` puts a C++ driver around an SV top above a VHDL counter that only counts
+  when enabled, and `t_vhdl_unbound_component_bad` pins the one direction that still fails
+  (a VHDL instance of an SV module, whose module is present in the same invocation).
+- The whole VHDL regression suite (275 runs) elaborates through the normal front half, and
+  `--protect-lib` and `--lib-create` keep working on a VHDL design.
+
+#### The library boundary (VHDL hierarchy as a compiled library)
 
 Run the VHDL frontend on one VHDL hierarchy with a single top entity and
 `--lib-create <name>` (`docs/guide/exe_verilator.rst:1367-1385`). The run emits C++, the
 wrapper `<name>.sv` — whose tail carries the control directive
 `verilator_lib -module "<name>"`, which is what makes any later run treat it as a pre-built
-library (`V3Control.cpp:319`) — and a Makefile that builds `lib<name>.a`/`.so`. The SV top
-is a pure-SV invocation that parses the wrapper, instantiates it by module name and links
-the library. No netlist is shared; the ABI is the generated wrapper.
+library (`V3Control.cpp:319`) — and a Makefile that builds `lib<name>.a`/`.so`. A second
+invocation, with or without other VHDL sources, parses the wrapper, instantiates it by
+module name and links the library. No netlist is shared; the ABI is the generated wrapper.
 
 Proven and kept under test by `test_regress/t/t_vhdl_lib_create.py`: a VHDL counter is
 built into `libvhdlsub.a`, an SV top instantiates the wrapper and compares `q` against its
 own cycle count for ten cycles. `docs/vhdl/usage.rst` documents the two-run recipe, which
 was executed verbatim (`--timescale-override /1fs`, `-LDFLAGS ../obj_vhdl/libvhdlsub.a`,
-`obj_dir/Vtop`). The VHDL frontend needed **no** change: its AST is post-width-commit, so
-`V3ProtectLib`/`V3EmitV`/`V3EmitMk` are language-agnostic — including the primary-clock
-marking the wrapper's `seq_update` needs (`V3SchedPartition`). `--protect-lib` also runs on
-a VHDL design through the same pass; its consumer side is not tested.
+`obj_dir/Vtop`). The VHDL frontend needed **no** change for it: its AST is post-width-
+commit, so `V3ProtectLib`/`V3EmitV`/`V3EmitMk` are language-agnostic — including the
+primary-clock marking the wrapper's `seq_update` needs (`V3SchedPartition`). `--protect-lib`
+also runs on a VHDL design through the same pass; its consumer side is not tested.
 
-#### The reverse direction: measured blockers (2026-11-19)
+#### Remaining: a VHDL instance of a SystemVerilog module
 
-Making a VHDL design instantiate a SystemVerilog module needs one of the options
-below. The first breakage in each direction, as measured (not assumed):
+The VHDL binder only looks in the VHDL entity map (`V3VhdlNativeLower.cpp:12089`), so a
+VHDL design cannot instantiate a SystemVerilog module, in one invocation or across a
+library. Three routes were analysed; the first is the cheapest:
 
-| Direction | First breakage | Owner |
-|---|---|---|
-| VHDL instance of an SV module | `V3VhdlNativeLower.cpp:12089`: the instance name is looked up in the VHDL entity map only, so an SV module is never considered | frontend |
-| SV cell of a VHDL entity, mixed sources | `V3VhdlLink.cpp:74`: the post-link contract check runs over the whole netlist and rejects SV `AstVar`s that still carry `childDTypep` | frontend |
-| same, check relaxed | `V3LinkDot.cpp:5525`: the primary resolve pass flags VHDL ports, which never get the `AstPort`/`user4` "in port list" bookkeeping | middle |
-| same | `V3Width`/`V3WidthCommit` never run on the SV half, so `assertDTypesResolved` fails | middle |
-
-`V3LinkCells` is *not* a blocker: an SV `AstCell` already binds to a VHDL entity by module
-name across the language boundary, and the VHDL cell of an unknown entity already binds to
-an SV module of that name. The blockers are the passes that assume SV parse shape and the
-frontend's own all-or-nothing pipeline gate.
-
-#### Options for the reverse direction
-
-1. **Library block boundary, VHDL side consuming the library (frontend only).** Build the
-   SV block with `--lib-create` in its own run, then let the VHDL frontend synthesize the
-   stub module the backend already consumes for `verilatorLib` modules: an `AstModule`
-   marked `verilatorLib(true)` holding the component's ports plus `protectlib_hash__V`
-   (`Const`, must equal the library's) and `handle__V`, both hard requirements of
-   `V3EmitCSyms.cpp:1538-1541`, and `AstCFunc(dpiImport)` for
+1. **Deferred component binding (frontend).** Emit an unbound `AstCell` whose `modName`
+   keeps the source spelling, keeping the component-declaration port-map validation that
+   §3.5.1 specifies, so `V3LinkCells`/`V3LinkDot` bind it to an SV module by name,
+   case-sensitively as UG901 requires. 1–2 days; the case handling and the port
+   width/direction check against the bound module are the work.
+1. **VHDL side consuming a `--lib-create` library (frontend).** Have the frontend
+   synthesize the `verilatorLib` stub instead of binding source: an `AstModule` marked
+   `verilatorLib(true)` with the component's ports, `protectlib_hash__V` (`Const`, equal to
+   the library's) and `handle__V` — both hard requirements of `V3EmitCSyms.cpp:1538-1541` —
+   plus `AstCFunc(dpiImport)` for
    `<lib>_protectlib_{check_hash,create,combo_update,seq_update,final}` called from
-   `AstAlways` blocks exactly as the wrapper's own `initial`/`always` blocks do. Nothing in
-   the middle or backend changes: `V3LinkCells.cpp:610` already skips pin elaboration for
-   such modules, `V3Name.cpp:88` renames them, and the ctor glue exists. Open questions,
-   in the order they must be answered: (a) can a frontend-authored `AstCFunc` with
-   `dpiImport` survive `V3EmitCImp`, whose import bookkeeping is set up at parse time — a
-   2–3 day spike; (b) the hash and the clock-port list are not derivable from VHDL source,
-   so the frontend must read them from the generated wrapper (text) or take a new option
-   (which lands in `V3Options`, outside `src/V3Vhdl*`); (c) it duplicates the lib ABI
-   contract in a second place, against the "one pattern globally" rule. `[INFERENCE]`
-   2–4 weeks with a viable spike.
-1. **Deferred component binding (frontend only, insufficient alone).** Emit an unbound
-   `AstCell` with `modName` in original spelling instead of erroring, keeping the
-   port-map validation against the component declaration that §3.5.1 specifies, so
-   `V3LinkCells` can bind it to an SV module. 1–2 days, but useless by itself: the SV
-   module still needs `V3Width`, so it only pays off together with option 3.
-1. **Per-module bypass (middle).** Mark VHDL-emitted modules and have the three objecting
-   sites skip them: scope `V3VhdlLink`'s contract check to VHDL modules, mark VHDL ports as
-   port-checked before `V3LinkDot`'s primary pass, and keep `V3Width`/`V3WidthCommit` off
-   VHDL modules while they run for the SV half. Measured, this is **three localized edits**,
-   not the invasive rewrite originally assumed — but two of them are in shared passes, they
-   need module provenance (a flag on `AstNodeModule`, i.e. a shared header), and a wrong
-   split silently miscompiles one language. This is the only path to genuinely mixed
-   elaboration and lints in one invocation.
-1. **Parse-level emission, SV pipeline consumes the VHDL AST.** Keep the committed AST but
-   make it something the normal front half can process (port-list nodes, explicit
-   casts/resizes so `V3Width` cannot redefine a VHDL idiom) and delete the VHDL-mode
-   pipeline bypass. Superseded assessment: this is not limited to leaf modules — measured
-   2026-11-19, it runs the whole suite and supports genuine mixed elaboration. **This is the
-   cheapest complete route; see the block below.**
+   `AstAlways` blocks. The consumer machinery already exists (`V3LinkCells.cpp:610`,
+   `V3Name.cpp:88`, the ctor glue), but the hash and the clock list are not derivable from
+   VHDL source, and it duplicates the library ABI contract. `[INFERENCE]` 2–4 weeks after a
+   2–3 day spike proving a frontend-authored `dpiImport` `AstCFunc` survives `V3EmitCImp`.
+1. **Parse-level emission for a VHDL top.** Emit VHDL design units in pure parse shape
+   (`AstRefDType` by name) so the SV pipeline builds them from source-level information.
+   Only viable for leaf modules with simple ports and it re-derives every VHDL type
+   decision in SV terms; not recommended.
 
-**Option 4 measured.** The committed AST is closer to SV-pipeline shape than the original
-assessment assumed. Three spike edits were enough to run the whole VHDL regression suite
-through the normal front half:
-
-1. the frontend emits the `AstPort` node the SV parser emits, ahead of each port `AstVar`
-   (`V3VhdlNativeLower.cpp`, the entity port loop). `V3LinkDot::visit(AstPort)` then does
-   the `user4`/`pinNum` bookkeeping that VHDL ports lacked — the `V3LinkDot.cpp:5525`
-   blocker disappears without touching that pass;
-2. `V3Global::readFiles` dispatches the parser per file and the mixed-source gate is gone;
-3. `process()` **deletes** the VHDL-mode `if (!vhdl)` bypass rather than extending it, so
-   `V3LinkParse`…`V3WidthCommit` run over the VHDL modules too.
-
-Result: **266 of 275** VHDL regression runs pass through the SV pipeline with only those
-three edits; **269 of 275** once the shift-fix snippet below is applied (baseline on the
-same command: 275/275). An SV top instantiating a VHDL entity *in one invocation* —
-`dut d (.clk(clk), .q(q))` with `dut.vhdl` on the same command line — elaborates and
-simulates correctly for ten cycles, which is the feature option 3 was meant to buy. Remaining
-failures, all in the frontend's emission, none needing a middle or backend edit:
-
-| Test(s) | Diagnostic | Cause and fix |
-|---|---|---|
-| `t_vhdl_enum`, `t_vhdl_enum_dyn` | `ENUMVALUE`: implicit conversion to enum from `logic[1:0]` | vector-valued expression assigned to an enum-typed signal; wrap it in an explicit cast at emission |
-| `t_vhdl_physical`, `t_vhdl_physical_units` | `WIDTHEXPAND`: `EQ` expects 64 bits, RHS `32'h0` has 32 | constant wider operand compared against a 32-bit zero; emit a width-matched constant |
-| `t_vhdl_tb` | `WIDTHTRUNC`: `LOOPTEST` expects 1 bit, condition `32'h1` has 32 | a `wait`-in-process loop condition; emit a 1-bit condition |
-| `t_vhdl_mixed` | golden mismatch | expected: that fixture pins the "mixed sources are rejected" message, which option 4 removes; re-point it at a positive test |
-
-One failure class was a *silent* miscompile and is the real risk: `sra` on a predefined
-`std_logic_vector` needs VHDL's edge fill, which the frontend encodes as `AstShiftRS` on an
-unsigned dtype; `V3Width` rewrites that into a logical shift (`12` became `4`) because SV
-types say an unsigned value shifts logically. Making the encoding width-stable fixes all
-three affected tests (`t_vhdl_slv_shift`, `t_vhdl_shift_edge`, `t_vhdl_shift_neg`) with a
-cast-based view, and is the pattern the rest needs:
-
-```cpp
-// VHDL sra on a predefined vector fills from the leftmost element; keep ShiftRS by
-// shifting a signed view so V3Width does not reinterpret it.
-AstNodeDType* const signedDtp
-    = findVector(flp, VBasicDTypeKwd::LOGIC, VSigning::SIGNED, width - 1, 0, false);
-AstNodeExpr* const shiftedp
-    = new AstShiftRS{flp, new AstCast{flp, valuep, signedDtp}, amountp, width};
-shiftedp->dtypep(signedDtp);
-resultp = new AstCast{flp, shiftedp, dtp};
-```
-
-Verdict: ~1–2 weeks `[INFERENCE]` of frontend work (casts/resizes at emission plus the
-width-stable shift idiom), then deleting the VHDL pipeline bypass; no pass logic changes.
-Its risk is exactly the class above — every place the frontend emits an idiom whose meaning
-`V3Width`/`V3Const` redefines — so the work must land with the full VHDL simulation suite
-green under the SV pipeline (it catches all observed cases). `V3Param` over the per-binding
-specialized generic modules and the `inout` ports (emitted as `WIRE` with `INOUT`) already
-pass under the spike, so those two are verification rather than open risk.
-
-Options 1 and 2 are frontend-only and strictly less capable. Option 4 is now the
-recommendation; option 3 stays on the table only if some VHDL construct turns out to be
-inexpressible in width-stable AST. Where a design allows it, the cheapest answer is still to
-restructure: put an SV top above the VHDL hierarchy, as in the landed flow above, or port
-the leaf modules to VHDL. §3.5.1 keeps the binding contract these options must satisfy.
+§3.5.1 keeps the binding contract these must satisfy.
 
 ### 3.5.1 Cross-language binding contract (UG901-compatible)
 
@@ -633,7 +581,7 @@ completes WP1–WP4, adds the full WP5 and WP7, and reaches the 16–33 person-m
 | Simulation | functional equivalence | random-vector differential runs against GHDL |
 | Regression | M1 design corpus | counter, shift register, FIFO, FSM, UART TX/RX, AXI-Lite slave, memory wrappers |
 | Negative | unsupported constructs | exact diagnostics, no silent acceptance |
-| Mixed language | VHDL hierarchy instantiated from SV through the §3.5 `--lib-create` wrapper/library flow (`t_vhdl_lib_create`, both `vlt` and `vltmt`); mixed sources in one invocation are rejected, with `t_vhdl_mixed` pinning the message and `t_vhdl_unbound_component_bad` pinning the VHDL-side instance diagnostic | separate M2 test suite |
+| Mixed language | both directions that work: `t_vhdl_mixed` (SV top above a VHDL entity in one invocation, `vlt` and `vltmt`) and `t_vhdl_lib_create` (VHDL hierarchy as a `--lib-create` library); `t_vhdl_unbound_component_bad` pins the diagnostic for a VHDL instance of an SV module, with the module present | runs with the VHDL suite |
 | Control files | `.vlt` waiver and control directives still apply in VHDL runs (libmap/hier-params are skipped) | run the waiver corpus with VHDL sources; assert the expected waivers fire |
 
 Differential harness: compile the VHDL sources with GHDL, drive both models with the same
@@ -678,7 +626,7 @@ CI: new tests must not require GHDL for the default suite; gate differential tes
 1. M2 mixed-language route (§3.5): `--lib-create` wrapper plus linked library, landed for a VHDL
    hierarchy under an SV top; the reverse direction is a frontend-only lib-stub synthesis, a
    frontend-only deferred binding plus a three-edit middle bypass, or parse-level emission for
-   VHDL leaf modules. Mixed inputs in one invocation are still rejected.
+   VHDL leaf modules. A VHDL instance of a SystemVerilog module is not supported yet.
 1. Frontend source: hand-written frontend (current recommendation) versus an out-of-process
    GPL helper that emits the analyzed, type-resolved GHDL IIR for Verilator to elaborate and
    lower. `ghdl --file-to-xml` carries `kind`, `file`/`line`/`col` on every node and resolved

@@ -161,8 +161,7 @@ static void process() {
             v3Global.vlExit(0);
         }
 
-        const bool vhdl = v3Global.vhdlMode();
-        if (!vhdl) {
+        {
             // Convert parseref's to varrefs, and other directly post parsing fixups
             V3LinkParse::linkParse(v3Global.rootp());
             // Cross-link signal names
@@ -207,10 +206,10 @@ static void process() {
         V3Dead::deadifyModules(v3Global.rootp());
 
         v3Global.checkTree();
-        if (!vhdl && v3Global.hasTable()) V3Udp::udpResolve(v3Global.rootp());
+        if (v3Global.hasTable()) V3Udp::udpResolve(v3Global.rootp());
 
         // Create a hierarchical Verilation plan
-        if (!vhdl && !v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
+        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
             && v3Global.opt.hierarchical() && !v3Global.opt.hierChild()) {
             V3Hierarchical::createGraph(v3Global.rootp());
             // If a plan is created, further analysis is not necessary.
@@ -218,35 +217,19 @@ static void process() {
             if (v3Global.hierGraphp()) return;
         }
 
-        if (!vhdl) {
-            // Calculate and check widths, edit tree to TRUNC/EXTRACT any width mismatches
-            V3Width::width(v3Global.rootp());
+        // Calculate and check widths, edit tree to TRUNC/EXTRACT any width mismatches.
+        // The VHDL frontend's dtypes are already committed, so this leaves them unchanged.
+        V3Width::width(v3Global.rootp());
 
-            V3Error::abortIfErrors();
+        V3Error::abortIfErrors();
 
-            // Inline property and sequence instances before widths are committed.
-            V3AssertElab::assertElabAll(v3Global.rootp());
-            // V3Undriven would report what a rejected instance or sequence event control leaves
-            V3Error::abortIfErrors();
+        // Inline property and sequence instances before widths are committed.
+        V3AssertElab::assertElabAll(v3Global.rootp());
+        // V3Undriven would report what a rejected instance or sequence event control leaves
+        V3Error::abortIfErrors();
 
-            // Commit to the widths we've chosen; Make widthMin==width
-            V3WidthCommit::widthCommit(v3Global.rootp());
-        } else {
-            // The VHDL frontend emits a post-width-commit AST, so there is nothing to width.
-            // V3LinkDot, which VHDL mode skips, normally reports cells to missing modules and
-            // binds their pins. Dead module removal has run, so every remaining cell is
-            // instantiated; report unresolved ones before later passes dereference their pins.
-            v3Global.rootp()->foreach([](AstNode* nodep) {
-                AstCell* const cellp = VN_CAST(nodep, Cell);
-                if (!cellp) return;
-                if (!cellp->modp() || VN_IS(cellp->modp(), NotFoundModule)) {
-                    cellp->v3error("Cannot find VHDL entity or module '"
-                                   << cellp->modName() << "' for instance '" << cellp->name()
-                                   << "'");
-                }
-            });
-            V3Error::abortIfErrors();
-        }
+        // Commit to the widths we've chosen; Make widthMin==width
+        V3WidthCommit::widthCommit(v3Global.rootp());
         v3Global.assertDTypesResolved(true);
         v3Global.widthMinUsage(VWidthMinUsage::MATCHES_WIDTH);
 

@@ -292,22 +292,35 @@ ______________________________________
 Mixed VHDL and SystemVerilog sources
 ______________________________________
 
-One invocation analyzes one language. Passing design files of both
-languages aborts before any of them is analyzed:
+One invocation may analyze both languages: each file is analyzed by the
+frontend of its own language, chosen by the file extension or by
+:vlopt:`--language vhdl \<--language\>`, and both feed one elaborated
+netlist. A SystemVerilog design therefore instantiates a VHDL entity by
+name:
+
+.. code-block:: sv
+
+   module top (input logic clk, input logic en, output logic [3:0] q);
+     mixed_dut dut (.clk(clk), .en(en), .q(q));
+   endmodule
 
 .. code-block:: bash
 
-   verilator --cc top.vhdl helper.sv
+   verilator --binary top.sv sim_main.cpp dut.vhdl
 
-.. code-block:: text
+where :file:`dut.vhdl` declares ``entity mixed_dut``. The instance binds
+like any other module instance: the port names are the entity's, folded to
+lower case, with the widths the entity declares. Each language elaborates
+its own hierarchy, so a VHDL entity may instantiate further VHDL entities
+below the SystemVerilog top. Name every design file on the command line:
+an invocation that holds VHDL sources does not search :vlopt:`-y`/`-v`
+directories for SystemVerilog modules.
 
-   %Error: Cannot mix VHDL and SystemVerilog design sources in one invocation
-   ... Compile one language per invocation; use --lib-create to instantiate the VHDL hierarchy from a SystemVerilog run
-
-A SystemVerilog design instantiates a VHDL hierarchy through
-:vlopt:`--lib-create`: one run builds the VHDL design into a DPI library
-together with a SystemVerilog wrapper module, and a second run
-instantiates that wrapper and links the library:
+The alternative is the library boundary, which is what a VHDL design
+compiled on its own or used from another simulator needs. One run builds
+the VHDL hierarchy into a DPI library together with a SystemVerilog
+wrapper module, and a second run instantiates that wrapper and links the
+library:
 
 .. code-block:: bash
 
@@ -360,7 +373,7 @@ What the two runs exchange:
   single top level module and rules out :vlopt:`--timing` delays and
   :vlopt:`--sc`.
 
-One direction remains unsupported: a VHDL design instantiating a
+One direction stays unsupported: a VHDL design instantiating a
 SystemVerilog module. A VHDL instance binds only to entities analyzed with
 it, so
 
@@ -369,12 +382,10 @@ it, so
    u1 : svmod port map (a => i, y => o);
 
 fails with ``Cannot find VHDL entity 'svmod' for instance 'u1'``, even
-when :file:`svmod.sv` is on the command line (one invocation analyzes one
-language, as above). The library is the boundary, and only a
-SystemVerilog top can sit above it, so where the hierarchy allows it,
-restructure: instantiate the VHDL design from a SystemVerilog top (the
-two-run recipe above) or port the leaf module to VHDL. There is no
-wrapper that makes a VHDL top see a SystemVerilog module.
+when :file:`svmod.sv` is on the command line. Where the hierarchy allows
+it, restructure: instantiate the VHDL design from a SystemVerilog top, as
+above, or port the leaf module to VHDL. There is no wrapper that makes a
+VHDL top see a SystemVerilog module.
 
 Parts that are each self-contained in one language can also be analyzed
 separately, for example to lint each in its own invocation:
@@ -383,10 +394,6 @@ separately, for example to lint each in its own invocation:
 
    verilator --lint-only top.vhdl
    verilator --lint-only helper.sv
-
-A part that instantiates across the language boundary cannot be analyzed
-at all: its instances resolve to nothing in the one language the
-invocation accepts.
 
 ________________
 Linting a design

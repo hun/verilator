@@ -3995,13 +3995,36 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             }
             if (m_modp) {
                 // A dynamic divisor can reach zero at run time, where the standard
-                // requires an error rather than a silent zero
-                AstNodeExpr* const zeroTestp
-                    = new AstEq{flp, rp->cloneTree(false), makeIntConst(flp, 0)};
+                // requires an error rather than a silent zero. Test the whole value with a
+                // reduction so the operand's width and signedness need no constant.
+                AstRedOr* const anyBitp = new AstRedOr{flp, rp->cloneTree(false)};
+                anyBitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+                AstNodeExpr* const zeroTestp = new AstNot{flp, anyBitp};
+                zeroTestp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
                 addRuntimeError(flp, zeroTestp, "VHDL: division by zero");
             }
         }
         AstNodeExpr* resultp = nullptr;
+        // The operands are both integers but need not have the same width (time is 64 bits,
+        // integer 32), and the width pass requires equal widths, so extend the narrower one
+        if (lt.width != rt.width) {
+            const int wideWidth = std::max(lt.width, rt.width);
+            if (lt.width < wideWidth) {
+                AstNodeExpr* const extendedp
+                    = lt.dtp->isSigned() || rt.dtp->isSigned()
+                          ? static_cast<AstNodeExpr*>(new AstExtendS{flp, lp, wideWidth})
+                          : static_cast<AstNodeExpr*>(new AstExtend{flp, lp, wideWidth});
+                extendedp->dtypep(rt.dtp);
+                lp = extendedp;
+            } else {
+                AstNodeExpr* const extendedp
+                    = lt.dtp->isSigned() || rt.dtp->isSigned()
+                          ? static_cast<AstNodeExpr*>(new AstExtendS{flp, rp, wideWidth})
+                          : static_cast<AstNodeExpr*>(new AstExtend{flp, rp, wideWidth});
+                extendedp->dtypep(lt.dtp);
+                rp = extendedp;
+            }
+        }
         if (op == "+") {
             resultp = new AstAdd{flp, lp, rp};
         } else if (op == "-") {
@@ -4017,6 +4040,14 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             resultp = new AstDivS{flp, lp, rp};
         }
         resultp->dtypep(lt.dtp);
+        // A division's width follows its widest operand in the width pass, while VHDL's
+        // result is the dividend's type (dividing two physical values, or a physical value
+        // by an integer, gives integer), so narrow to it explicitly
+        if ((op == "/" || op == "mod" || op == "rem") && std::max(lt.width, rt.width) > lt.width) {
+            AstNodeExpr* const narrowp = new AstSel{flp, resultp, 0, lt.width};
+            narrowp->dtypep(lt.dtp);
+            return narrowp;
+        }
         return resultp;
     }
     // A static integer operand acts as a natural/signed literal of the vector operand's
@@ -4222,10 +4253,21 @@ AstNodeExpr* Lowering::makeShift(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr
     if (op == "sll") {
         resultp = new AstShiftL{flp, valuep, amountp, width};
     } else if (op == "sra") {
-        resultp = edgeFill ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, valuep, amountp, width})
-                  : vt.isSigned()
-                      ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, valuep, amountp, width})
-                      : static_cast<AstNodeExpr*>(new AstShiftR{flp, valuep, amountp, width});
+        if (edgeFill) {
+            // VHDL's predefined sra fills with the leftmost element. Shift a signed view so
+            // the committed width survives: V3Width turns an AstShiftRS on an unsigned
+            // dtype into a logical shift.
+            AstNodeDType* const signedDtp
+                = findVector(flp, VBasicDTypeKwd::LOGIC, VSigning::SIGNED, width - 1, 0, false);
+            AstNodeExpr* const shiftedp
+                = new AstShiftRS{flp, new AstCast{flp, valuep, signedDtp}, amountp, width};
+            shiftedp->dtypep(signedDtp);
+            resultp = new AstCast{flp, shiftedp, dtp};
+        } else {
+            resultp = vt.isSigned()
+                          ? static_cast<AstNodeExpr*>(new AstShiftRS{flp, valuep, amountp, width})
+                          : static_cast<AstNodeExpr*>(new AstShiftR{flp, valuep, amountp, width});
+        }
     } else if (op == "sla" && edgeFill) {
         // (value << n) | (rightmost_element & ((1 << n) - 1)). The mask subtraction
         // wraps for n >= width, which fills the whole result with the edge element.
@@ -5475,12 +5517,20 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
                                 "VHDL: '" + attribute + "' of the " + (succ ? "last" : "first")
                                     + " enumeration literal is outside the type");
             }
+            // Arithmetic on an enumeration type is not something the width pass accepts, so
+            // step the position in the type's vector form and cast the result back
+            AstNodeDType* const bitsDtp
+                = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, typep->width);
+            AstNodeExpr* const argBitsp = new AstCast{flp, argp, bitsDtp};
+            AstNodeExpr* const oneBitsp = new AstCast{flp, enumConst(1), bitsDtp};
             AstNodeExpr* const steppedp
-                = succ ? static_cast<AstNodeExpr*>(new AstAdd{flp, argp, enumConst(1)})
-                       : static_cast<AstNodeExpr*>(new AstSub{flp, argp, enumConst(1)});
-            steppedp->dtypep(enumDtp);
+                = succ ? static_cast<AstNodeExpr*>(new AstAdd{flp, argBitsp, oneBitsp})
+                       : static_cast<AstNodeExpr*>(new AstSub{flp, argBitsp, oneBitsp});
+            steppedp->dtypep(bitsDtp);
+            AstNodeExpr* const steppedEnump = new AstCast{flp, steppedp, enumDtp};
+            steppedEnump->dtypep(enumDtp);
             AstCond* const resultp
-                = new AstCond{flp, atLimitp, enumConst(succ ? 0 : count - 1), steppedp};
+                = new AstCond{flp, atLimitp, enumConst(succ ? 0 : count - 1), steppedEnump};
             resultp->dtypep(enumDtp);
             return resultp;
         }
@@ -7435,7 +7485,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
         }
         AstLoop* const loopp = new AstLoop{flp};
         // The repeated body stops for good when it reaches a bare wait
-        AstNodeExpr* runp = new AstConst{flp, 1};
+        AstNodeExpr* runp = bitConst(flp, '1');
         if (m_suspendFlagp) {
             runp = new AstNot{flp, new AstVarRef{flp, m_suspendFlagp, VAccess::READ}};
             runp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
@@ -11376,7 +11426,10 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             // V3Tristate distinguishes a converted tristate input from an input that was
             // declared as one by comparing against the declared direction.
             varp->declDirection(direction);
-            varp->pinNum(++pinNum);
+            // The port list node the SV parser emits, so V3LinkDot marks the port and
+            // records its pin number exactly as it does for a parsed ANSI port
+            m_modp->addStmtsp(new AstPort{port.flp, ++pinNum, name.first});
+            varp->pinNum(pinNum);
             // VHDL ports are signals, so procedural assignment is legal
             varp->declTyped(true);
             m_modp->addStmtsp(varp);
@@ -12088,7 +12141,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     const auto modIt = m_modulesp->find(conc.instanceName);
     if (modIt == m_modulesp->end()) {
         flp->v3error("Cannot find VHDL entity '" + conc.instanceName + "' for instance '"
-                     + conc.instanceLabel + "'\n"
+                         + conc.instanceLabel + "'\n"
                      << flp->warnMore()
                      << "... VHDL instantiates only entities analyzed with it; a SystemVerilog"
                         " module must be instantiated from an SV top, with this hierarchy built"

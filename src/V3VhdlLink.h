@@ -20,16 +20,21 @@
 #include "config_build.h"
 #include "verilatedos.h"
 
-class AstNetlist;
+#include <set>
 
-//! VHDL-specific binding and control-file application.
+class AstNetlist;
+class AstNodeModule;
+
+//! VHDL-specific check of the AST the frontend emitted.
 //!
-//! VHDL mode skips V3LinkParse, which normally applies the control-file directives that
-//! target functions, variables, blocks and cases. This pass applies those directives to the
-//! already-emitted VHDL AST and checks the post-width AST contract in debug builds.
+//! The control-file directives are applied by V3LinkParse, which now runs on VHDL modules
+//! too. What remains is the post-width contract of the emitted AST, checked in debug builds
+//! and only on the modules this frontend produced, since a mixed design also holds
+//! SystemVerilog modules that are still in parse shape at this point.
 class V3VhdlLink final {
 public:
-    static void link(AstNetlist* nodep) VL_MT_DISABLED;
+    static void link(AstNetlist* nodep,
+                     const std::set<const AstNodeModule*>& vhdlModules) VL_MT_DISABLED;
 };
 
 #endif  // Guard

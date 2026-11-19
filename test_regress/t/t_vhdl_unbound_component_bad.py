@@ -15,7 +15,10 @@ test.top_filename = 't/t_vhdl_unbound_component_bad.vhdl'
 
 
 
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl'],
+# The SystemVerilog module of that name is in this invocation too: a VHDL instance still
+# binds only to entities analyzed with it, so the design is refused with the same message
+test.compile(verilator_flags2=vhdl_frontend.flags()
+             + ['--language', 'vhdl', 't/t_vhdl_unbound_component_bad.sv'],
              fails=True,
              expect_filename=test.golden_filename)
 

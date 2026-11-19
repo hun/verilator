@@ -31,6 +31,7 @@
 #include "V3Stats.h"
 #include "V3VhdlNative.h"
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -57,12 +58,19 @@ public:
         : m_rootp{rootp} {}
     ~V3VhdlParseImp() = default;
 
-    //! Parse, elaborate and lower the collected files in-tree
-    void finish();
+    //! Parse, elaborate and lower the collected files in-tree, recording the modules it adds
+    void finish(std::set<const AstNodeModule*>& emitted);
 };
 
-void V3VhdlParseImp::finish() {
+void V3VhdlParseImp::finish(std::set<const AstNodeModule*>& emitted) {
     if (m_files.empty()) return;
+    // A mixed design parses SystemVerilog sources into the same netlist, so remember which
+    // modules this frontend adds for the checks that only apply to its own AST
+    std::set<const AstNodeModule*> before;
+    for (AstNodeModule* modp = m_rootp->modulesp(); modp;
+         modp = VN_AS(modp->nextp(), NodeModule)) {
+        before.insert(modp);
+    }
     std::vector<V3VhdlNativeFile> files;
     files.reserve(m_files.size());
     for (const VhdlFile& vfile : m_files) {
@@ -77,6 +85,10 @@ void V3VhdlParseImp::finish() {
         ++modules;
     }
     V3Stats::addStatSum(V3Stats::STAT_SOURCE_MODULES, modules);
+    for (AstNodeModule* modp = m_rootp->modulesp(); modp;
+         modp = VN_AS(modp->nextp(), NodeModule)) {
+        if (!before.count(modp)) emitted.insert(modp);
+    }
 }
 
 //######################################################################
@@ -113,4 +125,4 @@ void V3VhdlParse::parseFile(FileLine* fileline, const std::string& filename, boo
     m_impp->m_files.push_back(VhdlFile{resolved, libname, inLibrary});
 }
 
-void V3VhdlParse::finish() { m_impp->finish(); }
+void V3VhdlParse::finish() { m_impp->finish(m_modules); }

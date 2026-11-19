@@ -34,6 +34,8 @@
 #include "V3VhdlLink.h"
 #include "V3VhdlParse.h"
 
+#include <set>
+
 VL_DEFINE_DEBUG_FUNCTIONS;
 
 //######################################################################
@@ -89,8 +91,8 @@ void V3Global::readFiles() {
 
     VInFilter filter{v3Global.opt.pipeFilter()};
 
-    // Decide the source language before parsing, and reject mixed-language designs. M1
-    // supports one language per invocation; mixed hierarchies are a separate design.
+    // Each design file is analyzed by the frontend of its own language; both feed the one
+    // netlist, so an instance may cross the language boundary
     bool anyVhdl = false;
     bool anySv = false;
     const auto noteLang = [&](const string& filename) {
@@ -105,11 +107,6 @@ void V3Global::readFiles() {
         noteLang(filelib.filename());
     }
     const bool forceVhdl = v3Global.opt.sourceLangVhdl();
-    if ((anyVhdl && anySv) || (forceVhdl && anySv)) {
-        v3error("Cannot mix VHDL and SystemVerilog design sources in one invocation\n"
-                << "... Compile one language per invocation; use --lib-create to instantiate"
-                   " the VHDL hierarchy from a SystemVerilog run");
-    }
     const bool vhdlMode = forceVhdl || anyVhdl;
     v3Global.vhdlMode(vhdlMode);
     V3Error::abortIfErrors();
@@ -119,7 +116,7 @@ void V3Global::readFiles() {
 
     const auto parseDesignFile = [&](FileLine* flp, const string& filename, bool inLibrary,
                                      const string& libname, const string& errmsg) {
-        if (vhdlMode) {
+        if (v3Global.opt.fileSourceLang(filename) == V3SourceLang::VHDL) {
             vhdlParserp->parseFile(flp, filename, inLibrary, false, libname, errmsg);
         } else {
             parser.parseFile(flp, filename, inLibrary, false, libname, errmsg);
@@ -140,7 +137,7 @@ void V3Global::readFiles() {
                          false, filelib.libname(), "Cannot find file containing .vlt file: ");
     }
 
-    if (!vhdlMode) {
+    if (!vhdlMode || anySv) {
         // Parse the std package
         if (v3Global.opt.stdPackage()) {
             parser.parseFile(
@@ -160,7 +157,7 @@ void V3Global::readFiles() {
 
     // Read top module
     for (const auto& filelib : v3Global.opt.vFiles()) {
-        const string& libname = vhdlMode || filelib.libname() != "work"
+        const string& libname = (vhdlMode && !anySv) || filelib.libname() != "work"
                                     ? filelib.libname()
                                     : v3Global.libMapp()->matchMapping(filelib.filename());
         parseDesignFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(), false,
@@ -175,7 +172,7 @@ void V3Global::readFiles() {
                         filelib.libname(), "Cannot find file containing library module: ");
     }
 
-    if (!vhdlMode) {
+    if (!vhdlMode || anySv) {
         // Read hierarchical type parameter file
         for (const auto& filelib : v3Global.opt.hierParamFile()) {
             parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filelib.filename(),
@@ -185,8 +182,10 @@ void V3Global::readFiles() {
     }
 
     // VHDL: analyze and elaborate all collected design units, then emit AstModules
+    std::set<const AstNodeModule*> vhdlModules;
     if (vhdlParserp) {
         vhdlParserp->finish();
+        vhdlModules = vhdlParserp->modules();
         delete vhdlParserp;
     }
 
@@ -199,8 +198,8 @@ void V3Global::readFiles() {
     }
 
     if (vhdlMode) {
-        // Apply the control-file directives that V3LinkParse would have applied
-        V3VhdlLink::link(v3Global.rootp());
+        // Check the emitted AST; its control-file directives are applied by V3LinkParse
+        V3VhdlLink::link(v3Global.rootp(), vhdlModules);
     }
 
     V3Global::dumpCheckGlobalTree("cells", false, dumpTreeEitherLevel() >= 9);

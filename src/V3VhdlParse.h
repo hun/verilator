@@ -20,9 +20,11 @@
 #include "config_build.h"
 #include "verilatedos.h"
 
+#include <set>
 #include <string>
 
 class AstNetlist;
+class AstNodeModule;
 class FileLine;
 class V3VhdlParseImp;
 
@@ -33,6 +35,7 @@ class V3VhdlParseImp;
 //! emits Verilator AST nodes. finish() must run after all files and before V3LinkCells.
 class V3VhdlParse final {
     V3VhdlParseImp* m_impp;  // Implementation
+    std::set<const AstNodeModule*> m_modules;  // Modules finish() emitted
     VL_UNCOPYABLE(V3VhdlParse);
 
 public:
@@ -45,6 +48,8 @@ public:
                    const std::string& notFoundName = "") VL_MT_DISABLED;
     //! Analyze and elaborate all design units, then emit AstModules
     void finish() VL_MT_DISABLED;
+    //! Modules and packages finish() emitted, for checks that must not see other languages
+    const std::set<const AstNodeModule*>& modules() const { return m_modules; }
 };
 
 #endif  // Guard
