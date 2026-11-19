@@ -8,7 +8,9 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
-entity mixed_dut is
+-- One VHDL level below the entity the SystemVerilog top instantiates, so the VHDL
+-- hierarchy under a SystemVerilog top is elaborated too
+entity mixed_leaf is
   port (
     clk : in std_logic;
     en  : in std_logic;
@@ -16,7 +18,7 @@ entity mixed_dut is
   );
 end;
 
-architecture rtl of mixed_dut is
+architecture rtl of mixed_leaf is
   signal s : unsigned(3 downto 0) := (others => '0');
 begin
   process (clk) is
@@ -28,4 +30,21 @@ begin
     end if;
   end process;
   q <= std_logic_vector(s);
+end;
+
+entity mixed_dut is
+  port (
+    clk : in std_logic;
+    en  : in std_logic;
+    q   : out std_logic_vector(3 downto 0)
+  );
+end;
+
+architecture rtl of mixed_dut is
+begin
+  u_leaf : mixed_leaf port map (
+    clk => clk,
+    en  => en,
+    q   => q
+  );
 end;
