@@ -12,6 +12,7 @@ VHDL frontend: Verilator invokes no external analyzer.
 .. toctree::
    :maxdepth: 2
 
+   usage
    architecture
    review
    findings
