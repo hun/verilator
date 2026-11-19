@@ -989,13 +989,38 @@ ______
       others' defaults
     - ``t_vhdl_generic_default``
 
+  * - N151
+    - a constant whose initializer calls a function that another package defines in its
+      body, e.g. `constant tag_c : string := pkg_a.tag(3)`, reported "call to subprogram
+      whose body was not read" although the body exists
+    - the specifications are emitted before any body, so a constant whose initializer is a
+      call with no body yet waits for the pass that reads the bodies, as an integer
+      constant already did; a call qualified by a package name imports that package first,
+      so the check sees the declarations it names
+    - ``t_vhdl_pkg_body_const``
+  * - N152
+    - a function that a package body declares cannot read a constant only that body
+      declares, and a constant of an architecture cannot see one either: poc's
+      configuration keeps its strings and tables in its package body
+    - the scope a body evaluates against is refreshed after each constant of its unit, and
+      an inlined body imports the package that declared it, since the caller may have
+      imported only the specification
+    - ``t_vhdl_pkg_body_const``
+  * - N153
+    - a constant of an unconstrained array of records crashed the frontend when its type
+      could not be resolved: the error path deleted a value that had not been lowered
+    - the error path deletes the value only when there is one, and the diagnostic stands
+      on its own; taking the bounds and the element type from the aggregate is open
+    - ``t_vhdl_const_unresolved_unsup``
+
 ____
 Open
 ____
 
-The two findings left here need more than a frontend change: N15 wants
-``AstModule::isTop()`` from the middle end, and N67 is the simulation-only
-subset. The conformance review against IEEE 1076-2008 with GHDL and nvc as the
+The findings here need more than a frontend change: N15 wants
+``AstModule::isTop()`` from the middle end, N67 is the simulation-only subset, and
+N154..N158 are the language features poc's configuration package uses before its
+blocks can be ported; each has a reproducer, none is modelled yet. The conformance review against IEEE 1076-2008 with GHDL and nvc as the
 reference simulators (findings N99..N127) is closed; every one of those is in
 the Closed table with the test that pins it.
 
@@ -1015,6 +1040,36 @@ the Closed table with the test that pins it.
        droppable here. Not making it a top needs ``AstModule::isTop()``
        (``level() == 1``, set by ``V3LinkCells``), which is the middle end.
        Reproducer: ``test_regress/t/t_vhdl_spec_top_repro.vhdl``.
+  * - N154
+    - a function whose formals all have defaults, called by naming it without arguments:
+      poc's `VENDOR = VENDOR_XILINX` is the call `VENDOR()` (``config.vhdl``), and the
+      frontend reads the name as a constant
+    - lowered as a call with no actuals, whose formals then take their defaults; the
+      same resolution ``resolveCall`` already does for a parenthesized call
+  * - N155
+    - a character literal as an operand of a string concatenation, `'3' & mark_c`
+      (``config.vhdl``); the frontend lowers character literals only in a logic context
+    - the other operand fixes the result type as a string, which is what a context does
+      for the literal today
+  * - N156
+    - a constant of an unconstrained array of records whose members are unconstrained,
+      the board tables of ``config.vhdl``; only the aggregate fixes the element type and
+      the bounds (the diagnostic of N153)
+    - the bounds come from the element count and the element record type from the first
+      aggregate element, as ``completeRecordType`` already does for a record constant
+  * - N157
+    - an overload set in which the string overloads take a slice actual,
+      `ite(cond, str(1 to n), ConstNUL)` in ``config.vhdl``: "no declaration of 'ite'
+      accepts the actuals"
+    - the actual's type is fixed by the formal's unconstrained string type, so the
+      unconstrained formals of the overload set have to accept a slice before the
+      overload is chosen
+  * - N158
+    - a slice whose bounds are equal and inverted, `d(d'left downto d'left -
+      EMPTY_STATE_BITS + 1)` with zero state bits (``fifo_cc_got.vhdl``): "empty or
+      reversed slice", reported while lowering a branch a static condition disables
+    - a null slice is legal (IEEE 1076-2008 8.5); the branch is not reachable when the
+      condition is static and false
   * - N67
     - the simulation-only subset: a ``line`` variable *written* by a debug
       procedure through ``ieee.std_logic_textio`` (bit-serial; reading a file into

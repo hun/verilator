@@ -187,7 +187,9 @@ only known at run time runs as a loop and its `exit` latches a flag the loop tes
 reads, a slice assignment whose width is a run-time value becomes one guarded
 write per width, and a conversion whose length is a run-time value takes the type
 its consumer needs. An input port's default may name the entity's own generics,
-and an instance that binds only some of them fills in the rest. A
+and an instance that binds only some of them fills in the rest. A constant that
+calls a function another package defines in its body waits for the pass that reads
+the bodies, and a body sees the constants its own package body declares. A
 string literal keeps a doubled quote as one quote character, and a case choice
 that pairs literals the two-state model merges (`'0'` with `'L'`) is one
 choice rather than a duplicate. A

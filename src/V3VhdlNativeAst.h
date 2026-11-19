@@ -345,6 +345,7 @@ struct SubprogramDecl final {
     bool impure = false;  // `impure` prefix; no subprogram may read a signal yet
     bool hasBody = false;
     FileLine* flp = nullptr;
+    std::string unitName;  // The package that declares it, if any: a body sees that package
     std::string name;  // Folded
     std::string spelling;
     std::vector<FormalDecl> formals;

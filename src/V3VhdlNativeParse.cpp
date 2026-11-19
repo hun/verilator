@@ -3034,7 +3034,14 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             continue;
         }
         if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
-            parseSubprogramInto(pkg.subprograms);
+            {
+                const std::size_t before = pkg.subprograms.size();
+                parseSubprogramInto(pkg.subprograms);
+                // A body of the package sees what the package declares, including the
+                // constants only the body declares
+                for (std::size_t i = before; i < pkg.subprograms.size(); ++i)
+                    pkg.subprograms[i].unitName = pkg.name;
+            }
             continue;
         }
         if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view

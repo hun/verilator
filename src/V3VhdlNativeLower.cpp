@@ -8962,6 +8962,11 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
     m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
     InlineFrame& frameRef = m_inlineFrames.back();
     setScope(base);
+    // A body a package declares sees that package's constants, including the ones only its
+    // body declares; the caller may have imported only the specification
+    if (!subp->unitName.empty() && subp->unitName != m_unitName) {
+        importPackage(subp->unitName);
+    }
     m_inlineP = &env;
     const auto fail = [&](AstNodeExpr* nullp) -> AstNodeExpr* {
         deleteInlineEnv(env);
@@ -10295,6 +10300,38 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         if (!deferredOk) flp->v3error("VHDL: constant without a value");
         return;
     }
+    // A call whose body this pass cannot read: the body's pass completes the constant
+    // rather than reporting the call (IEEE 1800-2023 6.6.1). The specifications are
+    // emitted before any body, so a call to a function another package defines in its
+    // body has none yet. A name with arguments parses as an indexed name and becomes a
+    // call once the prefix names a subprogram.
+    if (deferredOk) {
+        std::string callName;
+        const Expr* namep = nullptr;
+        if (initp->kind == Expr::CALL) {
+            callName = initp->text;
+            namep = initp;
+        } else if (initp->kind == Expr::INDEX && initp->a) {
+            callName = initp->a->text;
+            namep = initp->a.get();
+        }
+        if (!callName.empty()) {
+            // A call qualified by a package name imports it, as resolving the call does
+            std::string packageName;
+            if (namep && namep->kind == Expr::SELECTED && namep->a
+                && packageNameOf(*namep->a, packageName)) {
+                importPackage(packageName);
+            }
+            const auto refs = visibleSubprograms(callName);
+            const bool anyBody
+                = std::any_of(refs.begin(), refs.end(),
+                              [](const SubprogramDecl* const subp) { return subp->hasBody; });
+            if (!refs.empty() && !anyBody) {
+                m_deferredConsts.push_back(DeferredConst{names, &type, initp, flp, m_unitName});
+                return;
+            }
+        }
+    }
     VType constType;
     bool intConstant = true;
     bool realConstant = false;
@@ -10371,31 +10408,14 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
             }
             return;
         }
-        // A call whose body this pass cannot read: the body's pass completes the constant
-        // rather than reporting the call (IEEE 1800-2023 6.6.1). A name with arguments
-        // parses as an indexed name and becomes a call once the prefix names a subprogram.
-        std::string callName;
-        if (initp->kind == Expr::CALL) {
-            callName = initp->text;
-        } else if (initp->kind == Expr::INDEX && initp->a) {
-            callName = initp->a->text;
-        }
-        if (deferredOk && !callName.empty()) {
-            const auto refs = visibleSubprograms(callName);
-            const bool anyBody
-                = std::any_of(refs.begin(), refs.end(),
-                              [](const SubprogramDecl* const subp) { return subp->hasBody; });
-            if (!refs.empty() && !anyBody) {
-                m_deferredConsts.push_back(DeferredConst{names, &type, initp, flp, m_unitName});
-                return;
-            }
-        }
         // A call to a declared function is static as well: lower and fold it below
         if (!constType.dtp) constType = intType(flp);
     }
     if (!constType.dtp) {
+        // An unconstrained array of records whose elements leave a member unconstrained
+        // has no width until its aggregate supplies one
         unsupportedError(flp, "constant of an unresolved type");
-        valuep->deleteTree();
+        if (valuep) valuep->deleteTree();
         return;
     }
     if (!valuep) valuep = lowerExpr(*initp, &constType);
@@ -10718,8 +10738,13 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // Preliminary snapshot: a constant's value may already call a subprogram, whose body
     // evaluates against this scope and not against whatever the caller has
     m_moduleScope = saveScope();
-    for (const Decl& decl : pkg.decls)
+    for (const Decl& decl : pkg.decls) {
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
+        // A subprogram of this unit evaluates against what the unit has declared before
+        // it, so a body that reads a constant declared earlier in the same package body
+        // sees it (IEEE 1076-2008 4.7)
+        m_moduleScope = saveScope();
+    }
     // A constant whose call had no body when the unit was first read is completed now
     // that the bodies are read. It runs after the unit's own constants, because the call
     // may name one of them, and only the unit that declared it completes it: the scope
