@@ -28,8 +28,9 @@ int main(int argc, char** argv) {
         topp->eval();
     };
 
-    // `ra` drives o_sel; b_t also declares `ra` at index 1, so a literal wrongly
-    // taken from b_t would make lit rbb and leave o_lit high.
+    // `ra` drives o_sel. `lit` is a_t'low, a_t's `ra` at position 0; b_t also
+    // declares `ra` at position 1, so taking that literal would make lit equal
+    // a_t's rbb and raise o_lit.
     drive(0);
     check("o_sel", static_cast<int>(topp->o_sel), 0);
     check("o_lit", static_cast<int>(topp->o_lit), 0);

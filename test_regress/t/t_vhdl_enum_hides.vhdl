@@ -4,9 +4,9 @@
 -- SPDX-FileCopyrightText: 2026 Hannes Klas
 -- SPDX-License-Identifier: CC0-1.0
 
--- `p` declares `ra` in two enumeration types, so a bare `ra` with no expected
--- type is ambiguous. The port named `ra` shadows both, and the literal is still
--- selectable by an expected type (IEEE 1076-2008 12.4).
+-- `p` declares `ra` in two enumeration types. The port named `ra` shadows both,
+-- so the literal is not visible in the architecture; the a_t value is named by
+-- its low bound instead.
 
 package enum_hides_pkg is
   type a_t is (ra, rbb);
@@ -26,10 +26,11 @@ entity t is
 end entity;
 
 architecture rtl of t is
-  -- `ra` here takes its type from the target, so it is a_t's literal
+  -- The port object `ra` hides both imported literals, so name the a_t value by
+  -- its declared low bound instead of by the hidden literal.
   signal lit : a_t;
 begin
-  lit <= ra;
+  lit <= a_t'low;
 
   o_sel <= ra;  -- the object
   o_lit <= '1' when lit = rbb else '0';  -- a_t's `ra` is 0, so lit is never rbb

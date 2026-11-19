@@ -1043,7 +1043,7 @@ class Lowering final {
         const VBasicDTypeKwd kwd
             = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
         VType type = vectorType(flp, kwd, vectorSigning(mark), width);
-        type.typeName = mark;
+        type.typeName = mark == "u_signed" ? "signed" : (mark == "u_unsigned" ? "unsigned" : mark);
         return type;
     }
 
@@ -1120,7 +1120,7 @@ class Lowering final {
                || name == "unsigned" || name == "signed" || name == "u_unsigned"
                || name == "u_signed" || name == "to_integer" || name == "to_unsigned"
                || name == "to_signed" || name == "integer" || name == "natural"
-               || name == "positive";
+               || name == "positive" || name == "time";
     }
 
     AstNodeExpr* lowerExpr(const Expr& expr, const VType* context);
@@ -1260,6 +1260,15 @@ class Lowering final {
     bool formalType(const TypeSpec& spec, VType& out) const;
     static bool typesMatch(const VType& formal, const VType& actual);
     static bool kindAccepts(VType::Kind formal, VType::Kind actual);
+    //! Whether a value belongs to the target's base type, for an assignment, a return
+    //! or a generic actual (IEEE 1076-2008 10.5.1, 10.5.2, 12.5)
+    bool valueConforms(const VType& target, const Expr& value, const char* what,
+                       bool checkShape = true) const;
+    static bool isNumericLiteral(const Expr& expr);
+    static bool sameShape(const VType& target, const VType& value);
+    //! Whether a type conversion's target and operand types are closely related
+    //! (IEEE 1076-2008 9.3.6)
+    static bool conversionRelated(const VType& target, const VType& source);
     bool formalsAccept(const Expr& call, const SubprogramDecl& sub) const;
     bool formalsExact(const Expr& call, const SubprogramDecl& sub) const;
     std::vector<const SubprogramDecl*> visibleSubprograms(const std::string& name) const;
@@ -4594,6 +4603,22 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
                               : lowerExpr(*expr.args[0], operandNeedsContext ? context : nullptr);
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
+    // A type conversion needs closely related types. A conversion mark is not a
+    // subprogram, so `formalType` resolving it is what distinguishes the two.
+    {
+        TypeSpec targetSpec;
+        targetSpec.flp = flp;
+        targetSpec.mark = name;
+        VType targetType;
+        VType sourceType = valueType;
+        VType actual;
+        if (actualType(*expr.args[0], actual) && !actual.typeName.empty()) sourceType = actual;
+        if (formalType(targetSpec, targetType) && !conversionRelated(targetType, sourceType)) {
+            flp->v3error("VHDL: type conversion '" + name + "' from an unrelated type");
+            valuep->deleteTree();
+            return nullptr;
+        }
+    }
     if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {
         if (valueType.isInt()) return valuep;
         if (!valueType.isVector() || valueType.width > 32) {
@@ -6310,6 +6335,12 @@ AstNode* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType&
             if (restp) restp->deleteTree();
             return nullptr;
         }
+        if (alt.first->kind != Expr::UNAFFECTED
+            && !valueConforms(type, *alt.first, "assignment value")) {
+            valuep->deleteTree();
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
         valuep = resizeExpr(valuep, type, flp);
         const bool level = i < firstEdged;
         AstNode* const assignp
@@ -6362,6 +6393,11 @@ AstNode* Lowering::lowerLatchedAlternatives(const Concurrent& conc, const VType&
             if (restp) restp->deleteTree();
             return nullptr;
         }
+        if (!valueConforms(type, *alt.first, "assignment value")) {
+            valuep->deleteTree();
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
         valuep = resizeExpr(valuep, type, flp);
         AstNode* const assignp = new AstAssign{flp, lhsp->cloneTree(false), valuep};
         if (!alt.second) {
@@ -6397,6 +6433,12 @@ AstNodeExpr* Lowering::lowerAlternatives(const Concurrent& conc, const VType& ty
         }
         AstNodeExpr* valuep = lowerExpr(*alt.first, &type);
         if (!valuep) {
+            if (restp) restp->deleteTree();
+            return nullptr;
+        }
+        if (alt.first->kind != Expr::UNAFFECTED
+            && !valueConforms(type, *alt.first, "assignment value")) {
+            valuep->deleteTree();
             if (restp) restp->deleteTree();
             return nullptr;
         }
@@ -6700,6 +6742,13 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
             selectorp->deleteTree();
             return nullptr;
         }
+        if (!valueConforms(ltype, *alternative.second, "selected assignment value")) {
+            valuep->deleteTree();
+            for (AstNodeExpr* const ownedp : values) ownedp->deleteTree();
+            lhsp->deleteTree();
+            selectorp->deleteTree();
+            return nullptr;
+        }
         valuep = resizeExpr(valuep, ltype, flp);
         if (astHasZ(valuep)) tristate = true;
         values.push_back(valuep);
@@ -6934,6 +6983,10 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
         if (targetReadp) targetReadp->deleteTree();
     } else {
         rhsp = lowerExpr(*stmt.value, &ltype);
+        if (rhsp && stmt.value && !valueConforms(ltype, *stmt.value, "assignment value")) {
+            rhsp->deleteTree();
+            rhsp = nullptr;
+        }
         if (rhsp) rhsp = resizeExpr(rhsp, ltype, stmt.flp);
     }
     if (!rhsp) {
@@ -6966,6 +7019,11 @@ Lowering::lowerConditionalChain(FileLine* flp,
         } else {
             valuep = lowerExpr(*alt.first, &type);
             if (!valuep) {
+                if (restp) restp->deleteTree();
+                return nullptr;
+            }
+            if (!valueConforms(type, *alt.first, "assignment value")) {
+                valuep->deleteTree();
                 if (restp) restp->deleteTree();
                 return nullptr;
             }
@@ -8041,6 +8099,12 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
             if (!contextual.empty()) fitting = std::move(contextual);
         }
         matching = std::move(fitting);
+    } else if (matching.size() == 1 && !formalsAccept(call, *matching[0]->declp)) {
+        // A single declaration is not a choice, but it still has to accept the actuals:
+        // an actual of the wrong base type is a user error, not an overload ambiguity
+        call.flp->v3error("VHDL: arguments to '" + name
+                          + "' do not conform to its formal parameters");
+        return nullptr;
     }
     if (!matching.empty()) {
         if (foundpp) *foundpp = matching[0];
@@ -8126,7 +8190,23 @@ bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
     case Expr::STRING_LIT: out = VType::ARRAY; return true;
     case Expr::QUAL: return markKind(expr.text, out);
     case Expr::PAREN: return expr.a && actualKind(*expr.a, out);
-    case Expr::UNARY: return expr.a && actualKind(*expr.a, out);
+    case Expr::UNARY: {
+        if (!visibleSubprograms(expr.text).empty()) return false;
+        if (expr.text == "??") {
+            out = VType::LOGIC;
+            return true;
+        }
+        if (expr.text == "and" || expr.text == "or" || expr.text == "xor" || expr.text == "nand"
+            || expr.text == "nor" || expr.text == "xnor") {
+            VType operand;
+            if (!actualType(*expr.a, operand)) return false;
+            out = operand.isVector() ? (operand.kwd == VBasicDTypeKwd::BIT ? VType::BIT
+                                                                          : VType::LOGIC)
+                                     : operand.kind;
+            return true;
+        }
+        return expr.a && actualKind(*expr.a, out);
+    }
     case Expr::NAME:
     case Expr::SELECTED:
     case Expr::INDEX:
@@ -8152,17 +8232,34 @@ bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
         }
         return false;
     }
-    case Expr::ATTR:
-        if (expr.text == "high" || expr.text == "low" || expr.text == "left"
-            || expr.text == "right" || expr.text == "length" || expr.text == "pos"
-            || expr.text == "to_integer") {
+    case Expr::ATTR: {
+        if (expr.text == "length" || expr.text == "pos" || expr.text == "to_integer") {
             out = VType::INT;
             return true;
         }
+        if (expr.text == "high" || expr.text == "low" || expr.text == "left"
+            || expr.text == "right") {
+            VType prefix;
+            bool known = false;
+            if (expr.a && expr.a->kind == Expr::NAME) {
+                TypeSpec spec;
+                spec.flp = expr.flp;
+                spec.mark = expr.a->text;
+                known = formalType(spec, prefix);
+            }
+            if (!known && expr.a) known = typeOfDesignator(*expr.a, prefix);
+            if (!known) return false;
+            // An array attribute names the index type, which is a discrete scalar here
+            out = prefix.isVector() ? VType::INT : prefix.kind;
+            return true;
+        }
         return false;
+    }
     case Expr::BINARY:
         if (expr.text == "=" || expr.text == "/=" || expr.text == "<" || expr.text == ">"
-            || expr.text == "<=" || expr.text == ">=") {
+            || expr.text == "<=" || expr.text == ">=" || expr.text == "?="
+            || expr.text == "?/=" || expr.text == "?<" || expr.text == "?>"
+            || expr.text == "?<=" || expr.text == "?>=") {
             out = VType::LOGIC;  // The frontend models BOOLEAN as one logic bit
             return true;
         }
@@ -8225,14 +8322,41 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
         out.typeName = "boolean";
         return true;
     case Expr::PAREN: return expr.a && actualType(*expr.a, out);
-    case Expr::UNARY:
+    case Expr::UNARY: {
         if (!visibleSubprograms(expr.text).empty()) return false;
+        // The explicit condition operator yields boolean (IEEE 1076-2008 9.2.9)
+        if (expr.text == "??") {
+            out = VType{};
+            out.kind = VType::LOGIC;
+            out.typeName = "boolean";
+            return true;
+        }
+        if (expr.text == "and" || expr.text == "or" || expr.text == "xor" || expr.text == "nand"
+            || expr.text == "nor" || expr.text == "xnor") {
+            VType operand;
+            if (!expr.a || !actualType(*expr.a, operand)) return false;
+            if (operand.isVector()) {
+                out = elementType(operand, expr.flp);
+                out.typeName = operand.kwd == VBasicDTypeKwd::BIT ? "bit" : "std_ulogic";
+            } else {
+                out = operand;
+            }
+            return true;
+        }
         return expr.a && actualType(*expr.a, out);
+    }
     case Expr::BINARY: {
         const std::string& op = expr.text;
-        if (op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">" || op == ">="
-            || op == "?=" || op == "?/=" || op == "?<" || op == "?<=" || op == "?>"
+        if (op == "?=" || op == "?/=" || op == "?<" || op == "?<=" || op == "?>"
             || op == "?>=") {
+            // A matching operator returns std_ulogic, not boolean (IEEE 1076-2008 9.2.3)
+            out = VType{};
+            out.kind = VType::LOGIC;
+            out.typeName = "std_ulogic";
+            return true;
+        }
+        if (op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
+            || op == ">=") {
             out = VType{};
             out.kind = VType::LOGIC;
             out.typeName = "boolean";
@@ -8293,11 +8417,39 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
             out = aType.isVector() ? aType : bType;
             return true;
         }
+        const auto physical = [](const VType& type) {
+            return type.kind == VType::INT && !type.typeName.empty()
+                   && type.typeName != "integer";
+        };
         if (aType.kind == VType::INT && bType.kind == VType::INT) {
-            out = intType(expr.flp);
+            // Addition and subtraction keep a physical type; a physical divided or
+            // multiplied by an integer keeps it too, while physical/physical is an
+            // integer (IEEE 1076-2008 9.2.5)
+            const bool aPhysical = physical(aType);
+            const bool bPhysical = physical(bType);
+            if ((op == "+" || op == "-") && aType.typeName == bType.typeName) {
+                out = aType;
+            } else if ((op == "*" || op == "/") && aPhysical
+                       && bType.typeName == "integer") {
+                out = aType;
+            } else if ((op == "*" || op == "/") && bPhysical
+                       && aType.typeName == "integer") {
+                out = bType;
+            } else {
+                out = intType(expr.flp);
+            }
             return true;
         }
         if (aType.kind == VType::REAL || bType.kind == VType::REAL) {
+            // A physical value multiplied or divided by a real keeps its type
+            if ((op == "*" || op == "/") && physical(aType) && bType.kind == VType::REAL) {
+                out = aType;
+                return true;
+            }
+            if ((op == "*" || op == "/") && physical(bType) && aType.kind == VType::REAL) {
+                out = bType;
+                return true;
+            }
             out = VType{};
             out.kind = VType::REAL;
             out.typeName = "real";
@@ -8352,7 +8504,10 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
         return false;
     }
     case Expr::INDEX: {
-        if (typeOfDesignator(expr, out)) return true;
+        // A prefix that names a type mark is a conversion, not an index of a type object
+        const bool typeMark
+            = expr.a && expr.a->kind == Expr::NAME && m_types.count(expr.a->text) != 0;
+        if (!typeMark && typeOfDesignator(expr, out)) return true;
         // The parser writes an array index, a function call, and a type conversion all as
         // INDEX; the prefix says which.
         if (!expr.a || expr.a->kind != Expr::NAME) return false;
@@ -8398,16 +8553,28 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
         out.ascending = operandType.ascending;
         return true;
     }
-    case Expr::ATTR:
+    case Expr::ATTR: {
+        if (expr.text == "length" || expr.text == "pos" || expr.text == "to_integer") {
+            out = intType(expr.flp);
+            return true;
+        }
         if (expr.text == "high" || expr.text == "low" || expr.text == "left"
-            || expr.text == "right" || expr.text == "length" || expr.text == "pos"
-            || expr.text == "to_integer") {
-            out = VType{};
-            out.kind = VType::INT;
-            out.typeName = "integer";
+            || expr.text == "right") {
+            VType prefix;
+            bool known = false;
+            if (expr.a && expr.a->kind == Expr::NAME) {
+                TypeSpec spec;
+                spec.flp = expr.flp;
+                spec.mark = expr.a->text;
+                known = formalType(spec, prefix);
+            }
+            if (!known && expr.a) known = typeOfDesignator(*expr.a, prefix);
+            if (!known) return false;
+            out = prefix.isVector() ? intType(expr.flp) : prefix;
             return true;
         }
         return false;
+    }
     case Expr::CALL: {
         TypeSpec spec;
         spec.flp = expr.flp;
@@ -8513,7 +8680,15 @@ bool Lowering::typesMatch(const VType& formal, const VType& actual) {
     // Universal integer literals also fit a real formal
     if (formal.kind == VType::REAL && actual.kind == VType::INT) return true;
     if (!formal.typeName.empty() && !actual.typeName.empty()) {
-        if (formal.typeName != actual.typeName) return false;
+        if (formal.typeName != actual.typeName) {
+            // std_logic_vector is the resolved subtype of std_ulogic_vector (IEEE 1164)
+            const bool related
+                = (formal.typeName == "std_logic_vector"
+                   && actual.typeName == "std_ulogic_vector")
+                  || (formal.typeName == "std_ulogic_vector"
+                      && actual.typeName == "std_logic_vector");
+            if (!related) return false;
+        }
         // The same base type under different constraints, which is what an unconstrained
         // formal and a constrained actual are (IEEE 1076-2008 12.5)
         return true;
@@ -8527,6 +8702,155 @@ bool Lowering::typesMatch(const VType& formal, const VType& actual) {
         if (formal.elemp && actual.elemp) return typesMatch(*formal.elemp, *actual.elemp);
     }
     return true;
+}
+
+//! Whether a numeric literal, possibly parenthesized or signed, is a universal value
+bool Lowering::isNumericLiteral(const Expr& expr) {
+    const Expr* ep = &expr;
+    while (ep->kind == Expr::PAREN && ep->a) ep = ep->a.get();
+    if (ep->kind == Expr::UNARY && ep->a && (ep->text == "-" || ep->text == "+")) {
+        ep = ep->a.get();
+        while (ep->kind == Expr::PAREN && ep->a) ep = ep->a.get();
+    }
+    return ep->kind == Expr::INT_LIT || ep->kind == Expr::REAL_LIT;
+}
+
+//! Whether two values of one base type have the same array or record shape. A null or
+//! unconstrained width is left to the later lowering, which reports it if it matters.
+bool Lowering::sameShape(const VType& target, const VType& value) {
+    if (target.kind == VType::ARRAY && value.kind == VType::ARRAY) {
+        if (target.width <= 0 || value.width <= 0) return true;
+        if (target.length() != value.length()) return false;
+        if (target.elemp && value.elemp) return sameShape(*target.elemp, *value.elemp);
+        return true;
+    }
+    // A scalar's width is part of its type; the type mark already matched
+    if (target.kind == VType::VECTOR && value.kind == VType::VECTOR) {
+        if (target.width > 0 && value.width > 0) return target.width == value.width;
+    } else if (target.kind == VType::RECORD && value.kind == VType::RECORD) {
+        if (target.width > 0 && value.width > 0) return target.width == value.width;
+    }
+    return true;
+}
+
+//! A real literal with an integral value, possibly parenthesized or signed
+static bool integralRealLiteral(const Expr& expr, double& value) {
+    const Expr* ep = &expr;
+    while (ep->kind == Expr::PAREN && ep->a) ep = ep->a.get();
+    if (ep->kind == Expr::UNARY && ep->a && (ep->text == "-" || ep->text == "+")) {
+        ep = ep->a.get();
+        while (ep->kind == Expr::PAREN && ep->a) ep = ep->a.get();
+    }
+    if (ep->kind != Expr::REAL_LIT) return false;
+    value = ep->realValue;
+    return std::floor(value) == value;
+}
+
+//! Whether a value may be assigned to a target of `target`'s base type. A value that has
+//! no type of its own (an aggregate, a string literal, a character literal) takes the
+//! target's type; only a universal numeric literal converts implicitly.
+bool Lowering::valueConforms(const VType& target, const Expr& value, const char* what,
+                             bool checkShape) const {
+    if (target.typeName.empty()) return true;
+    // A concatenation takes its result type from the target context, so only the
+    // target category matters here (IEEE 1076-2008 9.2.5)
+    if (value.kind == Expr::BINARY && value.text == "&") {
+        if (!target.isVector()) {
+            value.flp->v3error(std::string{"VHDL: "} + what + " does not have the target's type");
+            return false;
+        }
+        return true;
+    }
+    VType source;
+    if (actualType(value, source) && !source.typeName.empty()) {
+        // A universal integer literal takes any integer type, but not a physical type
+        // (IEEE 1076-2008 9.3.1)
+        if (source.kind == VType::INT && target.kind == VType::INT
+            && target.typeName == "integer" && isNumericLiteral(value)) {
+            return true;
+        }
+        if (source.kind == VType::INT && target.kind == VType::REAL && isNumericLiteral(value)) {
+            return true;
+        }
+        // A universal real literal with an integral value takes an integer type, but
+        // not a physical type
+        if (source.kind == VType::REAL && target.kind == VType::INT
+            && target.typeName == "integer") {
+            double integral = 0.0;
+            if (integralRealLiteral(value, integral)) return true;
+        }
+        // std_logic_vector is a resolved subtype of std_ulogic_vector (IEEE 1164)
+        const bool relatedVector
+            = (source.typeName == "std_logic_vector"
+               && target.typeName == "std_ulogic_vector")
+              || (source.typeName == "std_ulogic_vector"
+                  && target.typeName == "std_logic_vector");
+        if (source.typeName != target.typeName && !relatedVector) {
+            value.flp->v3error(std::string{"VHDL: "} + what + " of type '" + source.typeName
+                               + "' does not have the target's base type '" + target.typeName
+                               + "'");
+            return false;
+        }
+        // Only a simple designator has a width this pass can trust: a call or a
+        // conversion is constrained by its context, and an operator result carries no
+        // declared bounds.
+        const bool sized = checkShape
+                           && (value.kind == Expr::NAME || value.kind == Expr::SELECTED
+                               || value.kind == Expr::SLICE);
+        if (sized && !sameShape(target, source)) {
+            value.flp->v3error(std::string{"VHDL: "} + what + " of type '" + source.typeName
+                               + "' does not have the target's length");
+            return false;
+        }
+        return true;
+    }
+    VType::Kind sourceKind;
+    if (!actualKind(value, sourceKind)) return true;
+    // A bare enumeration literal is typed by the target. Reject one that the target
+    // type does not declare; a shared literal name stays a valid choice (IEEE 1076-2008
+    // 12.5)
+    if (target.kind == VType::ENUM && value.kind == Expr::NAME
+        && std::find(target.literals.begin(), target.literals.end(), value.text)
+               == target.literals.end()) {
+        value.flp->v3error(std::string{"VHDL: "} + what
+                           + " uses an enumeration literal of another type");
+        return false;
+    }
+    if (!kindAccepts(target.kind, sourceKind)) {
+        value.flp->v3error(std::string{"VHDL: "} + what + " does not have the target's type");
+        return false;
+    }
+    return true;
+}
+
+//! Whether a type conversion relates its target and operand. Arrays convert to arrays with
+//! the same element type, numeric types to numeric types, and a subtype to its base; a
+//! conversion between unrelated types is an error (IEEE 1076-2008 9.3.6).
+bool Lowering::conversionRelated(const VType& target, const VType& source) {
+    const bool targetNumeric = target.kind == VType::INT || target.kind == VType::REAL;
+    const bool sourceNumeric = source.kind == VType::INT || source.kind == VType::REAL;
+    if (targetNumeric && sourceNumeric) {
+        // The predefined numeric types convert among themselves; a physical type only
+        // converts to itself (IEEE 1076-2008 9.3.6)
+        const auto builtinNumeric = [](const VType& type) {
+            return type.typeName == "integer" || type.typeName == "real";
+        };
+        if (builtinNumeric(target) && builtinNumeric(source)) return true;
+        return !target.typeName.empty() && target.typeName == source.typeName;
+    }
+    // An enumeration converts to and from its position number
+    if ((target.kind == VType::ENUM && source.kind == VType::INT)
+        || (target.kind == VType::INT && source.kind == VType::ENUM)) {
+        return true;
+    }
+    if (target.typeName == "character" && source.kind == VType::INT) return true;
+    if (target.isVector() && source.isVector()) return true;
+    if (!target.typeName.empty() && !source.typeName.empty()
+        && target.typeName == source.typeName) {
+        return true;
+    }
+    // A literal or aggregate has no type of its own; the mark types it
+    return source.typeName.empty();
 }
 
 //! Whether every actual of a call can be associated with the formal it fills. A caller asks
@@ -8551,7 +8875,15 @@ bool Lowering::formalsAccept(const Expr& call, const SubprogramDecl& sub) const 
         VType aType;
         VType fType;
         if (actualType(*actualp, aType) && formalType(formalp->type, fType)) {
-            if (!typesMatch(fType, aType)) return false;
+            if (!typesMatch(fType, aType)) {
+                // A universal integer literal takes any integer subtype
+                // (IEEE 1076-2008 9.3.1)
+                if (fType.kind == VType::INT && fType.typeName == "integer"
+                    && aType.kind == VType::INT && isNumericLiteral(*actualp)) {
+                    continue;
+                }
+                return false;
+            }
             continue;
         }
         VType::Kind aKind;
@@ -8831,6 +9163,15 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
                 binding.type = *ctxp;
             } else {
                 binding.type = typeOfDType(actualp->dtypep());
+                // The actual is an aggregate or another untyped value: its base type is
+                // the formal's, and only its bounds come from the value
+                VType formalBase;
+                if (this->formalType(formalp->type, formalBase)
+                    && !formalBase.typeName.empty()) {
+                    binding.type.typeName = formalBase.typeName;
+                    binding.type.signing = formalBase.signing;
+                    binding.type.kwd = formalBase.kwd;
+                }
             }
         }
         if (asLvalue && formalp->mode == PortMode::OUT && formalp->cls == FormalDecl::SIGNAL) {
@@ -9586,7 +9927,17 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 unsupportedError(flp, "return without a value in a VHDL function body");
                 return nullptr;
             }
-            return lowerExpr(*stmt.value, m_funcRetp);
+            AstNodeExpr* const valuep = lowerExpr(*stmt.value, m_funcRetp);
+            if (!valuep) return nullptr;
+            if (!m_inlineFrames.empty()) {
+                VType retType;
+                if (formalType(m_inlineFrames.back().declp->returnType, retType)
+                    && !valueConforms(retType, *stmt.value, "return value", false)) {
+                    valuep->deleteTree();
+                    return nullptr;
+                }
+            }
+            return valuep;
         }
         if (stmt.kind == Stmt::IF || stmt.kind == Stmt::CASE || stmt.kind == Stmt::FOR
             || stmt.kind == Stmt::WHILE) {
@@ -10575,6 +10926,11 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
                 lhsp->deleteTree();
                 continue;
             }
+            if (!valueConforms(type, *decl.init, "initial value")) {
+                rhsp->deleteTree();
+                lhsp->deleteTree();
+                continue;
+            }
             rhsp = resizeExpr(rhsp, type, decl.flp);
             m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
         }
@@ -10753,6 +11109,7 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
             }
         }
     }
+    if (initp && !valueConforms(constType, *initp, "constant value")) return;
     // A packed constant of that many bits is copied once per write into it, so a memory
     // image is reported rather than folded
     if (constType.width > (1 << 20)) {
@@ -10792,6 +11149,7 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
             for (const auto& name : names) {
                 if (!reserveName(name.first, name.second, flp)) continue;
                 m_consts[name.first] = value;
+                m_constTypes[name.first] = constType;
             }
             return;
         }
@@ -10952,6 +11310,8 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                 if (it != bindings->end()) {
                     if (it->second.isInt) {
                         m_consts[name.first] = it->second.intValue;
+                        VType declared;
+                        if (resolveType(gen.type, declared)) m_constTypes[name.first] = declared;
                     } else {
                         m_ownedConsts.push_back(
                             std::unique_ptr<AstConst>(it->second.valuep->cloneTree(false)));
@@ -11355,6 +11715,11 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
                 lhsp->deleteTree();
                 continue;
             }
+            if (!valueConforms(type, *decl.init, "initial value")) {
+                rhsp->deleteTree();
+                lhsp->deleteTree();
+                continue;
+            }
             rhsp = resizeExpr(rhsp, type, decl.flp);
             m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
         }
@@ -11461,6 +11826,11 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
                 AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
                 AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
                 if (!rhsp) {
+                    lhsp->deleteTree();
+                    continue;
+                }
+                if (!valueConforms(type, *decl.init, "initial value")) {
+                    rhsp->deleteTree();
                     lhsp->deleteTree();
                     continue;
                 }
@@ -11707,6 +12077,10 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         }
         if (!haveType) {
             unsupportedError(assocp->flp, "generic of type '" + gen.type.mark + "'");
+            freeBindings(bindings);
+            return nullptr;
+        }
+        if (!valueConforms(declared, *assocp->actual, "generic actual")) {
             freeBindings(bindings);
             return nullptr;
         }
@@ -12553,6 +12927,11 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
                 lhsp->deleteTree();
                 continue;
             }
+            if (!valueConforms(type, *decl.init, "initial value")) {
+                rhsp->deleteTree();
+                lhsp->deleteTree();
+                continue;
+            }
             rhsp = resizeExpr(rhsp, type, decl.flp);
             m_modp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
         }
@@ -12812,6 +13191,10 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
         rhsp = lowerAlternatives(stmt, ltype);
     } else {
         rhsp = lowerExpr(*stmt.value, &ltype);
+        if (rhsp && stmt.value && !valueConforms(ltype, *stmt.value, "assignment value")) {
+            rhsp->deleteTree();
+            rhsp = nullptr;
+        }
         if (rhsp) rhsp = resizeExpr(rhsp, ltype, stmt.flp);
     }
     if (!rhsp) {
