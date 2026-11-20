@@ -1,0 +1,4 @@
+%Error: t/t_vhdl_port_unbound_bad.vhdl:32:1: VHDL: input port 'a' has no default value and is not associated
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_port_unbound_bad.vhdl:34:1: VHDL: input port 'a' is left open and has no default value
+%Error: Exiting due to

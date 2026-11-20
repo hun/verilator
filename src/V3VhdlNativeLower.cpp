@@ -11492,6 +11492,17 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         valuep->deleteTree();
         return;
     }
+    // IEEE 1076-2008 9.3.2: an explicit value must have the declared type's length. The
+    // width is not visible to valueConforms for a literal or a simple designator; an
+    // operator expression takes its width from the context instead.
+    const bool sized = initp->kind == Expr::STRING_LIT || initp->kind == Expr::BITS_LIT
+                       || initp->kind == Expr::NAME || initp->kind == Expr::SELECTED
+                       || initp->kind == Expr::SLICE;
+    if (sized && constType.width > 0 && valuep->width() != constType.width) {
+        flp->v3error("VHDL: constant value does not have the type's length");
+        valuep->deleteTree();
+        return;
+    }
     constp->dtypep(constType.dtp);
     for (size_t i = 0; i < names.size(); ++i) {
         const auto& name = names[i];
@@ -12435,6 +12446,13 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             AstNodeExpr* const valuep = lowerExpr(*assocp->actual, &declared);
             AstConst* const foldedp = valuep ? foldStatic(valuep) : nullptr;
             if (foldedp) {
+                if (declared.width > 0 && foldedp->width() != declared.width) {
+                    assocp->flp->v3error("VHDL: generic actual does not have the generic's length");
+                    foldedp->deleteTree();
+                    valuep->deleteTree();
+                    freeBindings(bindings);
+                    return nullptr;
+                }
                 valuep->deleteTree();
                 binding.valuep = foldedp;
                 bound = true;
@@ -12938,6 +12956,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     };
     // An unassociated or `open` input takes its declared default; anything else
     // stays unconnected (IEEE 1076-2008 6.5.7.1)
+    bool defaultError = false;
     auto declaredDefault = [&](const AstVar* const portp, const VType& aggType,
                                const VType& portType) -> AstNodeExpr* {
         if (!entityp || !portp->direction().isInput()) return nullptr;
@@ -12951,16 +12970,31 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             // The default is written in the entity's scope, so its packages are visible
             // there even when the instance does not import them, and its generics carry
             // the values this instance binds (IEEE 1076-2008 6.5.7.1)
-            ScopeSave saved = saveScope();
-            const std::set<std::string> savedImported = m_imported;
-            for (const auto& use : entityp->uses) importPackage(use.pkg, use.decl);
-            for (const TypeDecl& typeDecl : entityp->types) registerType(typeDecl);
-            registerGenerics(entityp->generics, &m_instanceBindings, true);
-            AstNodeExpr* defaultp = lowerExpr(*port.init, &aggType);
-            restoreScope(saved);
-            m_imported = savedImported;
-            if (defaultp) defaultp = resizeExpr(defaultp, portType, flp);
-            return defaultp;
+            bool conforms = false;
+            AstNodeExpr* defaultp = nullptr;
+            {
+                ScopeSave saved = saveScope();
+                const std::set<std::string> savedImported = m_imported;
+                for (const auto& use : entityp->uses) importPackage(use.pkg, use.decl);
+                for (const TypeDecl& typeDecl : entityp->types) registerType(typeDecl);
+                registerGenerics(entityp->generics, &m_instanceBindings, true);
+                conforms = valueConforms(aggType, *port.init, "port default");
+                if (conforms) defaultp = lowerExpr(*port.init, &aggType);
+                restoreScope(saved);
+                m_imported = savedImported;
+            }
+            if (!conforms || !defaultp) {
+                defaultError = true;
+                return nullptr;
+            }
+            if (aggType.width > 0 && defaultp->width() != aggType.width) {
+                port.flp->v3error("VHDL: default of port '" + portp->name()
+                                  + "' does not have the port's length (IEEE 1076-2008 6.5.7.1)");
+                defaultp->deleteTree();
+                defaultError = true;
+                return nullptr;
+            }
+            return resizeExpr(defaultp, portType, flp);
         }
         return nullptr;
     };
@@ -13006,8 +13040,14 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         }
         const VType& aggType = recPortType.kind == VType::RECORD ? recPortType : portType;
         if (assocs.empty()) {
-            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(),
-                                            declaredDefault(portp, aggType, portType)};
+            AstNodeExpr* const defaultp = declaredDefault(portp, aggType, portType);
+            if (!defaultp && !defaultError && portp->direction().isInput()) {
+                flp->v3error("VHDL: input port '" + portp->name()
+                             + "' has no default value and is not associated");
+                return nullptr;
+            }
+            AstPin* const pinp
+                = new AstPin{flp, portp->pinNum(), portp->name(), defaultp};
             pinp->modVarp(portp);
             pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
             continue;
@@ -13092,12 +13132,15 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             // it unconnected, so an input takes its declared default
             const PortAssoc& assoc = *assocs.front();
             if (assoc.actual) {
+                // IEEE 1076-2008 6.5.2.2: the actual must conform to the formal's
+                // type. A scalar of another base type is a user error, not a resize.
+                if (!valueConforms(aggType, *assoc.actual, "port actual")) return nullptr;
                 const bool driven = portp->direction().isOutput() || portp->direction().isInout();
                 AstNodeExpr* valuep = driven ? lowerDesignator(*assoc.actual, true)
                                              : lowerExpr(*assoc.actual, &aggType);
                 if (!valuep) return nullptr;
-                // IEEE 1076-2008 6.5.2.2: the actual must conform to the formal's type,
-                // so a width or element-kind mismatch is reported rather than resized
+                // valueConforms cannot see the element kind of a packed vector, and
+                // cannot size a literal or a context-typed call
                 const VType actualType = typeOfLowered(*assoc.actual, valuep);
                 bool conforms = true;
                 if (actualType.isVector() && portType.isVector()) {
@@ -13113,9 +13156,21 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                     valuep->deleteTree();
                     return nullptr;
                 }
+                if (aggType.width > 0 && valuep->width() != aggType.width) {
+                    assoc.flp->v3error("VHDL: actual of port '" + portp->name()
+                                       + "' does not have the port's length "
+                                         "(IEEE 1076-2008 6.5.2.2)");
+                    valuep->deleteTree();
+                    return nullptr;
+                }
                 actualp = resizeExpr(valuep, portType, flp);
             } else {
                 actualp = declaredDefault(portp, aggType, portType);
+                if (!actualp && !defaultError && portp->direction().isInput()) {
+                    assoc.flp->v3error("VHDL: input port '" + portp->name()
+                                       + "' is left open and has no default value");
+                    return nullptr;
+                }
             }
         } else if (!portType.isVector() || portType.elemWidth != 1) {
             unsupportedError(flp, "part of a port that is not a bit vector");
