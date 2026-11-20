@@ -3128,7 +3128,18 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         if (it == m_scope.end()) {
             if (AstNodeExpr* const aliasp = lowerAlias(expr, false)) return aliasp;
             if (m_subprograms.count(expr.text)) {
-                // A function that has no formal arguments may be called without parentheses
+                // A function whose formals all have defaults may be called without
+                // parentheses; a procedure name alone is not a value
+                const std::vector<const SubprogramDecl*> visible = visibleSubprograms(expr.text);
+                const bool anyFunction
+                    = std::any_of(visible.begin(), visible.end(),
+                                  [](const SubprogramDecl* const subp) {
+                                      return subp->kind == SubprogramDecl::FUNCTION;
+                                  });
+                if (!anyFunction) {
+                    flp->v3error("VHDL: procedure '" + expr.spelling + "' used in an expression");
+                    return nullptr;
+                }
                 Expr call{Expr::CALL};
                 call.flp = flp;
                 call.text = expr.text;
@@ -8216,10 +8227,14 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
     }
     std::string firstWhy;
     bool withoutBody = false;
+    bool sawOtherClass = false;
     std::vector<const SubprogramRef*> matching;
     for (const SubprogramRef* const refp : refs) {
         const SubprogramDecl& sub = *refp->declp;
-        if ((sub.kind == SubprogramDecl::FUNCTION) != function) continue;
+        if ((sub.kind == SubprogramDecl::FUNCTION) != function) {
+            sawOtherClass = true;
+            continue;
+        }
         if (!sub.hasBody) {
             withoutBody = true;
             continue;
@@ -8284,6 +8299,9 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
     } else if (!refs.empty() && !firstWhy.empty()) {
         unsupportedError(call.flp,
                          "arguments to '" + name + "' match no declaration: " + firstWhy);
+    } else if (!refs.empty() && sawOtherClass) {
+        call.flp->v3error("VHDL: '" + name + "' designates a "
+                          + (function ? "procedure, not a function" : "function, not a procedure"));
     }
     return nullptr;
 }
