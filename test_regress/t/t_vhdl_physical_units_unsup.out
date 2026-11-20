@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_physical_units_unsup.vhdl:37:1: VHDL physical unit 'k' of two types is not supported yet
+%Error: t/t_vhdl_physical_units_unsup.vhdl:37:1: Unsupported: VHDL physical unit 'k' of two types
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

@@ -1105,7 +1105,7 @@ ______
   * - N172
     - an array indexed by an enumeration value, `DEFAULT_BLOCKING(ARCH)` with
       `type t_vec is array (t_arch) of ...` (poc's `arith_Adder_Wide`): "non-integer index
-      is not supported yet"
+      "Unsupported: VHDL non-integer index"
     - an enumeration value used as an index is its position (IEEE 1076-2008 9.3.6),
       whether it is a literal, a constant, or a formal an inlined body bound to one
     - ``t_vhdl_enum_index``

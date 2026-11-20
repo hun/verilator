@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_phys_obj_unsup.vhdl:19:1: VHDL physical value at run time is not supported yet
+%Error: t/t_vhdl_phys_obj_unsup.vhdl:19:1: Unsupported: VHDL physical value at run time
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: t/t_vhdl_phys_obj_unsup.vhdl:21:1: VHDL: unknown identifier 'd'
 %Error: Exiting due to

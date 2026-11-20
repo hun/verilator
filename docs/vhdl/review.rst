@@ -181,10 +181,9 @@ Where the implementation is sound
 - Most unsupported constructs are refused rather than silently accepted: 260
   sites use the shared refusal helper, which carries a source location and
   names the construct. The message form is
-  ``%Error: VHDL <construct> is not supported yet``, so 117 corpus
-  cases are classified by that message. It is not the repository's
-  ``%Error-UNSUPPORTED:`` form, and a few legal forms (matching ``case``, a
-  resolution indication) instead reach a generic parser error.
+  ``%Error-UNSUPPORTED: Unsupported: VHDL <construct>``, so 117 corpus
+  cases are classified by that message. A few legal forms (matching ``case``,
+  a resolution indication) instead reach a generic parser error.
 
 Semantic divergences
 ====================
@@ -384,7 +383,7 @@ answers. The former crash class was closed by:
 - a two-dimensional element target descends one type level per index, so its
   right-hand side is widened to the element width rather than the row width;
 - an unconstrained multi-dimensional port or array conversion is reported with
-  a source-located "is not supported yet" error;
+  a source-located ``Unsupported: VHDL ...`` error;
 - repeated aggregate initializers fold a constant value into one constant and
   chunk a run-time replication, so ``(others => (others => '0'))`` over 2^16
   elements lints in 0.05 s and 20 MiB instead of aborting;
@@ -553,8 +552,8 @@ Legal forms refused
        Fixed: the final item may be an operator symbol.
    * - 11
      - ``type t is range 0 to 7;``
-     - ``type definition 'range' is not supported yet``. Fixed: an integer
-       type definition is modelled as an integer subtype.
+     - Was refused as ``Unsupported: VHDL type definition 'range'``. Fixed:
+       an integer type definition is modelled as an integer subtype.
    * - 11, 12
      - ``--top-module CaseTop`` for ``entity CaseTop``
      - Not found; only the folded lowercase spelling matched, although VHDL
@@ -597,7 +596,7 @@ Remaining feature gaps
   ``std_logic_vector`` still escapes the frontend's unresolved set and reaches
   the middle end as multiple drivers, which emits ``MULTIDRIVEN``.
 - Arithmetic and comparison under ``use ieee.std_logic_signed.all`` are
-  refused with a source-located "is not supported yet" error;
+  refused with a source-located ``Unsupported: VHDL ...`` error;
   ``std_logic_unsigned`` is modeled.
 - ``report`` with a non-literal message executes with fallback text rather than
   the computed message; its severity, including ``failure``, is honoured.
@@ -682,14 +681,11 @@ The consequences are structural rather than cosmetic:
   variable or type. Model and compile cost grow with the total packed width,
   and the middle end treats an element as a bit range, not as an independent
   signal.
-- Refusals are ad hoc: 260 ``unsupported`` sites (230 in the lowering, 28 in
-  the parser, 2 in the lexer), each with a bespoke message and no diagnostic
-  code. They are emitted as plain ``%Error: VHDL ... is not supported yet``
-  rather than the repository's ``%Error-UNSUPPORTED:`` form, so a log or script
-  cannot tell a deliberate subset refusal from a hard error. The documentation
-  still promises ``Unsupported:`` in :file:`usage.rst`, ``V3VhdlNative.h`` and
-  :file:`journal.rst`. That is workable for a pinned subset, but extending it is
-  expensive and coverage is hard to audit mechanically.
+- Refusals use one shared helper with a source location and the repository's
+  ``%Error-UNSUPPORTED: Unsupported:`` form (260 sites: 230 in the lowering, 28
+  in the parser, 2 in the lexer), so a log can tell a deliberate subset refusal
+  from a hard error. Each message is bespoke, so coverage is still audited
+  mechanically by the test goldens.
 - Parser recovery is minimal. The first parse error in a file stops that file
   (``m_failed``), so a user gets one syntax diagnostic per file. Lowering
   errors do accumulate, so this is a parser limitation, not a frontend-wide

@@ -34,7 +34,7 @@
 //   - literals, names, indexing/slicing with a statically known width,
 //     arithmetic/logic/relational/concat operators, vector conversions,
 //     `(others => ...)` aggregates, static integer expressions
-// Everything else reports `VHDL ... is not supported yet` with the source
+// Everything else reports `Unsupported: VHDL ...` with the source
 // location.
 //
 //*************************************************************************
@@ -60,7 +60,7 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 namespace vhdlnative {
 
 void unsupportedError(FileLine* flp, const std::string& what) {
-    flp->v3error("VHDL " + what + " is not supported yet");
+    flp->v3error("Unsupported: VHDL " + what);
 }
 
 }  // namespace vhdlnative
@@ -226,9 +226,9 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
                                          + "' binds instance '" + label
                                          + "', which the architecture does not instantiate");
                 } else if (!instp->entityInstantiation) {
-                    binding.flp->v3error("VHDL configuration '" + config.spelling
+                    binding.flp->v3error("Unsupported: VHDL configuration '" + config.spelling
                                          + "' binds component '" + binding.component
-                                         + "'; component instantiation is not supported yet");
+                                         + "'; component instantiation");
                 } else if (instp->instanceName != binding.entity) {
                     binding.flp->v3error("VHDL configuration '" + config.spelling
                                          + "' rebinds instance '" + label + "' to entity '"
