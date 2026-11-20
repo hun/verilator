@@ -537,32 +537,33 @@ Legal forms refused
      - Observed
    * - 11
      - ``architecture rtl of work.e is``
-     - ``expected 'is', got '.'``; ``parseArchitecture`` takes one identifier.
+     - ``expected 'is', got '.'``; ``parseArchitecture`` took one identifier.
+       Fixed: the entity may be library qualified.
    * - 11
      - ``type a is array (work.pkg.idx) of ...``
-     - ``expected ')', got '.'``; ``parseIndexConstraint`` takes one
-       identifier.
+     - ``expected ')', got '.'``; ``parseIndexConstraint`` took one
+       identifier. Fixed: a qualified subtype mark is accepted.
    * - 11
      - ``u : comp;`` (component instantiation with no maps)
      - Parsed as a procedure call and reported as an unknown subprogram
-       named ``comp``.
+       named ``comp``. Fixed: a labelled bare designator is an instance.
    * - 11
      - ``use work.pkg."+";``
-     - ``expected ';', got '+'``; a use clause accepts identifiers only.
+     - ``expected ';', got '+'``; a use clause accepted identifiers only.
+       Fixed: the final item may be an operator symbol.
    * - 11
      - ``type t is range 0 to 7;``
-     - ``type definition 'range' is not supported yet``. The subset names
-       integer subtypes, not integer type definitions; decide to implement or
-       document.
+     - ``type definition 'range' is not supported yet``. Fixed: an integer
+       type definition is modelled as an integer subtype.
    * - 11, 12
      - ``--top-module CaseTop`` for ``entity CaseTop``
-     - Not found; only the folded lowercase spelling matches, although VHDL
-       lookup is case insensitive.
+     - Not found; only the folded lowercase spelling matched, although VHDL
+       lookup is case insensitive. Fixed: the request is folded for VHDL.
 
 These findings supersede the N117 port claim and the N112 case-completeness
 claim as stated above; the corresponding work packages add the missing checks
-without changing the accepted set for legal designs. Work packages 1--9 are
-implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
+without changing the accepted set for legal designs. Work packages 1--9, 11
+and 12 are implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_subp_class``, ``t_vhdl_port_*``, ``t_vhdl_generic_shape_bad``,
 ``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup``,
 ``t_vhdl_disconnect_unsup``, ``t_vhdl_component_*``, ``t_vhdl_*_chain*``,
@@ -570,8 +571,10 @@ implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_decl_*``, ``t_vhdl_label_*``, ``t_vhdl_severity_bad``,
 ``t_vhdl_pkg_body_orphan_bad``, ``t_vhdl_subp_dup_bad``,
 ``t_vhdl_entity_passive_bad``, ``t_vhdl_int_overflow_bad``,
-``t_vhdl_attr_length_bad`` and ``t_vhdl_shift_count_bad``); the remaining rows
-stay open.
+``t_vhdl_attr_length_bad``, ``t_vhdl_shift_count_bad``,
+``t_vhdl_arch_qual``, ``t_vhdl_array_idx_qual``, ``t_vhdl_inst_nomap``,
+``t_vhdl_use_op``, ``t_vhdl_int_type`` and ``t_vhdl_top_case``); work packages
+10 and 13 remain open.
 
 Two tier rows also disagree with the implementation in the other direction: a
 general ``wait until <condition>`` and ``signal``-class subprogram parameters

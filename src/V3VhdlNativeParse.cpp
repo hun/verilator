@@ -1651,6 +1651,9 @@ void Parser::parseIndexConstraint(TypeSpec& type) {
         const auto savedState = m_lexer.state();
         Token markTok;
         if (!takeId(markTok)) return;
+        while (acceptSym(".")) {  // A qualified subtype mark: `array (work.pkg.idx)`
+            if (!takeId(markTok)) return;
+        }
         if (isSym("-") || isSym("+") || isSym("*") || isId("to") || isId("downto")) {
             // The identifier began a range expression, e.g. `size - 1 downto 0`
             m_cur = savedTok;
@@ -1752,36 +1755,38 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
         if (!expectId("of")) return;
         parseTypeSpec(decl.base);
         if (m_failed) return;
-    } else if (isId("range")) {  // A physical type definition, IEEE 1076-2008 3.2.2.1
+    } else if (isId("range")) {  // An integer or physical type definition
         advance();
         if (!parseRange(decl.base)) return;
         if (!isId("units")) {
-            // An integer type definition starts the same way and is not modelled
-            unsupported("type definition 'range'");
-            return;
-        }
-        decl.kind = TypeDecl::PHYSICAL;
-        advance();
-        for (;;) {
-            if (m_failed) return;
-            if (isId("end")) break;
-            TypeDecl::Unit unit;
-            Token unitTok;
-            if (!takeId(unitTok)) return;
-            unit.name = unitTok.text;
-            unit.spelling = unitTok.spelling;
-            if (acceptSym("=")) {
-                unit.value = parsePrimary();
+            // An integer type definition has integer values; model it as a subtype
+            decl.kind = TypeDecl::SUBTYPE;
+            decl.base.mark = "integer";
+            decl.base.flp = decl.flp;
+        } else {
+            decl.kind = TypeDecl::PHYSICAL;
+            advance();
+            for (;;) {
                 if (m_failed) return;
+                if (isId("end")) break;
+                TypeDecl::Unit unit;
+                Token unitTok;
+                if (!takeId(unitTok)) return;
+                unit.name = unitTok.text;
+                unit.spelling = unitTok.spelling;
+                if (acceptSym("=")) {
+                    unit.value = parsePrimary();
+                    if (m_failed) return;
+                }
+                if (!acceptSym(";")) {
+                    error("expected ';' after a unit declaration");
+                    return;
+                }
+                decl.units.push_back(std::move(unit));
             }
-            if (!acceptSym(";")) {
-                error("expected ';' after a unit declaration");
-                return;
-            }
-            decl.units.push_back(std::move(unit));
+            if (!expectId("end")) return;
+            if (!expectId("units")) return;
         }
-        if (!expectId("end")) return;
-        if (!expectId("units")) return;
     } else {
         unsupported("type definition '" + m_cur.text + "'");
         return;
@@ -2083,8 +2088,12 @@ void Parser::parseArchitecture(FileLine* flp) {
     arch.contextNames = m_contextNames;
     if (!expectId("of")) return;
     Token entityTok;
-    if (!takeId(entityTok)) return;
+    if (!takeName(entityTok)) return;
     arch.entityName = entityTok.text;
+    while (acceptSym(".")) {  // `architecture rtl of work.entity is`
+        if (!takeId(entityTok)) return;
+        arch.entityName = entityTok.text;
+    }
     if (!expectId("is")) return;
     for (;;) {
         if (m_failed) return;
@@ -2281,8 +2290,11 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             advance();
         }
         // An `entity` head names an instantiation even with no map at all
+        // A labelled bare designator is a component instantiation with no maps; an
+        // unlabelled one stays a procedure call (`u : comp;`, IEEE 1076-2008 11.6)
         const bool mapped = nameTok.text == "entity"
-                            || ((isId("port") || isId("generic")) && m_cur.text != "process");
+                            || ((isId("port") || isId("generic")) && m_cur.text != "process")
+                            || (!label.empty() && isSym(";"));
         m_cur = nameTok;
         m_lexer.restore(saved);
         if (mapped) {
@@ -3046,7 +3058,8 @@ void Parser::parseUseClauseInto(std::vector<UseClause>& uses) {
     for (;;) {  // `use clause, clause;` -- IEEE 1076-2008 12.4
         std::vector<std::string> parts;
         for (;;) {
-            if (m_cur.kind != Token::ID) break;
+            // The final item may be an operator symbol, `use work.pkg."+";`
+            if (m_cur.kind != Token::ID && m_cur.kind != Token::STRING) break;
             parts.push_back(m_cur.text);
             advance();
             if (!acceptSym(".")) break;

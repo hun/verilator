@@ -39,6 +39,13 @@
 
 VL_DEFINE_DEBUG_FUNCTIONS;
 
+//! The requested top module as the frontend spells it. VHDL identifiers are case
+//! insensitive and the native frontend folds them to lowercase.
+static std::string topModuleName() {
+    const std::string& name = v3Global.opt.topModule();
+    return v3Global.opt.sourceLangVhdl() ? VString::downcase(name) : name;
+}
+
 //######################################################################
 // Graph subclasses
 
@@ -207,8 +214,8 @@ public:
     LinkConfigsVisitor(AstNetlist* nodep, LinkCellsState& state)
         : m_state{state} {
         // Initialize top module from command line option
-        if (!m_state.m_designs.size() && !v3Global.opt.topModule().empty()) {
-            m_state.m_designs.emplace_back(v3Global.opt.work(), v3Global.opt.topModule());
+        if (!m_state.m_designs.size() && !topModuleName().empty()) {
+            m_state.m_designs.emplace_back(v3Global.opt.work(), topModuleName());
         }
         iterate(nodep);
     }
@@ -371,7 +378,7 @@ class LinkCellsVisitor final : public VNVisitor {
     static void removeLibFlag() {
         // If the only NodeModules are in libraries, then presumably user
         // wants to check the library, so clear library flag
-        if (!v3Global.opt.topModule().empty()) return;
+        if (!topModuleName().empty()) return;
         for (AstNodeModule* const nodep : v3Global.rootp()->modulespList()) {
             if (!nodep->inLibrary()) return;
         }
@@ -476,7 +483,7 @@ class LinkCellsVisitor final : public VNVisitor {
                 vmodp->depth(vvertexp->rank() + 1);
             }
         }
-        if (v3Global.opt.topModule() != "" && !m_topVertexp) {
+        if (topModuleName() != "" && !m_topVertexp) {
             VSpellCheck spell;
             for (V3GraphVertex& vtx : m_graph.vertices()) {
                 if (const LinkCellsVertex* const vvertexp = vtx.cast<LinkCellsVertex>()) {
@@ -485,9 +492,9 @@ class LinkCellsVisitor final : public VNVisitor {
                 }
             }
             const string suggest
-                = spell.bestCandidateMsg(AstNode::prettyName(v3Global.opt.topModule()));
+                = spell.bestCandidateMsg(AstNode::prettyName(topModuleName()));
             v3error("Specified --top-module '"
-                    << AstNode::prettyName(v3Global.opt.topModule())
+                    << AstNode::prettyName(topModuleName())
                     << "' was not found in design.\n"
                     << (suggest.empty() ? "" : V3Error::warnMore() + suggest));
         }
@@ -534,7 +541,7 @@ class LinkCellsVisitor final : public VNVisitor {
                 UINFO(2, "Link --top-module: " << nodep);
                 nodep->inLibrary(false);  // Safer to make sure it doesn't disappear
             }
-            if (v3Global.opt.topModule().empty()
+            if (topModuleName().empty()
                     ? nodep->inLibrary()  // Library cells are lower
                     : !topMatch) {  // Any non-specified module is lower
                 // Put under a fake vertex so that the graph ranking won't indicate
@@ -917,7 +924,7 @@ class LinkCellsVisitor final : public VNVisitor {
     void readModNames(AstNodeModule* firstp) {
         // mangled_name, BlockOptions
         const V3HierBlockOptSet& hierBlocks = v3Global.opt.hierBlocks();
-        const auto hierIt = vlstd::as_const(hierBlocks).find(v3Global.opt.topModule());
+        const auto hierIt = vlstd::as_const(hierBlocks).find(topModuleName());
         UASSERT((hierIt != hierBlocks.end()) == !!v3Global.opt.hierChild(),
                 "information of the top module must exist if --hierarchical-child is set");
         // Look at the new modules, and store pointers to their names
@@ -983,15 +990,15 @@ public:
         , m_mods{nodep} {
         if (v3Global.opt.hierChild()) {
             const V3HierBlockOptSet& hierBlocks = v3Global.opt.hierBlocks();
-            UASSERT(!v3Global.opt.topModule().empty(),
+            UASSERT(!topModuleName().empty(),
                     "top module must be explicitly specified in hierarchical mode");
             const V3HierBlockOptSet::const_iterator hierIt
-                = hierBlocks.find(v3Global.opt.topModule());
+                = hierBlocks.find(topModuleName());
             UASSERT(hierIt != hierBlocks.end(),
                     "top module must be listed in --hierarchical-block");
             m_origTopModuleName = hierIt->second.origName();
         } else {
-            m_origTopModuleName = v3Global.opt.topModule();
+            m_origTopModuleName = topModuleName();
         }
         removeLibFlag();
         iterate(nodep);
