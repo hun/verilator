@@ -2141,7 +2141,8 @@ void Parser::parseArchitecture(FileLine* flp) {
         }
         if (isId("variable")) {
             // Only a shared variable may be declared in an architecture (IEEE 1076-2008 6.4.2)
-            error("plain variable declaration in an architecture; only a shared variable is legal");
+            error(
+                "plain variable declaration in an architecture; only a shared variable is legal");
             return;
         }
         if (isId("shared")) {

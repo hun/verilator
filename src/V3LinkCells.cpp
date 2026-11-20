@@ -491,11 +491,9 @@ class LinkCellsVisitor final : public VNVisitor {
                     if (VN_IS(vmodp, Module)) spell.pushCandidate(vmodp->prettyName());
                 }
             }
-            const string suggest
-                = spell.bestCandidateMsg(AstNode::prettyName(topModuleName()));
+            const string suggest = spell.bestCandidateMsg(AstNode::prettyName(topModuleName()));
             v3error("Specified --top-module '"
-                    << AstNode::prettyName(topModuleName())
-                    << "' was not found in design.\n"
+                    << AstNode::prettyName(topModuleName()) << "' was not found in design.\n"
                     << (suggest.empty() ? "" : V3Error::warnMore() + suggest));
         }
     }
@@ -541,9 +539,8 @@ class LinkCellsVisitor final : public VNVisitor {
                 UINFO(2, "Link --top-module: " << nodep);
                 nodep->inLibrary(false);  // Safer to make sure it doesn't disappear
             }
-            if (topModuleName().empty()
-                    ? nodep->inLibrary()  // Library cells are lower
-                    : !topMatch) {  // Any non-specified module is lower
+            if (topModuleName().empty() ? nodep->inLibrary()  // Library cells are lower
+                                        : !topMatch) {  // Any non-specified module is lower
                 // Put under a fake vertex so that the graph ranking won't indicate
                 // this is a top level module
                 if (!m_libVertexp) m_libVertexp = new LibraryVertex{&m_graph};
@@ -992,8 +989,7 @@ public:
             const V3HierBlockOptSet& hierBlocks = v3Global.opt.hierBlocks();
             UASSERT(!topModuleName().empty(),
                     "top module must be explicitly specified in hierarchical mode");
-            const V3HierBlockOptSet::const_iterator hierIt
-                = hierBlocks.find(topModuleName());
+            const V3HierBlockOptSet::const_iterator hierIt = hierBlocks.find(topModuleName());
             UASSERT(hierIt != hierBlocks.end(),
                     "top module must be listed in --hierarchical-block");
             m_origTopModuleName = hierIt->second.origName();

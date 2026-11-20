@@ -84,7 +84,8 @@ void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
 //! a default get a module per generic binding; the specializations are cached by key.
 struct Design final {
     std::map<std::string, const EntityUnit*> entities;  // Folded entity name -> entity
-    std::map<std::string, const Architecture*> archs;  // Folded entity name -> default architecture
+    // Folded entity name -> default architecture
+    std::map<std::string, const Architecture*> archs;
     // Folded entity name -> folded architecture name -> architecture
     std::map<std::string, std::map<std::string, const Architecture*>> archsByName;
     // (entity, architecture) selected by an instance -> the module lowered with it

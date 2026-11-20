@@ -278,8 +278,8 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         }
         const std::string moduleName
             = selection.first + "__Varch" + std::to_string(++design.specSeq);
-        AstModule* const modp = new AstModule{archIt->second->flp, moduleName,
-                                              archIt->second->libname};
+        AstModule* const modp
+            = new AstModule{archIt->second->flp, moduleName, archIt->second->libname};
         modp->inLibrary(archIt->second->inLibrary);
         rootp->addModulesp(modp);
         modules[moduleName] = modp;

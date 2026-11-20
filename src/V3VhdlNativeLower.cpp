@@ -3196,11 +3196,10 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
                 // A function whose formals all have defaults may be called without
                 // parentheses; a procedure name alone is not a value
                 const std::vector<const SubprogramDecl*> visible = visibleSubprograms(expr.text);
-                const bool anyFunction
-                    = std::any_of(visible.begin(), visible.end(),
-                                  [](const SubprogramDecl* const subp) {
-                                      return subp->kind == SubprogramDecl::FUNCTION;
-                                  });
+                const bool anyFunction = std::any_of(
+                    visible.begin(), visible.end(), [](const SubprogramDecl* const subp) {
+                        return subp->kind == SubprogramDecl::FUNCTION;
+                    });
                 if (!anyFunction) {
                     flp->v3error("VHDL: procedure '" + expr.spelling + "' used in an expression");
                     return nullptr;
@@ -4022,8 +4021,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
-        } else if (lt.isVector() && rt.isVector() && !lt.typeName.empty()
-                   && !rt.typeName.empty()
+        } else if (lt.isVector() && rt.isVector() && !lt.typeName.empty() && !rt.typeName.empty()
                    && (expr.a->kind == Expr::NAME || expr.a->kind == Expr::SELECTED
                        || expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)
                    && (expr.b->kind == Expr::NAME || expr.b->kind == Expr::SELECTED
@@ -8252,10 +8250,9 @@ void Lowering::registerSubprograms(const std::vector<SubprogramDecl>& decls, int
         m_imported.erase(decl.name);  // The local declaration shadows the package member
         std::vector<SubprogramRef>& refs = m_subprograms[decl.name];
         // A specification and its completing body are one subprogram; two bodies are not
-        if (decl.hasBody
-            && std::any_of(refs.begin(), refs.end(), [&](const SubprogramRef& ref) {
-                   return !ref.imported && ref.declp->hasBody && homograph(*ref.declp, decl);
-               })) {
+        if (decl.hasBody && std::any_of(refs.begin(), refs.end(), [&](const SubprogramRef& ref) {
+                return !ref.imported && ref.declp->hasBody && homograph(*ref.declp, decl);
+            })) {
             decl.flp->v3error("VHDL: duplicate subprogram body for '" + decl.spelling + "'");
             continue;
         }
@@ -8447,8 +8444,9 @@ const SubprogramDecl* Lowering::resolveCall(const Expr& call, bool function,
         unsupportedError(call.flp,
                          "arguments to '" + name + "' match no declaration: " + firstWhy);
     } else if (!refs.empty() && sawOtherClass) {
-        call.flp->v3error("VHDL: '" + name + "' designates a "
-                          + (function ? "procedure, not a function" : "function, not a procedure"));
+        call.flp->v3error(
+            "VHDL: '" + name + "' designates a "
+            + (function ? "procedure, not a function" : "function, not a procedure"));
     }
     return nullptr;
 }
@@ -9226,8 +9224,7 @@ bool Lowering::logicalOperandsConform(const Expr& a, const Expr& b, const VType&
     }
     // Two arrays must be of the same VHDL array type, not merely of the same element
     // kind: unsigned and std_logic_vector are unrelated (IEEE 1076-2008 9.2.2)
-    if (aType.isVector() && bType.isVector() && !aType.typeName.empty()
-        && !bType.typeName.empty()
+    if (aType.isVector() && bType.isVector() && !aType.typeName.empty() && !bType.typeName.empty()
         && !arrayBaseTypesRelated(aType.typeName, bType.typeName)) {
         a.flp->v3error("VHDL: logical operator operands do not have the same base type");
         return false;
@@ -9278,14 +9275,12 @@ bool Lowering::relationalOperandsConform(const Expr& a, const Expr& b) const {
         if ((other.kind == Expr::INDEX || other.kind == Expr::SLICE) && other.a) {
             VType prefixType;
             if (typeOfDesignator(*other.a, prefixType)) {
-                characterElement
-                    = prefixType.kind == VType::ARRAY && prefixType.elemWidth == 8
-                      && (!prefixType.elemp || prefixType.elemp->typeName.empty()
-                          || prefixType.elemp->typeName == "character");
+                characterElement = prefixType.kind == VType::ARRAY && prefixType.elemWidth == 8
+                                   && (!prefixType.elemp || prefixType.elemp->typeName.empty()
+                                       || prefixType.elemp->typeName == "character");
             }
         }
-        if (otherKnown && !characterElement
-            && !charLiteralFits(otherType, literal.charValue)) {
+        if (otherKnown && !characterElement && !charLiteralFits(otherType, literal.charValue)) {
             literal.flp->v3error("VHDL: relational operator compares a character with "
                                  "an unrelated type");
             return false;
@@ -12689,7 +12684,8 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             AstConst* const foldedp = valuep ? foldStatic(valuep) : nullptr;
             if (foldedp) {
                 if (declared.width > 0 && foldedp->width() != declared.width) {
-                    assocp->flp->v3error("VHDL: generic actual does not have the generic's length");
+                    assocp->flp->v3error(
+                        "VHDL: generic actual does not have the generic's length");
                     foldedp->deleteTree();
                     valuep->deleteTree();
                     freeBindings(bindings);
@@ -12779,9 +12775,8 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
     specp->inLibrary(entity.inLibrary);
     m_rootp->addModulesp(specp);
     Lowering child{m_rootp, m_packagesp, m_modulesp, m_designp};
-    const bool ok
-        = child.emit(entity, *archp, specp, bindings.empty() ? nullptr : &bindings,
-                     portBounds.empty() ? nullptr : &portBounds);
+    const bool ok = child.emit(entity, *archp, specp, bindings.empty() ? nullptr : &bindings,
+                               portBounds.empty() ? nullptr : &portBounds);
     --m_designp->specDepth;
     // The port map of this instance still lowers its defaults: keep the bindings
     m_instanceBindings = std::move(bindings);
@@ -13146,24 +13141,21 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                     }
                     if (!entityPortp) {
                         port.flp->v3error("VHDL: component '" + component.spelling
-                                          + "' declares port '" + name.second
-                                          + "', which entity '" + entityp->spelling
-                                          + "' does not have");
+                                          + "' declares port '" + name.second + "', which entity '"
+                                          + entityp->spelling + "' does not have");
                         ok = false;
                         continue;
                     }
                     if (entityPortp->dir != port.dir) {
-                        port.flp->v3error("VHDL: port '" + name.second + "' of component '"
-                                          + component.spelling
-                                          + "' has a different mode from entity '"
-                                          + entityp->spelling + "'");
+                        port.flp->v3error(
+                            "VHDL: port '" + name.second + "' of component '" + component.spelling
+                            + "' has a different mode from entity '" + entityp->spelling + "'");
                         ok = false;
                     }
                     if (!sameBase(entityPortp->type, port.type)) {
-                        port.flp->v3error("VHDL: port '" + name.second + "' of component '"
-                                          + component.spelling
-                                          + "' has a different type from entity '"
-                                          + entityp->spelling + "'");
+                        port.flp->v3error(
+                            "VHDL: port '" + name.second + "' of component '" + component.spelling
+                            + "' has a different type from entity '" + entityp->spelling + "'");
                         ok = false;
                     }
                 }
@@ -13172,8 +13164,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                 for (const auto& name : port.names) {
                     if (componentPorts.count(name.first)) continue;
                     port.flp->v3error("VHDL: entity '" + entityp->spelling + "' has port '"
-                                      + name.second + "', which component '"
-                                      + component.spelling + "' does not declare");
+                                      + name.second + "', which component '" + component.spelling
+                                      + "' does not declare");
                     ok = false;
                 }
             }
@@ -13208,10 +13200,9 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                 if (!sameKind
                     || (!entry.second->isType && !entry.second->isSubprogram
                         && !sameBase(entry.second->type, entityGenericp->type))) {
-                    entry.second->flp->v3error("VHDL: generic '" + entry.first + "' of component '"
-                                               + component.spelling
-                                               + "' does not conform to entity '"
-                                               + entityp->spelling + "'");
+                    entry.second->flp->v3error(
+                        "VHDL: generic '" + entry.first + "' of component '" + component.spelling
+                        + "' does not conform to entity '" + entityp->spelling + "'");
                     ok = false;
                 }
             }
@@ -13233,8 +13224,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     }
     if (!conc.architectureName.empty()) {
         const bool known
-            = entityp && m_designp
-              && m_designp->archsByName.count(conc.instanceName)
+            = entityp && m_designp && m_designp->archsByName.count(conc.instanceName)
               && m_designp->archsByName.at(conc.instanceName).count(conc.architectureName);
         if (!known) {
             flp->v3error("VHDL: entity '" + conc.instanceName + "' has no architecture '"
@@ -13417,8 +13407,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                              + "' has no default value and is not associated");
                 return nullptr;
             }
-            AstPin* const pinp
-                = new AstPin{flp, portp->pinNum(), portp->name(), defaultp};
+            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), defaultp};
             pinp->modVarp(portp);
             pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
             continue;
