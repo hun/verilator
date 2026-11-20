@@ -1349,10 +1349,14 @@ void Parser::parseEntity(FileLine* flp) {
             unsupported("interface view");
             return;
         }
-        if (isId("attribute") || isId("default") || isId("disconnect")) {
+        if (isId("attribute") || isId("default")) {
             // Attribute specifications and PSL directives have no synthesis meaning
             skipContextClause();
             continue;
+        }
+        if (isId("disconnect")) {
+            unsupported("disconnection specification");
+            return;
         }
         if (isSym("{")) {  // A PSL directive block
             skipToBraceBlock();
@@ -1842,12 +1846,13 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
         name = partTok.text;  // The library is not modelled
     }
     inst->instanceName = name;
-    if (acceptSym("(")) {  // Architecture selection: `entity work.X(ARCH)`; only one is kept
+    if (acceptSym("(")) {  // Architecture selection: `entity work.X(ARCH)`
         if (isSym("-")) {
             advance();  // `-` selects any architecture
         } else {
             Token archTok;
             if (!takeId(archTok)) return;
+            inst->architectureName = archTok.text;
         }
         expectSym(")");
     }
@@ -2050,10 +2055,14 @@ void Parser::parseArchitecture(FileLine* flp) {
             unsupported("interface view");
             return;
         }
-        if (isId("default") || isId("attribute") || isId("disconnect")) {
+        if (isId("default") || isId("attribute")) {
             // Verification directives and attribute specifications have no synthesis meaning
             skipContextClause();
             continue;
+        }
+        if (isId("disconnect")) {
+            unsupported("disconnection specification");
+            return;
         }
         if (isId("signal")) {
             advance();
@@ -2109,10 +2118,9 @@ void Parser::parseArchitecture(FileLine* flp) {
             parsePackageInstanceTail(instTok.flp, instTok.text, instTok.spelling);
             continue;
         }
-        if (isId("for")) {  // IEEE 1800-2023 19.4 configuration specification
-            advance();
-            skipToSemicolon();
-            continue;
+        if (isId("for")) {  // IEEE 1076-2008 3.4.7 configuration specification
+            unsupported("configuration specification");
+            return;
         }
         if (skipFileDecl()) continue;
         error("unexpected architecture declaration '" + m_cur.text + "'");
@@ -2380,10 +2388,14 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
                 skipContextClause();
                 continue;
             }
-            if (isId("attribute") || isId("disconnect")) {
-                // Attribute and disconnection specifications have no synthesis meaning
+            if (isId("attribute")) {
+                // Attribute specifications have no synthesis meaning
                 skipContextClause();
                 continue;
+            }
+            if (isId("disconnect")) {
+                unsupported("disconnection specification");
+                return;
             }
             if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
                 parseSubprogramInto(block->subprograms);
@@ -2555,11 +2567,15 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
             parseSubprogramInto(*subprograms);
             continue;
         }
-        if (isId("attribute") || isId("default") || isId("disconnect")) {
+        if (isId("attribute") || isId("default")) {
             // An attribute specification, like a verification directive, has no synthesis
             // meaning; a vendor tool reads it from the source, the netlist does not change
             skipContextClause();
             continue;
+        }
+        if (isId("disconnect")) {
+            unsupported("disconnection specification");
+            return;
         }
         if (isId("component")) {
             // Dropped: an instantiation naming this component binds the entity of the name
@@ -3067,10 +3083,14 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             unsupported("interface view");
             return;
         }
-        if (isId("attribute") || isId("disconnect") || isId("default")) {
+        if (isId("attribute") || isId("default")) {
             // Attribute specifications and PSL directives have no synthesis meaning
             skipContextClause();
             continue;
+        }
+        if (isId("disconnect")) {
+            unsupported("disconnection specification");
+            return;
         }
         if (isSym("{")) {  // A PSL directive block
             skipToBraceBlock();

@@ -433,6 +433,8 @@ struct Concurrent final {
     // INSTANCE: the instantiated entity and its port associations
     std::string instanceLabel;
     std::string instanceName;  // Folded entity or component name
+    // INSTANCE: the selected architecture, empty when none or `-` names any
+    std::string architectureName;
     // True for a direct `entity work.X`; false when the instantiation names a component
     bool entityInstantiation = false;
     // ASSIGN/COND_ASSIGN: `after <delay>`

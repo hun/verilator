@@ -84,7 +84,11 @@ void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
 //! a default get a module per generic binding; the specializations are cached by key.
 struct Design final {
     std::map<std::string, const EntityUnit*> entities;  // Folded entity name -> entity
-    std::map<std::string, const Architecture*> archs;  // Folded entity name -> architecture
+    std::map<std::string, const Architecture*> archs;  // Folded entity name -> default architecture
+    // Folded entity name -> folded architecture name -> architecture
+    std::map<std::string, std::map<std::string, const Architecture*>> archsByName;
+    // (entity, architecture) selected by an instance -> the module lowered with it
+    std::map<std::pair<std::string, std::string>, AstModule*> archModules;
     std::map<std::string, AstModule*> specializations;  // Generic binding key -> module
     std::set<std::string> instantiated;  // Entities named by at least one instance
     std::set<std::string> baseUsed;  // Entities whose base module an instance binds to
@@ -102,6 +106,9 @@ bool recordPortFullyConstrained(const PortDecl& port, const UnconstrainedRecordM
 
 //! Whether an entity port's index range is fixed by each instance, not the entity
 bool hasUnconstrainedPorts(const EntityUnit& entity, const UnconstrainedRecordMap& members);
+
+//! Whether an entity's base module needs an instance's generic or port bindings
+bool entityNeedsSpecialization(const EntityUnit& entity, const Design& design);
 
 //! Report why an unconstrained-port entity with no instance cannot be modelled
 void reportUnspecializedPorts(const EntityUnit& entity, const UnconstrainedRecordMap& members);

@@ -114,6 +114,22 @@ void collectInstances(const std::vector<std::unique_ptr<vhdlnative::Concurrent>>
     }
 }
 
+//! The (entity, architecture) pairs an architecture selects, searching nested bodies
+void collectArchSelections(const std::vector<std::unique_ptr<vhdlnative::Concurrent>>& stmts,
+                           std::set<std::pair<std::string, std::string>>& out) {
+    for (const std::unique_ptr<vhdlnative::Concurrent>& statement : stmts) {
+        if (!statement) continue;
+        if (statement->kind == vhdlnative::Concurrent::INSTANCE
+            && !statement->architectureName.empty()) {
+            out.emplace(statement->instanceName, statement->architectureName);
+        }
+        collectArchSelections(statement->body, out);
+        for (const vhdlnative::GenBranch& branch : statement->branches) {
+            collectArchSelections(branch.stmts, out);
+        }
+    }
+}
+
 //! Visit the entities the named one instantiates, then the named one itself, so no entity is
 //! elaborated before a child it instantiates. `visiting` breaks a cycle, which VHDL forbids
 //! and the frontend then reports as an instance whose child has no port.
@@ -238,8 +254,37 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         design.entities[entity.name] = &entity;
     }
     for (const auto& entry : archByEntity) design.archs[entry.first] = entry.second;
+    for (const vhdlnative::Architecture& arch : library.archs) {
+        design.archsByName[arch.entityName][arch.name] = &arch;
+    }
     // Record ports whose element widths come from the actual, like unconstrained arrays
     vhdlnative::collectUnconstrainedRecordMembers(library, design.unconstrainedRecordMembers);
+    // An instance that names an architecture gets a module lowered with it. An entity whose
+    // base module needs instance bindings is specialized instead, and that path picks the
+    // architecture per instance.
+    std::set<std::pair<std::string, std::string>> archSelections;
+    for (const vhdlnative::Architecture& arch : library.archs) {
+        collectArchSelections(arch.stmts, archSelections);
+    }
+    for (const auto& selection : archSelections) {
+        const auto entityIt = design.entities.find(selection.first);
+        if (entityIt == design.entities.end()) continue;  // Reported at the instance
+        const auto archIt = design.archsByName[selection.first].find(selection.second);
+        if (archIt == design.archsByName[selection.first].end()) continue;  // Reported
+        if (vhdlnative::entityNeedsSpecialization(*entityIt->second, design)) continue;
+        const auto defaultIt = design.archs.find(selection.first);
+        if (defaultIt != design.archs.end() && defaultIt->second->name == selection.second) {
+            continue;  // The base module already uses this architecture
+        }
+        const std::string moduleName
+            = selection.first + "__Varch" + std::to_string(++design.specSeq);
+        AstModule* const modp = new AstModule{archIt->second->flp, moduleName,
+                                              archIt->second->libname};
+        modp->inLibrary(archIt->second->inLibrary);
+        rootp->addModulesp(modp);
+        modules[moduleName] = modp;
+        design.archModules[selection] = modp;
+    }
 
     // Elaborate every entity after the entities its architecture instantiates: an instance
     // binds the ports its child's own elaboration declares, so in source order a user written
@@ -248,9 +293,12 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     std::map<std::string, std::set<std::string>> instantiatedBy;
     for (const vhdlnative::EntityUnit& entity : library.entities) {
         entityByName.emplace(entity.name, &entity);
-        const auto archIt = archByEntity.find(entity.name);
-        if (archIt != archByEntity.end()) {
-            collectInstances(archIt->second->stmts, instantiatedBy[entity.name]);
+    }
+    // Every architecture of an entity contributes dependencies: an instance may select one
+    // that the default architecture does not use
+    for (const vhdlnative::Architecture& arch : library.archs) {
+        if (entityByName.count(arch.entityName)) {
+            collectInstances(arch.stmts, instantiatedBy[arch.entityName]);
         }
     }
     std::vector<const vhdlnative::EntityUnit*> order;
@@ -291,6 +339,17 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         if (!vhdlnative::lower(entity, *it->second, modules[entity.name], packages, modules,
                                design)) {
             unelaborated.push_back(&entity);
+            continue;
+        }
+        // Lower every additional architecture an instance selects, with the same generic
+        // defaults the base module used
+        for (const auto& entry : design.archModules) {
+            if (entry.first.first != entity.name) continue;
+            const auto byName = design.archsByName.find(entity.name);
+            if (byName == design.archsByName.end()) continue;
+            const auto archIt = byName->second.find(entry.first.second);
+            if (archIt == byName->second.end()) continue;
+            vhdlnative::lower(entity, *archIt->second, entry.second, packages, modules, design);
         }
     }
     for (const vhdlnative::Architecture& arch : library.archs) {

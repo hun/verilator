@@ -12232,6 +12232,25 @@ static bool isBuiltinGenericMark(const std::string& mark) {
 AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit& entity,
                                         AstModule* basep, const PortBoundsMap& portBounds) {
     FileLine* const flp = conc.flp;
+    const Architecture* archp = nullptr;
+    if (!conc.architectureName.empty()) {
+        const auto byName = m_designp->archsByName.find(entity.name);
+        if (byName == m_designp->archsByName.end()
+            || !byName->second.count(conc.architectureName)) {
+            flp->v3error("VHDL: entity '" + entity.spelling + "' has no architecture '"
+                         + conc.architectureName + "'");
+            return nullptr;
+        }
+        archp = byName->second.at(conc.architectureName);
+    } else {
+        const auto archIt = m_designp->archs.find(entity.name);
+        if (archIt == m_designp->archs.end()) {
+            flp->v3error("VHDL: entity '" + entity.spelling
+                         + "' has no architecture to specialize for this instance");
+            return nullptr;
+        }
+        archp = archIt->second;
+    }
     struct Item final {
         const GenericDecl* declp;
         std::string folded;
@@ -12492,6 +12511,7 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             }
         }
     }
+    key += "|arch=" + archp->name;
     for (const auto& entry : bindings) {
         key += "|" + entry.first + "=";
         if (entry.second.isType) {
@@ -12530,14 +12550,6 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
         freeBindings(bindings);
         return nullptr;
     }
-    const auto archIt = m_designp->archs.find(entity.name);
-    if (archIt == m_designp->archs.end()) {
-        flp->v3error("VHDL: entity '" + entity.spelling
-                     + "' has no architecture to specialize for this instance");
-        cache[key] = nullptr;
-        freeBindings(bindings);
-        return nullptr;
-    }
     AstModule* const specp
         = new AstModule{entity.flp, entity.name + "__Vspec" + std::to_string(++m_designp->specSeq),
                         entity.libname};
@@ -12545,7 +12557,7 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
     m_rootp->addModulesp(specp);
     Lowering child{m_rootp, m_packagesp, m_modulesp, m_designp};
     const bool ok
-        = child.emit(entity, *archIt->second, specp, bindings.empty() ? nullptr : &bindings,
+        = child.emit(entity, *archp, specp, bindings.empty() ? nullptr : &bindings,
                      portBounds.empty() ? nullptr : &portBounds);
     --m_designp->specDepth;
     // The port map of this instance still lowers its defaults: keep the bindings
@@ -12887,6 +12899,34 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         flp->v3error("VHDL: generic map on instance '" + conc.instanceLabel + "' of '"
                      + conc.instanceName + "', which has no generics");
         return nullptr;
+    }
+    if (!conc.architectureName.empty()) {
+        const bool known
+            = entityp && m_designp
+              && m_designp->archsByName.count(conc.instanceName)
+              && m_designp->archsByName.at(conc.instanceName).count(conc.architectureName);
+        if (!known) {
+            flp->v3error("VHDL: entity '" + conc.instanceName + "' has no architecture '"
+                         + conc.architectureName + "'");
+            return nullptr;
+        }
+        // A specialized module selects its architecture itself; the base module's is the
+        // default, so only a different one needs the pre-lowered module
+        if (!entityNeedsSpecialization(*entityp, *m_designp)) {
+            const auto defaultIt = m_designp->archs.find(conc.instanceName);
+            const bool isDefault = defaultIt != m_designp->archs.end()
+                                   && defaultIt->second->name == conc.architectureName;
+            if (!isDefault) {
+                const auto moduleIt
+                    = m_designp->archModules.find({conc.instanceName, conc.architectureName});
+                if (moduleIt == m_designp->archModules.end()) {
+                    flp->v3error("VHDL: no module was lowered for entity '" + conc.instanceName
+                                 + "' and architecture '" + conc.architectureName + "'");
+                    return nullptr;
+                }
+                modp = moduleIt->second;
+            }
+        }
     }
     if (entityp) m_designp->instantiated.insert(conc.instanceName);
     PortBoundsMap portBounds;
@@ -13862,6 +13902,16 @@ bool hasUnconstrainedPorts(const EntityUnit& entity, const UnconstrainedRecordMa
         if (!port.type.hasRange && port.type.constraintMark.empty() && members.count(mark)
             && !recordPortFullyConstrained(port, members))
             return true;
+    }
+    return false;
+}
+
+bool entityNeedsSpecialization(const EntityUnit& entity, const Design& design) {
+    if (hasUnconstrainedPorts(entity, design.unconstrainedRecordMembers)) return true;
+    for (const GenericDecl& gen : entity.generics) {
+        // A type or subprogram generic has no default, and a value generic without one
+        // cannot elaborate the base module
+        if (gen.isType || gen.isSubprogram || !gen.init) return true;
     }
     return false;
 }

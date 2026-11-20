@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_disconnect_unsup.vhdl:15:1: VHDL disconnection specification is not supported yet
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to
