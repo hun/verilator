@@ -310,6 +310,7 @@ Give reviewers a one-page guide before the diff:
 
 ## 4. Recommended order
 
+1. Land `fix-inout-coalesce` (done on this branch as `600a1d2f`).
 2. Fix docs contradictions and test permissions. CI dist blockers are resolved;
    VHDL regression licenses are normalized.
 3. Mechanical lowerer split + unconditional contract check.
