@@ -23,12 +23,13 @@ outside the pinned idioms. The main risk is not an unsupported construct: it is
 a construct that is accepted and lowered with a different meaning. Assignment,
 return, single-candidate call-actual, generic-actual, type conversion, operator,
 standard-intrinsic and edge-function paths now check that a value belongs to the
-type the standard requires. The remaining silent divergences are narrow: a
-character or physical literal has no type of its own outside a context;
-array-to-array conversion is coarse; a computed ``report`` message is replaced by
-a fixed fallback text, though the statement and its ``severity`` still execute;
-and a metavalue case choice is refused rather than modelled (see
-`Semantic divergences`_).
+type the standard requires. The 2026-11-20 audit found that this is not yet
+true for every path: scalar port actuals, port and generic defaults, missing
+input ports, subprogram class mismatches, operator chains and case selectors
+still accept programs the standard rejects, and a real or physical subelement
+can crash the frontend. The known model limits remain the two-state collapse,
+the ``report`` fallback text, and the coarse array conversion. See
+`Open audit findings`_ and :file:`plan.md`.
 
 The in-tree frontend is the only VHDL frontend. GHDL and nvc are used as
 reference simulators in tests, not as build-time frontends.
@@ -90,14 +91,20 @@ Area                                         Status      Notes
 ===========================================  =========  =====================================
 Entities, architectures, packages            Supported  Multiple architectures: last analyzed
                                                          wins; context declarations are expanded
-Components and direct instantiation          Supported  Configurations are validated, not
-                                                         applied
+Components and direct instantiation          Supported  Configuration units are validated,
+                                                         not applied; component interfaces are
+                                                         not checked, and an instance's
+                                                         (ARCH) selection is ignored (audit)
 Ports, generics, generic types               Supported  Unconstrained ports specialize per
-                                                         instance; inout ports use V3Tristate
+                                                         instance; inout ports use V3Tristate;
+                                                         scalar actuals/defaults are unchecked
+                                                         and a missing input is silent (audit)
 Scalar, enum, record, 1-D array types        Supported  Includes arrays of arrays; multi-
                                                          dimensional ports excluded
 Static real and physical types               Supported  Elaboration-time constants only
-Expressions and aggregates                   Supported  Two-state model limits below
+Expressions and aggregates                   Supported  Two-state model limits below;
+                                                         operator chains and mixed array
+                                                         base types are accepted (audit)
 Sequential statements and subprograms        Partial    Procedures/functions inlined; dynamic
                                                          loops, impure functions, signal formals
                                                          limited
@@ -138,7 +145,9 @@ Where the implementation is sound
   The findings table records each one with its test. Type conformance is now
   checked separately by one predicate on the assignment, declaration, return,
   single-candidate call, generic and conversion paths (see
-  `Type conformance`_).
+  `Type conformance`_). The 2026-11-20 audit found further holes those findings
+  did not cover, including the port, subprogram-class, selector and crash cases
+  in `Open audit findings`_.
 
 - Elaboration is the strongest part: generic binding and specialization,
   unconstrained ports, generate unrolling, package bodies and deferred
@@ -330,12 +339,25 @@ an array with a scalar of its element type, and a character literal takes the
 other operand's element type. A relational operator may compare an
 ``unsigned``/``signed`` vector, or a legacy numeric-package vector, with an
 integer. ``'event``/``'active``/``'stable`` and ``rising_edge`` yield boolean.
-Whole-port association was already checked by N117.
+Whole-port association checks vectors and the shape of a simple designator
+(N117), but it does not check a scalar actual's base type, and it does not run
+on a port default or on an unassociated input.
 
-The remaining conformance holes are narrower:
+The conformance holes found by the 2026-11-20 audit are:
 
-- A character or physical literal has no inferred type outside its context, so
-  a character actual for an unrelated formal can pass.
+- A scalar port actual, and a port or generic default, may have any base type;
+  the value is resized instead of refused.
+- A named input with no default, or an ``open`` input with no default, is left
+  unconnected without a diagnostic.
+- A function call used as a statement and a procedure used as a value are
+  dropped silently.
+- A character literal is treated as untyped for any target, so a logic
+  character literal reaches an integer, real or boolean context.
+- Logical, concatenation and arithmetic operators compare element kinds rather
+  than array base types, so ``unsigned`` and ``std_logic_vector`` mix.
+- A relation, shift or unary operator chain is accepted without parentheses.
+- A ``case`` or ``with`` selector need not be discrete, and an empty ``case``
+  is accepted.
 - Conversion relatedness between arrays is coarse: any two arrays convert, even
   with different element types.
 
@@ -382,6 +404,14 @@ refused with a source-located "VHDL metavalue in a case or selected choice is
 not supported yet" diagnostic; the corpus case is ``synth/err01/case01``, and
 ``t_vhdl_case_metavalue_unsup`` covers the scalar and vector forms.
 
+The 2026-11-20 audit found one crash that the earlier list does not cover: a
+``real`` or physical type nested in an array element or record member escapes
+``rejectUnmodelledObject``, which only checks the top-level type. Using such an
+element crashes in ``AstNodeDType::width`` on a null dtype, reached through
+``typeOfLowered``; both ``integer(r(0))`` and ``r(0) < r(1)`` reproduce it for
+an array of ``real``, and ``integer(r.f)`` for a record field. The fix is the
+recursive type gate in :file:`plan.md` (WP1).
+
 The remaining middle-end leaks are:
 
 - zero-width objects outside a whole-array assignment. A null array that is
@@ -407,6 +437,136 @@ unconditionally rather than only in debug builds.
 The full neorv32 ``rtl/`` tree with its stock Verilog wrapper still aborts with
 ``std::bad_alloc`` under an 8 GiB limit when the wrapper's complete generic set
 is specialized. The core alone remains clean.
+
+Open audit findings
+===================
+
+The 2026-11-20 follow-up audit with GHDL 7.0.0-dev and nvc re-probed the
+shipped frontend with ``--lint-only`` and ``--cc``. The items below are
+accepted or refused differently from VHDL and the subset. :file:`plan.md`
+assigns each a work package (WP) and a regression test; this table is the
+source list for that plan.
+
+Silently accepted, wrong or missing model
+-----------------------------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 6 34 60
+
+   * - WP
+     - Construct
+     - Observed
+   * - 4
+     - ``u : entity work.e(rtl)``
+     - The architecture selection is parsed and dropped; the last-analyzed
+       architecture is used. A selected name that does not exist is also
+       accepted. Fixed: the selected architecture is lowered and a missing
+       name is an error.
+   * - 4
+     - configuration specification,
+       ``for u : c use entity work.e(rtl);``
+     - Skipped wholesale, so the default binding and architecture are used.
+       ``disconnect`` shares the skip path and is tier ``X``. Fixed: both are
+       refused with a source-located diagnostic.
+   * - 5
+     - component declaration whose ports differ from the entity
+     - The declaration is dropped; the instantiation is checked against the
+       entity, so a stale component builds here and fails in GHDL.
+   * - 3
+     - scalar port actual, port/generic default, missing input
+     - Base type and default shape are unchecked. An unassociated or ``open``
+       input with no default is silently left unconnected. Fixed: actuals and
+       defaults conform, and an unbound input without a default is an error.
+   * - 2
+     - function call as a statement; procedure in an expression
+     - Accepted and dropped, so an assignment can lose its driver.
+       ``resolveCall`` returns null without a diagnostic when only the wrong
+       subprogram class matches. Fixed: both directions are errors and the
+       expression path names the procedure.
+   * - 6
+     - ``a = b = c``, ``a sll 1 sll 2``, ``not not a``
+     - Accepted; only logical operator mixing is checked (N113).
+   * - 6
+     - ``unsigned`` mixed with ``std_logic_vector`` in ``+``, ``and`` and
+       ``&``
+     - Accepted and modelled as unsigned; array base type names are not
+       compared, only element kinds and signedness.
+   * - 6
+     - ``integer_signal = '1'``, ``return '1'`` from an integer function,
+       ``generic(n : integer := '1')``
+     - Accepted; a character literal is treated as untyped for any target.
+   * - 7
+     - empty ``case``; ``case``/``with`` over a record
+     - An empty case is dropped without a diagnostic, and the selector need
+       not be discrete.
+   * - 8
+     - plain ``variable`` in entity/architecture; duplicate statement labels;
+       unknown ``severity`` token; orphan package body; duplicate subprogram
+       body; signal assignment in an entity statement-part process
+     - Accepted without a diagnostic (a duplicate subprogram fails only if it
+       is called).
+   * - 9
+     - ``integer'high + 1``, ``2 ** 31``, ``v sll '1'``, ``i'length`` on a
+       scalar
+     - Static fold overflow wraps silently; the shift count and array-only
+       attribute checks are missing.
+   * - 1
+     - ``real``/physical type as an array element or record member
+     - Accepted; the first use crashes in ``AstNodeDType::width`` on a null
+       dtype (see `Internal faults and middle-end leaks`_). Fixed: the object
+       gate walks array elements and record members.
+   * - 10
+     - null-range object or port (``std_logic_vector(0 to -1)``)
+     - Accepted and can reach the middle end; the subset tier is ``X``.
+
+Legal forms refused
+-------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 6 42 52
+
+   * - WP
+     - Construct
+     - Observed
+   * - 11
+     - ``architecture rtl of work.e is``
+     - ``expected 'is', got '.'``; ``parseArchitecture`` takes one identifier.
+   * - 11
+     - ``type a is array (work.pkg.idx) of ...``
+     - ``expected ')', got '.'``; ``parseIndexConstraint`` takes one
+       identifier.
+   * - 11
+     - ``u : comp;`` (component instantiation with no maps)
+     - Parsed as a procedure call and reported as an unknown subprogram
+       named ``comp``.
+   * - 11
+     - ``use work.pkg."+";``
+     - ``expected ';', got '+'``; a use clause accepts identifiers only.
+   * - 11
+     - ``type t is range 0 to 7;``
+     - ``type definition 'range' is not supported yet``. The subset names
+       integer subtypes, not integer type definitions; decide to implement or
+       document.
+   * - 11, 12
+     - ``--top-module CaseTop`` for ``entity CaseTop``
+     - Not found; only the folded lowercase spelling matches, although VHDL
+       lookup is case insensitive.
+
+These findings supersede the N117 port claim and the N112 case-completeness
+claim as stated above; the corresponding work packages add the missing checks
+without changing the accepted set for legal designs. Work packages 1--4 are
+implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
+``t_vhdl_subp_class``, ``t_vhdl_port_*``, ``t_vhdl_generic_shape_bad``,
+``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup`` and
+``t_vhdl_disconnect_unsup``); the remaining rows stay open.
+
+Two tier rows also disagree with the implementation in the other direction: a
+general ``wait until <condition>`` and ``signal``-class subprogram parameters
+are accepted although ``vhdl_synth_subset.md`` marks them deferred. A probe of
+a signal ``out`` parameter matched VHDL's delta scheduling. If these stay,
+their tier rows move to ``S``; otherwise they become refusals.
 
 Remaining feature gaps
 ======================
