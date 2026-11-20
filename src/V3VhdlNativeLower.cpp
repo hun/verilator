@@ -129,6 +129,21 @@ static bool arrayBaseTypesRelated(const std::string& a, const std::string& b) {
     return baseTypesRelated(canonical(a), canonical(b));
 }
 
+//! Whether a case or selected-assignment selector is discrete, or a one-dimensional
+//! array of a discrete element type (IEEE 1076-2008 10.9)
+static bool discreteSelectorType(const VType& type) {
+    if (type.kind == VType::LOGIC || type.kind == VType::BIT || type.kind == VType::BOOLEAN
+        || type.kind == VType::INT || type.kind == VType::ENUM) {
+        return true;
+    }
+    if (type.kind == VType::VECTOR) return true;
+    if (type.kind == VType::ARRAY && type.elemp) {
+        return type.elemp->kind == VType::LOGIC || type.elemp->kind == VType::BIT
+               || type.elemp->kind == VType::BOOLEAN || type.elemp->kind == VType::ENUM;
+    }
+    return false;
+}
+
 //! Whether a character literal may adopt `target`'s type (IEEE 1076-2008 9.3.2, 15.5)
 static bool charLiteralFits(const VType& target, char ch) {
     if (target.kind == VType::INT || target.kind == VType::REAL || target.kind == VType::FILE
@@ -6936,6 +6951,13 @@ AstNodeStmt* Lowering::lowerSelected(const Concurrent& conc) {
     AstNodeDType* const selDtp = selectorp->dtypep();
     VType selType;
     if (!actualType(*conc.selector, selType)) selType = typeOfDType(selDtp);
+    if (!discreteSelectorType(selType)) {
+        flp->v3error("VHDL: selected assignment selector is not discrete "
+                     "(IEEE 1076-2008 10.9)");
+        lhsp->deleteTree();
+        selectorp->deleteTree();
+        return nullptr;
+    }
     // Lower every value once. Checking the lowered value also catches a high-impedance
     // constant produced by a folded call, not only a literal in the source.
     std::vector<AstNodeExpr*> values;
@@ -7370,6 +7392,16 @@ AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
     AstNodeDType* const selDtp = selectorp->dtypep();
     VType selType;
     if (!actualType(*stmt.selector, selType)) selType = typeOfDType(selDtp);
+    if (!discreteSelectorType(selType)) {
+        flp->v3error("VHDL: case selector is not discrete (IEEE 1076-2008 10.9)");
+        selectorp->deleteTree();
+        return nullptr;
+    }
+    if (stmt.caseItems.empty()) {
+        flp->v3error("VHDL: case statement has no alternatives");
+        selectorp->deleteTree();
+        return nullptr;
+    }
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen
     std::set<int64_t> covered;

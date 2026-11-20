@@ -49,7 +49,7 @@ WP1, WP3 and WP4 change models or crash. Land them first. WP5 needs the port
 conformance helper from WP3 and the architecture selection from WP4. WP13 is a
 mechanical sweep and should be last so it does not rebase every other commit.
 
-**Status:** WP1--WP6 are implemented and tested in this tree. The remaining
+**Status:** WP1--WP7 are implemented and tested in this tree. The remaining
 work packages are open.
 
 ## WP1 -- Nested real and physical element types
