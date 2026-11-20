@@ -65,6 +65,8 @@ class CoalesceVisitor final : public VNVisitorConst {
         if (varp->delayp()) return false;
         if (varp->isForced()) return false;
         if (varp->isSigUserRWPublic()) return false;
+        // An inout is also driven from outside, so its internal driver is not its value
+        if (varp->direction().isInout()) return false;
         // The user asked for it to be split, which needs the variable itself
         if (varp->attrSplitVar()) return false;
         if (varp->isSc()) return false;
