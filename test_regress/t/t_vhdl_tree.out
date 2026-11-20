@@ -1,0 +1,48 @@
+Verilator Tree Dump (format 0x3900) from <e0> to <e165>
+     NETLIST (B) {a0aa}  $root [1ps/1ps]
+    1: MODULE (C) {d13ab}  t  L1 D2 [1ps]
+    1:1: PORT (D) {d15ab}  clk
+    1:1: VAR (E) {d15ab} @dt=(F)@(G/w1)  clk INPUT PORT
+    1:1: PORT (G) {d16ab}  q
+    1:1: VAR (H) {d16ab} @dt=(I)@(nw4)  q OUTPUT PORT
+    1:1: VAR (J) {d21ab} @dt=(K)@(G/w4)  s VAR
+    1:1: INITIALSTATIC (L) {d21ab}
+    1:1:2: ASSIGN (M) {d21ab} @dt=(K)@(G/w4)
+    1:1:2:1: CONST (N) {d21ab} @dt=(K)@(G/w4)  4'h0
+    1:1:2:2: VARREF (O) {d21ab} @dt=(K)@(G/w4)  s [LV] => VAR (J) {d21ab} @dt=(K)@(G/w4)  s VAR
+    1:1: ALWAYS (P) {d23ab}
+    1:1:1: SENTREE (Q) {d23ab}
+    1:1:1:1: SENITEM (R) {d23ab} [CHANGED]
+    1:1:1:1:1: VARREF (S) {d23ab} @dt=(F)@(G/w1)  clk [RV] <- VAR (E) {d15ab} @dt=(F)@(G/w1)  clk INPUT PORT
+    1:1:2: IF (T) {d25ab} 
+    1:1:2:1: VARREF (U) {d25ab} @dt=(F)@(G/w1)  clk [RV] <- VAR (E) {d15ab} @dt=(F)@(G/w1)  clk INPUT PORT
+    1:1:2:2: ASSIGNDLY (V) {d26ab} @dt=(K)@(G/w4)
+    1:1:2:2:1: ADD (W) {d26ab} @dt=(K)@(G/w4)
+    1:1:2:2:1:1: VARREF (X) {d26ab} @dt=(K)@(G/w4)  s [RV] <- VAR (J) {d21ab} @dt=(K)@(G/w4)  s VAR
+    1:1:2:2:1:2: CONST (Y) {d26ab} @dt=(K)@(G/w4)  4'h1
+    1:1:2:2:2: VARREF (Z) {d26ab} @dt=(K)@(G/w4)  s [LV] => VAR (J) {d21ab} @dt=(K)@(G/w4)  s VAR
+    1:1:2:2: ASSIGNDLY (AB) {d27ab} @dt=(I)@(nw4)
+    1:1:2:2:1: VARREF (BB) {d27ab} @dt=(I)@(nw4)  s [RV] <- VAR (J) {d21ab} @dt=(K)@(G/w4)  s VAR
+    1:1:2:2:2: VARREF (CB) {d27ab} @dt=(I)@(nw4)  q [LV] => VAR (H) {d16ab} @dt=(I)@(nw4)  q OUTPUT PORT
+    1: PACKAGE (DB) {a0aa}  __024unit  L2 D3 [LIB] [1ps]
+    1: PACKAGE (EB) {a0aa}  __Vconstpool  L2 D3 [LIB] [1ps]
+    3: TYPETABLE (FB) {a0aa}
+		     int  -> BASICDTYPE (GB) {d26ab} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
+		   logic  -> BASICDTYPE (F) {d15ab} @dt=this@(G/w1)  logic [GENERIC] kwd=logic
+		detailed  ->  BASICDTYPE (HB) {d25ab} @dt=this@(G/w1)  bit [GENERIC] kwd=bit
+		detailed  ->  BASICDTYPE (F) {d15ab} @dt=this@(G/w1)  logic [GENERIC] kwd=logic
+		detailed  ->  BASICDTYPE (IB) {d21ab} @dt=this@(G/w4)  bit [GENERIC] kwd=bit range=[3:0]
+		detailed  ->  BASICDTYPE (K) {d21ab} @dt=this@(G/w4)  logic [GENERIC] kwd=logic range=[3:0]
+		detailed  ->  BASICDTYPE (JB) {d26ab} @dt=this@(G/w32)  bit [GENERIC] kwd=bit range=[31:0]
+		detailed  ->  BASICDTYPE (GB) {d26ab} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
+    3:1: BASICDTYPE (F) {d15ab} @dt=this@(G/w1)  logic [GENERIC] kwd=logic
+    3:1: BASICDTYPE (I) {d16ab} @dt=this@(nw4)  logic kwd=logic range=[3:0]
+    3:1: BASICDTYPE (K) {d21ab} @dt=this@(G/w4)  logic [GENERIC] kwd=logic range=[3:0]
+    3:1: BASICDTYPE (IB) {d21ab} @dt=this@(G/w4)  bit [GENERIC] kwd=bit range=[3:0]
+    3:1: BASICDTYPE (GB) {d26ab} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
+    3:1: BASICDTYPE (JB) {d26ab} @dt=this@(G/w32)  bit [GENERIC] kwd=bit range=[31:0]
+    3:1: BASICDTYPE (KB) {d27ab} @dt=this@(nw4)  logic kwd=logic range=[3:0]
+    3:1: BASICDTYPE (LB) {d27ab} @dt=this@(nw4)  logic kwd=logic range=[3:0]
+    3:1: BASICDTYPE (MB) {d27ab} @dt=this@(nw4)  logic kwd=logic range=[3:0]
+    3:1: BASICDTYPE (NB) {d27ab} @dt=this@(nw4)  logic kwd=logic range=[3:0]
+    3:1: BASICDTYPE (HB) {d25ab} @dt=this@(G/w1)  bit [GENERIC] kwd=bit

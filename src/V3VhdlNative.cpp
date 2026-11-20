@@ -336,7 +336,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
             portUnelaborated.push_back(&entity);
             continue;
         }
-        if (!vhdlnative::lower(entity, *it->second, modules[entity.name], packages, modules,
+        if (!vhdlnative::lower(rootp, entity, *it->second, modules[entity.name], packages, modules,
                                design)) {
             unelaborated.push_back(&entity);
             continue;
@@ -349,7 +349,8 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
             if (byName == design.archsByName.end()) continue;
             const auto archIt = byName->second.find(entry.first.second);
             if (archIt == byName->second.end()) continue;
-            vhdlnative::lower(entity, *archIt->second, entry.second, packages, modules, design);
+            vhdlnative::lower(rootp, entity, *archIt->second, entry.second, packages, modules,
+                              design);
         }
     }
     for (const vhdlnative::Architecture& arch : library.archs) {
@@ -359,11 +360,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     }
     // An entity whose generics have no defaults elaborates only through instances
     for (const vhdlnative::EntityUnit* const entityp : unelaborated) {
-        const std::string prefix = entityp->name + "|";
-        const bool covered = std::any_of(
-            design.specializations.begin(), design.specializations.end(), [&](const auto& entry) {
-                return entry.second && entry.first.compare(0, prefix.size(), prefix) == 0;
-            });
+        const bool covered = vhdlnative::specializationCovers(design, entityp->name, false);
         if (covered) {
             // Only the specializations are referenced; the empty base would look like a top
             deletedModules.insert(entityp->name);
@@ -379,11 +376,7 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     }
     // An entity with unconstrained ports elaborates only through its instances
     for (const vhdlnative::EntityUnit* const entityp : portUnelaborated) {
-        const std::string prefix = entityp->name + "|ports";
-        const bool covered = std::any_of(
-            design.specializations.begin(), design.specializations.end(), [&](const auto& entry) {
-                return entry.second && entry.first.compare(0, prefix.size(), prefix) == 0;
-            });
+        const bool covered = vhdlnative::specializationCovers(design, entityp->name, true);
         if (covered) {
             deletedModules.insert(entityp->name);
         } else {

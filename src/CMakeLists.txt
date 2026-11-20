@@ -212,6 +212,8 @@ set(HEADERS
     V3VhdlNative.h
     V3VhdlNativeAst.h
     V3VhdlNativeLower.h
+    V3VhdlNativeLowerImpl.h
+    V3VhdlNativeTypes.h
     V3VhdlParse.h
     V3Waiver.h
     V3Width.h
@@ -404,6 +406,13 @@ set(COMMON_SOURCES
     V3VhdlNative.cpp
     V3VhdlNativeLexer.cpp
     V3VhdlNativeLower.cpp
+    V3VhdlNativeLowerExpr.cpp
+    V3VhdlNativeLowerPackage.cpp
+    V3VhdlNativeLowerProcess.cpp
+    V3VhdlNativeLowerStmt.cpp
+    V3VhdlNativeLowerSubprog.cpp
+    V3VhdlNativeLowerTypes.cpp
+    V3VhdlNativeLowerElab.cpp
     V3VhdlNativeParse.cpp
     V3VhdlParse.cpp
     V3Waiver.cpp

@@ -23,19 +23,21 @@
 VL_DEFINE_DEBUG_FUNCTIONS;
 
 void V3VhdlLink::link(const std::set<const AstNodeModule*>& vhdlModules) {
-    if (!v3Global.opt.debugCheck()) return;
-    // Only the modules this frontend emitted are subject to its contract; a mixed design
-    // also holds SystemVerilog modules, whose nodes the width pass has not seen yet
-    for (const AstNodeModule* const modp : vhdlModules) {
-        const_cast<AstNodeModule*>(modp)->foreach([](AstNode* np) {
-            UASSERT_OBJ(!VN_IS(np, ParseRef), np, "AstParseRef in committed VHDL AST");
-            UASSERT_OBJ(!np->getChildDTypep(), np, "childDTypep in committed VHDL AST");
-            if (AstNodeExpr* const ep = VN_CAST(np, NodeExpr)) {
-                UASSERT_OBJ(ep->dtypep(), np, "Expression without dtype in committed VHDL AST");
-            }
-            if (AstVar* const vp = VN_CAST(np, Var)) {
-                UASSERT_OBJ(vp->dtypep(), np, "Variable without dtype in committed VHDL AST");
-            }
-        });
-    }
+    UDEBUGONLY({
+        // Only the modules this frontend emitted are subject to its contract; a mixed design
+        // also holds SystemVerilog modules, whose nodes the width pass has not seen yet
+        for (const AstNodeModule* const modp : vhdlModules) {
+            const_cast<AstNodeModule*>(modp)->foreach([](AstNode* np) {
+                UASSERT_OBJ(!VN_IS(np, ParseRef), np, "AstParseRef in committed VHDL AST");
+                UASSERT_OBJ(!np->getChildDTypep(), np, "childDTypep in committed VHDL AST");
+                if (AstNodeExpr* const ep = VN_CAST(np, NodeExpr)) {
+                    UASSERT_OBJ(ep->dtypep(), np,
+                                "Expression without dtype in committed VHDL AST");
+                }
+                if (AstVar* const vp = VN_CAST(np, Var)) {
+                    UASSERT_OBJ(vp->dtypep(), np, "Variable without dtype in committed VHDL AST");
+                }
+            });
+        }
+    });
 }

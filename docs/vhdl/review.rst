@@ -421,12 +421,11 @@ The remaining middle-end leaks are:
 The ``BLKANDNBLK`` and ``ASSIGNIN`` cases need the external corpus and were not
 re-checked; the metavalue, null-assignment and ``bit inout`` probes were.
 
-The pre-width contract is also checked only in debug runs: ``V3VhdlLink``
-asserts the emitted shape under ``--debug-check``, which the regression driver
-passes but the corpus sweep and an ordinary user run do not. A release build can
-therefore carry a malformed dtype into a middle-end pass. The frontend should
-refuse each construct where it is lowered, and check the contract
-unconditionally rather than only in debug builds.
+The pre-width contract is now checked in every debug build: ``V3VhdlLink``
+asserts the emitted shape without requiring ``--debug-check``, and
+``t_vhdl_tree`` pins the committed AST of one entity at the cellsort dump. The
+remaining leaks are source constructs still lowered with a suspect dtype;
+they should be refused where they are lowered.
 
 The full neorv32 ``rtl/`` tree with its stock Verilog wrapper still aborts with
 ``std::bad_alloc`` under an 8 GiB limit when the wrapper's complete generic set
@@ -662,11 +661,10 @@ The consequences are structural rather than cosmetic:
   why type conformance had to be threaded through six separate paths instead
   of living in one semantic pass.
 - Scope is a flat snapshot, not a chain. Entering a process or inlining a
-  subprogram calls ``saveScope``/``restoreScope``, which copy eleven
-  containers, including the whole signal map. That makes process lowering
-  quadratic by construction. A local probe, with no benchmark script shipped,
-  measured 0.05 s at 250 processes growing to 4.70 s at 8000; the trend is
-  structural, but the absolute numbers are not reproducible from a checkout.
+  subprogram calls ``saveScope``/``restoreScope``, which copy ten other
+  containers; the signal map is copy-on-write, so a snapshot is O(1) until
+  either side writes. The former full-map copy made process lowering
+  quadratic. No scale regression test is shipped.
 - Arrays and records are packed into one wide ``AstBasicDType`` vector, not an
   unpacked array or struct. This keeps slicing uniform and makes a 2^16-element
   memory cheap to lint, but an element access becomes a bit select, a dynamic
@@ -683,11 +681,9 @@ The consequences are structural rather than cosmetic:
   (``m_failed``), so a user gets one syntax diagnostic per file. Lowering
   errors do accumulate, so this is a parser limitation, not a frontend-wide
   one.
-- The pre-width V3 contract is enforced by ``V3VhdlLink`` only when
-  ``--debug-check`` is on, and it runs inside ``readFiles`` before ``V3Width``.
-  The regression driver passes it (all 323 tests run that way), but the corpus
-  sweep and an ordinary user run do not; the corpus leaks above are what
-  escapes that check.
+- The pre-width V3 contract is enforced by ``V3VhdlLink`` in every debug build,
+  inside ``readFiles`` before ``V3Width``, with no ``--debug-check`` flag
+  needed. ``t_vhdl_tree`` pins one entity's emitted shape.
 - Citation hygiene needs attention: 21 comments cite IEEE 1800-2023 for rules
   that are VHDL rules. Examples are the ``real`` constant comment, the
   array-index rule in ``registerType``, the subprogram-overload rule in
@@ -778,12 +774,12 @@ Verification gaps
   repository, so the corpus sweep and the neorv32 allocation run cannot be
   reproduced from a checkout. The 323-test suite and the probes in this page
   are the reproducible evidence.
-- There is no scale or performance test. The process-lowering quadratic in
-  `Implementation quality`_ is unguarded, so a regression that copies one more
-  container per scope would not be noticed.
-- The regression driver passes ``--debug-check``, but the corpus runner and
-  ordinary runs do not. Running the corpus with the same contract check would
-  move the middle-end leaks to the frontend's own diagnostics.
+- There is no scale or performance test. The signal map is now copy-on-write,
+  but a regression that copies another full container per scope would not be
+  noticed.
+- The corpus runner uses an optimized binary, so it does not exercise the
+  debug contract check. Running it under a debug build would move the
+  middle-end leaks to the frontend's own diagnostics.
 - Before the GHDL-XML frontend was retired, three tests did not request a
   frontend selector and therefore exercised the GHDL path even in a native run.
   Retiring the selector exposed the difference: one of them,
@@ -801,8 +797,7 @@ ______
 
 1. Close the remaining middle-end leaks: zero-width objects outside a
    whole-array assignment, and the ``BLKANDNBLK`` and ``ASSIGNIN`` rejects,
-   with a reduced regression test for each. Check the pre-width contract
-   unconditionally rather than only under ``--debug-check``.
+   with a reduced regression test for each.
 2. Add a differential simulation harness and a CI job, treat lint-only corpus
    counts as breadth, and add a scale test for the process path.
 3. Implement ``std_logic_signed`` arithmetic and comparison, ``case generate``,

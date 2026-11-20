@@ -145,16 +145,14 @@ These are code-review issues independent of the frontend itself:
   `V3LinkParse` runs unconditionally over the emitted modules.
 - `--language vhdl` applies to any unknown or extensionless file.
 - Mixed-mode libmap mapping can assign an SV library name to a VHDL `work` file.
-- The pre-width contract (`V3VhdlLink`) only runs with `--debug-check`; release
-  builds can carry malformed dtypes into the middle end.
-- Specialization is a stringly typed protocol (`"<entity>|ports..."`) matched
-  by prefix across files; the `entity|` coverage prefix also swallows
-  `entity|ports` keys.
+- The pre-width contract (`V3VhdlLink`) now runs in every debug build without
+  `--debug-check`; `t_vhdl_tree` pins the committed AST of one entity.
+- Specialization now uses a typed `SpecKey` (`entity`, `portPart`, `arch`,
+  `genericPart`) with explicit coverage predicates; the `entity|` collision is gone.
 - One `FileLine` is heap-allocated per token, including discarded and EOF tokens.
-- `rootpFromModules()` ignores its argument and reaches the `v3Global` singleton.
-- Scope save/restore copies eleven containers including the full signal map
-  (`setScope` copies ten); lowering is quadratic by construction. The quoted
-  0.05 s -> 4.70 s timings are docs-only -- no benchmark script exists.
+- `rootpFromModules()` is removed; `lower()` takes the netlist explicitly.
+- Scope snapshots use a copy-on-write signal map; the other ten containers are
+  still copied. The old 0.05 s -> 4.70 s probe measured the previous code.
 
 #### D. Test-quality gaps
 
@@ -248,17 +246,15 @@ integration shape is accepted.
 
 Do one refactor PR with no behavior change to make the rest reviewable:
 
-- Split `V3VhdlNativeLower.cpp` by domain: types, constants/expressions,
-  statements, processes, subprograms, packages, elaboration.
-- Move `VType` and type helpers to their own unit.
-- Replace the specialization string key with a typed struct.
-- Fix the specialization prefix collision: `entity|` also matches `entity|ports`
-  keys and can wrongly mark an entity as generically covered.
-- Replace scope snapshot copy with a scope chain, or at least stop copying the
-  full signal map.
-- Remove `rootpFromModules()`; pass the netlist explicitly.
-- Make `V3VhdlLink` run unconditionally in debug/CI, and add a tree golden for
-  one entity.
+- Done: the lowerer is split into types, expr, stmt, subprog, process, package,
+  and elab translation units with shared internal headers.
+- Done: `VType` and its helpers live in `V3VhdlNativeTypes.h`.
+- Done: the specialization string key is a typed `SpecKey`, and the `entity|`
+  coverage collision is fixed.
+- Done: the signal map is copy-on-write in scope snapshots.
+- Done: `rootpFromModules()` is gone; the netlist is passed explicitly.
+- Done: `V3VhdlLink` runs in every debug build, and `t_vhdl_tree` pins one
+  entity's committed AST.
 
 ### 3.4 Branch shaping
 
@@ -293,7 +289,7 @@ Give reviewers a one-page guide before the diff:
 1. Land `fix-inout-coalesce` (done on this branch as `600a1d2f`).
 2. Fix docs contradictions and test permissions -- done. CI blockers, licenses,
    process-log removal, and the limitations page are in place.
-3. Mechanical lowerer split + unconditional contract check.
+3. Mechanical lowerer split + unconditional contract check -- done.
 4. Open the RFC/design issue.
 5. Open PR 0 (plumbing) with a green VHDL option/extension test.
 6. Build the stacked PRs on top only after maintainers accept the architecture

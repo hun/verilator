@@ -22,10 +22,12 @@
 
 #include "V3VhdlNativeAst.h"
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 class AstModule;
@@ -49,6 +51,21 @@ struct PortBounds final {
     std::vector<bool> memberAscending;
 };
 using PortBoundsMap = std::map<std::string, PortBounds>;
+
+//! Cache key for one specialized entity module. Each part has a distinct meaning so
+//! coverage tests never depend on a raw string prefix.
+struct SpecKey final {
+    std::string entity;  // Folded entity name
+    std::string portPart;  // Canonical "|ports|..." text, empty when no ports were bound
+    std::string arch;  // Folded architecture name
+    std::string genericPart;  // Canonical "|name=value..." text
+};
+struct SpecKeyLess final {
+    bool operator()(const SpecKey& a, const SpecKey& b) const {
+        return std::tie(a.entity, a.portPart, a.arch, a.genericPart)
+               < std::tie(b.entity, b.portPart, b.arch, b.genericPart);
+    }
+};
 
 //! Record type mark -> the names of its unconstrained array elements
 using UnconstrainedRecordMap = std::map<std::string, std::set<std::string>>;
@@ -90,7 +107,7 @@ struct Design final {
     std::map<std::string, std::map<std::string, const Architecture*>> archsByName;
     // (entity, architecture) selected by an instance -> the module lowered with it
     std::map<std::pair<std::string, std::string>, AstModule*> archModules;
-    std::map<std::string, AstModule*> specializations;  // Generic binding key -> module
+    std::map<SpecKey, AstModule*, SpecKeyLess> specializations;  // Binding key -> module
     std::set<std::string> instantiated;  // Entities named by at least one instance
     std::set<std::string> baseUsed;  // Entities whose base module an instance binds to
     UnconstrainedRecordMap unconstrainedRecordMembers;  // Unconstrained record elements
@@ -101,6 +118,16 @@ struct Design final {
     int specSeq = 0;  // Disambiguates the specialized module names
     int specDepth = 0;  // Generic specialization recursion depth
 };
+
+//! Whether a successful specialization of this entity exists. withPorts restricts the
+//! test to unconstrained-port specializations; otherwise all specializations count.
+inline bool specializationCovers(const Design& design, const std::string& entity, bool withPorts) {
+    return std::any_of(design.specializations.begin(), design.specializations.end(),
+                       [&](const auto& entry) {
+                           return entry.second && entry.first.entity == entity
+                                  && (!withPorts || !entry.first.portPart.empty());
+                       });
+}
 
 //! Whether a port spec fixes every unconstrained element of its record type
 bool recordPortFullyConstrained(const PortDecl& port, const UnconstrainedRecordMap& members);
@@ -123,7 +150,7 @@ void collectPhysicalUnits(const DesignLibrary& library, Design& design) VL_MT_DI
 
 //! Lower one entity/architecture pair into the module created for its entity. False
 //! if the entity's generics have no defaults to elaborate, and no binding supplied
-bool lower(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
+bool lower(AstNetlist* rootp, const EntityUnit& entity, const Architecture& arch, AstModule* modp,
            const PackageTable& table, const ModuleMap& modules, Design& design,
            const PortBoundsMap* portBounds = nullptr) VL_MT_DISABLED;
 
