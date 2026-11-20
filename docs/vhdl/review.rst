@@ -472,7 +472,8 @@ Silently accepted, wrong or missing model
    * - 5
      - component declaration whose ports differ from the entity
      - The declaration is dropped; the instantiation is checked against the
-       entity, so a stale component builds here and fails in GHDL.
+       entity, so a stale component builds here and fails in GHDL. Fixed: the
+       component interface is kept and checked against the bound entity.
    * - 3
      - scalar port actual, port/generic default, missing input
      - Base type and default shape are unchecked. An unassociated or ``open``
@@ -556,11 +557,12 @@ Legal forms refused
 
 These findings supersede the N117 port claim and the N112 case-completeness
 claim as stated above; the corresponding work packages add the missing checks
-without changing the accepted set for legal designs. Work packages 1--4 are
+without changing the accepted set for legal designs. Work packages 1--5 are
 implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_subp_class``, ``t_vhdl_port_*``, ``t_vhdl_generic_shape_bad``,
-``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup`` and
-``t_vhdl_disconnect_unsup``); the remaining rows stay open.
+``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup``,
+``t_vhdl_disconnect_unsup`` and ``t_vhdl_component_*``); the remaining rows
+stay open.
 
 Two tier rows also disagree with the implementation in the other direction: a
 general ``wait until <condition>`` and ``signal``-class subprogram parameters

@@ -392,6 +392,15 @@ struct PortAssoc final {
 
 struct Concurrent;
 
+//! A component declaration: the interface a component instantiation binds to
+struct ComponentDecl final {
+    FileLine* flp = nullptr;
+    std::string name;  // Folded
+    std::string spelling;
+    std::vector<GenericDecl> generics;
+    std::vector<PortDecl> ports;
+};
+
 //! One branch of a conditional generate. A null condition marks the final else
 //! part, which is taken only when no preceding condition is true.
 struct GenBranch final {
@@ -399,6 +408,7 @@ struct GenBranch final {
     std::vector<Decl> decls;  // The branch's own declarative items
     std::vector<TypeDecl> types;
     std::vector<SubprogramDecl> subprograms;
+    std::vector<ComponentDecl> components;
     std::vector<std::unique_ptr<Concurrent>> stmts;
 };
 
@@ -447,6 +457,7 @@ struct Concurrent final {
     std::vector<Decl> decls;  // BLOCK: declarative items
     std::vector<TypeDecl> types;  // BLOCK/GEN_FOR
     std::vector<SubprogramDecl> subprograms;  // BLOCK/GEN_FOR
+    std::vector<ComponentDecl> components;  // BLOCK/GEN_FOR
     std::vector<std::unique_ptr<Concurrent>> body;  // GEN_FOR/BLOCK: statements
     std::vector<GenBranch> branches;  // GEN_IF: in source order
     explicit Concurrent(Kind kind_)
@@ -480,6 +491,7 @@ struct EntityUnit final {
     // Generic constants, visible in the port clause and every architecture
     std::vector<GenericDecl> generics;
     std::vector<SubprogramDecl> subprograms;
+    std::vector<ComponentDecl> components;
     // The entity statement part: concurrent assertions and passive processes
     std::vector<std::unique_ptr<Concurrent>> stmts;
 };
@@ -494,6 +506,7 @@ struct Architecture final {
     std::vector<TypeDecl> types;
     std::vector<AliasDecl> aliases;
     std::vector<SubprogramDecl> subprograms;
+    std::vector<ComponentDecl> components;
     std::vector<std::unique_ptr<Concurrent>> stmts;
     std::vector<UseClause> uses;
     std::vector<std::string> contextNames;
@@ -515,6 +528,7 @@ struct PackageUnit final {
     std::vector<UseClause> uses;
     std::vector<std::string> contextNames;
     std::vector<SubprogramDecl> subprograms;  // Prototypes in a spec, bodies in a body
+    std::vector<ComponentDecl> components;
 };
 //! `package NAME is new BASE [generic map (...)];` instantiates a generic package
 struct PackageInstance final {

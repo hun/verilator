@@ -136,6 +136,7 @@ struct PackageInfo final {
     std::set<std::string> ambiguousLiterals;  // Literals declared by more than one type
     std::map<std::string, double> realConsts;  // Elaboration-time reals, by folded name
     std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
+    std::map<std::string, const ComponentDecl*> components;  // Folded name -> declaration
     // Declarations only the body makes: private to it, but visible while a body it
     // declares is inlined (IEEE 1076-2008 12.4)
     std::vector<const SubprogramDecl*> bodySubprograms;
@@ -280,6 +281,7 @@ class Lowering final {
         std::map<std::string, VType> constTypes;
         std::map<std::string, AstConst*> enumConsts;
         std::map<std::string, std::vector<SubprogramRef>> subprograms;
+        std::map<std::string, const ComponentDecl*> components;
     };
     //! One name bound during subprogram inlining: an expression value, or an lvalue
     struct InlineBinding final {
@@ -316,6 +318,7 @@ class Lowering final {
     //! Cost of the element writes folded into one inlined body; each rebuilds the local value
     int64_t m_funcWriteCost = 0;
     std::map<std::string, std::vector<SubprogramRef>> m_subprograms;  // Visible, by name
+    std::map<std::string, const ComponentDecl*> m_components;  // Visible, by name
     std::vector<const Stmt*> m_procTail;  // Statements after the current procedure return
     int m_concurrentProc = 0;  // Lowering a concurrent procedure call body
     ScopeSave m_moduleScope;  // Module declarative part, hidden by processes
@@ -1279,6 +1282,7 @@ class Lowering final {
     bool lowerFlopIdiom(const Process& process);
     void registerSubprograms(const std::vector<SubprogramDecl>& decls, int frame,
                              bool processLocal = false);
+    void registerComponents(const std::vector<ComponentDecl>& components);
     void setScope(const ScopeSave& saved);
     bool subprogramMatches(const Expr& call, const SubprogramDecl& sub, std::string& why) const;
     static std::vector<std::pair<const FormalDecl*, std::string>>
@@ -8080,6 +8084,7 @@ void Lowering::setScope(const ScopeSave& saved) {
     m_constTypes = saved.constTypes;
     m_enumConsts = saved.enumConsts;
     m_subprograms = saved.subprograms;
+    m_components = saved.components;
 }
 
 //! Whether two declarations are one profile: a declaration of the same name and formal
@@ -8105,6 +8110,12 @@ static bool homograph(const SubprogramDecl& lhs, const SubprogramDecl& rhs) {
         }
     }
     return true;
+}
+
+void Lowering::registerComponents(const std::vector<ComponentDecl>& components) {
+    for (const ComponentDecl& component : components) {
+        m_components[component.name] = &component;
+    }
 }
 
 void Lowering::registerSubprograms(const std::vector<SubprogramDecl>& decls, int frame,
@@ -11192,6 +11203,7 @@ Lowering::ScopeSave Lowering::saveScope() const {
     saved.constTypes = m_constTypes;
     saved.enumConsts = m_enumConsts;
     saved.subprograms = m_subprograms;
+    saved.components = m_components;
     return saved;
 }
 
@@ -11206,6 +11218,7 @@ void Lowering::restoreScope(const ScopeSave& saved) {
     m_constTypes = saved.constTypes;
     m_enumConsts = saved.enumConsts;
     m_subprograms = saved.subprograms;
+    m_components = saved.components;
 }
 
 //! Declare the types, constants and variables of a process declarative part
@@ -11755,6 +11768,12 @@ void Lowering::importPackage(const std::string& name, const std::string& only) {
         m_enumConsts[literal.first] = m_ownedConsts.back().get();
         m_imported.insert(literal.first);
     }
+    for (const auto& component : info.components) {
+        if (!wants(component.first)) continue;
+        if (m_components.count(component.first)) continue;  // A local declaration wins
+        m_components[component.first] = component.second;
+        m_imported.insert(component.first);
+    }
     for (const SubprogramDecl* const subp : info.subprograms) {
         if (!wants(subp->name)) continue;
         std::vector<SubprogramRef>& refs = m_subprograms[subp->name];
@@ -11828,6 +11847,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_scope.clear();
     m_aliases.clear();
     m_subprograms.clear();
+    m_components.clear();
     // The packages named by the unit's `use` clauses are visible here as well, as they
     // are in an entity or an architecture. What the package declares itself wins: those
     // registrations overwrite, and `importPackage` never replaces a name it finds.
@@ -11845,6 +11865,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // exactly as an entity or architecture prescans before registering its types.
     preScanIntConstants(pkg.decls);
     registerTypes(pkg.types, pkg.decls);
+    registerComponents(pkg.components);
     // Subprograms are visible to the declarative items below, including deferred
     // constants, and to an alias renaming one of them
     registerSubprograms(pkg.subprograms, -1);
@@ -11895,6 +11916,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     info.ambiguousLiterals = m_ambiguousLiterals;
     info.realConsts = std::move(m_realConsts);
     info.owned = std::move(m_ownedConsts);
+    for (const ComponentDecl& component : pkg.components) {
+        info.components[component.name] = &component;
+    }
     // Only what the unit declares publishes: a declaration its `use` clauses made
     // visible is not part of its interface (IEEE 1076-2008 12.4). A declaration only the
     // body makes is private to it, unless it completes one the specification published;
@@ -11955,6 +11979,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     }
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
     for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
+    for (const auto& component : info.components) {
+        dest.components[component.first] = component.second;
+    }
     for (const SubprogramDecl* const subp : info.bodySubprograms) {
         if (std::find(dest.bodySubprograms.begin(), dest.bodySubprograms.end(), subp)
             == dest.bodySubprograms.end()) {
@@ -11976,6 +12003,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     m_modp = modp;
 
     m_subprograms.clear();  // Packages published these only through importPackage
+    m_components.clear();
     for (const auto& use : entity.uses) importPackage(use.pkg, use.decl);
     for (const auto& use : arch.uses) importPackage(use.pkg, use.decl);
 
@@ -11993,6 +12021,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     // pieces in dependency order.
     preScanIntConstants(entity.decls);
     registerTypes(entity.types, entity.decls);
+    registerComponents(entity.components);
 
     // Generics are constants visible to the port clause and the architecture
     if (!registerGenerics(entity.generics, bindings, false)) {
@@ -12059,6 +12088,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     // The architecture's own types come after the entity's items, because a constraint may
     // name one of the entity's constants and the loop above emits them
     registerTypes(arch.types, arch.decls);
+    registerComponents(arch.components);
     // A subprogram alias has to exist before the declarations, whose initializers may call it
     for (const AliasDecl& alias : arch.aliases) {
         if (!alias.hasSignature) continue;
@@ -12900,6 +12930,114 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                      + conc.instanceName + "', which has no generics");
         return nullptr;
     }
+    // A component declaration's interface must conform to the entity the instance binds,
+    // and the association formals are the component's (IEEE 1076-2008 6.5.2.2)
+    if (!conc.entityInstantiation && entityp) {
+        const auto componentIt = m_components.find(conc.instanceName);
+        if (componentIt != m_components.end()) {
+            const ComponentDecl& component = *componentIt->second;
+            const auto sameBase = [](const TypeSpec& lhs, const TypeSpec& rhs) {
+                return lhs.pkg == rhs.pkg && lhs.mark == rhs.mark
+                       && lhs.objectName == rhs.objectName && lhs.elementMark == rhs.elementMark;
+            };
+            bool ok = true;
+            std::set<std::string> componentPorts;
+            for (const PortDecl& port : component.ports) {
+                for (const auto& name : port.names) {
+                    componentPorts.insert(name.first);
+                    const PortDecl* entityPortp = nullptr;
+                    for (const PortDecl& entityPort : entityp->ports) {
+                        for (const auto& entityName : entityPort.names) {
+                            if (entityName.first == name.first) entityPortp = &entityPort;
+                        }
+                    }
+                    if (!entityPortp) {
+                        port.flp->v3error("VHDL: component '" + component.spelling
+                                          + "' declares port '" + name.second
+                                          + "', which entity '" + entityp->spelling
+                                          + "' does not have");
+                        ok = false;
+                        continue;
+                    }
+                    if (entityPortp->dir != port.dir) {
+                        port.flp->v3error("VHDL: port '" + name.second + "' of component '"
+                                          + component.spelling
+                                          + "' has a different mode from entity '"
+                                          + entityp->spelling + "'");
+                        ok = false;
+                    }
+                    if (!sameBase(entityPortp->type, port.type)) {
+                        port.flp->v3error("VHDL: port '" + name.second + "' of component '"
+                                          + component.spelling
+                                          + "' has a different type from entity '"
+                                          + entityp->spelling + "'");
+                        ok = false;
+                    }
+                }
+            }
+            for (const PortDecl& port : entityp->ports) {
+                for (const auto& name : port.names) {
+                    if (componentPorts.count(name.first)) continue;
+                    port.flp->v3error("VHDL: entity '" + entityp->spelling + "' has port '"
+                                      + name.second + "', which component '"
+                                      + component.spelling + "' does not declare");
+                    ok = false;
+                }
+            }
+            std::map<std::string, const GenericDecl*> componentGenerics;
+            for (const GenericDecl& generic : component.generics) {
+                for (const auto& name : generic.names) {
+                    componentGenerics[name.first] = &generic;
+                }
+            }
+            std::set<std::string> entityGenerics;
+            for (const GenericDecl& generic : entityp->generics) {
+                for (const auto& name : generic.names) entityGenerics.insert(name.first);
+            }
+            for (const auto& entry : componentGenerics) {
+                const GenericDecl* entityGenericp = nullptr;
+                for (const GenericDecl& generic : entityp->generics) {
+                    for (const auto& name : generic.names) {
+                        if (name.first == entry.first) entityGenericp = &generic;
+                    }
+                }
+                if (!entityGenericp) {
+                    entry.second->flp->v3error("VHDL: component '" + component.spelling
+                                               + "' declares generic '" + entry.first
+                                               + "', which entity '" + entityp->spelling
+                                               + "' does not have");
+                    ok = false;
+                    continue;
+                }
+                const bool sameKind
+                    = entry.second->isType == entityGenericp->isType
+                      && entry.second->isSubprogram == entityGenericp->isSubprogram;
+                if (!sameKind
+                    || (!entry.second->isType && !entry.second->isSubprogram
+                        && !sameBase(entry.second->type, entityGenericp->type))) {
+                    entry.second->flp->v3error("VHDL: generic '" + entry.first + "' of component '"
+                                               + component.spelling
+                                               + "' does not conform to entity '"
+                                               + entityp->spelling + "'");
+                    ok = false;
+                }
+            }
+            for (const std::string& name : entityGenerics) {
+                if (componentGenerics.count(name)) continue;
+                entityp->flp->v3error("VHDL: entity '" + entityp->spelling + "' has generic '"
+                                      + name + "', which component '" + component.spelling
+                                      + "' does not declare");
+                ok = false;
+            }
+            for (const PortAssoc& assoc : conc.associations) {
+                if (assoc.formal.empty() || componentPorts.count(assoc.formal)) continue;
+                assoc.flp->v3error("VHDL: component '" + component.spelling + "' has no port '"
+                                   + assoc.formalSpelling + "'");
+                ok = false;
+            }
+            if (!ok) return nullptr;
+        }
+    }
     if (!conc.architectureName.empty()) {
         const bool known
             = entityp && m_designp
@@ -13447,6 +13585,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
             m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
             m_consts[stmt.loopVar] = value;
             emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
+            registerComponents(stmt.components);
             registerSubprograms(stmt.subprograms, -1);
             for (const auto& bodyConcp : stmt.body) {
                 if (bodyConcp) emitConcurrent(*bodyConcp);
@@ -13491,6 +13630,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
         emitLocalDecls(takenp->decls, takenp->types, "vhdlgen_");
+        registerComponents(takenp->components);
         registerSubprograms(takenp->subprograms, -1);
         for (const auto& bodyConcp : takenp->stmts) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
@@ -13503,6 +13643,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         // A block's declarative items are visible to its statements only
         const ScopeSave saved = saveScope();
         emitLocalDecls(stmt.decls, stmt.types, "vhdlblk_");
+        registerComponents(stmt.components);
         registerSubprograms(stmt.subprograms, -1);
         for (const auto& bodyConcp : stmt.body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);

@@ -455,7 +455,7 @@ class Parser final {
     void parseTypeSpec(TypeSpec& type);
     //! The `name(range)` list of a record constraint
     bool parseMemberConstraints(TypeSpec& type);
-    void parsePortClause(EntityUnit& entity);
+    void parsePortClause(std::vector<PortDecl>& ports);
     void parseEntity(FileLine* flp);
     void parseNameList(std::vector<std::pair<std::string, std::string>>& names);
     void parseDecl(Architecture& arch, Decl::Kind kind);
@@ -482,14 +482,15 @@ class Parser final {
     void parsePackageInstanceTail(FileLine* flp, const std::string& name,
                                   const std::string& spelling);
     void parseAssocList(std::vector<PortAssoc>& out, const char* what);
-    void parseComponentDecl();
+    void parseComponentDecl(std::vector<ComponentDecl>& components);
     void parseInterfaceList(std::vector<FormalDecl>& formals);
     void parseSubprogramInto(std::vector<SubprogramDecl>& out);
     bool parseSubprogramSpec(SubprogramDecl& sub);
     void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
                              std::vector<Decl>* decls = nullptr,
                              std::vector<TypeDecl>* types = nullptr,
-                             std::vector<SubprogramDecl>* subprograms = nullptr);
+                             std::vector<SubprogramDecl>* subprograms = nullptr,
+                             std::vector<ComponentDecl>* components = nullptr);
     bool parseGenerateEnd();
     void parseProcess(Architecture& arch, FileLine* flp);
     std::vector<StmtP> parseStmtList(bool stopAtElse);
@@ -1158,7 +1159,7 @@ void Parser::parseNameList(std::vector<std::pair<std::string, std::string>>& nam
     if (!acceptSym(":")) { error("expected ':' after a name list"); }
 }
 
-void Parser::parsePortClause(EntityUnit& entity) {
+void Parser::parsePortClause(std::vector<PortDecl>& ports) {
     if (!acceptSym("(")) {
         error("expected '(' after 'port'");
         return;
@@ -1191,7 +1192,7 @@ void Parser::parsePortClause(EntityUnit& entity) {
             port.init = parseExpr();
             if (!port.init) return;
         }
-        entity.ports.push_back(std::move(port));
+        ports.push_back(std::move(port));
         if (acceptSym(";")) continue;
         if (acceptSym(")")) break;
         error("expected ';' or ')' in a port clause, got '" + m_cur.text + "'");
@@ -1278,7 +1279,7 @@ void Parser::parseEntity(FileLine* flp) {
         if (m_failed) return;
         if (isId("port")) {
             advance();
-            parsePortClause(entity);
+            parsePortClause(entity.ports);
             continue;
         }
         if (isId("shared")) {
@@ -1364,7 +1365,7 @@ void Parser::parseEntity(FileLine* flp) {
         }
         if (isId("component")) {
             advance();
-            parseComponentDecl();
+            parseComponentDecl(entity.components);
             continue;
         }
         if (skipFileDecl()) continue;
@@ -1799,26 +1800,26 @@ void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
 }
 
 //! `component name [is] [generic (...);] [port (...);] end component [name];`
-//! The declaration is dropped: a named instantiation binds to the entity of that name, and
-//! the interface list only shapes the association check this frontend does not model.
-void Parser::parseComponentDecl() {
+//! The interface is kept so an instantiation can check its formals and the bound entity.
+void Parser::parseComponentDecl(std::vector<ComponentDecl>& components) {
     Token nameTok;
     if (!takeName(nameTok)) return;
     (void)acceptId("is");
+    ComponentDecl component;
+    component.flp = nameTok.flp;
+    component.name = nameTok.text;
+    component.spelling = nameTok.spelling;
     for (;;) {
         if (m_failed) return;
         if (isId("end")) break;
-        if (isId("generic") || isId("port")) {
-            // The interface list only shapes the association checks; skip it
+        if (isId("generic")) {
             advance();
-            int depth = 0;
-            while (!m_failed && m_cur.kind != Token::END) {
-                if (isSym("(")) ++depth;
-                if (isSym(")")) --depth;
-                const bool done = depth == 0 && isSym(";");
-                advance();
-                if (done) break;
-            }
+            parseGenericClauseInto(component.generics);
+            continue;
+        }
+        if (isId("port")) {
+            advance();
+            parsePortClause(component.ports);
             continue;
         }
         unsupported("component declaration item '" + m_cur.text + "'");
@@ -1828,6 +1829,7 @@ void Parser::parseComponentDecl() {
     if (!expectId("component")) return;
     if (m_cur.kind == Token::ID) advance();  // Optional end name
     if (!acceptSym(";")) error("expected ';' after 'end component'");
+    components.push_back(std::move(component));
 }
 
 //! `[entity] name [generic map (...)] [port map (...)];`
@@ -2102,7 +2104,7 @@ void Parser::parseArchitecture(FileLine* flp) {
         }
         if (isId("component")) {
             advance();
-            parseComponentDecl();
+            parseComponentDecl(arch.components);
             continue;
         }
         if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
@@ -2295,7 +2297,8 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             return;
         }
         if (!expectId("generate")) return;
-        parseConcurrentList(gen->body, &gen->decls, &gen->types, &gen->subprograms);
+        parseConcurrentList(gen->body, &gen->decls, &gen->types, &gen->subprograms,
+                            &gen->components);
         if (m_failed) return;
         if (!parseGenerateEnd()) return;
         arch.stmts.push_back(std::move(gen));
@@ -2325,7 +2328,8 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             branch.cond = parseExpr();
             if (!branch.cond) return;
             if (!expectId("generate")) return;
-            parseConcurrentList(branch.stmts, &branch.decls, &branch.types, &branch.subprograms);
+            parseConcurrentList(branch.stmts, &branch.decls, &branch.types, &branch.subprograms,
+                                &branch.components);
             if (m_failed) return;
             gen->branches.push_back(std::move(branch));
             if (acceptId("elsif")) continue;
@@ -2333,7 +2337,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
                 GenBranch elseBranch;  // The else part carries no condition
                 if (!expectId("generate")) return;
                 parseConcurrentList(elseBranch.stmts, &elseBranch.decls, &elseBranch.types,
-                                    &elseBranch.subprograms);
+                                    &elseBranch.subprograms, &elseBranch.components);
                 if (m_failed) return;
                 gen->branches.push_back(std::move(elseBranch));
             }
@@ -2403,7 +2407,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             }
             if (isId("component")) {
                 advance();
-                parseComponentDecl();
+                parseComponentDecl(block->components);
                 continue;
             }
             if (skipFileDecl()) continue;
@@ -2521,7 +2525,8 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
 //! Parse concurrent statements up to `end [generate|block]`, without the terminator
 void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
                                  std::vector<Decl>* decls, std::vector<TypeDecl>* types,
-                                 std::vector<SubprogramDecl>* subprograms) {
+                                 std::vector<SubprogramDecl>* subprograms,
+                                 std::vector<ComponentDecl>* components) {
     Architecture scratch;  // The statements of a generate body
     while (!m_failed && !isId("end") && !isId("elsif") && !isId("else")
            && m_cur.kind != Token::END) {
@@ -2577,10 +2582,9 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
             unsupported("disconnection specification");
             return;
         }
-        if (isId("component")) {
-            // Dropped: an instantiation naming this component binds the entity of the name
+        if (components && isId("component")) {
             advance();
-            parseComponentDecl();
+            parseComponentDecl(*components);
             continue;
         }
         if (decls && isId("alias")) {
@@ -3098,7 +3102,7 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
         }
         if (isId("component")) {
             advance();
-            parseComponentDecl();
+            parseComponentDecl(pkg.components);
             continue;
         }
         if (skipFileDecl()) continue;
