@@ -1,5 +1,5 @@
 .. DESCRIPTION: Verilator: guide to using the native VHDL frontend
-   SPDX-FileCopyrightText: 2026-2026 Hannes Klas
+   SPDX-FileCopyrightText: 2026-2026 Wilson Snyder
    SPDX-License-Identifier: CC0-1.0
 
 .. _vhdl_usage:

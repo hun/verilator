@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: type bounds that name an object or a folded constant
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- An element subtype may take its range from an object of the same declarative
 -- part, and a type in a subprogram may be bounded by a constant of that

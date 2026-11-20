@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: an empty string as a value
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A string generic bound to "" (or defaulted to it) is the null string `1 to 0`: it has
 -- no characters, but its bounds and length are values the design reads, and functions

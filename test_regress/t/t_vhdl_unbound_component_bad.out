@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_unbound_component_bad.vhdl:25:1: Cannot find VHDL entity 'other' for instance 'u'
+%Error: t/t_vhdl_unbound_component_bad.vhdl:27:1: Cannot find VHDL entity 'other' for instance 'u'
                                                 : ... VHDL instantiates only entities analyzed with it; a SystemVerilog module must be instantiated from an SV top, with this hierarchy built by --lib-create
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_unconst_conv_unsup.vhdl:27:1: Unsupported: VHDL conversion to unconstrained type 'arr2d'
+%Error: t/t_vhdl_unconst_conv_unsup.vhdl:29:1: Unsupported: VHDL conversion to unconstrained type 'arr2d'
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

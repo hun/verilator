@@ -1,6 +1,6 @@
-%Error: t/t_vhdl_char_ctx_bad.vhdl:11:1: VHDL: constant value character literal does not have the target's type
+%Error: t/t_vhdl_char_ctx_bad.vhdl:13:1: VHDL: constant value character literal does not have the target's type
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_char_ctx_bad.vhdl:17:1: VHDL: unknown identifier 'n'
-%Error: t/t_vhdl_char_ctx_bad.vhdl:34:1: VHDL: relational operator compares a character with an unrelated type
-%Error: t/t_vhdl_char_ctx_bad.vhdl:30:1: VHDL: return value character literal does not have the target's type
+%Error: t/t_vhdl_char_ctx_bad.vhdl:19:1: VHDL: unknown identifier 'n'
+%Error: t/t_vhdl_char_ctx_bad.vhdl:36:1: VHDL: relational operator compares a character with an unrelated type
+%Error: t/t_vhdl_char_ctx_bad.vhdl:32:1: VHDL: return value character literal does not have the target's type
 %Error: Exiting due to

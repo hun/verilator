@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: VHDL nested real and physical objects are refused
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- An array element or record member has no packed run-time model when it is
 -- real or physical, even though the enclosing object does.

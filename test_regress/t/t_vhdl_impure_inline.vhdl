@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: an impure function that reads no file inlines at elaboration
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- poc's mem_InitMemory is impure because it may read a memory image file, but with no
 -- file name it returns a constant image. An impure function whose body reads no file is

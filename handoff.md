@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026-2026 Wilson Snyder
+     SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0 -->
+
 # VHDL frontend handoff -- 2026-11-18, end of the conformance session
 
 **Purpose.** The VHDL conformance work from `docs/vhdl/findings.rst` is **done**:

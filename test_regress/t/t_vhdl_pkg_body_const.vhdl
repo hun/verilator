@@ -1,9 +1,11 @@
 -- DESCRIPTION: Verilator: constants of a package body, and non-integer constants built
 -- by calling functions another package defines in its body
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- PoC's configuration package keeps its strings, board tables and tool name in the body of
 -- the package, built by functions that also live in that body, and other packages take

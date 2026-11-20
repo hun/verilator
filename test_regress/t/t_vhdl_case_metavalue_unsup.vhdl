@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: VHDL metavalue choice diagnostic
 --
--- This file ONLY is placed in the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A metavalue choice is legal VHDL (GHDL and nvc accept both statements), but
 -- the two-state model has no value for 'X' to match. The frontend must report

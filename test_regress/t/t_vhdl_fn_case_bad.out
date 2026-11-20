@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_fn_case_bad.vhdl:15:1: Unsupported: VHDL function does not return a value on all paths
+%Error: t/t_vhdl_fn_case_bad.vhdl:17:1: Unsupported: VHDL function does not return a value on all paths
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

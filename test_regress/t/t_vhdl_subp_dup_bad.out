@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_subp_dup_bad.vhdl:16:1: VHDL: duplicate subprogram body for 'f'
+%Error: t/t_vhdl_subp_dup_bad.vhdl:18:1: VHDL: duplicate subprogram body for 'f'
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

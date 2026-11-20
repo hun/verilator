@@ -1,9 +1,11 @@
 -- DESCRIPTION: Verilator: a run-time loop with exit, a slice with a run-time width, and a
 -- conversion whose width is a run-time value
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- open-logic's first-bit decoder searches a variable number of bits per stage, leaves its
 -- search with `exit`, writes the found index into a slice whose bounds are variables, and

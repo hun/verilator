@@ -1,6 +1,6 @@
-%Error: t/t_vhdl_ident_bad.vhdl:17:1: VHDL identifier cannot contain two underscores in a row: 'a__b'
+%Error: t/t_vhdl_ident_bad.vhdl:19:1: VHDL identifier cannot contain two underscores in a row: 'a__b'
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_ident_bad.vhdl:18:1: VHDL identifier cannot end with an underscore: 'c_'
-%Error: t/t_vhdl_ident_bad.vhdl:19:1: VHDL identifier cannot begin with an underscore: '_d'
-%Error: t/t_vhdl_ident_bad.vhdl:20:1: VHDL: 'and' is a reserved word, not an identifier
+%Error: t/t_vhdl_ident_bad.vhdl:20:1: VHDL identifier cannot end with an underscore: 'c_'
+%Error: t/t_vhdl_ident_bad.vhdl:21:1: VHDL identifier cannot begin with an underscore: '_d'
+%Error: t/t_vhdl_ident_bad.vhdl:22:1: VHDL: 'and' is a reserved word, not an identifier
 %Error: Exiting due to

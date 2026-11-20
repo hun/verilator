@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: a character literal in a concatenation is one logic element
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A character literal concatenated to a logic vector is a single logic value,
 -- even when the vector is eight bits wide: `'0' & v` is nine bits with a zero

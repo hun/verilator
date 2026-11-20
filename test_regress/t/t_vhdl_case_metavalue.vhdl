@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: a case over std_logic literals that the two-state model merges
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- open-logic's to01() chooses '0' or 'L' in one alternative and '1' or 'H' in another.
 -- The nine-valued std_logic is modelled with two states, so those pairs name one value

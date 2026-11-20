@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_int_lit_bad.vhdl:17:1: VHDL: integer literal does not fit the 32-bit integer type
+%Error: t/t_vhdl_int_lit_bad.vhdl:19:1: VHDL: integer literal does not fit the 32-bit integer type
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

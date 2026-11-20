@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_div_zero_bad.vhdl:16:1: VHDL: division by zero
+%Error: t/t_vhdl_div_zero_bad.vhdl:18:1: VHDL: division by zero
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_div_zero_bad.vhdl:18:1: VHDL: unknown identifier 'q'
+%Error: t/t_vhdl_div_zero_bad.vhdl:20:1: VHDL: unknown identifier 'q'
 %Error: Exiting due to

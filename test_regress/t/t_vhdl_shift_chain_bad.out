@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_shift_chain_bad.vhdl:20:1: VHDL: shift operators cannot be chained without parentheses (IEEE 1076-2008 9.1)
+%Error: t/t_vhdl_shift_chain_bad.vhdl:22:1: VHDL: shift operators cannot be chained without parentheses (IEEE 1076-2008 9.1)
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

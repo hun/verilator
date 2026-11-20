@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: a bit-string literal beside an unsigned keeps its signing
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- poc's arith_FirstOne extends a vector with a zero through a concatenation and then
 -- adds: `("0" & unsigned(not Request)) + 1`. The literal must take the numeric_std

@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: 2**n with a run-time exponent
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A power of two with an exponent that is not static is a shift, so a design that turns
 -- a counter or a generic-derived width into a decoder size lowers. A static exponent

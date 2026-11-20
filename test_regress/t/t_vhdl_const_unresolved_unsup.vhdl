@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: an array constant of records with unconstrained members
 --
--- This file ONLY is placed under the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- An array constant whose element type leaves a member unconstrained has no width until
 -- its aggregate supplies one; the frontend reports that rather than building a type of

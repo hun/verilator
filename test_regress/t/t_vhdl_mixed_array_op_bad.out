@@ -1,5 +1,5 @@
-%Error: t/t_vhdl_mixed_array_op_bad.vhdl:24:1: VHDL: arithmetic operands do not have the same base type
+%Error: t/t_vhdl_mixed_array_op_bad.vhdl:26:1: VHDL: arithmetic operands do not have the same base type
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_mixed_array_op_bad.vhdl:25:1: VHDL: logical operator operands do not have the same base type
-%Error: t/t_vhdl_mixed_array_op_bad.vhdl:26:1: VHDL: concatenation of operands of unrelated array types
+%Error: t/t_vhdl_mixed_array_op_bad.vhdl:27:1: VHDL: logical operator operands do not have the same base type
+%Error: t/t_vhdl_mixed_array_op_bad.vhdl:28:1: VHDL: concatenation of operands of unrelated array types
 %Error: Exiting due to

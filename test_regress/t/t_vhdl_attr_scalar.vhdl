@@ -1,8 +1,10 @@
 -- DESCRIPTION: Verilator: VHDL predefined scalar attributes
 --
--- This file ONLY is placed in the Creative Commons Public Domain.
--- SPDX-FileCopyrightText: 2026 Hannes Klas
--- SPDX-License-Identifier: CC0-1.0
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- Every scalar type has the discrete attribute set (IEEE 1076-2008 16.2.2);
 -- GHDL: bit'high is '1', bit'left is '0', std_logic'left is '0', and
