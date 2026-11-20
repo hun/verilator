@@ -323,7 +323,7 @@ class Lowering final {
     const VType* m_funcRetp = nullptr;  // Return-type context for function bodies
     std::map<std::string, VarInfo> m_scope;  // Signals and ports by folded name
     //! Statements produced while lowering an expression, emitted before the statement
-    AstNode* m_pendingStmtp = nullptr;
+    AstNodeStmt* m_pendingStmtp = nullptr;
     //! Whether this point has a statement sink, so a local array can become a variable
     bool m_materializeLocals = false;
     int m_localVarSeq = 0;  // Distinguishes materialized locals of separate calls
@@ -338,20 +338,21 @@ class Lowering final {
         }
         ~RuntimeBranchScope() { --depth; }
     };
-    void addPendingStmt(AstNode* nodep) {
-        m_pendingStmtp
-            = m_pendingStmtp ? AstNode::addNext<AstNode, AstNode>(m_pendingStmtp, nodep) : nodep;
+    void addPendingStmt(AstNodeStmt* nodep) {
+        m_pendingStmtp = m_pendingStmtp
+                             ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(m_pendingStmtp, nodep)
+                             : nodep;
     }
-    AstNode* takePendingStmts() {
-        AstNode* const pendingp = m_pendingStmtp;
+    AstNodeStmt* takePendingStmts() {
+        AstNodeStmt* const pendingp = m_pendingStmtp;
         m_pendingStmtp = nullptr;
         return pendingp;
     }
     //! Prepend the statements an inlined call produced to `bodyp`
-    AstNode* takePendingFor(AstNode* bodyp) {
-        AstNode* const pendingp = takePendingStmts();
+    AstNodeStmt* takePendingFor(AstNodeStmt* bodyp) {
+        AstNodeStmt* const pendingp = takePendingStmts();
         if (!pendingp) return bodyp;
-        return bodyp ? AstNode::addNext<AstNode, AstNode>(pendingp, bodyp) : pendingp;
+        return bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(pendingp, bodyp) : pendingp;
     }
     void discardPendingStmts() {
         if (m_pendingStmtp) m_pendingStmtp->deleteTree();
@@ -1152,7 +1153,7 @@ class Lowering final {
     AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
                          int hi, int lo, bool ascending);
 
-    AstNode* lowerCase(const Stmt& stmt);
+    AstNodeStmt* lowerCase(const Stmt& stmt);
     //! Build an AstCase; a case over an enumeration is exhaustive
     AstCase* makeCase(FileLine* flp, AstNodeExpr* selectorp, AstCaseItem* itemsp) const {
         AstCase* const casep = new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
@@ -1163,14 +1164,14 @@ class Lowering final {
     ScopeSave saveScope() const;
     void restoreScope(const ScopeSave& saved);
     void emitProcessDecls(const Process& process, std::set<std::string>& varNames);
-    AstNode* lowerFor(const Stmt& stmt);
-    AstNode* lowerForRuntime(const Stmt& stmt);
-    AstNode* lowerReport(const Stmt& stmt);
+    AstNodeStmt* lowerFor(const Stmt& stmt);
+    AstNodeStmt* lowerForRuntime(const Stmt& stmt);
+    AstNodeStmt* lowerReport(const Stmt& stmt);
     //! A failing assertion reports, and `severity failure` ends the run
-    AstNode* lowerAssert(const Stmt& stmt);
-    AstNode* assertBody(FileLine* flp, const Expr& condition, const Expr* message,
-                        Stmt::Severity severity);
-    AstNode* lowerDelay(const Expr& expr, FileLine* flp);
+    AstNodeStmt* lowerAssert(const Stmt& stmt);
+    AstNodeStmt* assertBody(FileLine* flp, const Expr& condition, const Expr* message,
+                            Stmt::Severity severity);
+    AstNodeStmt* lowerDelay(const Expr& expr, FileLine* flp);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
     static void collectExprNames(const Expr& expr, std::set<std::string>& names);
@@ -1181,11 +1182,11 @@ class Lowering final {
     static bool usesBareWait(const std::vector<StmtP>& stmts);
     static bool usesSeverityFailure(const std::vector<StmtP>& stmts);
     AstNodeExpr* loopGuard(FileLine* flp) const;
-    AstNode* lowerWhile(const Stmt& stmt);
+    AstNodeStmt* lowerWhile(const Stmt& stmt);
     AstVar* newLoopFlag(FileLine* flp, const char* what);
     LoopFrame* findLoop(const std::string& label);
-    AstNode* clearLoopFlag(FileLine* flp, AstVar* flagp);
-    AstNode* setLoopFlag(FileLine* flp, AstVar* flagp, AstNodeExpr* condp);
+    AstNodeStmt* clearLoopFlag(FileLine* flp, AstVar* flagp);
+    AstNodeStmt* setLoopFlag(FileLine* flp, AstVar* flagp, AstNodeExpr* condp);
     AstNodeExpr* lowerCond(const Expr& expr);
     bool containsEdgeCall(const Expr& expr) const;
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
@@ -1207,12 +1208,12 @@ class Lowering final {
     AstNodeExpr* lowerPackageMember(const Expr& expr, const std::string& pkgName);
     VType typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const;
     AstNodeExpr* lowerAlternatives(const Concurrent& conc, const VType& type);
-    AstNode* lowerLatchedAlternatives(const Concurrent& conc, const VType& type,
-                                      AstNodeExpr* lhsp);
-    AstNode* lowerClockedAlternatives(const Concurrent& conc, const VType& type,
-                                      AstNodeExpr* lhsp);
+    AstNodeStmt* lowerLatchedAlternatives(const Concurrent& conc, const VType& type,
+                                          AstNodeExpr* lhsp);
+    AstNodeStmt* lowerClockedAlternatives(const Concurrent& conc, const VType& type,
+                                          AstNodeExpr* lhsp);
     bool concHasEdge(const Concurrent& conc) const;
-    AstNode* lowerSelected(const Concurrent& conc);
+    AstNodeStmt* lowerSelected(const Concurrent& conc);
     void emitConcurrent(const Concurrent& conc);
     void emitLocalDecls(const std::vector<Decl>& decls, const std::vector<TypeDecl>& types,
                         const char* prefix);
@@ -1252,24 +1253,25 @@ class Lowering final {
     bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
     //! Bounds an unconstrained array target takes from an aggregate's own choices
     void constrainAggregateType(const Expr& agg, VType& type) const;
-    AstNode* lowerStmt(const Stmt& stmt);
+    AstNodeStmt* lowerStmt(const Stmt& stmt);
     //! One concurrent assignment, with the statements an inlined call's locals produced
     void emitConcurrentAssign(const Concurrent& stmt);
-    AstNode* lowerStmtList(const std::vector<StmtP>& stmts);
-    AstNode* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin, std::size_t end);
-    AstNode* lowerIf(const Stmt& stmt);
-    AstNode* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
+    AstNodeStmt* lowerStmtList(const std::vector<StmtP>& stmts);
+    AstNodeStmt* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin,
+                                std::size_t end);
+    AstNodeStmt* lowerIf(const Stmt& stmt);
+    AstNodeStmt* lowerAssign(const Stmt& stmt, bool concurrent, bool variable = false);
     //! An assignment to a slice whose width is a run-time value: one guarded write per
     //! possible width, since a selection node needs a static width
-    AstNode* lowerDynamicSliceAssign(const Stmt& stmt, bool variable);
+    AstNodeStmt* lowerDynamicSliceAssign(const Stmt& stmt, bool variable);
     //! A sequential conditional assignment `v1 when c1 else ... vN` as a value expression;
     //! targetReadp supplies the value for an `unaffected` waveform (a read of the target)
     AstNodeExpr* lowerConditionalChain(FileLine* flp,
                                        const std::vector<std::pair<ExprP, ExprP>>& alternatives,
                                        const VType& type, AstNodeExpr* targetReadp);
     //! Split `(a, b) <= value` into one assignment per target, leftmost most significant
-    AstNode* lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
-                                  bool variable, bool concurrentProc);
+    AstNodeStmt* lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
+                                      bool variable, bool concurrentProc);
     void lowerProcess(const Process& process);
     //! Emit the asynchronous-reset flip-flop idiom as an edge-triggered always, whose
     //! sensitivity then carries the clock. False when the process is not that idiom.
@@ -1313,7 +1315,7 @@ class Lowering final {
     void captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const;
     AstNodeExpr* inlineBinding(FileLine* flp, const std::string& name, bool write) const;
     bool bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub, InlineEnv& env,
-                               AstNode*& prologsp, bool lvalueFormals, bool concurrent);
+                               AstNodeStmt*& prologsp, bool lvalueFormals, bool concurrent);
     AstNodeExpr* lowerFunctionCall(const Expr& call, const VType* context,
                                    const SubprogramDecl* forcedp = nullptr);
     AstNodeExpr* evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index, InlineEnv& env,
@@ -1328,15 +1330,15 @@ class Lowering final {
     AstNodeExpr* evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth);
     AstNodeExpr* updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
                                     AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width);
-    AstNode* lowerProcedureCall(const Expr& callExpr, bool concurrent);
-    AstNode* lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
-                            bool& fallsThroughp);
-    AstNode* lowerProcChainWithTail(const std::vector<StmtP>& stmts,
-                                    const std::vector<const Stmt*>& tail, bool& fallsThroughp);
-    AstNode* lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
-                         const std::vector<const Stmt*>& tail, bool& fallsThroughp);
-    AstNode* lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*>& tail,
-                           bool& fallsThroughp);
+    AstNodeStmt* lowerProcedureCall(const Expr& callExpr, bool concurrent);
+    AstNodeStmt* lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
+                                bool& fallsThroughp);
+    AstNodeStmt* lowerProcChainWithTail(const std::vector<StmtP>& stmts,
+                                        const std::vector<const Stmt*>& tail, bool& fallsThroughp);
+    AstNodeStmt* lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
+                             const std::vector<const Stmt*>& tail, bool& fallsThroughp);
+    AstNodeStmt* lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*>& tail,
+                               bool& fallsThroughp);
     static void deleteInlineEnv(InlineEnv& env);
     static InlineEnv cloneInlineEnv(const InlineEnv& env);
     static std::vector<const Stmt*> rawPtrs(const std::vector<StmtP>& stmts);
@@ -1345,8 +1347,8 @@ public:
     explicit Lowering(AstNetlist* rootp, const PackageTable::Impl* packagesp = nullptr,
                       const ModuleMap* modulesp = nullptr, Design* designp = nullptr)
         : m_rootp{rootp}
-        , m_packagesp{packagesp}
         , m_modulesp{modulesp}
+        , m_packagesp{packagesp}
         , m_designp{designp} {}
     ~Lowering() = default;
 
@@ -3022,6 +3024,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return makeTimeConst(flp, scaled);
     }
     case Expr::REAL_LIT: unsupportedError(flp, "real value in this context"); return nullptr;
+    case Expr::UNAFFECTED:
+        unsupportedError(flp, "'unaffected' outside an assignment");
+        return nullptr;
     case Expr::TRUE_LIT: return bitConst(flp, '1');
     case Expr::FALSE_LIT: return bitConst(flp, '0');
     case Expr::CHAR_LIT: {
@@ -3227,13 +3232,12 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             if (!actualType(*expr.a, operandType)) operandType = type;
             // `not` is predefined for bit, boolean and arrays of them; an integer,
             // enumeration or character array has no such operator (IEEE 1076-2008 9.2.2)
-            const bool logicArray
-                = operandType.kind != VType::ARRAY || !operandType.elemp
-                  || (operandType.elemWidth == 1
-                      && (operandType.elemp->typeName.empty()
-                          || operandType.elemp->typeName == "std_ulogic"
-                          || operandType.elemp->typeName == "bit"
-                          || operandType.elemp->typeName == "boolean"));
+            const bool logicArray = operandType.kind != VType::ARRAY || !operandType.elemp
+                                    || (operandType.elemWidth == 1
+                                        && (operandType.elemp->typeName.empty()
+                                            || operandType.elemp->typeName == "std_ulogic"
+                                            || operandType.elemp->typeName == "bit"
+                                            || operandType.elemp->typeName == "boolean"));
             if (operandType.kind == VType::INT || operandType.kind == VType::REAL
                 || operandType.kind == VType::ENUM || operandType.kind == VType::FILE
                 || operandType.kind == VType::LINE || !logicArray) {
@@ -3668,9 +3672,9 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         rp->deleteTree();
         return nullptr;
     }
-    const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<="
-                              || op == ">" || op == ">=" || op == "?=" || op == "?/="
-                              || op == "?<" || op == "?<=" || op == "?>" || op == "?>=";
+    const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
+                              || op == ">=" || op == "?=" || op == "?/=" || op == "?<"
+                              || op == "?<=" || op == "?>" || op == "?>=";
     if (relationalOp && !relationalOperandsConform(*expr.a, *expr.b)) {
         lp->deleteTree();
         rp->deleteTree();
@@ -5087,7 +5091,7 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
 
 //! Slice assignment with a run-time width: VHDL bounds the result by the source, so every
 //! width the arrays allow gets one guarded write with a static width and a run-time offset
-AstNode* Lowering::lowerDynamicSliceAssign(const Stmt& stmt, bool variable) {
+AstNodeStmt* Lowering::lowerDynamicSliceAssign(const Stmt& stmt, bool variable) {
     FileLine* const flp = stmt.flp;
     const Expr& slice = *stmt.target;
     const bool ascendingSlice = slice.text != "downto";
@@ -5141,7 +5145,7 @@ AstNode* Lowering::lowerDynamicSliceAssign(const Stmt& stmt, bool variable) {
     AstVar* const countVarp
         = new AstVar{flp, VVarType::VAR, "vhdlslice_" + std::to_string(++m_loopSeq), intT.dtp};
     m_modp->addStmtsp(countVarp);
-    AstNode* headp = new AstAssign{flp, new AstVarRef{flp, countVarp, VAccess::WRITE}, countp};
+    AstNodeStmt* headp = new AstAssign{flp, new AstVarRef{flp, countVarp, VAccess::WRITE}, countp};
     // The right operand is the selection's least significant element
     AstNodeExpr* offsetp = rightp->cloneTree(false);
     if (baseType.ascending) {
@@ -5162,10 +5166,11 @@ AstNode* Lowering::lowerDynamicSliceAssign(const Stmt& stmt, bool variable) {
         AstSel* const rhsp = new AstSel{flp, valuep->cloneTree(false),
                                         makeIntConst(flp, i * elemWidth), elemWidth};
         rhsp->dtypep(findVectorWidth(flp, baseType.kwd, baseType.signing, elemWidth));
-        AstNode* const assignp = variable
-                                     ? static_cast<AstNode*>(new AstAssign{flp, lhsp, rhsp})
-                                     : static_cast<AstNode*>(new AstAssignDly{flp, lhsp, rhsp});
-        headp = AstNode::addNext<AstNode, AstNode>(headp, new AstIf{flp, condp, assignp, nullptr});
+        AstNodeStmt* const assignp
+            = variable ? static_cast<AstNodeStmt*>(new AstAssign{flp, lhsp, rhsp})
+                       : static_cast<AstNodeStmt*>(new AstAssignDly{flp, lhsp, rhsp});
+        headp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(
+            headp, new AstIf{flp, condp, assignp, nullptr});
     }
     basep->deleteTree();
     rightp->deleteTree();
@@ -6401,8 +6406,8 @@ bool Lowering::concHasEdge(const Concurrent& conc) const {
 
 //! A conditional assignment gated by a clock edge is a register: if/elsif with
 //! non-blocking assignments under the edge sensitivity
-AstNode* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType& type,
-                                            AstNodeExpr* lhsp) {
+AstNodeStmt* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType& type,
+                                                AstNodeExpr* lhsp) {
     FileLine* const flp = conc.flp;
     // Alternatives before the clocked one are level branches, e.g. an asynchronous
     // reset; they assign immediately, the clocked branches wait for the edge
@@ -6414,7 +6419,7 @@ AstNode* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType&
             break;
         }
     }
-    AstNode* restp = nullptr;
+    AstNodeStmt* restp = nullptr;
     for (std::size_t i = conc.alternatives.size(); i-- > 0;) {
         const auto& alt = conc.alternatives[i];
         AstNodeExpr* valuep = lowerExpr(*alt.first, &type);
@@ -6430,9 +6435,10 @@ AstNode* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType&
         }
         valuep = resizeExpr(valuep, type, flp);
         const bool level = i < firstEdged;
-        AstNode* const assignp
-            = level ? static_cast<AstNode*>(new AstAssign{flp, lhsp->cloneTree(false), valuep})
-                    : static_cast<AstNode*>(new AstAssignDly{flp, lhsp->cloneTree(false), valuep});
+        AstNodeStmt* const assignp
+            = level ? static_cast<AstNodeStmt*>(new AstAssign{flp, lhsp->cloneTree(false), valuep})
+                    : static_cast<AstNodeStmt*>(
+                          new AstAssignDly{flp, lhsp->cloneTree(false), valuep});
         if (!alt.second) {  // The final else
             if (restp) restp->deleteTree();
             restp = assignp;
@@ -6452,15 +6458,15 @@ AstNode* Lowering::lowerClockedAlternatives(const Concurrent& conc, const VType&
 //! A conditional signal assignment with no final `else` is a process that keeps the
 //! target value when no condition holds. Emit it as a latch, so the hold is explicit
 //! rather than feeding the target back into a continuous assignment.
-AstNode* Lowering::lowerLatchedAlternatives(const Concurrent& conc, const VType& type,
-                                            AstNodeExpr* lhsp) {
+AstNodeStmt* Lowering::lowerLatchedAlternatives(const Concurrent& conc, const VType& type,
+                                                AstNodeExpr* lhsp) {
     FileLine* const flp = conc.flp;
-    AstNode* restp = nullptr;
+    AstNodeStmt* restp = nullptr;
     for (std::size_t i = conc.alternatives.size(); i-- > 0;) {
         const auto& alt = conc.alternatives[i];
         if (alt.first->kind == Expr::UNAFFECTED) {
             // The branch holds the target: an empty statement under its condition
-            AstNode* const holdp = new AstComment{flp, "unaffected"};
+            AstNodeStmt* const holdp = new AstComment{flp, "unaffected"};
             if (!alt.second) {
                 if (restp) restp->deleteTree();
                 restp = holdp;
@@ -6486,7 +6492,7 @@ AstNode* Lowering::lowerLatchedAlternatives(const Concurrent& conc, const VType&
             return nullptr;
         }
         valuep = resizeExpr(valuep, type, flp);
-        AstNode* const assignp = new AstAssign{flp, lhsp->cloneTree(false), valuep};
+        AstNodeStmt* const assignp = new AstAssign{flp, lhsp->cloneTree(false), valuep};
         if (!alt.second) {
             if (restp) restp->deleteTree();
             restp = assignp;
@@ -6760,11 +6766,12 @@ bool Lowering::choicesComplete(AstNodeDType* selDtp, const VType& selType,
     return false;
 }
 void Lowering::addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message) {
-    AstNode* bodyp = new AstDisplay{flp, VDisplayType::DT_ERROR, message, nullptr, nullptr, 'd'};
+    AstNodeStmt* bodyp
+        = new AstDisplay{flp, VDisplayType::DT_ERROR, message, nullptr, nullptr, 'd'};
     VTimescale unit = m_modp->timeunit();
     if (unit.isNone()) unit = VTimescale{VTimescale::TS_1PS};
     VN_AS(bodyp, Display)->fmtp()->timeunit(unit);
-    bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, new AstFinish{flp});
+    bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstFinish{flp});
     m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS_COMB, nullptr,
                                     new AstIf{flp, condp, bodyp, nullptr}});
 }
@@ -6828,7 +6835,7 @@ void Lowering::checkDrivers() {
     }
 }
 
-AstNode* Lowering::lowerSelected(const Concurrent& conc) {
+AstNodeStmt* Lowering::lowerSelected(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
     AstNodeExpr* const selectorp = lowerExpr(*conc.selector, nullptr);
     if (!selectorp) return nullptr;
@@ -6945,7 +6952,7 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     for (std::size_t i = 0; i < conc.choices.size(); ++i) {
         AstNodeExpr* const valuep = values[i];
         values[i] = nullptr;
-        AstNode* const assignp = new AstAssignW{flp, lhsp->cloneTree(false), valuep};
+        AstNodeStmt* const assignp = new AstAssignW{flp, lhsp->cloneTree(false), valuep};
         std::vector<AstConst*> cops;
         if (!lowerChoiceConsts(conc.choices[i].first, selDtp, cops)) {
             for (AstConst* const cop : cops) cop->deleteTree();
@@ -6988,8 +6995,8 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     return makeCase(flp, selectorp, itemsp);
 }
 
-AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
-                                        bool variable, bool concurrentProc) {
+AstNodeStmt* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
+                                            bool variable, bool concurrentProc) {
     if (target.kind != Expr::AGG_POSITIONAL) {
         unsupportedError(flp, "aggregate assignment target with choices");
         return nullptr;
@@ -7023,7 +7030,7 @@ AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const
         return nullptr;
     }
     valuep = resizeExpr(valuep, totalType, flp);
-    AstNode* headp = nullptr;
+    AstNodeStmt* headp = nullptr;
     int offset = totalWidth;
     for (AstNodeExpr* const lhsp : lhsv) {
         const int width = lhsp->width();
@@ -7036,7 +7043,7 @@ AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const
             selp->dtypep(lhsp->dtypep());
             partp = selp;
         }
-        AstNode* assignp = nullptr;
+        AstNodeStmt* assignp = nullptr;
         if (variable) {
             assignp = new AstAssign{flp, lhsp, partp};
         } else if (concurrentProc) {
@@ -7044,13 +7051,13 @@ AstNode* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const
         } else {
             assignp = new AstAssignDly{flp, lhsp, partp};
         }
-        headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assignp) : assignp;
+        headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, assignp) : assignp;
     }
     valuep->deleteTree();
     return headp;
 }
 
-AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
+AstNodeStmt* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
     // A delay of zero is a delta, which a cycle model already has; a longer one needs a
     // scheduled update, which a process body has no notion of
     if (stmt.delay && !staticZeroDelay(stmt.delay)) {
@@ -7182,8 +7189,8 @@ Lowering::lowerConditionalChain(FileLine* flp,
     return restp;
 }
 
-AstNode* Lowering::lowerIf(const Stmt& stmt) {
-    AstNode* elsesp = nullptr;
+AstNodeStmt* Lowering::lowerIf(const Stmt& stmt) {
+    AstNodeStmt* elsesp = nullptr;
     // A value tracked before the statement still holds inside each branch, which are
     // lowered in reverse, so each one starts from the same values
     const auto entryVals = saveVarVals();
@@ -7195,7 +7202,7 @@ AstNode* Lowering::lowerIf(const Stmt& stmt) {
         bool staticValue = false;
         const bool isStatic = branch.first && evalCond(*branch.first, staticValue);
         restoreVarVals(entryVals);
-        AstNode* bodyp = (isStatic && !staticValue) ? nullptr : lowerStmtList(branch.second);
+        AstNodeStmt* bodyp = (isStatic && !staticValue) ? nullptr : lowerStmtList(branch.second);
         if (!branch.first) {
             elsesp = bodyp;
             continue;
@@ -7231,7 +7238,7 @@ AstNode* Lowering::lowerIf(const Stmt& stmt) {
     return elsesp;
 }
 
-AstNode* Lowering::lowerStmt(const Stmt& stmt) {
+AstNodeStmt* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::ASSIGN) return lowerAssign(stmt, false);
     if (stmt.kind == Stmt::VAR_ASSIGN) return lowerAssign(stmt, false, true);
     if (stmt.kind == Stmt::IF) return lowerIf(stmt);
@@ -7266,7 +7273,7 @@ AstNode* Lowering::lowerStmt(const Stmt& stmt) {
     return nullptr;
 }
 
-AstNode* Lowering::lowerCase(const Stmt& stmt) {
+AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
     FileLine* const flp = stmt.flp;
     // As in an if, an alternative starts from the values that held before the statement
     const auto entryVals = saveVarVals();
@@ -7281,7 +7288,7 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
     bool bad = false;
     for (const auto& item : stmt.caseItems) {
         restoreVarVals(entryVals);
-        AstNode* const bodyp = lowerStmtList(item.second);
+        AstNodeStmt* const bodyp = lowerStmtList(item.second);
         std::vector<AstConst*> cops;
         if (!lowerChoiceConsts(item.first, selDtp, cops)) {
             for (AstConst* const cop : cops) cop->deleteTree();
@@ -7322,17 +7329,17 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
     return makeCase(flp, selectorp, itemsp);
 }
 
-AstNode* Lowering::lowerStmtList(const std::vector<StmtP>& stmts) {
+AstNodeStmt* Lowering::lowerStmtList(const std::vector<StmtP>& stmts) {
     return lowerStmtRange(stmts, 0, stmts.size());
 }
 
-AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin,
-                                  std::size_t end) {
+AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin,
+                                      std::size_t end) {
     // A statement list is a sink, so a local array of an inlined function becomes a
     // variable here rather than a rebuilt expression
     const bool savedMaterialize = m_materializeLocals;
     m_materializeLocals = true;
-    AstNode* headp = nullptr;
+    AstNodeStmt* headp = nullptr;
     // Conditions that must hold for the following statements to run, set by exit/next
     AstNodeExpr* runCondp = nullptr;
     for (std::size_t index = begin; index < end; ++index) {
@@ -7351,8 +7358,9 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
                 condp = lowerCond(*stmtp->value);
                 if (!condp) continue;
             }
-            AstNode* const setp = setLoopFlag(stmtp->flp, flagp, condp);
-            if (setp) headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, setp) : setp;
+            AstNodeStmt* const setp = setLoopFlag(stmtp->flp, flagp, condp);
+            if (setp)
+                headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, setp) : setp;
             if (!condp) break;  // Unconditional: the rest of this body is unreachable
             AstNodeExpr* const clearp
                 = new AstNot{stmtp->flp, new AstVarRef{stmtp->flp, flagp, VAccess::READ}};
@@ -7366,12 +7374,13 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
             }
             continue;
         }
-        AstNode* const stmtNodep = lowerStmt(*stmtp);
+        AstNodeStmt* const stmtNodep = lowerStmt(*stmtp);
         // Statements the call's materialized locals produced run before this statement
-        AstNode* const pendingp = takePendingStmts();
-        AstNode* nodep = stmtNodep;
+        AstNodeStmt* const pendingp = takePendingStmts();
+        AstNodeStmt* nodep = stmtNodep;
         if (pendingp) {
-            nodep = stmtNodep ? AstNode::addNext<AstNode, AstNode>(pendingp, stmtNodep) : pendingp;
+            nodep = stmtNodep ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(pendingp, stmtNodep)
+                              : pendingp;
         }
         updateVarVals(*stmtp);
         if (!nodep) continue;
@@ -7380,7 +7389,7 @@ AstNode* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t b
         if (AstNodeExpr* const guardp = loopGuard(stmtp->flp)) {
             nodep = new AstIf{stmtp->flp, guardp, nodep, nullptr};
         }
-        headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+        headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, nodep) : nodep;
         // A wait suspends the process at once: the rest of this list never runs
         if (stmtp->kind == Stmt::WAIT) break;
         // Severity failure ends the run at the statement (IEEE 1076-2008 8.3):
@@ -7425,7 +7434,7 @@ AstVar* Lowering::newLoopFlag(FileLine* flp, const char* what) {
 }
 
 //! `if (cond) flag = 1`, or `flag = 1` when there is no condition
-AstNode* Lowering::setLoopFlag(FileLine* flp, AstVar* flagp, AstNodeExpr* condp) {
+AstNodeStmt* Lowering::setLoopFlag(FileLine* flp, AstVar* flagp, AstNodeExpr* condp) {
     AstNodeExpr* const lhsp = new AstVarRef{flp, flagp, VAccess::WRITE};
     AstNodeExpr* const rhsp = bitConst(flp, '1');
     AstAssign* const assignp = new AstAssign{flp, lhsp, rhsp};
@@ -7434,7 +7443,7 @@ AstNode* Lowering::setLoopFlag(FileLine* flp, AstVar* flagp, AstNodeExpr* condp)
 }
 
 //! Clear a loop flag before it is tested again
-AstNode* Lowering::clearLoopFlag(FileLine* flp, AstVar* flagp) {
+AstNodeStmt* Lowering::clearLoopFlag(FileLine* flp, AstVar* flagp) {
     AstNodeExpr* const lhsp = new AstVarRef{flp, flagp, VAccess::WRITE};
     AstNodeExpr* const rhsp = bitConst(flp, '0');
     return new AstAssign{flp, lhsp, rhsp};
@@ -7621,7 +7630,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
         }
         m_initial = true;
         m_varVals.clear();
-        AstNode* const initp = lowerStmtList(process.body);
+        AstNodeStmt* const initp = lowerStmtList(process.body);
         m_initial = false;
         if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
         restoreScope(saved);
@@ -7659,17 +7668,17 @@ void Lowering::lowerWaitProcess(const Process& process) {
         if (bareWaitInBody) makeSuspendFlag();
         // A timed wait suspends the process until the delay expires and the process then
         // runs again from the top, so its whole body repeats
-        AstNode* bodyp = lowerStmtRange(process.body, 0, waitIndex);
-        AstNode* const delayp = lowerDelay(*waitp->delay, flp);
+        AstNodeStmt* bodyp = lowerStmtRange(process.body, 0, waitIndex);
+        AstNodeStmt* const delayp = lowerDelay(*waitp->delay, flp);
         if (!delayp) {
             m_suspendFlagp = nullptr;
             restoreScope(saved);
             return;
         }
-        bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, delayp) : delayp;
-        if (AstNode* const postp
+        bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp) : delayp;
+        if (AstNodeStmt* const postp
             = lowerStmtRange(process.body, waitIndex + 1, process.body.size())) {
-            bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, postp);
+            bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, postp);
         }
         AstLoop* const loopp = new AstLoop{flp};
         // The repeated body stops for good when it reaches a bare wait
@@ -7687,7 +7696,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
     }
     // The statements before the wait run once at time zero
     m_initial = true;
-    AstNode* const preInitp = lowerStmtRange(bodyStmts, 0, waitIndex);
+    AstNodeStmt* const preInitp = lowerStmtRange(bodyStmts, 0, waitIndex);
     m_initial = false;
     if (preInitp) m_modp->addStmtsp(new AstInitialStatic{flp, preInitp});
     if (waitp->waitForever) {
@@ -7732,10 +7741,12 @@ void Lowering::lowerWaitProcess(const Process& process) {
     // Each activation runs the statements after the wait, then those before it
     m_initial = false;
     if (bareWaitInBody && !singleShot) makeSuspendFlag();
-    AstNode* const afterp = lowerStmtRange(bodyStmts, waitIndex + 1, stopIndex);
-    AstNode* const preActp = singleShot ? nullptr : lowerStmtRange(bodyStmts, 0, waitIndex);
-    AstNode* bodyp = afterp;
-    if (preActp) { bodyp = bodyp ? AstNode::addNext<AstNode, AstNode>(bodyp, preActp) : preActp; }
+    AstNodeStmt* const afterp = lowerStmtRange(bodyStmts, waitIndex + 1, stopIndex);
+    AstNodeStmt* const preActp = singleShot ? nullptr : lowerStmtRange(bodyStmts, 0, waitIndex);
+    AstNodeStmt* bodyp = afterp;
+    if (preActp) {
+        bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, preActp) : preActp;
+    }
     if (singleShot) {
         // Latch that the single activation has happened
         const std::string name = "vhdlloop_" + std::to_string(++m_loopSeq) + "__once";
@@ -7745,16 +7756,16 @@ void Lowering::lowerWaitProcess(const Process& process) {
         AstNodeExpr* const onceReadp = new AstVarRef{flp, oncep, VAccess::READ};
         AstNodeExpr* const notOncep = new AstNot{flp, onceReadp};
         notOncep->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-        AstNode* innerp = nullptr;
+        AstNodeStmt* innerp = nullptr;
         if (bodyp) {
-            AstNode* const setp = new AstAssign{flp, new AstVarRef{flp, oncep, VAccess::WRITE},
-                                                bitConst(flp, '1')};
-            innerp = AstNode::addNext<AstNode, AstNode>(setp, bodyp);
+            AstNodeStmt* const setp = new AstAssign{flp, new AstVarRef{flp, oncep, VAccess::WRITE},
+                                                    bitConst(flp, '1')};
+            innerp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(setp, bodyp);
         } else {
             innerp = new AstAssign{flp, new AstVarRef{flp, oncep, VAccess::WRITE},
                                    bitConst(flp, '1')};
         }
-        AstNode* const gatedp = new AstIf{flp, condp, innerp, nullptr};
+        AstNodeStmt* const gatedp = new AstIf{flp, condp, innerp, nullptr};
         bodyp = new AstIf{flp, notOncep, gatedp, nullptr};
     } else if (m_suspendFlagp && bodyp) {
         // A reached bare wait set the flag: every later activation is gated off
@@ -7777,7 +7788,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
     restoreScope(saved);
 }
 
-AstNode* Lowering::lowerFor(const Stmt& stmt) {
+AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
     m_varVals.clear();
     FileLine* const flp = stmt.flp;
     int64_t left = 0;
@@ -7831,9 +7842,9 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
     frame.nextp = newLoopFlag(flp, "next");
     frame.guard = usesExitNext(stmt.body);
     m_loops.push_back(frame);
-    AstNode* headp = clearLoopFlag(flp, frame.exitp);
-    AstNode* const initp = clearLoopFlag(flp, frame.nextp);
-    headp = AstNode::addNext<AstNode, AstNode>(headp, initp);
+    AstNodeStmt* headp = clearLoopFlag(flp, frame.exitp);
+    AstNodeStmt* const initp = clearLoopFlag(flp, frame.nextp);
+    headp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, initp);
 
     // The loop variable is a static constant, so each iteration can be unrolled
     // An inline binding of the loop variable's name, e.g. a procedure formal, must not
@@ -7855,14 +7866,14 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
         m_consts[stmt.loopVar] = value;
         // An exit ends every later iteration; a next only resets per iteration
         if (frame.guard) {
-            AstNode* const clearNextp = clearLoopFlag(flp, frame.nextp);
-            headp = AstNode::addNext<AstNode, AstNode>(headp, clearNextp);
+            AstNodeStmt* const clearNextp = clearLoopFlag(flp, frame.nextp);
+            headp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, clearNextp);
         }
         m_varVals.clear();
-        AstNode* const bodyp = lowerStmtList(stmt.body);
+        AstNodeStmt* const bodyp = lowerStmtList(stmt.body);
         if (bodyp) {
-            AstNode* const guardp = new AstIf{flp, exitNotp->cloneTree(false), bodyp, nullptr};
-            headp = AstNode::addNext<AstNode, AstNode>(headp, guardp);
+            AstNodeStmt* const guardp = new AstIf{flp, exitNotp->cloneTree(false), bodyp, nullptr};
+            headp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, guardp);
         }
         if (value == right) break;
     }
@@ -7877,7 +7888,7 @@ AstNode* Lowering::lowerFor(const Stmt& stmt) {
     return headp;
 }
 
-AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
+AstNodeStmt* Lowering::lowerForRuntime(const Stmt& stmt) {
     FileLine* const flp = stmt.flp;
     const bool up = stmt.rangeAscending;
     VType intT = intType(flp);
@@ -7898,7 +7909,7 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     m_scope[stmt.loopVar] = VarInfo{varp, intT};
     // The discrete range is evaluated once, at loop entry (IEEE 1076-2008 8.9), so a
     // bound the body writes must not re-read on every test: capture it first
-    AstNode* capturep = nullptr;
+    AstNodeStmt* capturep = nullptr;
     if (!VN_CAST(boundp, Const)) {
         AstVar* const boundVarp
             = new AstVar{flp, VVarType::VAR, "vhdlbound_" + std::to_string(++m_loopSeq), intT.dtp};
@@ -7929,7 +7940,7 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     loopp->addStmtsp(new AstLoopTest{flp, loopp, testp});
     // The next flag only skips the rest of one iteration
     if (frame.guard) loopp->addStmtsp(clearLoopFlag(flp, frame.nextp));
-    AstNode* const bodyp = lowerStmtList(stmt.body);
+    AstNodeStmt* const bodyp = lowerStmtList(stmt.body);
     m_loops.pop_back();
     if (bodyp) loopp->addStmtsp(bodyp);
     AstNodeExpr* const stepp
@@ -7937,11 +7948,11 @@ AstNode* Lowering::lowerForRuntime(const Stmt& stmt) {
     stepp->dtypep(intT.dtp);
     loopp->addStmtsp(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, stepp});
     restoreScope(savedScope);
-    AstNode* resultp = AstNode::addNext<AstNode, AstNode>(
+    AstNodeStmt* resultp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(
         clearLoopFlag(flp, frame.exitp),
-        AstNode::addNext<AstNode, AstNode>(
+        AstNode::addNext<AstNodeStmt, AstNodeStmt>(
             new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, initp}, loopp));
-    if (capturep) resultp = AstNode::addNext<AstNode, AstNode>(capturep, resultp);
+    if (capturep) resultp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(capturep, resultp);
     return resultp;
 }
 
@@ -7956,46 +7967,46 @@ static std::string reportText(const Expr* exprp, const char* fallback) {
     return text;
 }
 
-AstNode* Lowering::lowerReport(const Stmt& stmt) {
+AstNodeStmt* Lowering::lowerReport(const Stmt& stmt) {
     // A computed message is not modelled, but the statement still executes: dropping it
     // would also drop a `severity failure` termination (IEEE 1076-2008 8.3)
-    AstNode* const displayp = new AstDisplay{stmt.flp,
-                                             VDisplayType::DT_DISPLAY,
-                                             reportText(stmt.value.get(), "report"),
-                                             nullptr,
-                                             nullptr,
-                                             'd'};
+    AstNodeStmt* const displayp = new AstDisplay{stmt.flp,
+                                                 VDisplayType::DT_DISPLAY,
+                                                 reportText(stmt.value.get(), "report"),
+                                                 nullptr,
+                                                 nullptr,
+                                                 'd'};
     // `report ... severity failure` ends the simulation (IEEE 1076-2008 8.3); the other
     // severities only report
     if (stmt.severity == Stmt::SEV_FAILURE) {
-        return AstNode::addNext<AstNode, AstNode>(displayp, new AstFinish{stmt.flp});
+        return AstNode::addNext<AstNodeStmt, AstNodeStmt>(displayp, new AstFinish{stmt.flp});
     }
     return displayp;
 }
 
-AstNode* Lowering::lowerAssert(const Stmt& stmt) {
+AstNodeStmt* Lowering::lowerAssert(const Stmt& stmt) {
     // A concurrent procedure call is already one combinational process, so its
     // assertions run inside it
     return assertBody(stmt.flp, *stmt.value, stmt.message.get(), stmt.severity);
 }
 
-AstNode* Lowering::assertBody(FileLine* flp, const Expr& condition, const Expr* message,
-                              Stmt::Severity severity) {
+AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Expr* message,
+                                  Stmt::Severity severity) {
     AstNodeExpr* const condp = lowerCond(condition);
     if (!condp) return nullptr;
     // A failing assertion reports, and `severity failure` ends the run (IEEE 1076-2008 8.3)
     AstNodeExpr* const failp = new AstNot{flp, condp};
     failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-    AstNode* bodyp = new AstDisplay{
+    AstNodeStmt* bodyp = new AstDisplay{
         flp, VDisplayType::DT_DISPLAY, reportText(message, "Assertion failed"), nullptr, nullptr,
         'd'};
     if (severity == Stmt::SEV_FAILURE) {
-        bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, new AstFinish{flp});
+        bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstFinish{flp});
     }
     return new AstIf{flp, failp, bodyp, nullptr};
 }
 
-AstNode* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
+AstNodeStmt* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
     int64_t fs = 0;
     if (!evalInt(expr, fs)) {
         unsupportedError(flp, "delay that is not static");
@@ -8015,7 +8026,7 @@ AstNode* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
     return delayp;
 }
 
-AstNode* Lowering::lowerWhile(const Stmt& stmt) {
+AstNodeStmt* Lowering::lowerWhile(const Stmt& stmt) {
     unsupportedError(stmt.flp, stmt.kind == Stmt::WHILE ? "while loop" : "bare loop");
     return nullptr;
 }
@@ -8333,9 +8344,9 @@ bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
             || expr.text == "nor" || expr.text == "xnor") {
             VType operand;
             if (!actualType(*expr.a, operand)) return false;
-            out = operand.isVector() ? (operand.kwd == VBasicDTypeKwd::BIT ? VType::BIT
-                                                                          : VType::LOGIC)
-                                     : operand.kind;
+            out = operand.isVector()
+                      ? (operand.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC)
+                      : operand.kind;
             return true;
         }
         return expr.a && actualKind(*expr.a, out);
@@ -8402,9 +8413,9 @@ bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
     }
     case Expr::BINARY:
         if (expr.text == "=" || expr.text == "/=" || expr.text == "<" || expr.text == ">"
-            || expr.text == "<=" || expr.text == ">=" || expr.text == "?="
-            || expr.text == "?/=" || expr.text == "?<" || expr.text == "?>"
-            || expr.text == "?<=" || expr.text == "?>=") {
+            || expr.text == "<=" || expr.text == ">=" || expr.text == "?=" || expr.text == "?/="
+            || expr.text == "?<" || expr.text == "?>" || expr.text == "?<="
+            || expr.text == "?>=") {
             out = VType::LOGIC;  // The frontend models BOOLEAN as one logic bit
             return true;
         }
@@ -8492,16 +8503,14 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
     }
     case Expr::BINARY: {
         const std::string& op = expr.text;
-        if (op == "?=" || op == "?/=" || op == "?<" || op == "?<=" || op == "?>"
-            || op == "?>=") {
+        if (op == "?=" || op == "?/=" || op == "?<" || op == "?<=" || op == "?>" || op == "?>=") {
             // A matching operator returns std_ulogic, not boolean (IEEE 1076-2008 9.2.3)
             out = VType{};
             out.kind = VType::LOGIC;
             out.typeName = "std_ulogic";
             return true;
         }
-        if (op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
-            || op == ">=") {
+        if (op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
             out = VType{};
             out.kind = VType::LOGIC;
             out.typeName = "boolean";
@@ -8563,8 +8572,7 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
             return true;
         }
         const auto physical = [](const VType& type) {
-            return type.kind == VType::INT && !type.typeName.empty()
-                   && type.typeName != "integer";
+            return type.kind == VType::INT && !type.typeName.empty() && type.typeName != "integer";
         };
         if (aType.kind == VType::INT && bType.kind == VType::INT) {
             // Addition and subtraction keep a physical type; a physical divided or
@@ -8574,11 +8582,9 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
             const bool bPhysical = physical(bType);
             if ((op == "+" || op == "-") && aType.typeName == bType.typeName) {
                 out = aType;
-            } else if ((op == "*" || op == "/") && aPhysical
-                       && bType.typeName == "integer") {
+            } else if ((op == "*" || op == "/") && aPhysical && bType.typeName == "integer") {
                 out = aType;
-            } else if ((op == "*" || op == "/") && bPhysical
-                       && aType.typeName == "integer") {
+            } else if ((op == "*" || op == "/") && bPhysical && aType.typeName == "integer") {
                 out = bType;
             } else {
                 out = intType(expr.flp);
@@ -8918,8 +8924,8 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
     if (actualType(value, source) && !source.typeName.empty()) {
         // A universal integer literal takes any integer type, but not a physical type
         // (IEEE 1076-2008 9.3.1)
-        if (source.kind == VType::INT && target.kind == VType::INT
-            && target.typeName == "integer" && isNumericLiteral(value)) {
+        if (source.kind == VType::INT && target.kind == VType::INT && target.typeName == "integer"
+            && isNumericLiteral(value)) {
             return true;
         }
         if (source.kind == VType::INT && target.kind == VType::REAL && isNumericLiteral(value)) {
@@ -9064,8 +9070,8 @@ bool Lowering::relationalOperandsConform(const Expr& a, const Expr& b) const {
                                        || other.typeName == "u_unsigned"
                                        || other.typeName == "u_signed";
             if (numericVector) return true;
-            const bool logicVector = other.typeName == "std_logic_vector"
-                                     || other.typeName == "std_ulogic_vector";
+            const bool logicVector
+                = other.typeName == "std_logic_vector" || other.typeName == "std_ulogic_vector";
             if (logicVector
                 && (m_stdLogicArith || m_stdLogicUnsigned || m_stdLogicSigned
                     || m_numericStdUnsigned || m_numericStdSigned)) {
@@ -9340,7 +9346,7 @@ AstNodeExpr* Lowering::inlineBinding(FileLine* flp, const std::string& name, boo
 }
 
 bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub, InlineEnv& env,
-                                     AstNode*& prologsp, bool lvalueFormals, bool concurrent) {
+                                     AstNodeStmt*& prologsp, bool lvalueFormals, bool concurrent) {
     std::vector<std::pair<const FormalDecl*, std::string>> slots;
     for (const FormalDecl& formal : sub.formals)
         for (const auto& name : formal.names) slots.emplace_back(&formal, name.first);
@@ -9403,7 +9409,7 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         if (haveFormalType) ctxp = &formalType;
         AstNodeExpr* actualp = asLvalue ? lowerDesignator(actual, true) : lowerExpr(actual, ctxp);
         if (!actualp) return false;
-        InlineBinding binding{actualp, asLvalue, true};
+        InlineBinding binding{actualp, asLvalue, true, VType{}, nullptr};
         // The actual's VHDL type first: an array's element width and index bounds are gone
         // from its data type, and a formal indexing the actual needs both
         const bool haveActualType = typeOfDesignator(actual, binding.type);
@@ -9422,8 +9428,7 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
                 // The actual is an aggregate or another untyped value: its base type is
                 // the formal's, and only its bounds come from the value
                 VType formalBase;
-                if (this->formalType(formalp->type, formalBase)
-                    && !formalBase.typeName.empty()) {
+                if (this->formalType(formalp->type, formalBase) && !formalBase.typeName.empty()) {
                     binding.type.typeName = formalBase.typeName;
                     binding.type.signing = formalBase.signing;
                     binding.type.kwd = formalBase.kwd;
@@ -9443,12 +9448,14 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         if (asLvalue && formalp->mode == PortMode::OUT && !concurrent) {
             FileLine* const pflp = formalp->flp;
             AstNodeExpr* const defp = resizeExpr(makeIntConst(pflp, 0), binding.type, pflp);
-            AstNode* const initp = formalp->cls == FormalDecl::SIGNAL
-                                       ? static_cast<AstNode*>(new AstAssignDly{
-                                             pflp, actualp->cloneTree(false), defp})
-                                       : static_cast<AstNode*>(
-                                             new AstAssign{pflp, actualp->cloneTree(false), defp});
-            prologsp = prologsp ? AstNode::addNext<AstNode, AstNode>(prologsp, initp) : initp;
+            AstNodeStmt* const initp
+                = formalp->cls == FormalDecl::SIGNAL
+                      ? static_cast<AstNodeStmt*>(
+                            new AstAssignDly{pflp, actualp->cloneTree(false), defp})
+                      : static_cast<AstNodeStmt*>(
+                            new AstAssign{pflp, actualp->cloneTree(false), defp});
+            prologsp
+                = prologsp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(prologsp, initp) : initp;
         }
         env[formalName] = std::move(binding);
     }
@@ -9463,7 +9470,7 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         }
         AstNodeExpr* const initp = lowerExpr(*formal.init, nullptr);
         if (!initp) return false;
-        InlineBinding binding{initp, false, true};
+        InlineBinding binding{initp, false, true, VType{}, nullptr};
         binding.type = typeOfDType(initp->dtypep());
         env[slots[s].second] = std::move(binding);
     }
@@ -9860,7 +9867,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
     if (readsFile(*subp)) return evalFileInit(*subp, call);
     m_funcWriteCost = 0;  // This call's own fold budget
     InlineEnv env;
-    AstNode* unusedPrologsp = nullptr;  // A function has no out mode formal
+    AstNodeStmt* unusedPrologsp = nullptr;  // A function has no out mode formal
     // The captured environment supplies enclosing names; formals bind on top of them
     ScopeSave base;
     captureBaseFor(*refp, base, env);
@@ -9878,7 +9885,6 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
     const ScopeSave outer = saveScope();
     InlineEnv* const savedInlineP = m_inlineP;
     m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
-    InlineFrame& frameRef = m_inlineFrames.back();
     setScope(base);
     // A body a package declares sees that package's whole scope: the caller may have
     // imported only the specification
@@ -9921,7 +9927,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
         }
         AstNodeExpr* const valuep = lowerExpr(*alias.designator, nullptr);
         if (!valuep) return fail(nullptr);
-        InlineBinding binding{valuep, false, true};
+        InlineBinding binding{valuep, false, true, VType{}, nullptr};
         VType aliasType;
         if (alias.mark.flp && resolveType(alias.mark, aliasType)
             && aliasType.width == valuep->width()) {
@@ -9960,13 +9966,15 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
                 addPendingStmt(
                     new AstAssign{decl.flp, new AstVarRef{decl.flp, varp, VAccess::WRITE},
                                   resizeExpr(initp->cloneTree(false), declType, decl.flp)});
-                InlineBinding binding{new AstVarRef{decl.flp, varp, VAccess::READ}, true, true};
+                InlineBinding binding{new AstVarRef{decl.flp, varp, VAccess::READ}, true, true,
+                                      VType{}, nullptr};
                 binding.type = declType;
                 binding.materializedp = varp;
                 env[name.first] = std::move(binding);
                 continue;
             }
-            InlineBinding binding{first ? initp : initp->cloneTree(false), false, true};
+            InlineBinding binding{first ? initp : initp->cloneTree(false), false, true, VType{},
+                                  nullptr};
             binding.type = resolved ? declType : typeOfDType(binding.exprp->dtypep());
             env[name.first] = std::move(binding);
             first = false;
@@ -10521,7 +10529,7 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
             return nullptr;
         }
         InlineEnv iterEnv = cloneInlineEnv(inEnv);
-        InlineBinding loopBinding{makeIntConst(flp, value), false, true};
+        InlineBinding loopBinding{makeIntConst(flp, value), false, true, VType{}, nullptr};
         loopBinding.type = intType(flp);
         iterEnv[stmt.loopVar] = std::move(loopBinding);
         const int64_t nextValue = value + step;
@@ -10614,7 +10622,7 @@ AstNodeExpr* Lowering::updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstN
     return resultp;
 }
 
-AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
+AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
     const SubprogramRef* refp = nullptr;
     const SubprogramDecl* const subp = resolveCall(callExpr, false, &refp);
     if (!subp) {
@@ -10627,7 +10635,7 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
     }
     m_funcWriteCost = 0;  // This call's own fold budget
     InlineEnv env;
-    AstNode* prologsp = nullptr;  // Out-parameter initializations
+    AstNodeStmt* prologsp = nullptr;  // Out-parameter initializations
     // The captured environment supplies enclosing names; formals bind on top of them
     ScopeSave base;
     captureBaseFor(*refp, base, env);
@@ -10654,7 +10662,7 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
         importInlineScope(subp->unitName);
     }
     m_inlineP = &env;
-    const auto fail = [&](AstNode* nullp) -> AstNode* {
+    const auto fail = [&](AstNodeStmt* nullp) -> AstNodeStmt* {
         deleteInlineEnv(env);
         m_inlineFrames.pop_back();
         m_inlineP = savedInlineP;
@@ -10682,7 +10690,7 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
     for (const AliasDecl& alias : subp->aliases) registerAlias(alias);
 
     // Locals are real module variables reinitialized on every call, like automatics
-    AstNode* initsp = nullptr;
+    AstNodeStmt* initsp = nullptr;
     for (const Decl& decl : subp->decls) {
         registerTypesBefore(decl.flp->lineno());
         if (decl.kind == Decl::CONSTANT) {
@@ -10704,19 +10712,21 @@ AstNode* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
             if (decl.init) rhsp = lowerExpr(*decl.init, &ltype);
             if (!rhsp) rhsp = makeVectorConst(decl.flp, ltype, 0);
             AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
-            AstNode* const initp = new AstAssign{decl.flp, lhsp, rhsp};
-            initsp = initsp ? AstNode::addNext<AstNode, AstNode>(initsp, initp) : initp;
+            AstNodeStmt* const initp = new AstAssign{decl.flp, lhsp, rhsp};
+            initsp = initsp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(initsp, initp) : initp;
         }
     }
     // A type no declaration follows still belongs to the part
     for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
 
     bool fallsThrough = true;
-    AstNode* const bodysp = lowerProcChain(rawPtrs(subp->body), 0, fallsThrough);
-    AstNode* resultp = prologsp;
+    AstNodeStmt* const bodysp = lowerProcChain(rawPtrs(subp->body), 0, fallsThrough);
+    AstNodeStmt* resultp = prologsp;
     prologsp = nullptr;
-    if (initsp) resultp = resultp ? AstNode::addNext<AstNode, AstNode>(resultp, initsp) : initsp;
-    if (bodysp) resultp = resultp ? AstNode::addNext<AstNode, AstNode>(resultp, bodysp) : bodysp;
+    if (initsp)
+        resultp = resultp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(resultp, initsp) : initsp;
+    if (bodysp)
+        resultp = resultp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(resultp, bodysp) : bodysp;
     return fail(resultp);
 }
 
@@ -10728,12 +10738,13 @@ std::vector<const Stmt*> Lowering::rawPtrs(const std::vector<StmtP>& stmts) {
 }
 
 //! Lower a procedure statement chain. `fallsThroughp` is false when every path returns
-AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
-                                  bool& fallsThroughp) {
+AstNodeStmt* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
+                                      bool& fallsThroughp) {
     m_varVals.clear();
-    AstNode* headp = nullptr;
-    const auto add = [&headp](AstNode* nodep) {
-        if (nodep) headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, nodep) : nodep;
+    AstNodeStmt* headp = nullptr;
+    const auto add = [&headp](AstNodeStmt* nodep) {
+        if (nodep)
+            headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, nodep) : nodep;
     };
     for (std::size_t i = index; i < stmts.size(); ++i) {
         const Stmt& stmt = *stmts[i];
@@ -10743,13 +10754,13 @@ AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::si
             return headp;
         }
         if (stmt.kind == Stmt::IF) {
-            AstNode* const ifp
+            AstNodeStmt* const ifp
                 = lowerProcIf(stmt, 0, {stmts.begin() + i + 1, stmts.end()}, fallsThroughp);
             add(ifp);
             return headp;
         }
         if (stmt.kind == Stmt::CASE) {
-            AstNode* const casep
+            AstNodeStmt* const casep
                 = lowerProcCase(stmt, {stmts.begin() + i + 1, stmts.end()}, fallsThroughp);
             add(casep);
             return headp;
@@ -10763,7 +10774,7 @@ AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::si
             }
             AstNodeExpr* condp = stmt.value ? lowerCond(*stmt.value) : nullptr;
             if (stmt.value && !condp) continue;
-            AstNode* const setp
+            AstNodeStmt* const setp
                 = setLoopFlag(stmt.flp, isExit ? framep->exitp : framep->nextp, condp);
             add(setp);
             if (!stmt.value) {
@@ -10772,7 +10783,7 @@ AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::si
                 return headp;
             }
             bool restFalls = true;
-            AstNode* restp = lowerProcChain(stmts, i + 1, restFalls);
+            AstNodeStmt* restp = lowerProcChain(stmts, i + 1, restFalls);
             if (!restp) {
                 fallsThroughp = false;
                 return headp;
@@ -10785,11 +10796,12 @@ AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::si
         }
         const bool savedMaterialize = m_materializeLocals;
         m_materializeLocals = true;
-        AstNode* const stmtNodep = lowerStmt(stmt);
-        AstNode* const pendingp = takePendingStmts();
+        AstNodeStmt* const stmtNodep = lowerStmt(stmt);
+        AstNodeStmt* const pendingp = takePendingStmts();
         m_materializeLocals = savedMaterialize;
         if (pendingp) {
-            add(stmtNodep ? AstNode::addNext<AstNode, AstNode>(pendingp, stmtNodep) : pendingp);
+            add(stmtNodep ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(pendingp, stmtNodep)
+                          : pendingp);
         } else {
             add(stmtNodep);
         }
@@ -10799,17 +10811,17 @@ AstNode* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std::si
 }
 
 //! Lower the statements and then `tail`, so a return truncates the tail in that path only
-AstNode* Lowering::lowerProcChainWithTail(const std::vector<StmtP>& stmts,
-                                          const std::vector<const Stmt*>& tail,
-                                          bool& fallsThroughp) {
+AstNodeStmt* Lowering::lowerProcChainWithTail(const std::vector<StmtP>& stmts,
+                                              const std::vector<const Stmt*>& tail,
+                                              bool& fallsThroughp) {
     std::vector<const Stmt*> combined = rawPtrs(stmts);
     combined.insert(combined.end(), tail.begin(), tail.end());
     return lowerProcChain(combined, 0, fallsThroughp);
 }
 
 //! Lower an if/elsif/else statement, appending the following statements to each branch
-AstNode* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
-                               const std::vector<const Stmt*>& tail, bool& fallsThroughp) {
+AstNodeStmt* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
+                                   const std::vector<const Stmt*>& tail, bool& fallsThroughp) {
     m_varVals.clear();
     FileLine* const flp = stmt.flp;
     const auto& branch = stmt.branches[branchIndex];
@@ -10819,14 +10831,14 @@ AstNode* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
         return nullptr;
     }
     bool thenFalls = true;
-    AstNode* const thensp = lowerProcChainWithTail(branch.second, tail, thenFalls);
+    AstNodeStmt* const thensp = lowerProcChainWithTail(branch.second, tail, thenFalls);
     if (!condp) {
         // The final else has no condition, so its statements are appended as they are
         fallsThroughp = thenFalls;
         return thensp;
     }
     bool elseFalls = true;
-    AstNode* elsesp = nullptr;
+    AstNodeStmt* elsesp = nullptr;
     if (branchIndex + 1 < stmt.branches.size()) {
         elsesp = lowerProcIf(stmt, branchIndex + 1, tail, elseFalls);
     } else {
@@ -10838,8 +10850,8 @@ AstNode* Lowering::lowerProcIf(const Stmt& stmt, std::size_t branchIndex,
 }
 
 //! Lower a case statement, appending the following statements to each alternative
-AstNode* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*>& tail,
-                                 bool& fallsThroughp) {
+AstNodeStmt* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*>& tail,
+                                     bool& fallsThroughp) {
     m_varVals.clear();
     FileLine* const flp = stmt.flp;
     AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
@@ -10858,7 +10870,7 @@ AstNode* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const Stmt*
             return nullptr;
         }
         bool altFalls = true;
-        AstNode* const bodyp = lowerProcChainWithTail(item.second, tail, altFalls);
+        AstNodeStmt* const bodyp = lowerProcChainWithTail(item.second, tail, altFalls);
         fallsThroughp = fallsThroughp || altFalls;
         AstCaseItem* const itemp = cops.empty() ? new AstCaseItem{flp, nullptr, bodyp}
                                                 : new AstCaseItem{flp, cops.front(), bodyp};
@@ -10935,15 +10947,15 @@ void Lowering::lowerProcess(const Process& process) {
     m_edges.clear();
     m_initial = false;
     m_varVals.clear();
-    AstNode* bodyp = lowerStmtList(process.body);
+    AstNodeStmt* bodyp = lowerStmtList(process.body);
     const std::vector<Edge> edges = m_edges;
     m_edges.clear();
     // Record the current signal values for the next run's edge detection
-    AstNode* initPrevsp = nullptr;
+    AstNodeStmt* initPrevsp = nullptr;
     for (const auto& entry : m_edgePrevVars) {
         AstNodeExpr* const lhsp = new AstVarRef{process.flp, entry.second, VAccess::WRITE};
         AstNodeExpr* const rhsp = new AstVarRef{process.flp, entry.first, VAccess::READ};
-        initPrevsp = initPrevsp ? AstNode::addNext<AstNode, AstNode>(
+        initPrevsp = initPrevsp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(
                                       initPrevsp, new AstAssign{process.flp, lhsp, rhsp})
                                 : new AstAssign{process.flp, lhsp, rhsp};
     }
@@ -10952,7 +10964,7 @@ void Lowering::lowerProcess(const Process& process) {
     }
     m_initial = true;
     m_varVals.clear();
-    AstNode* initp = lowerStmtList(process.body);
+    AstNodeStmt* initp = lowerStmtList(process.body);
     m_initial = false;
     if (!m_edgePrevVars.empty() && initp && initPrevsp) {
         initp = AstNode::addNext(initp, initPrevsp);
@@ -11096,8 +11108,8 @@ bool Lowering::lowerFlopIdiom(const Process& process) {
     m_edgeAsPrev = false;
     m_initial = false;
     m_varVals.clear();
-    AstNode* const clockedp = lowerStmtList(ifStmt.branches[1].second);
-    AstNode* const resetp = lowerStmtList(ifStmt.branches[0].second);
+    AstNodeStmt* const clockedp = lowerStmtList(ifStmt.branches[1].second);
+    AstNodeStmt* const resetp = lowerStmtList(ifStmt.branches[0].second);
     AstNodeExpr* const condp = lowerCond(*testp);
     if (!clockedp || !resetp || !condp) {
         if (clockedp) clockedp->deleteTree();
@@ -11112,14 +11124,14 @@ bool Lowering::lowerFlopIdiom(const Process& process) {
         itemsp,
         new AstSenItem{process.flp, activeLow ? VEdgeType::ET_NEGEDGE : VEdgeType::ET_POSEDGE,
                        new AstVarRef{process.flp, resetVarp, VAccess::READ}});
-    AstNode* const bodyp = new AstIf{process.flp, condp, resetp, clockedp};
+    AstNodeStmt* const bodyp = new AstIf{process.flp, condp, resetp, clockedp};
     m_modp->addStmtsp(new AstAlways{process.flp, VAlwaysKwd::ALWAYS,
                                     new AstSenTree{process.flp, itemsp}, bodyp});
     // A VHDL process runs once at time zero, when the clock has not had an edge: only a
     // reset that is already active assigns anything
     m_initial = true;
     m_varVals.clear();
-    AstNode* const initp = lowerStmtList(process.body);
+    AstNodeStmt* const initp = lowerStmtList(process.body);
     m_initial = false;
     if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
     return true;
@@ -12985,7 +12997,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                  "vhdlind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
                                  portp->dtypep()};
                 m_modp->addStmtsp(tempVarp);
-                AstNode* headp = nullptr;
+                AstNodeStmt* headp = nullptr;
                 for (const PortAssoc* const assocp : assocs) {
                     if (!assocp->actual) continue;
                     const VField* const fieldp = recordField(recType, assocp->formalMember);
@@ -13005,8 +13017,8 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                         = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
                                      fieldp->offset, fieldp->width};
                     rhsp->dtypep(fieldp->type->dtp);
-                    AstNode* const assp = new AstAssign{flp, lhsp, rhsp};
-                    headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assp) : assp;
+                    AstNodeStmt* const assp = new AstAssign{flp, lhsp, rhsp};
+                    headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, assp) : assp;
                 }
                 if (headp) {
                     m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
@@ -13135,7 +13147,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                                  "vhdlind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
                                  portp->dtypep()};
                 m_modp->addStmtsp(tempVarp);
-                AstNode* headp = nullptr;
+                AstNodeStmt* headp = nullptr;
                 for (const Connection& connection : connections) {
                     if (!connection.assocp->actual) continue;
                     AstNodeExpr* const lhsp = lowerDesignator(*connection.assocp->actual, true);
@@ -13149,9 +13161,9 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                         = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
                                      connection.lsb, connection.width};
                     rhsp->dtypep(elementType.dtp);
-                    AstNode* const assp
+                    AstNodeStmt* const assp
                         = new AstAssign{flp, resizeExpr(lhsp, elementType, flp), rhsp};
-                    headp = headp ? AstNode::addNext<AstNode, AstNode>(headp, assp) : assp;
+                    headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, assp) : assp;
                 }
                 if (headp) {
                     m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
@@ -13225,7 +13237,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
     const Concurrent& stmt = conc;
     if (stmt.kind == Concurrent::ASSERT) {
         // A concurrent assertion reports on every evaluation, and failure ends the run
-        AstNode* const assertp
+        AstNodeStmt* const assertp
             = assertBody(stmt.flp, *stmt.target, stmt.value.get(), stmt.severity);
         if (assertp)
             m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, assertp});
@@ -13235,7 +13247,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         // A concurrent procedure call is one combinational process: its locals are
         // intermediates and the signal actuals are driven continuously
         ++m_concurrentProc;
-        AstNode* const callp = lowerProcedureCall(*stmt.value, true);
+        AstNodeStmt* const callp = lowerProcedureCall(*stmt.value, true);
         --m_concurrentProc;
         if (callp) {
             m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, callp});
@@ -13389,9 +13401,9 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
         }
     } const scope{this};
     if (stmt.kind == Concurrent::SEL_ASSIGN) {
-        AstNode* const casep = lowerSelected(stmt);
+        AstNodeStmt* const casep = lowerSelected(stmt);
         if (!casep) return;
-        if (AstNode* const allp = takePendingFor(casep)) {
+        if (AstNodeStmt* const allp = takePendingFor(casep)) {
             m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, allp});
         }
         return;
@@ -13401,9 +13413,9 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
             unsupportedError(stmt.flp, "aggregate target in a conditional or selected assignment");
             return;
         }
-        AstNode* const bodyp
+        AstNodeStmt* const bodyp
             = lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, false, true);
-        if (AstNode* const allp = takePendingFor(bodyp)) {
+        if (AstNodeStmt* const allp = takePendingFor(bodyp)) {
             m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr, allp});
         }
         return;
@@ -13426,7 +13438,7 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
             if (alt.second && containsEdgeCall(*alt.second)) break;
             if (alt.second) collectExprNames(*alt.second, levelNames);
         }
-        AstNode* const bodyp = lowerClockedAlternatives(stmt, ltype, lhsp);
+        AstNodeStmt* const bodyp = lowerClockedAlternatives(stmt, ltype, lhsp);
         const std::vector<Edge> edges = m_edges;
         m_edges.clear();
         AstSenItem* itemsp = nullptr;
@@ -13466,9 +13478,9 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
                                           }));
     if (stmt.kind == Concurrent::COND_ASSIGN && holds) {
         // A missing else or an unaffected branch makes the target hold its value
-        AstNode* const bodyp = lowerLatchedAlternatives(stmt, ltype, lhsp);
+        AstNodeStmt* const bodyp = lowerLatchedAlternatives(stmt, ltype, lhsp);
         lhsp->deleteTree();
-        if (AstNode* const allp = takePendingFor(bodyp)) {
+        if (AstNodeStmt* const allp = takePendingFor(bodyp)) {
             m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS_LATCH, nullptr, allp});
         }
         return;
@@ -13491,16 +13503,16 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
     if (!stmt.waveform.empty()) {
         // A waveform list repeats: each element after the first waits its own delay, and
         // the last element's delay closes the period (IEEE 1800-2023 10.6)
-        AstNode* bodyp = new AstAssign{stmt.flp, lhsp, rhsp};
+        AstNodeStmt* bodyp = new AstAssign{stmt.flp, lhsp, rhsp};
         const Expr* lastDelayp = stmt.delay.get();
         for (const auto& element : stmt.waveform) {
             if (element.second) {
-                AstNode* const delayp = lowerDelay(*element.second, stmt.flp);
+                AstNodeStmt* const delayp = lowerDelay(*element.second, stmt.flp);
                 if (!delayp) {
                     bodyp->deleteTree();
                     return;
                 }
-                bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
+                bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp);
                 lastDelayp = element.second.get();
             }
             AstNodeExpr* const elementp = lowerExpr(*element.first, &ltype);
@@ -13508,17 +13520,17 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
                 bodyp->deleteTree();
                 return;
             }
-            bodyp = AstNode::addNext<AstNode, AstNode>(
+            bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(
                 bodyp, new AstAssign{stmt.flp, lhsp->cloneTree(false),
                                      resizeExpr(elementp, ltype, stmt.flp)});
         }
         if (lastDelayp) {
-            AstNode* const delayp = lowerDelay(*lastDelayp, stmt.flp);
+            AstNodeStmt* const delayp = lowerDelay(*lastDelayp, stmt.flp);
             if (!delayp) {
                 bodyp->deleteTree();
                 return;
             }
-            bodyp = AstNode::addNext<AstNode, AstNode>(bodyp, delayp);
+            bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp);
         }
         m_modp->addStmtsp(
             new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, takePendingFor(bodyp)});
@@ -13526,13 +13538,13 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
     }
     if (stmt.delay && !staticZeroDelay(stmt.delay)) {
         // A concurrent delayed assignment repeats: it waits, then drives the target
-        AstNode* const assignp = new AstAssign{stmt.flp, lhsp, rhsp};
-        AstNode* const delayp = lowerDelay(*stmt.delay, stmt.flp);
+        AstNodeStmt* const assignp = new AstAssign{stmt.flp, lhsp, rhsp};
+        AstNodeStmt* const delayp = lowerDelay(*stmt.delay, stmt.flp);
         if (!delayp) {
             assignp->deleteTree();
             return;
         }
-        AstNode* const bodyp = AstNode::addNext<AstNode, AstNode>(delayp, assignp);
+        AstNodeStmt* const bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(delayp, assignp);
         m_modp->addStmtsp(
             new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, takePendingFor(bodyp)});
         return;
