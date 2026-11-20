@@ -612,6 +612,7 @@ class Lowering final {
     //! Type of a lowered operand. A designator keeps the declared array structure,
     //! which a packed dtype no longer carries.
     VType typeOfLowered(const Expr& expr, AstNodeExpr* nodep) const {
+        UASSERT_OBJ(nodep->dtypep(), nodep, "VHDL expression has no data type");
         VType type;
         if (typeOfDesignator(expr, type) && type.width == nodep->width()) return type;
         const auto arrayIt = m_arrayDtypes.find(nodep->dtypep());
@@ -2084,7 +2085,30 @@ bool Lowering::rejectUnmodelledObject(const VType& type, FileLine* flp, bool all
         unsupportedError(flp, "object of an unconstrained array type");
         return true;
     }
-    return false;
+    // An array or record whose element or member is real or physical has the same
+    // missing run-time model, but the checks above see only the object's own type.
+    // Walk the element and member types so a later conversion or comparison cannot
+    // dereference the element's null dtype.
+    static constexpr int MAX_NESTING = 32;
+    const auto rejectNested = [&](const VType& nested, const auto& self, int depth) -> bool {
+        if (depth > MAX_NESTING) v3fatalSrc("VHDL type nesting exceeds the supported depth");
+        if (nested.kind == VType::REAL) {
+            unsupportedError(flp, "real object element");
+            return true;
+        }
+        if (nested.kind == VType::INT && nested.kwd == VBasicDTypeKwd::LONGINT) {
+            unsupportedError(flp, "physical object at run time");
+            return true;
+        }
+        if (nested.isVector() && nested.elemp) return self(*nested.elemp, self, depth + 1);
+        if (nested.kind == VType::RECORD) {
+            for (const VField& field : nested.fields) {
+                if (field.type && self(*field.type, self, depth + 1)) return true;
+            }
+        }
+        return false;
+    };
+    return rejectNested(type, rejectNested, 0);
 }
 
 AstNodeDType* Lowering::enumDType(FileLine* flp, const TypeDecl& decl, int width) {
@@ -4676,6 +4700,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
                               ? makeIntConst(flp, folded)
                               : lowerExpr(*expr.args[0], operandNeedsContext ? context : nullptr);
     if (!valuep) return nullptr;
+    UASSERT_OBJ(valuep->dtypep(), valuep, "VHDL conversion operand has no data type");
     const VType valueType = typeOfDType(valuep->dtypep());
     // A type conversion needs closely related types. A conversion mark is not a
     // subprogram, so `formalType` resolving it is what distinguishes the two.
