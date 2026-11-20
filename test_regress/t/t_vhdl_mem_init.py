@@ -8,13 +8,12 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import vltest_bootstrap
-import vhdl_frontend
 
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_mem_init.vhdl'
 
 test.lint(make_top_shell=False,
           make_main=False,
-          verilator_flags2=[*vhdl_frontend.flags(), '--language', 'vhdl'])
+          verilator_flags2=['--language', 'vhdl'])
 
 test.passes()

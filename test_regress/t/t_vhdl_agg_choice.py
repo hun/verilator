@@ -8,7 +8,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import vltest_bootstrap
-import vhdl_frontend
 
 test.scenarios('simulator')
 test.top_filename = 't/t_vhdl_agg_choice.vhdl'
@@ -16,7 +15,7 @@ test.top_filename = 't/t_vhdl_agg_choice.vhdl'
 
 
 
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--binary'])
+test.compile(verilator_flags2=['--language', 'vhdl', '--binary'])
 
 test.execute()
 

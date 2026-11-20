@@ -8,7 +8,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import vltest_bootstrap
-import vhdl_frontend
 
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_inout_bus.vhdl'
@@ -16,7 +15,7 @@ test.top_filename = 't/t_vhdl_inout_bus.vhdl'
 test.compile(make_top_shell=False,
              make_main=False,
              verilator_flags2=[
-                 *vhdl_frontend.flags(), '--language', 'vhdl', '--top-module', 't', '--exe',
+                 '--language', 'vhdl', '--top-module', 't', '--exe',
                  test.pli_filename])
 
 test.execute()

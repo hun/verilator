@@ -8,12 +8,11 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import vltest_bootstrap
-import vhdl_frontend
 
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_case_selector_bad.vhdl'
 
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
+test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

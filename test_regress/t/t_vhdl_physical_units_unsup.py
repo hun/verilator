@@ -8,7 +8,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import vltest_bootstrap
-import vhdl_frontend
 
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_physical_units_unsup.vhdl'
@@ -17,7 +16,7 @@ test.top_filename = 't/t_vhdl_physical_units_unsup.vhdl'
 # native message is pinned here
 
 
-test.compile(verilator_flags2=vhdl_frontend.flags() + ['--language', 'vhdl', '--top-module', 't'],
+test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 
