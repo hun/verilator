@@ -487,16 +487,20 @@ Silently accepted, wrong or missing model
        expression path names the procedure.
    * - 6
      - ``a = b = c``, ``a sll 1 sll 2``, ``not not a``
-     - Accepted; only logical operator mixing is checked (N113).
+     - Accepted; only logical operator mixing is checked (N113). Fixed: all
+       three non-associative levels require parentheses.
    * - 6
      - ``unsigned`` mixed with ``std_logic_vector`` in ``+``, ``and`` and
        ``&``
      - Accepted and modelled as unsigned; array base type names are not
-       compared, only element kinds and signedness.
+       compared, only element kinds and signedness. Fixed: the three operator
+       families compare the array base type.
    * - 6
      - ``integer_signal = '1'``, ``return '1'`` from an integer function,
        ``generic(n : integer := '1')``
      - Accepted; a character literal is treated as untyped for any target.
+       Fixed: it fits only a logic, bit, character or matching enumeration
+       type.
    * - 7
      - empty ``case``; ``case``/``with`` over a record
      - An empty case is dropped without a diagnostic, and the selector need
@@ -557,11 +561,12 @@ Legal forms refused
 
 These findings supersede the N117 port claim and the N112 case-completeness
 claim as stated above; the corresponding work packages add the missing checks
-without changing the accepted set for legal designs. Work packages 1--5 are
+without changing the accepted set for legal designs. Work packages 1--6 are
 implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_subp_class``, ``t_vhdl_port_*``, ``t_vhdl_generic_shape_bad``,
 ``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup``,
-``t_vhdl_disconnect_unsup`` and ``t_vhdl_component_*``); the remaining rows
+``t_vhdl_disconnect_unsup``, ``t_vhdl_component_*``, ``t_vhdl_*_chain*``,
+``t_vhdl_mixed_array_op_bad`` and ``t_vhdl_char_ctx_bad``); the remaining rows
 stay open.
 
 Two tier rows also disagree with the implementation in the other direction: a

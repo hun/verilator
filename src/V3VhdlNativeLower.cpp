@@ -118,6 +118,34 @@ static bool baseTypesRelated(const std::string& a, const std::string& b) {
     return (logic(a) && logic(b)) || (logicVector(a) && logicVector(b));
 }
 
+//! The base type an array operator sees. The resolved VHDL-2008 numeric types are
+//! subtypes of the numeric_std ones, so `u_unsigned` and `unsigned` are one base type.
+static bool arrayBaseTypesRelated(const std::string& a, const std::string& b) {
+    const auto canonical = [](std::string name) {
+        if (name == "u_unsigned") return std::string{"unsigned"};
+        if (name == "u_signed") return std::string{"signed"};
+        return name;
+    };
+    return baseTypesRelated(canonical(a), canonical(b));
+}
+
+//! Whether a character literal may adopt `target`'s type (IEEE 1076-2008 9.3.2, 15.5)
+static bool charLiteralFits(const VType& target, char ch) {
+    if (target.kind == VType::INT || target.kind == VType::REAL || target.kind == VType::FILE
+        || target.kind == VType::LINE) {
+        return false;
+    }
+    if (target.kind == VType::LOGIC) return target.typeName != "boolean";
+    if (target.kind == VType::BIT) return true;
+    if (target.kind == VType::ENUM) {
+        const std::string key = std::string{"'"} + ch + "'";
+        return std::find(target.literals.begin(), target.literals.end(), key)
+               != target.literals.end();
+    }
+    // A character is modelled as its eight-bit code
+    return target.isVector() && target.width == 8 && target.typeName == "character";
+}
+
 //! Elaborated contents of one package, publishable to the units that use it
 //! An alias: the designator it renames, and the type its mark declares
 struct AliasInfo final {
@@ -3945,6 +3973,17 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
+        } else if (lt.isVector() && rt.isVector() && !lt.typeName.empty()
+                   && !rt.typeName.empty()
+                   && (expr.a->kind == Expr::NAME || expr.a->kind == Expr::SELECTED
+                       || expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)
+                   && (expr.b->kind == Expr::NAME || expr.b->kind == Expr::SELECTED
+                       || expr.b->kind == Expr::INDEX || expr.b->kind == Expr::SLICE)
+                   && !arrayBaseTypesRelated(lt.typeName, rt.typeName)) {
+            flp->v3error("VHDL: concatenation of operands of unrelated array types");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
         }
         if (lt.isInt() || rt.isInt()) {
             unsupportedError(flp, "concatenation with an integer operand");
@@ -4186,6 +4225,15 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     }
     if (!lt.isVector() || !rt.isVector() || lt.kwd != rt.kwd) {
         unsupportedError(flp, "arithmetic on non-numeric operands");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    // Two vector operands must have one base type; a numeric_std unsigned and a
+    // std_logic_vector do not mix (IEEE 1076-2008 9.2.5)
+    if (!lt.typeName.empty() && !rt.typeName.empty()
+        && !arrayBaseTypesRelated(lt.typeName, rt.typeName)) {
+        flp->v3error("VHDL: arithmetic operands do not have the same base type");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -8960,10 +9008,19 @@ static bool integralRealLiteral(const Expr& expr, double& value) {
 }
 
 //! Whether a value may be assigned to a target of `target`'s base type. A value that has
-//! no type of its own (an aggregate, a string literal, a character literal) takes the
-//! target's type; only a universal numeric literal converts implicitly.
+//! no type of its own (an aggregate, a string literal) takes the target's type; a
+//! character literal may only take a character-like one, and only a universal numeric
+//! literal converts implicitly.
 bool Lowering::valueConforms(const VType& target, const Expr& value, const char* what,
                              bool checkShape) const {
+    if (value.kind == Expr::CHAR_LIT) {
+        if (!charLiteralFits(target, value.charValue)) {
+            value.flp->v3error(std::string{"VHDL: "} + what
+                               + " character literal does not have the target's type");
+            return false;
+        }
+        return true;
+    }
     if (target.typeName.empty()) return true;
     // A concatenation takes its result type from the target context, so only the
     // target category matters here (IEEE 1076-2008 9.2.5)
@@ -9079,6 +9136,21 @@ bool Lowering::logicalOperandsConform(const Expr& a, const Expr& b, const VType&
         a.flp->v3error("VHDL: logical operator operand is not a logic or bit value");
         return false;
     }
+    // Two arrays must be of the same VHDL array type, not merely of the same element
+    // kind: unsigned and std_logic_vector are unrelated (IEEE 1076-2008 9.2.2)
+    if (aType.isVector() && bType.isVector() && !aType.typeName.empty()
+        && !bType.typeName.empty()
+        && !arrayBaseTypesRelated(aType.typeName, bType.typeName)) {
+        a.flp->v3error("VHDL: logical operator operands do not have the same base type");
+        return false;
+    }
+    // boolean and std_logic are distinct enumeration types; a character literal is an
+    // element of the logic or bit type beside it, never a boolean
+    if ((a.kind == Expr::CHAR_LIT && bType.typeName == "boolean")
+        || (b.kind == Expr::CHAR_LIT && aType.typeName == "boolean")) {
+        a.flp->v3error("VHDL: logical operator operands do not have the same element type");
+        return false;
+    }
     const auto elementName = [](const VType& type) -> std::string {
         if (type.kind == VType::ARRAY && type.elemp) return type.elemp->typeName;
         if (type.kind == VType::VECTOR) {
@@ -9102,7 +9174,37 @@ bool Lowering::logicalOperandsConform(const Expr& a, const Expr& b, const VType&
 bool Lowering::relationalOperandsConform(const Expr& a, const Expr& b) const {
     VType aType;
     VType bType;
-    if (!actualType(a, aType) || !actualType(b, bType)) return true;
+    const bool aKnown = actualType(a, aType);
+    const bool bKnown = actualType(b, bType);
+    if (a.kind == Expr::CHAR_LIT || b.kind == Expr::CHAR_LIT) {
+        // A character literal compares with a logic/bit scalar, a character, or an
+        // enumeration type that declares it (IEEE 1076-2008 9.2.3, 12.5)
+        if (a.kind == Expr::CHAR_LIT && b.kind == Expr::CHAR_LIT) return true;
+        const Expr& literal = a.kind == Expr::CHAR_LIT ? a : b;
+        const Expr& other = a.kind == Expr::CHAR_LIT ? b : a;
+        const bool otherKnown = a.kind == Expr::CHAR_LIT ? bKnown : aKnown;
+        const VType& otherType = a.kind == Expr::CHAR_LIT ? bType : aType;
+        // An element of a string loses the character type name in the packed model; its
+        // declared array still says every element is a character
+        bool characterElement = false;
+        if ((other.kind == Expr::INDEX || other.kind == Expr::SLICE) && other.a) {
+            VType prefixType;
+            if (typeOfDesignator(*other.a, prefixType)) {
+                characterElement
+                    = prefixType.kind == VType::ARRAY && prefixType.elemWidth == 8
+                      && (!prefixType.elemp || prefixType.elemp->typeName.empty()
+                          || prefixType.elemp->typeName == "character");
+            }
+        }
+        if (otherKnown && !characterElement
+            && !charLiteralFits(otherType, literal.charValue)) {
+            literal.flp->v3error("VHDL: relational operator compares a character with "
+                                 "an unrelated type");
+            return false;
+        }
+        return true;
+    }
+    if (!aKnown || !bKnown) return true;
     const bool aNumeric = aType.kind == VType::INT || aType.kind == VType::REAL;
     const bool bNumeric = bType.kind == VType::INT || bType.kind == VType::REAL;
     if (aNumeric && bNumeric) {

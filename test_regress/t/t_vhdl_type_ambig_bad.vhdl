@@ -23,5 +23,5 @@ end;
 architecture rtl of t is
   signal x : pair_t;
 begin
-  o <= '0';
+  o <= 0;
 end;

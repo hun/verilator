@@ -559,9 +559,17 @@ ExprP Parser::parseLogical() {
 ExprP Parser::parseRelation() {
     ExprP lhsp = parseShift();
     if (!lhsp) return nullptr;
+    bool seen = false;
     while (isSym("=") || isSym("/=") || isSym("<") || isSym("<=") || isSym(">") || isSym(">=")
            || isSym("?=") || isSym("?/=") || isSym("?<") || isSym("?<=") || isSym("?>")
            || isSym("?>=")) {
+        // Relational operators are non-associative (IEEE 1076-2008 9.1)
+        if (seen) {
+            error("relational operators cannot be chained without parentheses "
+                  "(IEEE 1076-2008 9.1)");
+            return nullptr;
+        }
+        seen = true;
         ExprP node = std::make_unique<Expr>(Expr::BINARY);
         node->flp = m_cur.flp;
         node->text = m_cur.text;
@@ -578,8 +586,16 @@ ExprP Parser::parseRelation() {
 ExprP Parser::parseShift() {
     ExprP lhsp = parseAdd();
     if (!lhsp) return nullptr;
+    bool seen = false;
     while (isId("sll") || isId("srl") || isId("sla") || isId("sra") || isId("rol")
            || isId("ror")) {
+        // Shift and rotate operators are non-associative (IEEE 1076-2008 9.1)
+        if (seen) {
+            error("shift operators cannot be chained without parentheses "
+                  "(IEEE 1076-2008 9.1)");
+            return nullptr;
+        }
+        seen = true;
         ExprP node = std::make_unique<Expr>(Expr::BINARY);
         node->flp = m_cur.flp;
         node->text = m_cur.text;
@@ -649,7 +665,9 @@ ExprP Parser::parseUnary() {
         node->flp = m_cur.flp;
         node->text = m_cur.text;
         advance();
-        node->a = parseUnary();
+        // A unary operator applies to a primary, so a chain needs parentheses
+        // (IEEE 1076-2008 9.1)
+        node->a = parsePrimary();
         if (!node->a) return nullptr;
         return node;
     }
