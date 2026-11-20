@@ -223,6 +223,26 @@ class Parser final {
         m_failed = true;
     }
     void error(const std::string& message) { error(m_cur.flp, message); }
+    //! Labels of one declarative region, from the architecture down to nested statements
+    class LabelScope final {
+        Parser& m_parser;
+
+    public:
+        explicit LabelScope(Parser& parser)
+            : m_parser{parser} {
+            m_parser.m_labelScopes.emplace_back();
+        }
+        ~LabelScope() { m_parser.m_labelScopes.pop_back(); }
+    };
+    std::vector<std::set<std::string>> m_labelScopes;
+    bool addLabel(const std::string& label, FileLine* flp) {
+        if (label.empty()) return true;
+        if (!m_labelScopes.empty() && !m_labelScopes.back().insert(label).second) {
+            error(flp, "duplicate label '" + label + "'");
+            return false;
+        }
+        return true;
+    }
     void unsupported(FileLine* flp, const std::string& what) {
         if (m_failed) return;
         unsupportedError(flp, what);
@@ -955,6 +975,9 @@ Stmt::Severity Parser::parseSeverityValue() {
     if (severityTok.text == "warning") return Stmt::SEV_WARNING;
     if (severityTok.text == "error") return Stmt::SEV_ERROR;
     if (severityTok.text == "failure") return Stmt::SEV_FAILURE;
+    if (severityTok.text == "note") return Stmt::SEV_NOTE;
+    error(severityTok.flp, "unknown severity level '" + severityTok.spelling
+                               + "'; expected note, warning, error or failure");
     return Stmt::SEV_NOTE;
 }
 
@@ -1307,9 +1330,9 @@ void Parser::parseEntity(FileLine* flp) {
             continue;
         }
         if (isId("variable")) {
-            advance();
-            parseDeclInto(entity.decls, Decl::VARIABLE);
-            continue;
+            // Only a shared variable may be declared in an entity (IEEE 1076-2008 6.4.2)
+            error("plain variable declaration in an entity; only a shared variable is legal");
+            return;
         }
         if (isId("signal")) {
             advance();
@@ -1593,7 +1616,10 @@ void Parser::parseSubprogramInto(std::vector<SubprogramDecl>& out) {
     }
     if (m_failed) return;
     advance();  // 'begin'
-    sub.body = parseStmtList(false);
+    {
+        LabelScope labelScope{*this};
+        sub.body = parseStmtList(false);
+    }
     if (m_failed) return;
     sub.hasBody = true;
     if (!expectId("end")) return;
@@ -2105,9 +2131,9 @@ void Parser::parseArchitecture(FileLine* flp) {
             continue;
         }
         if (isId("variable")) {
-            advance();
-            parseDecl(arch, Decl::VARIABLE);
-            continue;
+            // Only a shared variable may be declared in an architecture (IEEE 1076-2008 6.4.2)
+            error("plain variable declaration in an architecture; only a shared variable is legal");
+            return;
         }
         if (isId("shared")) {
             advance();
@@ -2147,8 +2173,11 @@ void Parser::parseArchitecture(FileLine* flp) {
         return;
     }
     advance();  // 'begin'
-    while (!m_failed && !isId("end") && m_cur.kind != Token::END) {
-        parseConcurrentStatement(arch);
+    {
+        LabelScope labelScope{*this};
+        while (!m_failed && !isId("end") && m_cur.kind != Token::END) {
+            parseConcurrentStatement(arch);
+        }
     }
     if (!expectId("end")) return;
     (void)acceptId("architecture");
@@ -2221,6 +2250,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             advance();
         }
     }
+    if (!addLabel(label, flp)) return;
     if (isId("cover") || isId("restrict") || isId("assume") || isId("fair")
         || isId("fairness")) {  // A PSL verification directive (IEEE 1800.1 ch.5)
         const auto pslSaved = m_lexer.state();
@@ -2545,6 +2575,7 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
                                  std::vector<Decl>* decls, std::vector<TypeDecl>* types,
                                  std::vector<SubprogramDecl>* subprograms,
                                  std::vector<ComponentDecl>* components) {
+    LabelScope labelScope{*this};
     Architecture scratch;  // The statements of a generate body
     while (!m_failed && !isId("end") && !isId("elsif") && !isId("else")
            && m_cur.kind != Token::END) {
@@ -2716,7 +2747,10 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
     }
     if (m_failed) return;
     advance();  // 'begin'
-    process.body = parseStmtList(false);
+    {
+        LabelScope labelScope{*this};
+        process.body = parseStmtList(false);
+    }
     if (m_failed) return;
     if (!expectId("end")) return;
     (void)acceptId("process");
@@ -2764,6 +2798,7 @@ StmtP Parser::parseSequentialStatement() {
             advance();
         }
     }
+    if (!addLabel(label, flp)) return nullptr;
     if (isId("if")) {
         advance();
         return parseIf(flp);

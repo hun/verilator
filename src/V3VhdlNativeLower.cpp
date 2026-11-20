@@ -364,6 +364,7 @@ class Lowering final {
     std::map<std::string, const ComponentDecl*> m_components;  // Visible, by name
     std::vector<const Stmt*> m_procTail;  // Statements after the current procedure return
     int m_concurrentProc = 0;  // Lowering a concurrent procedure call body
+    bool m_passive = false;  // Lowering the entity statement part, which may not assign
     ScopeSave m_moduleScope;  // Module declarative part, hidden by processes
     int m_procVarSeq = 0;  // Disambiguates procedure local variables
     const VType* m_funcRetp = nullptr;  // Return-type context for function bodies
@@ -7168,6 +7169,10 @@ AstNodeStmt* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, c
 }
 
 AstNodeStmt* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
+    if (m_passive) {
+        stmt.flp->v3error("VHDL: assignment in the entity statement part");
+        return nullptr;
+    }
     // A delay of zero is a delta, which a cycle model already has; a longer one needs a
     // scheduled update, which a process body has no notion of
     if (stmt.delay && !staticZeroDelay(stmt.delay)) {
@@ -8203,6 +8208,14 @@ void Lowering::registerSubprograms(const std::vector<SubprogramDecl>& decls, int
     for (const SubprogramDecl& decl : decls) {
         m_imported.erase(decl.name);  // The local declaration shadows the package member
         std::vector<SubprogramRef>& refs = m_subprograms[decl.name];
+        // A specification and its completing body are one subprogram; two bodies are not
+        if (decl.hasBody
+            && std::any_of(refs.begin(), refs.end(), [&](const SubprogramRef& ref) {
+                   return !ref.imported && ref.declp->hasBody && homograph(*ref.declp, decl);
+               })) {
+            decl.flp->v3error("VHDL: duplicate subprogram body for '" + decl.spelling + "'");
+            continue;
+        }
         // A declaration of this unit hides an imported one of the same profile; the
         // declaration a package body completes is its own, not one it hides
         // (IEEE 1076-2008 12.4)
@@ -12362,7 +12375,10 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     // Subprograms of the declarative part capture the module scope as it stands here
     m_moduleScope = saveScope();
     // The entity's own statement part drives the module as well
+    const bool savedPassive = m_passive;
+    m_passive = true;
     for (const auto& stmtp : entity.stmts) emitConcurrent(*stmtp);
+    m_passive = savedPassive;
     for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
     checkDrivers();
 
@@ -14084,6 +14100,13 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
             continue;
         }
         lowering.instantiatePackage(library.packages, inst, table.impl());
+    }
+    // A body completes a specification; without one it has no declarative region to extend
+    for (const PackageUnit& pkg : library.packages) {
+        if (pkg.isBody && !specNames.count(pkg.name)) {
+            pkg.flp->v3error("VHDL: package body '" + pkg.spelling
+                             + "' has no package specification");
+        }
     }
     // A specification constant whose call had no body when the specification was emitted
     // is completed by a second pass over the specifications, now that every body is read

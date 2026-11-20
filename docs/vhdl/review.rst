@@ -510,7 +510,7 @@ Silently accepted, wrong or missing model
        unknown ``severity`` token; orphan package body; duplicate subprogram
        body; signal assignment in an entity statement-part process
      - Accepted without a diagnostic (a duplicate subprogram fails only if it
-       is called).
+       is called). Fixed: each is now a source-located error.
    * - 9
      - ``integer'high + 1``, ``2 ** 31``, ``v sll '1'``, ``i'length`` on a
        scalar
@@ -561,13 +561,15 @@ Legal forms refused
 
 These findings supersede the N117 port claim and the N112 case-completeness
 claim as stated above; the corresponding work packages add the missing checks
-without changing the accepted set for legal designs. Work packages 1--7 are
+without changing the accepted set for legal designs. Work packages 1--8 are
 implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_subp_class``, ``t_vhdl_port_*``, ``t_vhdl_generic_shape_bad``,
 ``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup``,
 ``t_vhdl_disconnect_unsup``, ``t_vhdl_component_*``, ``t_vhdl_*_chain*``,
-``t_vhdl_mixed_array_op_bad``, ``t_vhdl_char_ctx_bad`` and
-``t_vhdl_case_*_bad``); the remaining rows stay open.
+``t_vhdl_mixed_array_op_bad``, ``t_vhdl_char_ctx_bad``, ``t_vhdl_case_*_bad``
+and ``t_vhdl_decl_*``, ``t_vhdl_label_*``, ``t_vhdl_severity_bad``,
+``t_vhdl_pkg_body_orphan_bad``, ``t_vhdl_subp_dup_bad``,
+``t_vhdl_entity_passive_bad``); the remaining rows stay open.
 
 Two tier rows also disagree with the implementation in the other direction: a
 general ``wait until <condition>`` and ``signal``-class subprogram parameters
