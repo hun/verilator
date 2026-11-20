@@ -249,6 +249,5 @@ Every construct the frontend supports is pinned by a test in ``test_regress/t``
 that fails without it, and the value is confirmed with an independent simulator.
 GHDL is the default reference; nvc (``nvc --std=2008``) is used when the two
 disagree, and has settled arguments GHDL got wrong. The findings these tests
-came from, and the ones still open, are in :doc:`findings`; the record of how
-they were closed is in :doc:`journal`, and the current coverage and remaining
-correctness risks are assessed in :doc:`review`.
+came from, and the ones still open, are in :doc:`findings`; the current
+coverage and remaining correctness risks are assessed in :doc:`review`.

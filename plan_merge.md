@@ -146,9 +146,10 @@ immediately:
   non-executable, 13,783 lowering lines. Actual: 323 drivers, 74 `_bad`/`_unsup`
   drivers (75 `.out` goldens), 98 mode-`100644` scripts, 14,273 lowering lines.
 - **Historical root files must not ship**: `VHDL_FRONTEND_PLAN.md`, `plan.md`,
-  `handoff.md`, `vhdl_translator_plan.md`, `TODO_native.md`,
-  `docs/vhdl/journal.rst`, `findings.rst`, `journal-guide.md`. They are process
-  logs, several explicitly say "not user documentation".
+  `handoff.md`, `vhdl_translator_plan.md`, `TODO_native.md`, and
+  `findings.rst` / `journal-guide.md` under `docs/vhdl`. `journal.rst` has been
+  removed from the tree; these are process logs, several explicitly say "not
+  user documentation".
 
 #### C. Core integration risks
 
