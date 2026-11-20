@@ -23,10 +23,14 @@ outside the pinned idioms. The main risk is not an unsupported construct: it is
 a construct that is accepted and lowered with a different meaning. Assignment,
 return, single-candidate call-actual, generic-actual, type conversion and
 operator paths now check that a value belongs to the target type. The remaining
-silent divergences are narrow: a character or physical literal has no type of
-its own outside a context, ``std_logic`` and ``std_ulogic`` share one model
-name, and array-to-array conversion and comparison are coarse (see
-`Type conformance`_ below).
+silent divergences are narrow but not all type-related: a character or physical
+literal has no type of its own outside a context; ``std_logic`` and
+``std_ulogic`` share one model name; array-to-array conversion and comparison
+are coarse (see `Type conformance`_ below); a standard-package intrinsic is
+selected by name without checking its signature, so ``rising_edge`` accepts an
+integer or a vector; and a ``report`` whose message is computed is dropped,
+including one of ``severity failure`` that should end the run (see
+`Semantic divergences`_).
 
 The in-tree frontend is the only VHDL frontend. GHDL and nvc are used as
 reference simulators in tests, not as build-time frontends.
@@ -35,11 +39,11 @@ __________________
 Measured coverage
 __________________
 
-The regression suite contains 276 VHDL tests; all pass (run on 2026-11-19).
+The regression suite contains 276 VHDL tests; all pass (re-run on 2026-11-20).
 The GHDL ``synth`` testsuite corpus is used as a breadth check with
 ``--lint-only`` on 1139 case/top pairs, re-measured on 2026-11-19 with the
-current tree. The counts differ from the earlier sweep, which predates the
-diagnostics added since:
+current tree. The corpus is not part of this repository, so that sweep cannot
+be repeated in-tree; the counts below are retained from that run.
 
 ========================================  =====
 Result                                    Count
@@ -62,9 +66,10 @@ selection artifacts), 4 are entities without an architecture, 19 are parser
 refusals of syntax the frontend does not model, 11 are unknown identifiers,
 mostly standard subprograms, and 10 are driver-count diagnostics. Eight of those
 ten are false positives: two concurrent drivers on a scalar ``std_logic``, or on
-an array or record built from it, are reported as unresolved because the type
-resolver records both ``std_logic`` and ``std_ulogic`` as ``std_ulogic``, so the
-resolved subtype can no longer be told from the unresolved one. In addition,
+a record or custom array built from it, are reported as unresolved because the
+type resolver records both ``std_logic`` and ``std_ulogic`` as ``std_ulogic``,
+so the resolved subtype can no longer be told from the unresolved one
+(``std_logic_vector`` keeps its name and escapes this). In addition,
 3 are case-coverage diagnostics and 7 are other frontend diagnostics. Eight
 case/top pairs are not answered by the frontend at all: four zero-width designs
 fail in ``V3Width``, one ``bit`` ``inout`` fails the net-type check, and three
@@ -100,6 +105,11 @@ Sequential statements and subprograms        Partial    Procedures/functions inl
                                                          limited
 Concurrent statements and generate           Supported  Conditional assignment with no final
                                                          ``else`` is a latch holding the target
+``case`` generate, matching ``case``         Excluded   Legal VHDL-2008 forms; they
+                                                         are refused with a parser error
+Subtypes and type attributes                 Partial    Enumeration range subtypes and
+                                                         ``'base``/``'subtype``/``'element``/
+                                                         ``'simple_name`` are refused
 ``numeric_std`` and ``std_logic_1164``       Partial    Arithmetic and conversions; not every
                                                          function; see library gaps
 ``std_logic_arith``, ``std_logic_signed``    Partial    Conversions, comparisons and
@@ -161,8 +171,13 @@ Where the implementation is sound
   selected drivers, process drivers, hierarchical connections, and the top-level
   enable/drive interface are tested. Conflicting drivers remain a documented
   two-state divergence.
-- Most unsupported constructs produce a source-located ``Unsupported:``
-  diagnostic; 117 corpus cases are classified that way.
+- Most unsupported constructs are refused rather than silently accepted: 257
+  sites use the shared refusal helper, which carries a source location and
+  names the construct. The message form is
+  ``%Error: VHDL <construct> is not supported yet``, so 117 corpus
+  cases are classified by that message. It is not the repository's
+  ``%Error-UNSUPPORTED:`` form, and a few legal forms (matching ``case``, a
+  resolution indication) instead reach a generic parser error.
 
 Semantic divergences
 ====================
@@ -177,6 +192,17 @@ the model, including an ``integer``, where IEEE 1076-2008 6.4.2.1 gives it
 documented model limits, not silent miscompilations. They are separate from the
 type-conformance hole below, which is not a model limit: it accepts programs
 the standard rejects.
+
+One statement-level divergence is not a two-state consequence and is not
+documented as a modelling choice: a ``report`` whose message is not a string
+literal is dropped. ``lowerReport`` returns before it examines the severity, so
+``report "x" & bit'image(y) severity failure`` neither reports nor terminates;
+the same statement with a literal message does terminate. Probed on 2026-11-20
+with a C++ harness: a computed ``severity failure`` left ``gotFinish`` false,
+while the literal form set it; GHDL 7.0.0-dev stops on the same computed
+source. ``t_vhdl_assert`` and ``t_vhdl_assert_finish``
+pin only literal messages. A computed assertion message is replaced by the
+default text, but the assertion still runs and still terminates.
 
 The former overload and bound-check divergences are closed:
 
@@ -309,13 +335,23 @@ The remaining conformance holes are narrower:
 
 - Relational operands that are both arrays are compared only by category, so
   ``std_logic_vector = unsigned`` is still accepted. Only the vector/integer
-  case is gated by a visible numeric package.
+  case is gated by a visible numeric package. Re-probed on 2026-11-20: the
+  frontend accepts the comparison, and GHDL 7.0.0-dev rejects it with "no
+  function declarations for operator ``=``".
 - A character or physical literal has no inferred type outside its context, so
   a character actual for an unrelated formal can pass.
 - ``std_logic`` and ``std_ulogic`` share the normalised ``std_ulogic`` type
   name, so the resolved and unresolved subtypes cannot be distinguished.
 - Conversion relatedness between arrays is coarse: any two arrays convert, even
   with different element types.
+- Standard-package intrinsics are selected by name, not by signature.
+  ``rising_edge`` and ``falling_edge`` accept any named signal, including an
+  ``integer`` and a ``std_logic_vector``; ``to_integer(integer_signal)`` is
+  accepted. ``resize(v, '1')`` is refused, but as a non-static width rather
+  than as the type error it is. These programs are illegal VHDL, and the
+  accepted ones lower to plausible but meaningless logic. GHDL 7.0.0-dev
+  rejects the ``rising_edge`` and ``to_integer`` forms with "no overloaded
+  function found".
 
 
 Internal faults and middle-end leaks
@@ -330,17 +366,20 @@ by:
 - a concurrent procedure assertion is evaluated in its own ``always_comb``;
 - a two-dimensional element target descends one type level per index, so its
   right-hand side is widened to the element width rather than the row width;
-- an unconstrained multi-dimensional port or array conversion is reported as
-  ``Unsupported:`` with its location;
+- an unconstrained multi-dimensional port or array conversion is reported with
+  a source-located "is not supported yet" error;
 - repeated aggregate initializers fold a constant value into one constant and
   chunk a run-time replication, so ``(others => (others => '0'))`` over 2^16
   elements lints in 0.05 s and 20 MiB instead of aborting.
 
 The remaining internal fault is a metavalue choice. A case statement over
-``std_logic_vector`` with a choice such as ``"XX"``, which both GHDL and nvc
-accept, reaches ``V3Number::toUInt`` on a four-state constant through the
-choice-value bookkeeping in ``lowerChoiceConsts`` and ``addChoiceValues``. The
-corpus case is ``synth/err01/case01``; no regression test covers it.
+``std_logic`` or ``std_logic_vector`` with a choice such as ``'X'`` or
+``"XX"``, which both GHDL and nvc accept, reaches ``V3Number::toUInt`` on a
+four-state constant through the choice-value bookkeeping in
+``lowerChoiceConsts`` and ``addChoiceValues``. The corpus case is
+``synth/err01/case01``; no regression test covers it. Re-probed on 2026-11-20:
+a scalar ``'X'`` choice fails with ``toUInt with 4-state 1'bx``, and a
+``"XX"`` vector choice with ``toUInt with 4-state 2'bx``.
 
 Eight other case/top pairs reach a middle-end check instead of a frontend
 answer:
@@ -348,15 +387,21 @@ answer:
 - four zero-width designs, including ``std_logic_vector(-1 downto 0)`` and an
   unconstrained record element, which the subset lists as cleanly refused,
   reach ``V3Width`` and fail with "Width of bit extract must be positive
-  (IEEE 1800-2023 11.5.1)";
+  (IEEE 1800-2023 11.5.1)"; re-probed with a legal null signal that is only
+  assigned ``(others => '0')`` and read through ``'length``, the frontend
+  accepts it and ``V3Width`` fails at the assignment;
 - a ``bit`` (two-state) ``inout`` port, which VHDL permits, fails the net-type
   check with "Net 'q' data type must be 4-state integral ... (IEEE 1800-2023
-  6.7.1)";
+  6.7.1)"; re-probed, same result;
 - two legal designs are rejected as ``BLKANDNBLK``: a plain combinational
   process assigning an output port, and an alias of an input-port slice;
 - one legal inout procedure actual (``neg(mem(n))``) is rejected as
   ``ASSIGNIN`` naming the index ``n`` (``Assigning to input/const variable:
   'n'``).
+
+Only the metavalue, zero-width and ``bit inout`` probes were re-run in this
+tree; the ``BLKANDNBLK`` and ``ASSIGNIN`` cases need the external corpus and
+were not re-checked.
 
 The post-width contract is also checked only in debug runs: ``V3VhdlLink``
 asserts the emitted shape under ``--debug-check``, which the regression driver
@@ -383,24 +428,52 @@ Remaining feature gaps
   their elements would never collide. The resolved check is also wrong at its
   root: ``isResolvedType`` looks for the name ``std_logic``, but ``resolveType``
   records both ``std_logic`` and ``std_ulogic`` as ``std_ulogic``. A scalar
-  ``std_logic`` signal, and an array or record built from it, are therefore
-  reported as unresolved; ``std_logic_vector`` escapes only because it keeps
-  its own name. Eight corpus cases (``issue1428``) are this false positive.
+  ``std_logic`` signal, a record with a ``std_logic`` member, and a custom array
+  of ``std_logic`` are therefore reported as unresolved; ``std_logic_vector``
+  escapes only because it keeps its own name. Eight corpus cases
+  (``issue1428``) are this false positive. Re-probed on 2026-11-20: two drivers
+  on a scalar ``std_logic`` and two drivers on a record member are both
+  rejected, while two drivers on ``std_logic_vector`` bits are accepted. The
+  vector then reaches the middle end as multiple drivers, which emits
+  ``MULTIDRIVEN`` and still resolves in the two-state model rather than by
+  IEEE 1164 resolution.
 - A null (zero-width) array such as ``std_logic_vector(-1 downto 0)`` is
   documented as cleanly refused, but is accepted and then fails in ``V3Width``.
 - A ``bit`` (two-state) ``inout`` port is accepted and then fails the middle
   end's net-type check; the frontend should refuse it with a VHDL diagnostic.
+- Case coverage for an ``integer`` selector is computed against the base
+  32-bit type, not the selector's subtype. A case over ``integer range 0 to 3``
+  that names ``0``, ``1``, ``2`` and ``3`` is reported as not covering every
+  value unless it has an ``others`` arm, although the standard requires
+  coverage of the selector's subtype only (IEEE 1076-2008 10.9). This is a
+  false rejection, not a silent divergence; GHDL 7.0.0-dev accepts the same
+  case without ``others``.
 - Arithmetic and comparison under ``use ieee.std_logic_signed.all`` are
-  refused with ``Unsupported:``; ``std_logic_unsigned`` is modeled.
-- ``report`` with a non-literal message is dropped.
+  refused with a source-located "is not supported yet" error;
+  ``std_logic_unsigned`` is modeled.
+- ``report`` with a non-literal message is dropped, including the
+  ``severity failure`` termination (see `Semantic divergences`_).
 - PSL properties are accepted and skipped, so they never fire.
 - ``while`` and bare loops in processes are refused; dynamic-loop
   ``exit``/``next`` is limited to function folding.
+- ``case generate`` and matching ``case`` (``case?``), both legal VHDL-2008,
+  are refused; ``case?`` surfaces as the generic parse error "expected an
+  expression, got '?'". Conditional expressions, a VHDL-2019 feature, are
+  likewise unsupported.
+- A resolution indication such as ``signal s : resolve bit;`` is refused by a
+  generic parser error, not by a named diagnostic.
+- Enumeration range subtypes (``subtype e2 is e range a1 to a2;``) and the
+  ``'base``, ``'subtype``, ``'element`` and ``'simple_name`` attributes are
+  refused. ``'range``, ``'length``, ``'left``/``'right``, ``'high``/``'low``,
+  ``'pos``/``'val``, ``'succ``/``'pred``, ``'image`` and ``'event`` are modeled.
 - Timing: nonzero ``after`` inside a process, multiple waits, and
   non-clock ``wait on`` are refused.
 - Libraries are not a namespace: a ``use`` clause's library name is recorded
   but never compared, and every design unit is keyed by its folded name only.
-  Two libraries that export the same package name collide. There is no VHDL
+  Two libraries that export the same package name collide: the last package
+  parsed wins silently, and the result changes with file order (re-probed:
+  ``y`` was 1 or 2 depending on argument order). Duplicate entities are
+  reported, so the asymmetry is in packages only. There is no VHDL
   ``-y``/``-v`` autoload either; all design files must be given explicitly.
 - A file read at elaboration is not registered as a build dependency, so a
   change to it does not trigger a re-verilation.
@@ -430,11 +503,11 @@ Measure                                       Value
 Frontend source                               18,869 lines in 11 files
 ``V3VhdlNativeLower.cpp``                     13,636 lines (72% of the frontend)
 ``Lowering`` class declaration                1,101 lines, one class
-``Lowering`` member functions                 140; 14 are over 150 lines
-Largest functions                             705, 392, 374, 314, 307 lines
-Conditions and case labels in the lowering    about 2,200 and 131
-Explicit refusal sites                        227 in the lowering, 31 in the parser
-Direct STL container members in ``Lowering``  33 (46 ``m_`` data members)
+``Lowering`` member functions                 176; 21 are over 150 lines
+Largest functions                             705, 392, 374, 317, 314, 307 lines
+Conditions and case labels in the lowering    2,231 and 130
+Shared refusal-helper sites                   257 (227 lowering, 28 parser, 2 lexer)
+Data members in ``Lowering``                  66, most of them STL containers
 ============================================  =====================================
 
 The consequences are structural rather than cosmetic:
@@ -444,16 +517,17 @@ The consequences are structural rather than cosmetic:
   maps, a type is a flat ``VType`` value carrying a textual ``typeName``, and
   ``boolean`` shares the ``LOGIC`` kind with ``std_logic``. Each construct's
   typing rules are hand-written in the function that creates its AST; that is
-  why type conformance had to be threaded through five separate paths instead
+  why type conformance had to be threaded through six separate paths instead
   of living in one semantic pass.
 - Scope is a flat snapshot, not a chain. Entering a process or inlining a
   subprogram calls ``saveScope``/``restoreScope``, which copy ten containers,
   including the whole signal map. That makes process lowering quadratic by
-  construction: on a generated entity with one process per signal, 250, 500,
-  1000 and 2000 processes take 0.04, 0.12, 0.41 and 1.54 s; 2000 concurrent
-  assignments take 0.04 s, and 500, 1000, 2000 and 4000 of them take 0.01,
-  0.02, 0.04 and 0.09 s. The doubling of the process time is consistent with the
-  copied scope and does not appear on the assignment path.
+  construction. Re-measured on 2026-11-20 on a generated entity with one
+  process per signal: 250, 500, 1000, 2000, 4000 and 8000 processes take 0.05,
+  0.07, 0.13, 0.36, 1.25 and 4.70 s; the last three doublings cost 2.8x, 3.5x
+  and 3.8x. On the assignment path, 500, 1000, 2000, 4000 and 8000 concurrent
+  assignments take 0.05, 0.06, 0.07, 0.10 and 0.17 s. The process path grows
+  quadratically; the assignment path is near linear.
 - Arrays and records are packed into one wide ``AstBasicDType`` vector, not an
   unpacked array or struct. This keeps slicing uniform and makes a 2^16-element
   memory cheap to lint, but an element access becomes a bit select, a dynamic
@@ -461,25 +535,29 @@ The consequences are structural rather than cosmetic:
   variable or type. Model and compile cost grow with the total packed width,
   and the middle end treats an element as a bit range, not as an independent
   signal.
-- Refusals are ad hoc: 258 ``unsupported`` sites, each with a bespoke message
-  and no diagnostic code. They are also plain ``%Error:`` diagnostics rather
-  than the repository's ``Unsupported:`` form, so a log or script cannot tell a
-  deliberate subset refusal from a hard error. That is workable for a pinned
-  subset, but extending it is expensive and coverage is hard to audit
-  mechanically.
+- Refusals are ad hoc: 257 ``unsupported`` sites (227 in the lowering, 28 in
+  the parser, 2 in the lexer), each with a bespoke message and no diagnostic
+  code. They are emitted as plain ``%Error: VHDL ... is not supported yet``
+  rather than the repository's ``%Error-UNSUPPORTED:`` form, so a log or script
+  cannot tell a deliberate subset refusal from a hard error. The documentation
+  still promises ``Unsupported:`` in :file:`usage.rst`, ``V3VhdlNative.h`` and
+  :file:`journal.rst`. That is workable for a pinned subset, but extending it is
+  expensive and coverage is hard to audit mechanically.
 - Parser recovery is minimal. The first parse error in a file stops that file
   (``m_failed``), so a user gets one syntax diagnostic per file. Lowering
   errors do accumulate, so this is a parser limitation, not a frontend-wide
   one.
 - The post-width V3 contract is enforced by ``V3VhdlLink`` only when
-  ``--debug-check`` is on. The regression driver passes it (all 275 tests run
+  ``--debug-check`` is on. The regression driver passes it (all 276 tests run
   that way), but the corpus sweep and an ordinary user run do not; the corpus
   leaks above are what escapes that check.
-- Citation hygiene needs attention: several comments cite IEEE 1800-2023 for
-  VHDL rules, for example the subprogram-overload rule in ``resolveCall``, the
-  array-index rule in ``registerType``, and conversion keyword spelling. Those
-  rules are in IEEE 1076-2008; the wrong reference makes the code harder to
-  review and hides which clause a check implements.
+- Citation hygiene needs attention: 21 comments cite IEEE 1800-2023 for rules
+  that are VHDL rules. Examples are the ``real`` constant comment, the
+  array-index rule in ``registerType``, the subprogram-overload rule in
+  ``resolveCall``, the external-name and configuration syntax comments in the
+  parser, and the waveform rule for ``after``. Those rules are in IEEE
+  1076-2008; the wrong reference makes the code harder to review and hides
+  which clause a check implements.
 
 Inout and tristate
 ==================
@@ -543,14 +621,25 @@ Verification gaps
   hand. There is no automated differential simulation harness in the
   repository, so value differences must be found by targeted tests.
 - The VHDL suite has no dedicated CI job; it must be run explicitly. The suite
-  is 276 tests, 41 of them negative; all pass.
+  is 276 tests, 42 of them negative; all pass.
+- 70 of the 276 test scripts are committed mode 100644, so the documented
+  direct invocation ``test_regress/t/t_<name>.py`` fails with "Permission
+  denied". ``driver.py`` runs them through ``runpy``, so ``make test`` is not
+  affected; either all tests should be executable or the documented invocation
+  should say ``python3``.
 - The negative tests now cover assignment, initial value, constant, return,
   single-candidate call, generic, conversion and operator conformance in
-  ``t_vhdl_type_conf_bad``. The remaining literal and array/array corners are
-  untested.
+  ``t_vhdl_type_conf_bad``. The remaining literal, array/array and intrinsic
+  corners are untested.
 - No test drives a zero-width object through lowering, a metavalue case
-  choice, or a ``bit`` ``inout``; the corpus found the resulting internal error
-  and middle-end leaks, not the regression suite.
+  choice, a ``bit`` ``inout``, a computed ``report`` with ``severity failure``,
+  an illegal intrinsic operand, an exhaustive ``integer`` case, or two
+  same-named packages. The corpus found the internal error and middle-end
+  leaks; the regression suite did not.
+- The external corpus and ``third_party`` trees are not part of this
+  repository, so the corpus sweep and the neorv32 allocation run cannot be
+  reproduced from a checkout. The 276-test suite and the probes in this page
+  are the reproducible evidence.
 - There is no scale or performance test. The process-lowering quadratic in
   `Implementation quality`_ is unguarded, so a regression that copies one more
   container per scope would not be noticed.
@@ -572,11 +661,17 @@ ______
 Order
 ______
 
-1. Fix the metavalue-choice internal error, and refuse or model the eight
-   middle-end leaks (zero-width objects, ``bit`` ``inout``, the
-   ``BLKANDNBLK`` and ``ASSIGNIN`` rejects).
+1. Fix the silent miscompilations: a computed ``report`` must still honour
+   ``severity failure``, standard-package intrinsics need operand checks, and
+   the metavalue-choice internal error must not reach ``V3Number::toUInt``.
+   Then refuse or model the eight middle-end leaks (zero-width objects,
+   ``bit`` ``inout``, the ``BLKANDNBLK`` and ``ASSIGNIN`` rejects), with a
+   regression test for each.
 2. Add a differential simulation harness and a CI job, treat lint-only corpus
    counts as breadth, and add a scale test for the process path.
-3. Implement ``std_logic_signed`` arithmetic and comparison. The remaining
-   value differences are the documented two-state model limits.
+3. Fix the false rejections: integer case coverage against the selector
+   subtype, ``std_logic`` resolution detection, and same-named packages in
+   different libraries. Implement ``std_logic_signed`` arithmetic and
+   comparison. Correct the docs that promise an ``Unsupported:`` prefix. The
+   remaining value differences are the documented two-state model limits.
 4. Revisit the large-memory and neorv32 wrapper allocation failures.
