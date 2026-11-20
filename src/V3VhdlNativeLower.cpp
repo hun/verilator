@@ -105,6 +105,19 @@ struct VType final {
     int indexOffset(int index) const { return ascending ? right - index : index - right; }
 };
 
+//! Whether two base type names are the same VHDL type or closely related (IEEE
+//! 1076-2008 9.3.6): std_logic is the resolved subtype of std_ulogic, and
+//! std_logic_vector of std_ulogic_vector (IEEE 1164)
+static bool baseTypesRelated(const std::string& a, const std::string& b) {
+    if (a == b) return true;
+    const auto logic
+        = [](const std::string& name) { return name == "std_logic" || name == "std_ulogic"; };
+    const auto logicVector = [](const std::string& name) {
+        return name == "std_logic_vector" || name == "std_ulogic_vector";
+    };
+    return (logic(a) && logic(b)) || (logicVector(a) && logicVector(b));
+}
+
 //! Elaborated contents of one package, publishable to the units that use it
 //! An alias: the designator it renames, and the type its mark declares
 struct AliasInfo final {
@@ -1211,7 +1224,8 @@ class Lowering final {
                                 const char* what);
     //! Whether the choices cover every value the selector can take; a selector too
     //! wide to enumerate needs an `others` arm (IEEE 1076-2008 10.9, 11.5)
-    bool choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& covered) const;
+    bool choicesComplete(AstNodeDType* selDtp, const VType& selType,
+                         const std::set<int64_t>& covered) const;
     //! Whether a type has a resolution function: std_logic and the arrays built from
     //! it do, so several drivers are legal (IEEE 1076-2008 12.6.4)
     static bool isResolvedType(const VType& type) {
@@ -1219,7 +1233,17 @@ class Lowering final {
             || type.typeName == "unsigned" || type.typeName == "signed") {
             return true;
         }
-        return type.kind == VType::ARRAY && type.elemp && type.elemp->typeName == "std_logic";
+        // A composite is resolved when every scalar subelement is (IEEE 1076-2008
+        // 12.6.4); a record's fields and an array's element carry their own types
+        if (type.isVector()) return type.elemp && isResolvedType(*type.elemp);
+        if (type.kind == VType::RECORD) {
+            if (type.fields.empty()) return false;
+            for (const VField& field : type.fields) {
+                if (!isResolvedType(*field.type)) return false;
+            }
+            return true;
+        }
+        return false;
     }
     //! Report every unresolved signal that more than one emitted assignment drives
     void checkDrivers();
@@ -2897,7 +2921,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         }
         out.kind = mark == "bit" ? VType::BIT : VType::LOGIC;
         out.dtp = findBasic(flp, mark == "bit" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC);
-        out.typeName = mark == "bit" ? "bit" : (mark == "boolean" ? "boolean" : "std_ulogic");
+        out.typeName = mark == "bit" ? "bit" : (mark == "boolean" ? "boolean" : mark);
         return true;
     }
     if (mark == "integer" || mark == "natural" || mark == "positive") {
@@ -4197,6 +4221,14 @@ AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
         flp->v3error("VHDL: unknown signal '" + expr.args[0]->spelling + "' in an edge function");
         return nullptr;
     }
+    // The std_logic_1164 edge functions take a scalar std_ulogic (IEEE 1164 3.2.6);
+    // a vector, an integer, a boolean or a bit has no such overload
+    VType argType;
+    if (actualType(*expr.args[0], argType)
+        && (argType.kind != VType::LOGIC || argType.isVector() || argType.typeName == "boolean")) {
+        flp->v3error("VHDL: " + expr.a->text + " operand is not std_ulogic");
+        return nullptr;
+    }
     const bool rising = expr.a->text == "rising_edge";
     Edge edge;
     edge.varp = varp;
@@ -4657,7 +4689,24 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
             return nullptr;
         }
     }
-    if (name == "to_integer" || name == "integer" || name == "natural" || name == "positive") {
+    if (name == "to_integer") {
+        // numeric_std declares to_integer only for unsigned and signed (IEEE 1076-2008
+        // 16.8.5); an integer or a std_logic_vector operand is not a conversion
+        if (!valueType.isVector()
+            || (valueType.signing != VSigning::UNSIGNED
+                && valueType.signing != VSigning::SIGNED)) {
+            flp->v3error("VHDL: to_integer operand is not unsigned or signed");
+            valuep->deleteTree();
+            return nullptr;
+        }
+        if (valueType.width > 32) {
+            unsupportedError(flp, name + " of this operand");
+            valuep->deleteTree();
+            return nullptr;
+        }
+        return resizeExpr(valuep, intType(flp), flp);
+    }
+    if (name == "integer" || name == "natural" || name == "positive") {
         if (valueType.isInt()) return valuep;
         if (!valueType.isVector() || valueType.width > 32) {
             unsupportedError(flp, name + " of this operand");
@@ -6628,11 +6677,20 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
             constp = foldedp;
         }
         if (constp->dtypep()->width() != dtp->width()) constp->dtypep(dtp);
+        // A metavalue choice has no two-state ordinal and cannot be matched by a signal
+        // in the cycle model; report it instead of asserting in toUInt()
+        if (constp->num().isFourState()) {
+            unsupportedError(choicep->flp, "metavalue in a case or selected choice");
+            constp->deleteTree();
+            return false;
+        }
         // The nine-valued std_logic is modelled with two states, so two different literals
         // can name one value ('0' and 'L', '1' and 'H'): the pair is a single choice then,
         // not the duplicate the standard rejects (IEEE 1076-2008 10.9)
         if (constp->width() <= 32) {
-            const int64_t value = static_cast<int64_t>(constp->num().toUInt());
+            const int64_t value = constp->num().isSigned()
+                                      ? static_cast<int64_t>(constp->num().toSInt())
+                                      : static_cast<int64_t>(constp->num().toUInt());
             const std::string text = choiceText(*choicep);
             const auto seen = seenValues.find(value);
             if (seen != seenValues.end() && !seen->second.empty() && !text.empty()
@@ -6662,7 +6720,9 @@ bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, std::set<int6
     for (AstConst* const cop : cops) {
         // A value too wide to enumerate is not tracked; such a selector needs `others`
         if (cop->width() > 32) continue;
-        if (covered.insert(static_cast<int64_t>(cop->num().toUInt())).second) continue;
+        const int64_t value = cop->num().isSigned() ? static_cast<int64_t>(cop->num().toSInt())
+                                                    : static_cast<int64_t>(cop->num().toUInt());
+        if (covered.insert(value).second) continue;
         cop->v3error(std::string{"VHDL: duplicate choice in a "} + what
                      + " (IEEE 1076-2008 10.9, 11.5)");
         ok = false;
@@ -6670,7 +6730,8 @@ bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, std::set<int6
     return ok;
 }
 
-bool Lowering::choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& covered) const {
+bool Lowering::choicesComplete(AstNodeDType* selDtp, const VType& selType,
+                               const std::set<int64_t>& covered) const {
     VType enumType;
     if (enumTypeOfDType(selDtp, enumType)) {
         for (size_t i = 0; i < enumType.literals.size(); ++i) {
@@ -6678,7 +6739,18 @@ bool Lowering::choicesComplete(AstNodeDType* selDtp, const std::set<int64_t>& co
         }
         return true;
     }
-    const VType type = typeOfDType(selDtp);
+    VType type = typeOfDType(selDtp);
+    if (selType.kind == VType::INT) {
+        // An integer selector's choices must cover its subtype, not the base 32-bit
+        // type (IEEE 1076-2008 10.9); a range too wide to enumerate needs `others`
+        const int64_t span = static_cast<int64_t>(selType.intHigh) - selType.intLow + 1;
+        if (span <= 0 || span > static_cast<int64_t>(covered.size())) return false;
+        for (int64_t value = selType.intLow; value <= selType.intHigh; ++value) {
+            if (!covered.count(value)) return false;
+        }
+        return true;
+    }
+    if (selType.isVector() && selType.width > 0) type = selType;
     if (type.kind == VType::LOGIC || type.kind == VType::BIT) {
         return covered.count(0) && covered.count(1);
     }
@@ -6767,6 +6839,8 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
     }
     const VType ltype = typeOfTarget(*conc.target, lhsp);
     AstNodeDType* const selDtp = selectorp->dtypep();
+    VType selType;
+    if (!actualType(*conc.selector, selType)) selType = typeOfDType(selDtp);
     // Lower every value once. Checking the lowered value also catches a high-impedance
     // constant produced by a folded call, not only a literal in the source.
     std::vector<AstNodeExpr*> values;
@@ -6849,7 +6923,7 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
         if (!restp) {
             // A selected assignment without `others` must be exhaustive; the
             // fall-through is then unreachable, but a conditional expression needs one.
-            if (bad || !choicesComplete(selDtp, covered)) {
+            if (bad || !choicesComplete(selDtp, selType, covered)) {
                 flp->v3error("VHDL: selected assignment does not cover every value of "
                              "its selector (IEEE 1076-2008 11.5)");
                 lhsp->deleteTree();
@@ -6901,7 +6975,7 @@ AstNode* Lowering::lowerSelected(const Concurrent& conc) {
         selectorp->deleteTree();
         return nullptr;
     }
-    if (!bad && !currentp && !choicesComplete(selDtp, covered)) {
+    if (!bad && !currentp && !choicesComplete(selDtp, selType, covered)) {
         flp->v3error("VHDL: selected assignment does not cover every value of its selector "
                      "(IEEE 1076-2008 11.5)");
         bad = true;
@@ -6998,6 +7072,15 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
             if (empty) return nullptr;
         }
     }
+    // A whole null array is likewise a no-op; skip it before its aggregate value is
+    // lowered into a zero-width expression
+    {
+        VType targetType;
+        if (actualType(*stmt.target, targetType) && targetType.isVector()
+            && targetType.width == 0) {
+            return nullptr;
+        }
+    }
     // A bare `x <= unaffected;` leaves the target unchanged, so emit nothing
     if (stmt.alternatives.empty() && stmt.value && stmt.value->kind == Expr::UNAFFECTED) {
         return nullptr;
@@ -7029,6 +7112,13 @@ AstNode* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable)
     }
     if (!rhsp) {
         lhsp->deleteTree();
+        return nullptr;
+    }
+    // A null array has no elements, so assigning to it is a no-op (IEEE 1076-2008
+    // 5.3.2); emitting a zero-width assignment would fail in V3Width
+    if (ltype.isVector() && ltype.width == 0) {
+        lhsp->deleteTree();
+        rhsp->deleteTree();
         return nullptr;
     }
     // Only variable assignments update immediately; a signal write waits for the
@@ -7183,6 +7273,8 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
     AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
     if (!selectorp) return nullptr;
     AstNodeDType* const selDtp = selectorp->dtypep();
+    VType selType;
+    if (!actualType(*stmt.selector, selType)) selType = typeOfDType(selDtp);
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen
     std::set<int64_t> covered;
@@ -7217,7 +7309,7 @@ AstNode* Lowering::lowerCase(const Stmt& stmt) {
         selectorp->deleteTree();
         return nullptr;
     }
-    if (!bad && !currentp && !choicesComplete(selDtp, covered)) {
+    if (!bad && !currentp && !choicesComplete(selDtp, selType, covered)) {
         flp->v3error("VHDL: case statement does not cover every value of its selector "
                      "(IEEE 1076-2008 10.9)");
         bad = true;
@@ -7865,11 +7957,14 @@ static std::string reportText(const Expr* exprp, const char* fallback) {
 }
 
 AstNode* Lowering::lowerReport(const Stmt& stmt) {
-    // A computed message is not modelled yet: only a literal reaches the model
-    if (stmt.value && stmt.value->kind != Expr::STRING_LIT) return nullptr;
-    AstNode* const displayp = new AstDisplay{
-        stmt.flp, VDisplayType::DT_DISPLAY, reportText(stmt.value.get(), ""), nullptr, nullptr,
-        'd'};
+    // A computed message is not modelled, but the statement still executes: dropping it
+    // would also drop a `severity failure` termination (IEEE 1076-2008 8.3)
+    AstNode* const displayp = new AstDisplay{stmt.flp,
+                                             VDisplayType::DT_DISPLAY,
+                                             reportText(stmt.value.get(), "report"),
+                                             nullptr,
+                                             nullptr,
+                                             'd'};
     // `report ... severity failure` ends the simulation (IEEE 1076-2008 8.3); the other
     // severities only report
     if (stmt.severity == Stmt::SEV_FAILURE) {
@@ -8696,7 +8791,7 @@ bool Lowering::formalType(const TypeSpec& spec, VType& out) const {
         out = VType{};
         out.kind = mark == "bit" ? VType::BIT : VType::LOGIC;
         out.dtp = findBasic(spec.flp, mark == "bit" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC);
-        out.typeName = mark == "bit" ? "bit" : (mark == "boolean" ? "boolean" : "std_ulogic");
+        out.typeName = mark == "bit" ? "bit" : (mark == "boolean" ? "boolean" : mark);
         return true;
     }
     // A character is a VHDL array element, not a numeric_std vector, so it signs like
@@ -8746,15 +8841,7 @@ bool Lowering::typesMatch(const VType& formal, const VType& actual) {
     // Universal integer literals also fit a real formal
     if (formal.kind == VType::REAL && actual.kind == VType::INT) return true;
     if (!formal.typeName.empty() && !actual.typeName.empty()) {
-        if (formal.typeName != actual.typeName) {
-            // std_logic_vector is the resolved subtype of std_ulogic_vector (IEEE 1164)
-            const bool related
-                = (formal.typeName == "std_logic_vector"
-                   && actual.typeName == "std_ulogic_vector")
-                  || (formal.typeName == "std_ulogic_vector"
-                      && actual.typeName == "std_logic_vector");
-            if (!related) return false;
-        }
+        if (!baseTypesRelated(formal.typeName, actual.typeName)) return false;
         // The same base type under different constraints, which is what an unconstrained
         // formal and a constrained actual are (IEEE 1076-2008 12.5)
         return true;
@@ -8845,13 +8932,8 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
             double integral = 0.0;
             if (integralRealLiteral(value, integral)) return true;
         }
-        // std_logic_vector is a resolved subtype of std_ulogic_vector (IEEE 1164)
-        const bool relatedVector
-            = (source.typeName == "std_logic_vector"
-               && target.typeName == "std_ulogic_vector")
-              || (source.typeName == "std_ulogic_vector"
-                  && target.typeName == "std_logic_vector");
-        if (source.typeName != target.typeName && !relatedVector) {
+        // std_logic is the resolved subtype of std_ulogic (IEEE 1164)
+        if (!baseTypesRelated(source.typeName, target.typeName)) {
             value.flp->v3error(std::string{"VHDL: "} + what + " of type '" + source.typeName
                                + "' does not have the target's base type '" + target.typeName
                                + "'");
@@ -8911,9 +8993,8 @@ bool Lowering::conversionRelated(const VType& target, const VType& source) {
     }
     if (target.typeName == "character" && source.kind == VType::INT) return true;
     if (target.isVector() && source.isVector()) return true;
-    if (!target.typeName.empty() && !source.typeName.empty()
-        && target.typeName == source.typeName) {
-        return true;
+    if (!target.typeName.empty() && !source.typeName.empty()) {
+        if (baseTypesRelated(target.typeName, source.typeName)) return true;
     }
     // A literal or aggregate has no type of its own; the mark types it
     return source.typeName.empty();
@@ -8948,7 +9029,7 @@ bool Lowering::logicalOperandsConform(const Expr& a, const Expr& b, const VType&
     // A character literal is a logic or bit element, whichever the other operand needs
     const std::string aName = a.kind == Expr::CHAR_LIT ? "" : elementName(aType);
     const std::string bName = b.kind == Expr::CHAR_LIT ? "" : elementName(bType);
-    if (!aName.empty() && !bName.empty() && aName != bName) {
+    if (!aName.empty() && !bName.empty() && !baseTypesRelated(aName, bName)) {
         a.flp->v3error("VHDL: logical operator operands do not have the same element type");
         return false;
     }
@@ -8995,12 +9076,33 @@ bool Lowering::relationalOperandsConform(const Expr& a, const Expr& b) const {
         a.flp->v3error("VHDL: relational operator operands do not have the same base type");
         return false;
     }
-    if (aType.isVector() && bType.isVector()) return true;
+    if (aType.isVector() && bType.isVector()) {
+        // std_logic_arith declares comparisons between its signed and unsigned
+        // vectors, and between either and an integer; numeric_std does not
+        const auto numericVector = [](const std::string& name) {
+            return name == "unsigned" || name == "signed" || name == "u_unsigned"
+                   || name == "u_signed";
+        };
+        if (numericVector(aType.typeName) && numericVector(bType.typeName)
+            && (m_stdLogicArith || m_stdLogicUnsigned || m_stdLogicSigned)) {
+            return true;
+        }
+        // Otherwise both operands must be of one VHDL array type (or closely related
+        // logic subtypes); std_logic_vector and unsigned are unrelated (IEEE 1076-2008
+        // 9.2.3)
+        if (!aType.typeName.empty() && !bType.typeName.empty()
+            && !baseTypesRelated(aType.typeName, bType.typeName)) {
+            a.flp->v3error("VHDL: relational operator operands do not have the same base type");
+            return false;
+        }
+        return true;
+    }
     if (aType.isVector() || bType.isVector()) {
         a.flp->v3error("VHDL: relational operator compares an array with a scalar");
         return false;
     }
-    if (!aType.typeName.empty() && !bType.typeName.empty() && aType.typeName != bType.typeName) {
+    if (!aType.typeName.empty() && !bType.typeName.empty()
+        && !baseTypesRelated(aType.typeName, bType.typeName)) {
         a.flp->v3error("VHDL: relational operator operands do not have the same base type");
         return false;
     }
@@ -9328,6 +9430,10 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
                 }
             }
         }
+        // A scalar formal keeps its declared subtype: case coverage and attributes see
+        // the formal's bounds, not the actual's narrower ones. An array formal keeps the
+        // actual's bounds, which are what indexing it needs.
+        if (haveFormalType && !formalType.isVector()) binding.type = formalType;
         if (asLvalue && formalp->mode == PortMode::OUT && formalp->cls == FormalDecl::SIGNAL) {
             // Reading an out signal formal before return would see the actual's old value
             binding.readable = false;
@@ -10234,6 +10340,8 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
                                     const InlineCont* exitContp, int depth) {
     AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
     if (!selectorp) return nullptr;
+    VType selType;
+    if (!actualType(*stmt.selector, selType)) selType = typeOfDType(selectorp->dtypep());
     // A selector that folds to a constant picks which arm runs, so the others need no value
     AstConst* const selConstp = foldStatic(selectorp);
     const bool known = selConstp && !selConstp->num().isFourState();
@@ -10312,7 +10420,7 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         branch.resultp = nullptr;
         break;
     }
-    if (!resultp && !known && !bad && choicesComplete(selectorp->dtypep(), covered)) {
+    if (!resultp && !known && !bad && choicesComplete(selectorp->dtypep(), selType, covered)) {
         // Every value of the selector is covered, so no fallthrough value is ever used;
         // any arm's value serves as the chain's default
         for (Branch& branch : branches) {
@@ -11928,6 +12036,24 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             continue;
         }
         if (rejectUnmodelledObject(type, port.flp, /*allowUnconstrained:*/ true)) continue;
+        if (port.dir == PortMode::INOUT) {
+            // V3Tristate needs a four-state net; a VHDL `bit` (or bit_vector) inout
+            // cannot be expressed and must be refused here, not in the net-type check
+            const auto hasTwoState = [](const VType& type, const auto& self) -> bool {
+                if (type.kind == VType::BIT || type.kwd == VBasicDTypeKwd::BIT) return true;
+                if (type.isVector() && type.elemp) return self(*type.elemp, self);
+                if (type.kind == VType::RECORD) {
+                    for (const VField& field : type.fields) {
+                        if (self(*field.type, self)) return true;
+                    }
+                }
+                return false;
+            };
+            if (hasTwoState(type, hasTwoState)) {
+                unsupportedError(port.flp, "inout port of a two-state type");
+                continue;
+            }
+        }
         if (!type.dtp) {
             unsupportedError(port.flp, "port of type '" + port.type.mark
                                            + "' has no resolvable index constraint");
@@ -13285,6 +13411,11 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
     AstNodeExpr* const lhsp = lowerDesignator(*stmt.target, true);
     if (!lhsp) return;
     const VType ltype = typeOfTarget(*stmt.target, lhsp);
+    // A whole null array is a no-op, and a zero-width assignment fails in V3Width
+    if (ltype.isVector() && ltype.width == 0) {
+        lhsp->deleteTree();
+        return;
+    }
     if (stmt.kind == Concurrent::COND_ASSIGN && concHasEdge(stmt)) {
         // Register clocked by the edge the condition names
         m_edges.clear();
@@ -13507,12 +13638,28 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
     Lowering lowering{rootp, &table.impl(), nullptr, &design};
     // A package that declares generics is a template: elaborate only its instances.
     const auto isTemplate = [](const PackageUnit& pkg) { return !pkg.generics.empty(); };
-    for (const PackageUnit& pkg : library.packages)
-        if (!pkg.isBody && !isTemplate(pkg)) lowering.emitPackage(pkg, table.impl());
-    for (const PackageUnit& pkg : library.packages)
-        if (pkg.isBody && !isTemplate(pkg)) lowering.emitPackage(pkg, table.impl());
-    for (const PackageInstance& inst : library.packageInstances)
+    // Libraries are not a namespace here, so two units of one name would silently
+    // replace each other in the table; report the second, as for a duplicate entity
+    std::set<std::string> specNames;
+    std::set<std::string> bodyNames;
+    for (const PackageUnit& pkg : library.packages) {
+        std::set<std::string>& names = pkg.isBody ? bodyNames : specNames;
+        if (!names.insert(pkg.name).second) {
+            pkg.flp->v3error(
+                (pkg.isBody ? "Duplicate VHDL package body: '" : "Duplicate VHDL package: '")
+                + pkg.spelling + "'");
+            continue;
+        }
+        if (isTemplate(pkg)) continue;
+        lowering.emitPackage(pkg, table.impl());
+    }
+    for (const PackageInstance& inst : library.packageInstances) {
+        if (!specNames.insert(inst.name).second) {
+            inst.flp->v3error("Duplicate VHDL package: '" + inst.spelling + "'");
+            continue;
+        }
         lowering.instantiatePackage(library.packages, inst, table.impl());
+    }
     // A specification constant whose call had no body when the specification was emitted
     // is completed by a second pass over the specifications, now that every body is read
     for (int pass = 0; pass < 4 && lowering.hasDeferredConsts(); ++pass) {
