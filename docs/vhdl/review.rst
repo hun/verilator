@@ -23,22 +23,20 @@ outside the pinned idioms. The main risk is not an unsupported construct: it is
 a construct that is accepted and lowered with a different meaning. Assignment,
 return, single-candidate call-actual, generic-actual, type conversion, operator,
 standard-intrinsic and edge-function paths now check that a value belongs to the
-type the standard requires. The 2026-11-20 audit found that this is not yet
-true for every path: scalar port actuals, port and generic defaults, missing
-input ports, subprogram class mismatches, operator chains and case selectors
-still accept programs the standard rejects, and a real or physical subelement
-can crash the frontend. The known model limits remain the two-state collapse,
-the ``report`` fallback text, and the coarse array conversion. See
-`Open audit findings`_ and :file:`plan.md`.
+type the standard requires. The 2026-11-20 conformance audit closed the
+remaining findings with regression tests. The model limits that remain are the
+two-state collapse, the ``report`` fallback text, the coarse array conversion,
+and the inout contract described below.
 
-The in-tree frontend is the only VHDL frontend. GHDL and nvc are used as
-reference simulators in tests, not as build-time frontends.
+The in-tree frontend is the only VHDL frontend; tests do not invoke GHDL or
+nvc. Those simulators are used only in external corpus sweeps that are not
+reproducible from this checkout.
 
 __________________
 Measured coverage
 __________________
 
-The regression suite contains 285 VHDL tests; all pass (re-run on 2026-11-20).
+The regression suite contains 323 VHDL tests; all pass (re-run on 2026-11-20).
 The GHDL ``synth`` testsuite corpus is used as a breadth check with
 ``--lint-only`` on 1139 case/top pairs, re-measured on 2026-11-19 with the
 current tree. The corpus is not part of this repository, so that sweep cannot
@@ -56,7 +54,7 @@ NO_TOP                                       16
 
 Acceptance is not correctness: the corpus is lint-only, and a design counts as
 PASS when the frontend accepts it, not when its simulation matches VHDL. The
-value-checked evidence is the 285 regression tests, 20 ported corpus designs
+value-checked evidence is the 323 regression tests, 20 ported corpus designs
 whose results are compared against GHDL, and the specific probes in this
 assessment.
 
@@ -145,9 +143,9 @@ Where the implementation is sound
   The findings table records each one with its test. Type conformance is now
   checked separately by one predicate on the assignment, declaration, return,
   single-candidate call, generic and conversion paths (see
-  `Type conformance`_). The 2026-11-20 audit found further holes those findings
-  did not cover, including the port, subprogram-class, selector and crash cases
-  in `Open audit findings`_.
+  `Type conformance`_). The 2026-11-20 audit covered the port, subprogram-class,
+  selector and nested-type cases as well; each closed item and its regression
+  test are recorded in `Audit findings`_.
 
 - Elaboration is the strongest part: generic binding and specialization,
   unconstrained ports, generate unrolling, package bodies and deferred
@@ -178,12 +176,13 @@ Where the implementation is sound
   selected drivers, process drivers, hierarchical connections, and the top-level
   enable/drive interface are tested. Conflicting drivers remain a documented
   two-state divergence.
-- Most unsupported constructs are refused rather than silently accepted: 260
+- Most unsupported constructs are refused rather than silently accepted: 238
   sites use the shared refusal helper, which carries a source location and
-  names the construct. The message form is
-  ``%Error-UNSUPPORTED: Unsupported: VHDL <construct>``, so 117 corpus
-  cases are classified by that message. A few legal forms (matching ``case``,
-  a resolution indication) instead reach a generic parser error.
+  names the construct. The emitted form is
+  ``%Error: ... Unsupported: VHDL <construct>`` (an ordinary error, not
+  ``%Error-UNSUPPORTED``), so the shipped corpus runner does not classify those
+  cases as UNSUPPORTED. A few legal forms (matching ``case``, a resolution
+  indication) instead reach a generic parser error.
 
 Semantic divergences
 ====================
@@ -403,13 +402,9 @@ refused with a source-located "VHDL metavalue in a case or selected choice is
 not supported yet" diagnostic; the corpus case is ``synth/err01/case01``, and
 ``t_vhdl_case_metavalue_unsup`` covers the scalar and vector forms.
 
-The 2026-11-20 audit found one crash that the earlier list does not cover: a
-``real`` or physical type nested in an array element or record member escapes
-``rejectUnmodelledObject``, which only checks the top-level type. Using such an
-element crashes in ``AstNodeDType::width`` on a null dtype, reached through
-``typeOfLowered``; both ``integer(r(0))`` and ``r(0) < r(1)`` reproduce it for
-an array of ``real``, and ``integer(r.f)`` for a record field. The fix is the
-recursive type gate in :file:`plan.md` (WP1).
+The earlier real/physical crash is closed: a ``real`` or physical type nested in
+an array element or record member is now rejected by the recursive type gate in
+``rejectUnmodelledObject``, and ``t_vhdl_nested_real_unsup`` pins the diagnostic.
 
 The remaining middle-end leaks are:
 
@@ -426,7 +421,7 @@ The remaining middle-end leaks are:
 The ``BLKANDNBLK`` and ``ASSIGNIN`` cases need the external corpus and were not
 re-checked; the metavalue, null-assignment and ``bit inout`` probes were.
 
-The post-width contract is also checked only in debug runs: ``V3VhdlLink``
+The pre-width contract is also checked only in debug runs: ``V3VhdlLink``
 asserts the emitted shape under ``--debug-check``, which the regression driver
 passes but the corpus sweep and an ordinary user run do not. A release build can
 therefore carry a malformed dtype into a middle-end pass. The frontend should
@@ -437,14 +432,13 @@ The full neorv32 ``rtl/`` tree with its stock Verilog wrapper still aborts with
 ``std::bad_alloc`` under an 8 GiB limit when the wrapper's complete generic set
 is specialized. The core alone remains clean.
 
-Open audit findings
-===================
+Audit findings
+==============
 
 The 2026-11-20 follow-up audit with GHDL 7.0.0-dev and nvc re-probed the
-shipped frontend with ``--lint-only`` and ``--cc``. The items below are
-accepted or refused differently from VHDL and the subset. :file:`plan.md`
-assigns each a work package (WP) and a regression test; this table is the
-source list for that plan.
+shipped frontend with ``--lint-only`` and ``--cc``. The items below record
+where the frontend accepts or refuses differently from VHDL and the subset;
+each has a regression test.
 
 Silently accepted, wrong or missing model
 -----------------------------------------
@@ -648,13 +642,13 @@ The lowering is where the cost sits. Measured on the current tree:
 ============================================  =====================================
 Measure                                       Value
 ============================================  =====================================
-Frontend source                               19,016 lines in 11 files
-``V3VhdlNativeLower.cpp``                     13,783 lines (73% of the frontend)
-``Lowering`` class declaration                1,125 lines, one class
+Frontend source                               19,680 lines in 11 files
+``V3VhdlNativeLower.cpp``                     14,273 lines (73% of the frontend)
+``Lowering`` class declaration                1,119 lines, one class
 ``Lowering`` member functions                 176; 21 are over 150 lines
 Largest functions                             705, 392, 374, 317, 314, 307 lines
 Conditions and case labels in the lowering    2,260 and 132
-Shared refusal-helper sites                   260 (230 lowering, 28 parser, 2 lexer)
+Shared refusal-helper sites                   238 (233 lowering, 2 lexer, 1 parser)
 Data members in ``Lowering``                  66, most of them STL containers
 ============================================  =====================================
 
@@ -668,14 +662,11 @@ The consequences are structural rather than cosmetic:
   why type conformance had to be threaded through six separate paths instead
   of living in one semantic pass.
 - Scope is a flat snapshot, not a chain. Entering a process or inlining a
-  subprogram calls ``saveScope``/``restoreScope``, which copy ten containers,
-  including the whole signal map. That makes process lowering quadratic by
-  construction. Re-measured on 2026-11-20 on a generated entity with one
-  process per signal: 250, 500, 1000, 2000, 4000 and 8000 processes take 0.05,
-  0.07, 0.13, 0.36, 1.25 and 4.70 s; the last three doublings cost 2.8x, 3.5x
-  and 3.8x. On the assignment path, 500, 1000, 2000, 4000 and 8000 concurrent
-  assignments take 0.05, 0.06, 0.07, 0.10 and 0.17 s. The process path grows
-  quadratically; the assignment path is near linear.
+  subprogram calls ``saveScope``/``restoreScope``, which copy eleven
+  containers, including the whole signal map. That makes process lowering
+  quadratic by construction. A local probe, with no benchmark script shipped,
+  measured 0.05 s at 250 processes growing to 4.70 s at 8000; the trend is
+  structural, but the absolute numbers are not reproducible from a checkout.
 - Arrays and records are packed into one wide ``AstBasicDType`` vector, not an
   unpacked array or struct. This keeps slicing uniform and makes a 2^16-element
   memory cheap to lint, but an element access becomes a bit select, a dynamic
@@ -684,18 +675,19 @@ The consequences are structural rather than cosmetic:
   and the middle end treats an element as a bit range, not as an independent
   signal.
 - Refusals use one shared helper with a source location and the repository's
-  ``%Error-UNSUPPORTED: Unsupported:`` form (260 sites: 230 in the lowering, 28
-  in the parser, 2 in the lexer), so a log can tell a deliberate subset refusal
-  from a hard error. Each message is bespoke, so coverage is still audited
-  mechanically by the test goldens.
+  ``%Error: ... Unsupported: VHDL ...`` form (238 sites: 233 in the lowering,
+  2 in the lexer, 1 in the parser), so a log can tell a deliberate subset
+  refusal from a hard error. Each message is bespoke, so coverage is still
+  audited mechanically by the test goldens.
 - Parser recovery is minimal. The first parse error in a file stops that file
   (``m_failed``), so a user gets one syntax diagnostic per file. Lowering
   errors do accumulate, so this is a parser limitation, not a frontend-wide
   one.
-- The post-width V3 contract is enforced by ``V3VhdlLink`` only when
-  ``--debug-check`` is on. The regression driver passes it (all 285 tests run
-  that way), but the corpus sweep and an ordinary user run do not; the corpus
-  leaks above are what escapes that check.
+- The pre-width V3 contract is enforced by ``V3VhdlLink`` only when
+  ``--debug-check`` is on, and it runs inside ``readFiles`` before ``V3Width``.
+  The regression driver passes it (all 323 tests run that way), but the corpus
+  sweep and an ordinary user run do not; the corpus leaks above are what
+  escapes that check.
 - Citation hygiene needs attention: 21 comments cite IEEE 1800-2023 for rules
   that are VHDL rules. Examples are the ``real`` constant comment, the
   array-index rule in ``registerType``, the subprogram-overload rule in
@@ -740,11 +732,11 @@ At a non-top instance the port becomes an input plus ``__en``/``__out``
 connected to the parent signal, and reads of the signal inside the parent see
 the resolved value. At the top-level C++ interface:
 
-- without :vlopt:`--pins-inout-enables`, the port is a single inout field. The
-  model combines the external value with the internal driver by OR, and reads
-  inside the design see that combined value. This is the most convenient
-  single-driver interface, but the testbench cannot separately observe the
-  module's drive when an external driver is also present.
+- without :vlopt:`--pins-inout-enables`, the port is a single inout field and
+  the model holds one two-state value. The testbench writes the externally
+  resolved value to that field; reads inside the design see that value. There
+  is no IEEE 1164 resolution and no guaranteed OR of an external and an
+  internal driver. Use the enabled interface below when another driver exists.
 - with :vlopt:`--pins-inout-enables`, the port is an input and the driver is
   exposed as ``name__en`` and ``name__out``. The testbench supplies the
   externally resolved value. Use this interface when external drivers exist.
@@ -765,13 +757,11 @@ Verification gaps
 - The corpus is lint-only, and the regression suite pins expected values by
   hand. There is no automated differential simulation harness in the
   repository, so value differences must be found by targeted tests.
-- The VHDL suite has no dedicated CI job; it must be run explicitly. The suite
-  is 285 tests, 47 of them negative; all pass.
-- 70 of the 285 test scripts are committed mode 100644, so the documented
-  direct invocation ``test_regress/t/t_<name>.py`` fails with "Permission
-  denied". ``driver.py`` runs them through ``runpy``, so ``make test`` is not
-  affected; either all tests should be executable or the documented invocation
-  should say ``python3``.
+- The VHDL suite has no dedicated CI job; it must be run explicitly. It has
+  323 drivers (74 negative, 75 diagnostic goldens); all pass.
+- All VHDL test scripts are committed mode 100755, so the documented direct
+  invocation ``test_regress/t/t_<name>.py`` works; ``driver.py`` also runs
+  them through ``runpy``.
 - The negative tests cover assignment, initial value, constant, return,
   single-candidate call, generic, conversion and operator conformance in
   ``t_vhdl_type_conf_bad``. The new tests add ``t_vhdl_intrinsic_bad``
@@ -786,7 +776,7 @@ Verification gaps
   either a reduced reproducer or the external corpus.
 - The external corpus and ``third_party`` trees are not part of this
   repository, so the corpus sweep and the neorv32 allocation run cannot be
-  reproduced from a checkout. The 285-test suite and the probes in this page
+  reproduced from a checkout. The 323-test suite and the probes in this page
   are the reproducible evidence.
 - There is no scale or performance test. The process-lowering quadratic in
   `Implementation quality`_ is unguarded, so a regression that copies one more
@@ -811,13 +801,12 @@ ______
 
 1. Close the remaining middle-end leaks: zero-width objects outside a
    whole-array assignment, and the ``BLKANDNBLK`` and ``ASSIGNIN`` rejects,
-   with a reduced regression test for each. Check the post-width contract
+   with a reduced regression test for each. Check the pre-width contract
    unconditionally rather than only under ``--debug-check``.
 2. Add a differential simulation harness and a CI job, treat lint-only corpus
    counts as breadth, and add a scale test for the process path.
 3. Implement ``std_logic_signed`` arithmetic and comparison, ``case generate``,
    matching ``case``, enumeration range subtypes, resolution indications and
-   the missing type attributes. Tighten array-conversion conformance. Correct
-   the docs that promise an ``Unsupported:`` prefix. The remaining value
-   differences are the documented two-state model limits.
+   the missing type attributes. Tighten array-conversion conformance. The
+   remaining value differences are the documented two-state model limits.
 4. Revisit the large-memory and neorv32 wrapper allocation failures.

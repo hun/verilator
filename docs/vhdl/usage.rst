@@ -33,7 +33,7 @@ files with other extensions is selected with
 
 .. code-block:: bash
 
-   verilator --lint-only --language vhdl design.v
+   verilator --lint-only --language vhdl design.vhdl
 
 The extension wins, so :vlopt:`--language vhdl \<--language\>` never
 reinterprets a :file:`.v` or :file:`.sv` file as VHDL.

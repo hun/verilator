@@ -13,6 +13,6 @@ VHDL frontend: Verilator invokes no external analyzer.
    :maxdepth: 2
 
    usage
+   limitations
    architecture
    review
-   findings

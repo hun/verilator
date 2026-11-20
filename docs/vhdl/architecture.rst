@@ -78,9 +78,10 @@ are collected per design unit, so each unit carries the packages it can see.
 
 ``parseDesignFile`` dispatches on the design-unit keyword: ``entity``,
 ``architecture``, ``package``, ``configuration``, plus the PSL directives that
-are skipped. Every construct the frontend does not model is refused at parse
-time with a diagnostic naming the construct, which is why most unsupported
-features surface before any lowering happens.
+are skipped. Every construct the frontend does not model is refused by the
+lexer, parser, or lowering pass with a diagnostic naming the construct; most
+refusal sites are in lowering, so most unsupported features surface during
+elaboration.
 
 The parser also carries the checks that need the source form rather than a
 lowered value:
@@ -246,8 +247,7 @@ Testing
 _______________
 
 Every construct the frontend supports is pinned by a test in ``test_regress/t``
-that fails without it, and the value is confirmed with an independent simulator.
-GHDL is the default reference; nvc (``nvc --std=2008``) is used when the two
-disagree, and has settled arguments GHDL got wrong. The findings these tests
-came from, and the ones still open, are in :doc:`findings`; the current
-coverage and remaining correctness risks are assessed in :doc:`review`.
+that fails without it. The suite checks generated C++ values directly; no
+external simulator is invoked. GHDL and nvc are used only for external corpus
+sweeps that are not reproducible from this repository. The current coverage
+and remaining correctness risks are assessed in :doc:`review`.

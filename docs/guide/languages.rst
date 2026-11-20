@@ -80,8 +80,8 @@ by name, and a VHDL entity can instantiate others below a SystemVerilog top.
 A VHDL design cannot instantiate a SystemVerilog module.
 
 What the VHDL frontend accepts, and where its model diverges from a VHDL
-simulator, is tabulated in :doc:`../vhdl/review`; :doc:`../vhdl/usage` shows
-the flow.
+simulator, is summarized in :doc:`../vhdl/limitations` and assessed in
+:doc:`../vhdl/review`; :doc:`../vhdl/usage` shows the flow.
 
 
 Verilog AMS Support

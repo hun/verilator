@@ -106,50 +106,30 @@ Both `dist` checks pass now; the changes are recorded here for the PR:
    updated. Header growth shifted line numbers in 72 diagnostic goldens; they
    were corrected, and all 323 VHDL tests pass through `driver.py`.
 
-#### B. Documentation is not yet truthful
+#### B. Documentation is now truthful
 
-The docs are extensive but contain contradictions that a reviewer will find
-immediately:
+The contradictions were resolved in the shipped docs:
 
-- **Inout "OR" claim**: `docs/vhdl/review.rst` says the default top-level inout
-  combines external and internal values by OR. The model is still one two-state
-  field; only scheduler change-detect ordering makes the current test pass.
-  Decide the contract: implement explicit resolution, or document that external
-  drivers must use `--pins-inout-enables`. Do not claim an OR guarantee the
-  model does not provide.
-  The inout fix's own harness (`t_tri_inout_top.cpp:34-36`) asserts this OR
-  behavior, so the contract decision also changes that expectation.
-- **`%Error-UNSUPPORTED` claim is false**: goldens show
-  `%Error: ... Unsupported: VHDL ...`, because the helper uses
-  `v3error("Unsupported: ...")`, which is `EC_ERROR`. The corpus runner searches
-  for `UNSUPPORTED`/"not supported yet", so the reported corpus counts are not
-  reproducible with the shipped runner.
-- **Broken `--language` example**: `docs/vhdl/usage.rst` shows
-  `verilator --language vhdl design.v`. Verified: extensions win, so
-  `design.v` is parsed as SystemVerilog and fails. The example must use a
-  non-`.v/.sv` extension or be retracted.
-- **Mixed-language claims conflict**: the guide says mixing works,
-  `vhdl_synth_subset.md` says it is excluded, and `review.rst` says partial.
-  Choose one first-milestone policy.
-- **Audit status contradicts itself**: the review opening says several illegal
-  forms are still accepted and a nested real/physical crash remains; the audit
-  table marks them fixed and `plan.md` says WP1--WP13 are implemented.
-- **Architecture overclaims**: "most unsupported features surface at parse
-  time" is false -- 238 `unsupportedError` sites exist, 233 in lowering;
-  `review.rst:687` itself claims 230/28/2 (lowering/parser/lexer), which does
-  not match the tree (233/1/2). "Every value is confirmed with an independent
-  simulator" is false -- there is no automated differential harness.
-- **"Post-width AST" label is wrong**: `V3VhdlLink` runs inside `readFiles`
-  after `V3LinkCells` (`V3Global.cpp:199-203`), before `V3Width`
-  (`Verilator.cpp:222`). It is a pre-width contract.
-- **Counts are stale**: docs say 285 tests, 239 tests, 47 negative, 70
-  non-executable, 13,783 lowering lines. Actual: 323 drivers, 74 `_bad`/`_unsup`
-  drivers (75 `.out` goldens), 98 mode-`100644` scripts, 14,273 lowering lines.
-- **Historical root files must not ship**: `VHDL_FRONTEND_PLAN.md`, `plan.md`,
-  `handoff.md`, `vhdl_translator_plan.md`, `TODO_native.md`, and
-  `findings.rst` / `journal-guide.md` under `docs/vhdl`. `journal.rst` has been
-  removed from the tree; these are process logs, several explicitly say "not
-  user documentation".
+- The inout section no longer promises an OR. It documents one two-state field,
+  no IEEE resolution, and the `--pins-inout-enables` interface for external
+  drivers. `t_tri_inout_top` still encodes the single-field expectation.
+- Refusals are documented as `%Error: ... Unsupported: VHDL ...`; the false
+  `%Error-UNSUPPORTED` claim and the non-reproducible corpus classification
+  were removed.
+- `usage.rst` now uses `design.vhdl` in the `--language` example.
+- Mixed-language policy is one contract: an SV top instantiating a VHDL entity
+  in one invocation, and a VHDL hierarchy as a `--lib-create` library. A VHDL
+  design cannot instantiate an SV module directly.
+- The audit opening and table agree: all findings are closed with tests. The
+  architecture page no longer claims parse-time dominance or
+  independent-simulator confirmation.
+- `V3VhdlLink` is described as a pre-width, debug-gated contract.
+- Counts are current: 323 drivers, 74 negative drivers (75 goldens), 14,273
+  lowering lines. All drivers are git mode `100755`.
+- Historical process logs were removed from the PR tree: the root planning
+  files, `docs/vhdl/findings.rst`, `journal.rst`, and `vhdl_synth_subset.md`.
+  `journal-guide.md` was converted to `.rst` but deliberately left untracked.
+  A short user-facing `docs/vhdl/limitations.rst` replaces the subset plan.
 
 #### C. Core integration risks
 
@@ -188,9 +168,8 @@ Not blockers, but they weaken the "independent verification" story:
   `t_vhdl_proc_multiple` checks no values.
 - 17 `--binary` tests (15 use `wait for`, 3 assert absolute times), but zero
   pass `--trace*`/`--timing`; only one `--pins-inout-enables` test.
-- 98 test scripts are git mode `100644`; direct invocation as documented fails,
-  though `driver.py` uses `runpy`.
-- `vhdl_frontend.flags()` is a dead shim imported by 316 tests.
+- All 323 VHDL drivers are git mode `100755`; direct invocation works.
+- The `vhdl_frontend.flags()` shim was deleted; drivers pass flags directly.
 - Duplicate/near-duplicate tests: `t_vhdl_native_cnt` (duplicate of
   `t_vhdl_cnt`), `dyn_slice`/`dynslice`, repeated bare-`wait;` coverage in
   three `wait_*` fixtures. `native_rst` is not a duplicate.
@@ -283,15 +262,16 @@ Do one refactor PR with no behavior change to make the rest reviewable:
 
 ### 3.4 Branch shaping
 
-- Rebase onto latest `origin/master`; the inout fix should land first.
-- Remove all historical/planning artifacts from the PR tree.
-- Keep only `docs/vhdl/index.rst`, a corrected `usage.rst`, a concise
-  `limitations.rst`, and `docs/guide` links.
-- Convert `vhdl_synth_subset.md` into one short user-facing "supported subset
-  and divergences" page, not the 703-line planning document.
+- The inout fix landed first as `600a1d2f`; rebase onto latest `origin/master`
+  is still pending.
+- Historical and planning artifacts were removed from the PR tree.
+- Docs are now `index.rst`, `usage.rst`, `architecture.rst`, `review.rst`,
+  `limitations.rst`, and `docs/guide` links. `vhdl_synth_subset.md` was
+  replaced by the short `limitations.rst` page.
 - CI dist checks are green: whitelist, renamed `.v`/`.dat` fixtures,
   normalized licenses and copyright lines, corrected diagnostic goldens.
-- Fix test permissions and delete `vhdl_frontend.flags()` indirection.
+- Test permissions are `100755` and the `vhdl_frontend.flags()` indirection
+  is deleted.
 - Re-run `make test` plus the VHDL suite; document exact command and result.
 - Do not edit `Changes` or `docs/CONTRIBUTORS`.
 
@@ -311,8 +291,8 @@ Give reviewers a one-page guide before the diff:
 ## 4. Recommended order
 
 1. Land `fix-inout-coalesce` (done on this branch as `600a1d2f`).
-2. Fix docs contradictions and test permissions. CI dist blockers are resolved;
-   VHDL regression licenses are normalized.
+2. Fix docs contradictions and test permissions -- done. CI blockers, licenses,
+   process-log removal, and the limitations page are in place.
 3. Mechanical lowerer split + unconditional contract check.
 4. Open the RFC/design issue.
 5. Open PR 0 (plumbing) with a green VHDL option/extension test.
