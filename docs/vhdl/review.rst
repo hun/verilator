@@ -522,7 +522,9 @@ Silently accepted, wrong or missing model
        gate walks array elements and record members.
    * - 10
      - null-range object or port (``std_logic_vector(0 to -1)``)
-     - Accepted and can reach the middle end; the subset tier is ``X``.
+     - Supported as an empty value: a whole-array assignment is a no-op, and
+       ``'length`` reads zero. Other uses of a zero-width object are not
+       modelled; the subset tier is now ``S``.
 
 Legal forms refused
 -------------------
@@ -561,8 +563,8 @@ Legal forms refused
 
 These findings supersede the N117 port claim and the N112 case-completeness
 claim as stated above; the corresponding work packages add the missing checks
-without changing the accepted set for legal designs. Work packages 1--9, 11
-and 12 are implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
+without changing the accepted set for legal designs. Work packages 1--13 are
+implemented or decided in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_subp_class``, ``t_vhdl_port_*``, ``t_vhdl_generic_shape_bad``,
 ``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup``,
 ``t_vhdl_disconnect_unsup``, ``t_vhdl_component_*``, ``t_vhdl_*_chain*``,
@@ -572,8 +574,8 @@ and 12 are implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_entity_passive_bad``, ``t_vhdl_int_overflow_bad``,
 ``t_vhdl_attr_length_bad``, ``t_vhdl_shift_count_bad``,
 ``t_vhdl_arch_qual``, ``t_vhdl_array_idx_qual``, ``t_vhdl_inst_nomap``,
-``t_vhdl_use_op``, ``t_vhdl_int_type`` and ``t_vhdl_top_case``); work packages
-10 and 13 remain open.
+``t_vhdl_use_op``, ``t_vhdl_int_type`` and ``t_vhdl_top_case``). WP10 keeps
+the null-array extension and updates the subset tier.
 
 Two tier rows also disagree with the implementation in the other direction: a
 general ``wait until <condition>`` and ``signal``-class subprogram parameters

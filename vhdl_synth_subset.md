@@ -639,7 +639,7 @@ The following are always rejected, with a specific reason:
 | External names | Verilator hierarchy is not the VHDL hierarchy. |
 | Allocators, access deallocation | Same as access types. |
 | Multi-dimensional ports | UG901 does not accept them as ports. |
-| Zero-width/null arrays | No unambiguous hardware meaning. |
+| Zero-width/null arrays | Supported as an empty value: a whole-array assignment is a no-op (`t_vhdl_null_assign`); other uses of a zero-width object are not modelled. |
 | `linkage` ports, `disconnect`, `guarded` signals | UG901 does not support them. |
 | Deferred constants, `register`/`bus` signal kinds | UG901 does not support them. |
 | Fixed/float packages | Would require a fixed-point/floating value model. |
