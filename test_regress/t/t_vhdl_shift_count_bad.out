@@ -1,0 +1,4 @@
+%Error: t/t_vhdl_shift_count_bad.vhdl:20:1: VHDL: shift count is not an integer
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_shift_count_bad.vhdl:21:1: VHDL: shift count is not an integer
+%Error: Exiting due to

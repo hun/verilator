@@ -515,7 +515,7 @@ Silently accepted, wrong or missing model
      - ``integer'high + 1``, ``2 ** 31``, ``v sll '1'``, ``i'length`` on a
        scalar
      - Static fold overflow wraps silently; the shift count and array-only
-       attribute checks are missing.
+       attribute checks are missing. Fixed: all three are errors.
    * - 1
      - ``real``/physical type as an array element or record member
      - Accepted; the first use crashes in ``AstNodeDType::width`` on a null
@@ -561,15 +561,17 @@ Legal forms refused
 
 These findings supersede the N117 port claim and the N112 case-completeness
 claim as stated above; the corresponding work packages add the missing checks
-without changing the accepted set for legal designs. Work packages 1--8 are
+without changing the accepted set for legal designs. Work packages 1--9 are
 implemented in the tree (tests ``t_vhdl_nested_real_unsup``,
 ``t_vhdl_subp_class``, ``t_vhdl_port_*``, ``t_vhdl_generic_shape_bad``,
 ``t_vhdl_inst_arch*``, ``t_vhdl_cfg_spec_unsup``,
 ``t_vhdl_disconnect_unsup``, ``t_vhdl_component_*``, ``t_vhdl_*_chain*``,
-``t_vhdl_mixed_array_op_bad``, ``t_vhdl_char_ctx_bad``, ``t_vhdl_case_*_bad``
-and ``t_vhdl_decl_*``, ``t_vhdl_label_*``, ``t_vhdl_severity_bad``,
+``t_vhdl_mixed_array_op_bad``, ``t_vhdl_char_ctx_bad``, ``t_vhdl_case_*_bad``,
+``t_vhdl_decl_*``, ``t_vhdl_label_*``, ``t_vhdl_severity_bad``,
 ``t_vhdl_pkg_body_orphan_bad``, ``t_vhdl_subp_dup_bad``,
-``t_vhdl_entity_passive_bad``); the remaining rows stay open.
+``t_vhdl_entity_passive_bad``, ``t_vhdl_int_overflow_bad``,
+``t_vhdl_attr_length_bad`` and ``t_vhdl_shift_count_bad``); the remaining rows
+stay open.
 
 Two tier rows also disagree with the implementation in the other direction: a
 general ``wait until <condition>`` and ``signal``-class subprogram parameters

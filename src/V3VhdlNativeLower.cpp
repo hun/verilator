@@ -129,6 +129,23 @@ static bool arrayBaseTypesRelated(const std::string& a, const std::string& b) {
     return baseTypesRelated(canonical(a), canonical(b));
 }
 
+//! Whether an integer expression is built only from literals and static scalar attributes,
+//! so evaluating it cannot depend on a folded constant this pass has not completed
+static bool literalIntegerExpr(const Expr& expr) {
+    switch (expr.kind) {
+    case Expr::INT_LIT: return true;
+    case Expr::PAREN:
+    case Expr::UNARY: return expr.a && literalIntegerExpr(*expr.a);
+    case Expr::BINARY:
+        return expr.a && expr.b && literalIntegerExpr(*expr.a) && literalIntegerExpr(*expr.b);
+    case Expr::ATTR:
+        return expr.a && expr.a->kind == Expr::NAME
+               && (expr.text == "high" || expr.text == "low" || expr.text == "left"
+                   || expr.text == "right" || expr.text == "length");
+    default: return false;
+    }
+}
+
 //! Whether a case or selected-assignment selector is discrete, or a one-dimensional
 //! array of a discrete element type (IEEE 1076-2008 10.9)
 static bool discreteSelectorType(const VType& type) {
@@ -3593,6 +3610,22 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
 AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
+    // A static integer expression must fit the 32-bit integer type (IEEE 1076-2008 9.1);
+    // the unrolled multiply or the middle end would otherwise wrap it silently
+    if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem"
+         || op == "**")
+        && expr.a && expr.b && literalIntegerExpr(expr)) {
+        VType aType;
+        VType bType;
+        if (actualType(*expr.a, aType) && actualType(*expr.b, bType) && aType.isInt()
+            && bType.isInt() && aType.width <= 32 && bType.width <= 32) {
+            int64_t value = 0;
+            if (evalInt(expr, value) && (value < -0x80000000LL || value > 0x7fffffffLL)) {
+                flp->v3error("VHDL: integer overflow in a static expression");
+                return nullptr;
+            }
+        }
+    }
     // An explicitly declared operator with matching parameter types takes precedence over
     // the built-in operator of the same symbol
     if (expr.a && expr.b) {
@@ -4065,6 +4098,12 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     if (op == "sll" || op == "srl" || op == "sla" || op == "sra" || op == "rol" || op == "ror") {
         if (!lt.isVector()) {
             unsupportedError(flp, "shift or rotate of a non-vector value");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+        if (!rt.isInt()) {
+            flp->v3error("VHDL: shift count is not an integer");
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
@@ -5806,6 +5845,10 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
     } else if (attribute == "right") {
         value = typep->right;
     } else if (attribute == "length") {
+        if (!typep->isVector()) {
+            flp->v3error("VHDL: 'length is only defined for an array type");
+            return nullptr;
+        }
         value = typep->length();
     } else if (attribute == "ascending") {
         return bitConst(flp, typep->ascending ? '1' : '0');
