@@ -24,8 +24,8 @@ int main(int argc, char** argv) {
     int fails = 0;
     struct {
         const char* name;
-        int got;
-        int exp;
+        uint32_t got;
+        uint32_t exp;
     } checks[] = {
         {"c97", topp->c97, 97},  // 'pos(character'val(97))
         {"cupp", topp->cupp, 32},  // 'pos('A') - 'pos('a')
@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     };
     for (const auto& c : checks) {
         if (c.got != c.exp) {
-            std::printf("%%Error: %s=%d exp=%d\n", c.name, c.got, c.exp);
+            std::printf("%%Error: %s=%u exp=%u\n", c.name, c.got, c.exp);
             ++fails;
         }
     }
