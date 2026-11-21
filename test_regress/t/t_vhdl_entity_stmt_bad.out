@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_entity_stmt_bad.vhdl:20:3: VHDL: instance, block or generate in the entity statement part (IEEE 1076-2008 3.2.4).
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

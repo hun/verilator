@@ -756,7 +756,17 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     // The entity's own statement part drives the module as well
     const bool savedPassive = m_passive;
     m_passive = true;
-    for (const auto& stmtp : entity.stmts) emitConcurrent(*stmtp);
+    for (const auto& stmtp : entity.stmts) {
+        // Only passive statements belong here (IEEE 1076-2008 3.2.4); an assignment is
+        // reported where it lowers, which also covers one inside a process
+        if (stmtp->kind == Concurrent::INSTANCE || stmtp->kind == Concurrent::BLOCK
+            || stmtp->kind == Concurrent::GEN_FOR || stmtp->kind == Concurrent::GEN_IF) {
+            stmtp->flp->v3error("VHDL: instance, block or generate in the entity statement "
+                                "part (IEEE 1076-2008 3.2.4).");
+            continue;
+        }
+        emitConcurrent(*stmtp);
+    }
     m_passive = savedPassive;
     for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
     checkDrivers();
@@ -1612,11 +1622,9 @@ bool Lowering::selectInstanceArchitecture(const Concurrent& conc, const EntityUn
             if (!isDefault) {
                 const auto moduleIt
                     = m_designp->archModules.find({conc.instanceName, conc.architectureName});
-                if (moduleIt == m_designp->archModules.end()) {
-                    flp->v3error("VHDL: no module was lowered for entity '" + conc.instanceName
-                                 + "' and architecture '" + conc.architectureName + "'.");
-                    return false;
-                }
+                // createSelectedArchModules lowered one for every such selection
+                UASSERT(moduleIt != m_designp->archModules.end(),
+                        "No module lowered for a selected architecture");
                 modp = moduleIt->second;
             }
         }
