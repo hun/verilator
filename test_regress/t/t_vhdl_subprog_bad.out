@@ -1,0 +1,6 @@
+%Error: t/t_vhdl_subprog_bad.vhdl:18:5: VHDL: cannot assign to formal argument 'a'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_subprog_bad.vhdl:23:10: VHDL: out mode parameter 's' may not be read before the procedure returns.
+%Error: t/t_vhdl_subprog_bad.vhdl:43:5: VHDL: unknown subprogram 'nosuch'.
+%Error: t/t_vhdl_subprog_bad.vhdl:44:10: VHDL: ambiguous call to 'f'.
+%Error: Exiting due to

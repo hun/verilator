@@ -1,0 +1,10 @@
+%Error: t/t_vhdl_unit_bad.vhdl:17:1: Duplicate VHDL package body: 'p'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_unit_bad.vhdl:24:12: VHDL: constant without a value.
+%Error: t/t_vhdl_unit_bad.vhdl:27:1: Entity 'dupe' has no architecture; cannot elaborate it.
+%Error: t/t_vhdl_unit_bad.vhdl:30:1: Duplicate VHDL entity: 'dupe'.
+%Error: t/t_vhdl_unit_bad.vhdl:43:16: VHDL: range constraint on scalar type 'bit'.
+%Error: t/t_vhdl_unit_bad.vhdl:42:10: VHDL: duplicate declaration of 's'.
+%Error: t/t_vhdl_unit_bad.vhdl:44:14: VHDL: unknown subtype 'nosuch'.
+%Error: t/t_vhdl_unit_bad.vhdl:33:1: VHDL architecture does not name a declared entity.
+%Error: Exiting due to

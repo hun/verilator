@@ -1,0 +1,14 @@
+%Error: t/t_vhdl_expr_bad.vhdl:27:18: VHDL: record 'rv' has no element 'b'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_expr_bad.vhdl:29:23: VHDL: record has no element 'b'.
+%Error: t/t_vhdl_expr_bad.vhdl:31:42: VHDL: empty or reversed slice.
+%Error: t/t_vhdl_expr_bad.vhdl:32:43: VHDL: unknown name 'nosuch' in 'range.
+%Error: t/t_vhdl_expr_bad.vhdl:33:28: VHDL: package 'p' has no declaration 'nosuch'.
+%Error: t/t_vhdl_expr_bad.vhdl:34:20: VHDL: alias 'a' refers to itself.
+%Error: t/t_vhdl_expr_bad.vhdl:34:20: VHDL: unknown identifier 'a'.
+%Error: t/t_vhdl_expr_bad.vhdl:37:8: VHDL: unknown identifier 'a'.
+%Error: t/t_vhdl_expr_bad.vhdl:38:8: VHDL: slice is out of range of the array.
+%Error: t/t_vhdl_expr_bad.vhdl:39:27: VHDL: comparison of unrelated array types.
+%Error: t/t_vhdl_expr_bad.vhdl:42:5: VHDL: cannot assign to constant 'c'.
+%Error: t/t_vhdl_expr_bad.vhdl:43:5: VHDL: cannot assign to input port 'i'.
+%Error: Exiting due to

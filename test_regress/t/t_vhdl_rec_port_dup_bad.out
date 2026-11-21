@@ -1,0 +1,5 @@
+%Error: t/t_vhdl_rec_port_dup_bad.vhdl:35:47: VHDL: record port 'p' element 'a' is associated more than once.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error-UNSUPPORTED: t/t_vhdl_rec_port_dup_bad.vhdl:21:9: Unsupported: VHDL unconstrained type 'ur'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

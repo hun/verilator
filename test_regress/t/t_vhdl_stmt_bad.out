@@ -1,0 +1,8 @@
+%Error: t/t_vhdl_stmt_bad.vhdl:20:12: VHDL: empty choice range.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_stmt_bad.vhdl:25:3: VHDL: more than one 'others' choice in a selected assignment.
+%Error: t/t_vhdl_stmt_bad.vhdl:29:8: VHDL: condition is not a 1-bit value.
+%Error: t/t_vhdl_stmt_bad.vhdl:34:8: VHDL: logical operator operand is not a logic or bit value.
+%Error: t/t_vhdl_stmt_bad.vhdl:36:3: VHDL: unknown signal 'nosuch' in a sensitivity list.
+%Error: t/t_vhdl_stmt_bad.vhdl:40:3: VHDL: sensitivity element '' is not a signal.
+%Error: Exiting due to

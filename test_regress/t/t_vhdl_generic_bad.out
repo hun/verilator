@@ -1,0 +1,9 @@
+%Error: t/t_vhdl_generic_bad.vhdl:15:1: VHDL: package generic 'h' of 'gp' is not bound in instance 'pi'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_generic_bad.vhdl:21:40: VHDL: 'open' is not allowed on a package generic association.
+%Error: t/t_vhdl_generic_bad.vhdl:46:3: VHDL: generic 'n' of entity 'sub' has no default value and no association.
+%Error: t/t_vhdl_generic_bad.vhdl:47:37: VHDL: 'open' is not allowed on a generic association.
+%Error: t/t_vhdl_generic_bad.vhdl:48:3: VHDL: generic map on instance 'u3' of 'leaf', which has no generics.
+%Error: t/t_vhdl_generic_bad.vhdl:43:14: VHDL: generic 'n' of component 'sub' does not conform to entity 'sub'.
+%Error: t/t_vhdl_generic_bad.vhdl:23:1: VHDL: entity 'sub' has a generic without a default value, and no instance binds it.
+%Error: Exiting due to
