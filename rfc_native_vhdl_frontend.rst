@@ -159,9 +159,68 @@ tree.
   distribution tests (``t_dist_test_style``, ``t_dist_copyright``) pass. The
   suite needs only the built Verilator and a C++ compiler; no test invokes GHDL
   or nvc.
-* External GHDL corpus sweeps and real-design runs were done during
-  development but their inputs are not in this repository; those numbers are
-  **not reproducible from a checkout** and are not offered as evidence here.
+Open-source corpus
+------------------
+
+Beyond the regression tests, the frontend runs against a corpus of 18 pinned
+open-source VHDL projects: PoC, open-logic, hdl-modules, microwatt, neorv32,
+neo430, neoTRNG, potato, RPU, T65, T80, nandland spi-master, spi-fpga and
+others. The corpus lives in a separate repository: a manifest of pinned upstream
+revisions, a fetch script, and 88 ported testcases. Each testcase keeps the
+upstream design unmodified, drives it from a self-checking C++ testbench, and
+many also compare a cycle-by-cycle trace against GHDL. Upstream sources are
+fetched, not copied, so each keeps its own license.
+
+Results on this branch (lint and simulation with Verilator, trace comparison
+against GHDL 7):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Project
+     - Simulates
+     - Notes
+   * - open-logic
+     - 32 / 35
+     - All 32 match GHDL cycle by cycle: arbiters, clock crossings, FIFOs
+       (sync, async, packet), RAMs, CRC, width converters, TDM, CAM
+   * - hdl-modules
+     - 13 / 13
+     - FIFO, ring buffer, handshake pipeline/mux/merger/splitter, LFSR,
+       debounce, resync; 7 also traced against GHDL
+   * - microwatt
+     - 5 / 7
+     - Multiplier, PLRU, bitsort, SoC reset, wishbone BRAM; the caches do not
+       yet elaborate
+   * - neorv32
+     - 1 / 2
+     - The CPU runs a freestanding C program (12.2M cycles) to the expected
+       results; the SoC top does not yet elaborate
+   * - neo430, neoTRNG
+     - 3 / 3
+     - Multiplier/divider and CRC units; the TRNG matches a 5,621-cycle GHDL
+       trace
+   * - T80, RPU, spi-master, spi-fpga
+     - 6 / 6
+     - The T80 runs a Z80 program; RV32 ALU and register file; SPI masters and
+       slave
+   * - PoC
+     - 4 / 17
+     - Divider, square root, Gray counter, strobe generator; 13 others share
+       one blocker in PoC's configuration package
+   * - potato, T65
+     - 0 / 3
+     - An enumeration actual on a port of another type is not accepted
+
+In total 64 of 86 testcases simulate with every check passing. All 45 GHDL
+trace comparisons that build match cycle for cycle; none mismatches. Two of the failures, open-logic's
+CAM and one PoC harness, fail only because ``--enable-ccwarn`` turns a C++
+warning into an error.
+
+The corpus repository is not yet public, so these results cannot be reproduced
+from a Verilator checkout. Publishing it is part of the maintenance plan; until
+then the numbers are reported for information.
 
 8. Known limitations
 ====================
