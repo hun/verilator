@@ -330,7 +330,7 @@ Token Lexer::lexExtendedIdentifier(FileLine* flp) {
         ++m_pos;
     }
     if (!closed) {
-        tok.flp->v3error("VHDL extended identifier is missing its closing '\\'.");
+        tok.flp->v3error("VHDL extended identifier is missing its closing backslash.");
         tok.kind = Token::END;
         return tok;
     }

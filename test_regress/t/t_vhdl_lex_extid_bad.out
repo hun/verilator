@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_lex_extid_bad.vhdl:15:12: VHDL extended identifier is missing its closing '\'.
+%Error: t/t_vhdl_lex_extid_bad.vhdl:15:12: VHDL extended identifier is missing its closing backslash.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: t/t_vhdl_lex_extid_bad.vhdl:15:12: VHDL: expected an identifier, got ''.
 %Error: Exiting due to
