@@ -290,7 +290,7 @@ Give reviewers a one-page guide before the diff:
 2. Fix docs contradictions and test permissions -- done. CI blockers, licenses,
    process-log removal, and the limitations page are in place.
 3. Mechanical lowerer split + unconditional contract check -- done.
-4. RFC/design issue: draft prepared at `rfc_native_vhdl_frontend.md`; posting
+4. RFC/design issue: draft prepared at `rfc_native_vhdl_frontend.rst`; posting
    awaits maintainer-facing cleanup and a human in the loop.
 5. Open PR 0 (plumbing) with a green VHDL option/extension test.
 6. Build the stacked PRs on top only after maintainers accept the architecture
