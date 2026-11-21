@@ -14,8 +14,8 @@
 //
 //*************************************************************************
 
-#ifndef VERILATOR_V3VHDLNATIVE_LOWER_H_
-#define VERILATOR_V3VHDLNATIVE_LOWER_H_
+#ifndef VERILATOR_V3VHDLNATIVELOWER_H_
+#define VERILATOR_V3VHDLNATIVELOWER_H_
 
 #include "config_build.h"
 #include "verilatedos.h"
@@ -154,7 +154,7 @@ void collectPhysicalUnits(const DesignLibrary& library, Design& design) VL_MT_DI
 //! if the entity's generics have no defaults to elaborate, and no binding supplied
 bool lower(AstNetlist* rootp, const EntityUnit& entity, const Architecture& arch, AstModule* modp,
            const PackageTable& table, const ModuleMap& modules, Design& design,
-           const PortBoundsMap* portBounds = nullptr) VL_MT_DISABLED;
+           const PortBoundsMap* portBoundsp = nullptr) VL_MT_DISABLED;
 
 }  // namespace vhdlnative
 

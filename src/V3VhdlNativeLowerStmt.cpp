@@ -28,7 +28,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1570,7 +1569,7 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
     // The loop variable is a static constant, so each iteration can be unrolled
     // An inline binding of the loop variable's name, e.g. a procedure formal, must not
     // shadow the iteration constant
-    auto& bindings = activeEnv();
+    const InlineEnv& bindings = activeEnv();
     const auto boundIt = bindings.find(stmt.loopVar);
     std::unique_ptr<InlineBinding> boundSavep
         = boundIt != bindings.end() ? std::make_unique<InlineBinding>(boundIt->second) : nullptr;
@@ -1711,7 +1710,7 @@ AstNodeStmt* Lowering::lowerAssert(const Stmt& stmt) {
     return assertBody(stmt.flp, *stmt.value, stmt.message.get(), stmt.severity);
 }
 
-AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Expr* message,
+AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Expr* messagep,
                                   Stmt::Severity severity) {
     AstNodeExpr* const condp = lowerCond(condition);
     if (!condp) return nullptr;
@@ -1719,7 +1718,7 @@ AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Ex
     AstNodeExpr* const failp = new AstNot{flp, condp};
     failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     AstNodeStmt* bodyp = new AstDisplay{
-        flp, VDisplayType::DT_DISPLAY, reportText(message, "Assertion failed"), nullptr, nullptr,
+        flp, VDisplayType::DT_DISPLAY, reportText(messagep, "Assertion failed"), nullptr, nullptr,
         'd'};
     if (severity == Stmt::SEV_FAILURE) {
         bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstFinish{flp});

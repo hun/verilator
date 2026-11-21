@@ -28,7 +28,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1281,7 +1280,7 @@ bool Lowering::formalsExact(const Expr& call, const SubprogramDecl& sub) const {
 }
 
 //! A user-defined infix operator whose formals exactly match the operands
-AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context, bool& found) {
+AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* contextp, bool& found) {
     found = false;
     if (!expr.a || !expr.b) return nullptr;
     VType actual0;
@@ -1328,9 +1327,9 @@ AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context,
                 continue;
             }
         }
-        if (context) {
+        if (contextp) {
             VType returnType;
-            if (formalType(subp->returnType, returnType) && !typesMatch(returnType, *context)) {
+            if (formalType(subp->returnType, returnType) && !typesMatch(returnType, *contextp)) {
                 continue;
             }
         }
@@ -1348,11 +1347,11 @@ AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* context,
     call.spelling = expr.spelling;
     call.args.push_back(cloneExpr(*expr.a));
     call.args.push_back(cloneExpr(*expr.b));
-    return lowerFunctionCall(call, context, matches.front());
+    return lowerFunctionCall(call, contextp, matches.front());
 }
 
 //! A user-defined prefix operator whose formal exactly matches the operand
-AstNodeExpr* Lowering::lowerUserUnary(const Expr& expr, const VType* context, bool& found) {
+AstNodeExpr* Lowering::lowerUserUnary(const Expr& expr, const VType* contextp, bool& found) {
     found = false;
     if (!expr.a) return nullptr;
     VType actual;
@@ -1365,9 +1364,9 @@ AstNodeExpr* Lowering::lowerUserUnary(const Expr& expr, const VType* context, bo
         VType formal;
         if (!formalType(slots[0].first->type, formal)) continue;
         if (!typesMatch(formal, actual)) continue;
-        if (context) {
+        if (contextp) {
             VType returnType;
-            if (formalType(subp->returnType, returnType) && !typesMatch(returnType, *context)) {
+            if (formalType(subp->returnType, returnType) && !typesMatch(returnType, *contextp)) {
                 continue;
             }
         }
@@ -1384,7 +1383,7 @@ AstNodeExpr* Lowering::lowerUserUnary(const Expr& expr, const VType* context, bo
     call.text = expr.text;
     call.spelling = expr.spelling;
     call.args.push_back(cloneExpr(*expr.a));
-    return lowerFunctionCall(call, context, matches.front());
+    return lowerFunctionCall(call, contextp, matches.front());
 }
 
 void Lowering::captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const {
@@ -1417,7 +1416,7 @@ void Lowering::deleteInlineEnv(InlineEnv& env) {
 }
 
 AstNodeExpr* Lowering::inlineBinding(FileLine* flp, const std::string& name, bool write) const {
-    auto& bindings = activeEnv();
+    const InlineEnv& bindings = activeEnv();
     const auto it = bindings.find(name);
     if (it == bindings.end()) return nullptr;
     const InlineBinding& binding = it->second;
@@ -1933,7 +1932,7 @@ AstNodeExpr* Lowering::evalFileInit(const SubprogramDecl& subp, const Expr& call
     return makeBitsConst(call.flp, retType.dtp, result.bits);
 }
 
-AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
+AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp,
                                          const SubprogramDecl* forcedp) {
     const SubprogramRef* refp = nullptr;
     const SubprogramDecl* subp = nullptr;
@@ -1953,7 +1952,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
             return nullptr;
         }
     } else {
-        subp = resolveCall(call, true, &refp, context);
+        subp = resolveCall(call, true, &refp, contextp);
         if (!subp) return nullptr;  // resolveCall reported why
     }
     // A subprogram that reads a file builds its result at elaboration
@@ -1976,7 +1975,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
         return nullptr;
     }
     const ScopeSave outer = saveScope();
-    InlineEnv* const savedInlineP = m_inlineP;
+    InlineEnv* const savedInlinep = m_inlinep;
     m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
     setScope(base);
     // A body a package declares sees that package's whole scope: the caller may have
@@ -1984,11 +1983,11 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
     if (!subp->unitName.empty() && subp->unitName != m_unitName) {
         importInlineScope(subp->unitName);
     }
-    m_inlineP = &env;
+    m_inlinep = &env;
     const auto fail = [&](AstNodeExpr* nullp) -> AstNodeExpr* {
         deleteInlineEnv(env);
         m_inlineFrames.pop_back();
-        m_inlineP = savedInlineP;
+        m_inlinep = savedInlinep;
         restoreScope(outer);
         m_inlineBodies.erase(subp);
         return nullp;
@@ -2083,7 +2082,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
                           || !subp->returnType.constraintMark.empty();
     // An unconstrained return type takes its width from the body, and a body that needs
     // one (a conversion whose width is a run-time value) takes the caller's type
-    m_funcRetp = retSized && resolveType(subp->returnType, retType) ? &retType : context;
+    m_funcRetp = retSized && resolveType(subp->returnType, retType) ? &retType : contextp;
     const InlineCont noCont = [](InlineEnv&) -> AstNodeExpr* { return nullptr; };
     AstNodeExpr* resultp = evalFuncBlock(subp->body, 0, env, noCont, nullptr, 0);
     m_funcRetp = outerRetp;
@@ -2096,8 +2095,8 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
             resultp = resizeExpr(resultp, retType, call.flp);
         }
     }
-    if (resultp && context && context->dtp && resultp->width() == context->width) {
-        resultp->dtypep(context->dtp);
+    if (resultp && contextp && contextp->dtp && resultp->width() == contextp->width) {
+        resultp->dtypep(contextp->dtp);
     }
     // A constrained array return type keeps the element structure that the packed dtype
     // would otherwise lose; comparisons of a direct call need it. An unconstrained return
@@ -2133,16 +2132,16 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* context,
 AstNodeExpr* Lowering::evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index,
                                      InlineEnv& env, const InlineCont& cont,
                                      const InlineCont* exitContp, int depth) {
-    InlineEnv* const savedInlineP = m_inlineP;
-    m_inlineP = &env;
+    InlineEnv* const savedInlinep = m_inlinep;
+    m_inlinep = &env;
     if (depth > 64) {
         unsupportedError(m_inlineFrames.back().declp->flp,
                          "VHDL function statement nesting is too deep");
-        m_inlineP = savedInlineP;
+        m_inlinep = savedInlinep;
         return nullptr;
     }
     AstNodeExpr* const resultp = evalFuncBlockBody(stmts, index, cont, exitContp, depth);
-    m_inlineP = savedInlineP;
+    m_inlinep = savedInlinep;
     return resultp;
 }
 
@@ -2160,7 +2159,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
         if (stmt.kind == Stmt::VAR_ASSIGN) {
             const Expr& target = *stmt.target;
             if (target.kind == Expr::NAME) {
-                auto& bindings = activeEnv();
+                InlineEnv& bindings = activeEnv();
                 const auto it = bindings.find(target.text);
                 if (it == bindings.end()) {
                     unsupportedError(flp, "assignment to a name that is not local to the "
@@ -2207,7 +2206,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 unsupportedError(flp, "assignment target form in an inlined function body");
                 return nullptr;
             }
-            auto& bindings = activeEnv();
+            InlineEnv& bindings = activeEnv();
             const auto it = bindings.find(basep->text);
             if (it == bindings.end()) {
                 unsupportedError(flp, "assignment to an element outside the inlined subprogram");
@@ -2749,7 +2748,7 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
         return nullptr;
     }
     const ScopeSave outer = saveScope();
-    InlineEnv* const savedInlineP = m_inlineP;
+    InlineEnv* const savedInlinep = m_inlinep;
     m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
     InlineFrame& frameRef = m_inlineFrames.back();
     frameRef.liveScope = base;
@@ -2758,11 +2757,11 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
     if (!subp->unitName.empty() && subp->unitName != m_unitName) {
         importInlineScope(subp->unitName);
     }
-    m_inlineP = &env;
+    m_inlinep = &env;
     const auto fail = [&](AstNodeStmt* nullp) -> AstNodeStmt* {
         deleteInlineEnv(env);
         m_inlineFrames.pop_back();
-        m_inlineP = savedInlineP;
+        m_inlinep = savedInlinep;
         restoreScope(outer);
         m_inlineBodies.erase(subp);
         if (prologsp) prologsp->deleteTree();

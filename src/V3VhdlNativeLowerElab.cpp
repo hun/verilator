@@ -28,7 +28,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,7 +51,7 @@ void Lowering::freeInstanceBindings() {
 }
 
 bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
-                                const GenericBindings* bindings, bool probe) {
+                                const GenericBindings* bindingsp, bool probe) {
     bool ok = true;
     bool unbound = false;  // A generic here has neither a binding nor a default
     const auto registerString
@@ -75,9 +74,9 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
         for (const auto& name : gen.names) {
             if (unbound) continue;  // An earlier generic has no value, so nothing can elaborate
             if (gen.isType) {
-                if (bindings) {
-                    const auto it = bindings->find(name.first);
-                    if (it != bindings->end() && it->second.isType) {
+                if (bindingsp) {
+                    const auto it = bindingsp->find(name.first);
+                    if (it != bindingsp->end() && it->second.isType) {
                         if (!probe) {
                             m_types[name.first] = it->second.typeValue;
                             m_imported.insert(name.first);
@@ -92,9 +91,9 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                 continue;
             }
             if (gen.isSubprogram) {
-                if (bindings) {
-                    const auto it = bindings->find(name.first);
-                    if (it != bindings->end() && it->second.subp) {
+                if (bindingsp) {
+                    const auto it = bindingsp->find(name.first);
+                    if (it != bindingsp->end() && it->second.subp) {
                         if (!probe) {
                             m_subprograms[name.first].push_back(
                                 SubprogramRef{it->second.subp, false, -1});
@@ -110,9 +109,9 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                 continue;
             }
             if (gen.type.mark == "real") {
-                if (bindings) {
-                    const auto it = bindings->find(name.first);
-                    if (it != bindings->end() && it->second.isReal) {
+                if (bindingsp) {
+                    const auto it = bindingsp->find(name.first);
+                    if (it != bindingsp->end() && it->second.isReal) {
                         if (!probe) m_realConsts[name.first] = it->second.realValue;
                         continue;
                     }
@@ -127,9 +126,9 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                 continue;
             }
             if (gen.type.mark == "string") {
-                if (bindings) {
-                    const auto it = bindings->find(name.first);
-                    if (it != bindings->end() && it->second.isString) {
+                if (bindingsp) {
+                    const auto it = bindingsp->find(name.first);
+                    if (it != bindingsp->end() && it->second.isString) {
                         if (!probe) registerString(gen.flp, name.first, it->second.stringValue);
                         continue;
                     }
@@ -145,9 +144,9 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
                 }
                 continue;
             }
-            if (bindings) {
-                const auto it = bindings->find(name.first);
-                if (it != bindings->end()) {
+            if (bindingsp) {
+                const auto it = bindingsp->find(name.first);
+                if (it != bindingsp->end()) {
                     if (it->second.isInt) {
                         m_consts[name.first] = it->second.intValue;
                         VType declared;
@@ -324,7 +323,7 @@ void Lowering::importInlineScope(const std::string& name) {
 }
 
 void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
-                           const GenericBindings* bindings, const std::string& publishName) {
+                           const GenericBindings* bindingsp, const std::string& publishName) {
     const std::string& pubName = publishName.empty() ? pkg.name : publishName;
     m_unitName = pubName;
 
@@ -358,7 +357,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // before its body.
     if (pkg.isBody) importPackage(pubName);
     // A generic package is emitted once per instance, with its generics already bound
-    if (bindings) registerGenerics(pkg.generics, bindings, false);
+    if (bindingsp) registerGenerics(pkg.generics, bindingsp, false);
     // Integer constants are folded first so a type range (a record element, an array
     // bound, an integer subtype) that names one resolves during type registration,
     // exactly as an entity or architecture prescans before registering its types.
@@ -498,7 +497,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
 }
 
 bool Lowering::emitPrelude(const EntityUnit& entity, const Architecture& arch,
-                           const GenericBindings* bindings) {
+                           const GenericBindings* bindingsp) {
     m_subprograms.clear();  // Packages published these only through importPackage
     m_components.clear();
     for (const auto& use : entity.uses) importPackage(use.pkg, use.decl);
@@ -521,7 +520,7 @@ bool Lowering::emitPrelude(const EntityUnit& entity, const Architecture& arch,
     registerComponents(entity.components);
 
     // Generics are constants visible to the port clause and the architecture
-    if (registerGenerics(entity.generics, bindings, false)) return true;
+    if (registerGenerics(entity.generics, bindingsp, false)) return true;
     m_modp = nullptr;
     m_scope.clear();
     m_consts.clear();
@@ -597,14 +596,14 @@ void Lowering::emitEntityDecls(const EntityUnit& entity, const Architecture& arc
     m_moduleScope = saveScope();
 }
 
-void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBounds) {
+void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoundsp) {
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
         VType type;
         const PortBounds* boundsp = nullptr;
-        if (portBounds) {
-            const auto it = portBounds->find(port.names.empty() ? "" : port.names.front().first);
-            if (it != portBounds->end()) boundsp = &it->second;
+        if (portBoundsp) {
+            const auto it = portBoundsp->find(port.names.empty() ? "" : port.names.front().first);
+            if (it != portBoundsp->end()) boundsp = &it->second;
         }
         if (boundsp && boundsp->isRecord) {
             // An unconstrained record port: each element's range comes from the actual
@@ -732,11 +731,11 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
 }
 
 bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-                    const GenericBindings* bindings, const PortBoundsMap* portBounds) {
+                    const GenericBindings* bindingsp, const PortBoundsMap* portBoundsp) {
     m_modp = modp;
-    if (!emitPrelude(entity, arch, bindings)) return false;
+    if (!emitPrelude(entity, arch, bindingsp)) return false;
     emitEntityDecls(entity, arch);
-    emitPorts(entity, portBounds);
+    emitPorts(entity, portBoundsp);
     emitArchitectureDecls(arch);
 
     // Subprograms of the declarative part capture the module scope as it stands here
@@ -1649,7 +1648,7 @@ bool Lowering::collectInstancePorts(const Concurrent& conc, AstModule* modp,
         if (varp && varp->isIO()) ports.push_back(varp);
     }
     std::sort(ports.begin(), ports.end(),
-              [](const AstVar* l, const AstVar* r) { return l->pinNum() < r->pinNum(); });
+              [](const AstVar* lp, const AstVar* rp) { return lp->pinNum() < rp->pinNum(); });
     // Associations without a formal name are positional: they map to the next port
     positional = std::any_of(conc.associations.begin(), conc.associations.end(),
                              [](const PortAssoc& assoc) { return assoc.formal.empty(); });
@@ -2270,16 +2269,16 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
     // The assignment body is a statement list, so an inlined function's array local can
     // be a real variable here; a failure leaves statements behind, so they are dropped
     struct MaterializeScope final {
-        Lowering* const self;
+        Lowering* const selfp;
         const bool saved;
-        explicit MaterializeScope(Lowering* s)
-            : self(s)
-            , saved(s->m_materializeLocals) {
-            self->m_materializeLocals = true;
+        explicit MaterializeScope(Lowering* lowerp)
+            : selfp{lowerp}
+            , saved{lowerp->m_materializeLocals} {
+            selfp->m_materializeLocals = true;
         }
         ~MaterializeScope() {
-            self->m_materializeLocals = saved;
-            self->discardPendingStmts();
+            selfp->m_materializeLocals = saved;
+            selfp->discardPendingStmts();
         }
     } const scope{this};
     if (stmt.kind == Concurrent::SEL_ASSIGN) {

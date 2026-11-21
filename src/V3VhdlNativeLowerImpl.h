@@ -13,8 +13,8 @@
 // SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 //
 //*************************************************************************
-#ifndef VERILATOR_V3VHDLNATIVELOWER_IMPL_H_
-#define VERILATOR_V3VHDLNATIVELOWER_IMPL_H_
+#ifndef VERILATOR_V3VHDLNATIVELOWERIMPL_H_
+#define VERILATOR_V3VHDLNATIVELOWERIMPL_H_
 
 #include "config_build.h"
 #include "verilatedos.h"
@@ -23,7 +23,6 @@
 #include "V3VhdlNativeLower.h"
 #include "V3VhdlNativeTypes.h"
 
-#include <cstdint>
 #include <cstdio>
 #include <deque>
 #include <fstream>
@@ -202,9 +201,9 @@ class Lowering final {
     //! Active bindings, referenced before the scope tables: a callee owns its map while
     //! its body lowers, so nested lowering sees it
     InlineEnv m_ownEnv;  // Bindings outside any inlining: always empty
-    InlineEnv* m_inlineP = &m_ownEnv;
-    InlineEnv& activeEnv() { return *m_inlineP; }
-    const InlineEnv& activeEnv() const { return *m_inlineP; }
+    InlineEnv* m_inlinep = &m_ownEnv;
+    InlineEnv& activeEnv() { return *m_inlinep; }
+    const InlineEnv& activeEnv() const { return *m_inlinep; }
     std::deque<InlineFrame> m_inlineFrames;
     std::vector<FuncLoopTarget> m_funcLoopTargets;
     std::set<const SubprogramDecl*> m_inlineBodies;  // Recursion guard
@@ -656,7 +655,7 @@ class Lowering final {
                           const TypeSpec& type, const Expr& init, FileLine* flp,
                           const VType& constType);
     bool registerGenerics(const std::vector<GenericDecl>& generics,
-                          const GenericBindings* bindings, bool probe);
+                          const GenericBindings* bindingsp, bool probe);
     void freeInstanceBindings();  // Releases the bindings kept for one instance's ports
     AstModule* specializeInstance(const Concurrent& conc, const EntityUnit& entity,
                                   AstModule* basep, const PortBoundsMap& portBounds);
@@ -780,25 +779,25 @@ class Lowering final {
     }
     //! Add or subtract two linear forms (coef * atom + const); atoms must match to keep
     //! a single dynamic term, otherwise the sum is not linear in one unknown
-    static bool combineLinear(const Expr* atomA, int64_t coefA, int64_t conA, const Expr* atomB,
+    static bool combineLinear(const Expr* atomAp, int64_t coefA, int64_t conA, const Expr* atomBp,
                               int64_t coefB, int64_t conB, int64_t sign, const Expr*& atomOut,
                               int64_t& coefOut, int64_t& conOut) {
         const int64_t bCoef = coefB * sign;
         const int64_t bCon = conB * sign;
         if (coefA == 0) {
-            atomOut = atomB;
+            atomOut = atomBp;
             coefOut = bCoef;
             conOut = conA + bCon;
             return true;
         }
         if (bCoef == 0) {
-            atomOut = atomA;
+            atomOut = atomAp;
             coefOut = coefA;
             conOut = conA + bCon;
             return true;
         }
-        if (!sameExpr(*atomA, *atomB)) return false;  // two distinct dynamic terms
-        atomOut = atomA;
+        if (!sameExpr(*atomAp, *atomBp)) return false;  // two distinct dynamic terms
+        atomOut = atomAp;
         coefOut = coefA + bCoef;
         conOut = conA + bCon;
         return true;
@@ -807,38 +806,38 @@ class Lowering final {
     //! terms and scale by a constant multiplicand; atomOut is null for a pure constant
     bool linearForm(const Expr& expr, const Expr*& atomOut, int64_t& coefOut,
                     int64_t& conOut) const {
-        const Expr* e = &expr;
-        while (e->kind == Expr::PAREN && e->a) e = e->a.get();
+        const Expr* ep = &expr;
+        while (ep->kind == Expr::PAREN && ep->a) ep = ep->a.get();
         atomOut = nullptr;
         coefOut = 0;
         conOut = 0;
         int64_t value = 0;
-        if (evalInt(*e, value)) {
+        if (evalInt(*ep, value)) {
             conOut = value;
             return true;
         }
-        if (e->kind == Expr::BINARY && e->a && e->b) {
-            const Expr* aAtom = nullptr;
-            const Expr* bAtom = nullptr;
+        if (ep->kind == Expr::BINARY && ep->a && ep->b) {
+            const Expr* aAtomp = nullptr;
+            const Expr* bAtomp = nullptr;
             int64_t aCoef = 0;
             int64_t aCon = 0;
             int64_t bCoef = 0;
             int64_t bCon = 0;
-            const int sign = e->text == "+" ? 1 : e->text == "-" ? -1 : 0;
-            if (sign != 0 && linearForm(*e->a, aAtom, aCoef, aCon)
-                && linearForm(*e->b, bAtom, bCoef, bCon)) {
-                return combineLinear(aAtom, aCoef, aCon, bAtom, bCoef, bCon, sign, atomOut,
+            const int sign = ep->text == "+" ? 1 : ep->text == "-" ? -1 : 0;
+            if (sign != 0 && linearForm(*ep->a, aAtomp, aCoef, aCon)
+                && linearForm(*ep->b, bAtomp, bCoef, bCon)) {
+                return combineLinear(aAtomp, aCoef, aCon, bAtomp, bCoef, bCon, sign, atomOut,
                                      coefOut, conOut);
             }
-            if (e->text == "*") {
-                if (evalInt(*e->b, value) && linearForm(*e->a, aAtom, aCoef, aCon)) {
-                    atomOut = aAtom;
+            if (ep->text == "*") {
+                if (evalInt(*ep->b, value) && linearForm(*ep->a, aAtomp, aCoef, aCon)) {
+                    atomOut = aAtomp;
                     coefOut = aCoef * value;
                     conOut = aCon * value;
                     return true;
                 }
-                if (evalInt(*e->a, value) && linearForm(*e->b, bAtom, bCoef, bCon)) {
-                    atomOut = bAtom;
+                if (evalInt(*ep->a, value) && linearForm(*ep->b, bAtomp, bCoef, bCon)) {
+                    atomOut = bAtomp;
                     coefOut = bCoef * value;
                     conOut = bCon * value;
                     return true;
@@ -846,7 +845,7 @@ class Lowering final {
             }
         }
         // An opaque dynamic term: 1 * e + 0
-        atomOut = e;
+        atomOut = ep;
         coefOut = 1;
         conOut = 0;
         return true;
@@ -927,16 +926,16 @@ class Lowering final {
         const ExprP rightCopy = substVars(right);
         const Expr& hip = ascending ? *rightCopy : *leftCopy;
         const Expr& lop = ascending ? *leftCopy : *rightCopy;
-        const Expr* hiAtom = nullptr;
-        const Expr* loAtom = nullptr;
+        const Expr* hiAtomp = nullptr;
+        const Expr* loAtomp = nullptr;
         int64_t hiCoef = 0;
         int64_t hiCon = 0;
         int64_t loCoef = 0;
         int64_t loCon = 0;
-        if (!linearForm(hip, hiAtom, hiCoef, hiCon) || !linearForm(lop, loAtom, loCoef, loCon)) {
+        if (!linearForm(hip, hiAtomp, hiCoef, hiCon) || !linearForm(lop, loAtomp, loCoef, loCon)) {
             return false;
         }
-        if (hiCoef != loCoef || (hiCoef != 0 && !sameExpr(*hiAtom, *loAtom))) return false;
+        if (hiCoef != loCoef || (hiCoef != 0 && !sameExpr(*hiAtomp, *loAtomp))) return false;
         width = hiCon - loCon + 1;
         return width > 0;
     }
@@ -1075,14 +1074,14 @@ class Lowering final {
                || name == "positive" || name == "time";
     }
 
-    AstNodeExpr* lowerExpr(const Expr& expr, const VType* context);
-    AstNodeExpr* lowerCharLiteral(FileLine* flp, const Expr& expr, const VType* context);
-    AstNodeExpr* lowerBitStringLiteral(FileLine* flp, const Expr& expr, const VType* context);
-    AstNodeExpr* lowerName(FileLine* flp, const Expr& expr, const VType* context);
-    AstNodeExpr* lowerQualification(FileLine* flp, const Expr& expr, const VType* context);
-    AstNodeExpr* lowerUnary(FileLine* flp, const Expr& expr, const VType* context);
-    AstNodeExpr* lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* context);
-    AstNodeExpr* lowerOthersAssociation(FileLine* flp, const Expr& expr, const VType* context);
+    AstNodeExpr* lowerExpr(const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerCharLiteral(FileLine* flp, const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerBitStringLiteral(FileLine* flp, const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerName(FileLine* flp, const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerQualification(FileLine* flp, const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerUnary(FileLine* flp, const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerOthersAssociation(FileLine* flp, const Expr& expr, const VType* contextp);
     //! Lowered operands of a binary expression with their resolved VHDL types
     struct BinaryOperands final {
         AstNodeExpr* lp = nullptr;
@@ -1112,12 +1111,12 @@ class Lowering final {
                                     BinaryOperands& ops);
     AstNodeExpr* lowerVectorArithmetic(FileLine* flp, const Expr& expr, const std::string& op,
                                        BinaryOperands& ops);
-    AstNodeExpr* lowerBinary(const Expr& expr, const VType* context);
+    AstNodeExpr* lowerBinary(const Expr& expr, const VType* contextp);
     //! Lexicographic ordering of two VHDL arrays; consumes the operands
     AstNodeExpr* lowerArrayRelation(FileLine* flp, const std::string& cmpOp, const VType& lt,
                                     const VType& rt, AstNodeExpr*& lp, AstNodeExpr*& rp,
                                     AstNodeDType* bitDtp);
-    AstNodeExpr* lowerConversion(const Expr& expr, const VType* context);
+    AstNodeExpr* lowerConversion(const Expr& expr, const VType* contextp);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
     bool sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
@@ -1170,7 +1169,7 @@ class Lowering final {
     AstNodeStmt* lowerReport(const Stmt& stmt);
     //! A failing assertion reports, and `severity failure` ends the run
     AstNodeStmt* lowerAssert(const Stmt& stmt);
-    AstNodeStmt* assertBody(FileLine* flp, const Expr& condition, const Expr* message,
+    AstNodeStmt* assertBody(FileLine* flp, const Expr& condition, const Expr* messagep,
                             Stmt::Severity severity);
     AstNodeStmt* lowerDelay(const Expr& expr, FileLine* flp);
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
@@ -1391,14 +1390,14 @@ class Lowering final {
                                       const SubprogramRef** foundpp = nullptr,
                                       const VType* contextp = nullptr);
     //! A user-defined infix operator whose formals exactly match the operands
-    AstNodeExpr* lowerUserOperator(const Expr& expr, const VType* context, bool& found);
+    AstNodeExpr* lowerUserOperator(const Expr& expr, const VType* contextp, bool& found);
     //! A user-defined prefix operator whose formal matches the operand
-    AstNodeExpr* lowerUserUnary(const Expr& expr, const VType* context, bool& found);
+    AstNodeExpr* lowerUserUnary(const Expr& expr, const VType* contextp, bool& found);
     void captureBaseFor(const SubprogramRef& ref, ScopeSave& base, InlineEnv& env) const;
     AstNodeExpr* inlineBinding(FileLine* flp, const std::string& name, bool write) const;
     bool bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub, InlineEnv& env,
                                AstNodeStmt*& prologsp, bool lvalueFormals, bool concurrent);
-    AstNodeExpr* lowerFunctionCall(const Expr& call, const VType* context,
+    AstNodeExpr* lowerFunctionCall(const Expr& call, const VType* contextp,
                                    const SubprogramDecl* forcedp = nullptr);
     AstNodeExpr* evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index, InlineEnv& env,
                                const InlineCont& cont, const InlineCont* exitContp, int depth);
@@ -1435,8 +1434,8 @@ public:
     ~Lowering() = default;
 
     bool emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-              const GenericBindings* bindings = nullptr,
-              const PortBoundsMap* portBounds = nullptr);
+              const GenericBindings* bindingsp = nullptr,
+              const PortBoundsMap* portBoundsp = nullptr);
     AstNode* lowerInstance(const Concurrent& conc);
     //! One generic of an entity, as seen from an instance's generic map
     struct InstanceGeneric final {
@@ -1455,9 +1454,9 @@ public:
     };
 
     bool emitPrelude(const EntityUnit& entity, const Architecture& arch,
-                     const GenericBindings* bindings);
+                     const GenericBindings* bindingsp);
     void emitEntityDecls(const EntityUnit& entity, const Architecture& arch);
-    void emitPorts(const EntityUnit& entity, const PortBoundsMap* portBounds);
+    void emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoundsp);
     void emitArchitectureDecls(const Architecture& arch);
 
     const Architecture* selectInstanceArchitecture(const Concurrent& conc,
@@ -1509,7 +1508,7 @@ public:
     }
 
     void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
-                     const GenericBindings* bindings = nullptr,
+                     const GenericBindings* bindingsp = nullptr,
                      const std::string& publishName = {});
     void instantiatePackage(const std::vector<PackageUnit>& packages, const PackageInstance& inst,
                             PackageTable::Impl& table);

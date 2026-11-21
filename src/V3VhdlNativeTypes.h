@@ -22,7 +22,6 @@
 #include "V3Ast.h"
 #include "V3VhdlNativeLower.h"
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>

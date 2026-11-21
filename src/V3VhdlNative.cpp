@@ -180,8 +180,8 @@ using ArchByEntity = std::map<std::string, const vhdlnative::Architecture*>;
 
 //! State shared by the elaboration steps of one frontend run
 struct EmitContext final {
-    explicit EmitContext(AstNetlist* rootp_)
-        : m_rootp{rootp_} {}
+    explicit EmitContext(AstNetlist* netlistp)
+        : m_rootp{netlistp} {}
     AstNetlist* const m_rootp;  // Netlist the frontend emits into
     vhdlnative::DesignLibrary library;
     vhdlnative::Design design;

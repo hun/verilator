@@ -20,8 +20,8 @@
 //
 //*************************************************************************
 
-#ifndef VERILATOR_V3VHDLNATIVE_AST_H_
-#define VERILATOR_V3VHDLNATIVE_AST_H_
+#ifndef VERILATOR_V3VHDLNATIVEAST_H_
+#define VERILATOR_V3VHDLNATIVEAST_H_
 
 #include "config_build.h"
 #include "verilatedos.h"
@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>

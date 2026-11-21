@@ -28,7 +28,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -142,11 +141,11 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
 //! Integer value of a name: a bound pure-call formal, a constant, or a foldable call
 bool Lowering::evalIntName(const Expr& expr, int64_t& value) const {
     if (!m_pureCalls.empty()) {
-        const auto& args = m_pureCalls.back().args;
+        const std::map<std::string, ExprP>& args = m_pureCalls.back().args;
         const auto argIt = args.find(expr.text);
         if (argIt != args.end()) return evalInt(*argIt->second, value);
     }
-    auto& bindings = activeEnv();
+    const InlineEnv& bindings = activeEnv();
     const auto bindIt = bindings.find(expr.text);
     if (bindIt != bindings.end() && !isAggregateType(bindIt->second.type)) {
         // A fold is speculative and reports nothing, so a value that does not fit an
@@ -400,7 +399,7 @@ bool Lowering::pushPureCall(const Expr& call, const Expr*& returnp) const {
     } else {
         return false;
     }
-    const SubprogramDecl* candidate = nullptr;
+    const SubprogramDecl* candidatep = nullptr;
     for (const SubprogramDecl* const subp : visibleSubprograms(*namep)) {
         if (subp->kind != SubprogramDecl::FUNCTION || subp->impure || !subp->hasBody) continue;
         if (std::any_of(m_pureCalls.cbegin(), m_pureCalls.cend(),
@@ -420,13 +419,13 @@ bool Lowering::pushPureCall(const Expr& call, const Expr*& returnp) const {
         }
         if (!positional) continue;
         if (!formalsAccept(call, *subp)) continue;
-        if (candidate) return false;
-        candidate = subp;
+        if (candidatep) return false;
+        candidatep = subp;
     }
-    if (!candidate) return false;
+    if (!candidatep) return false;
     PureCall frame;
     std::size_t slot = 0;
-    for (const FormalDecl& formal : candidate->formals) {
+    for (const FormalDecl& formal : candidatep->formals) {
         for (const auto& name : formal.names) {
             // Value the actual here, in the caller's scope: the body is then evaluated
             // over literals only, so no name of the caller can leak into it.
@@ -446,11 +445,11 @@ bool Lowering::pushPureCall(const Expr& call, const Expr*& returnp) const {
             frame.args[name.first] = std::move(valuep);
         }
     }
-    frame.subp = candidate;
+    frame.subp = candidatep;
     m_pureCalls.push_back(std::move(frame));
     // Constants of the body's declarative part are folded on top of the formals, which a
     // helper such as `constant log2_value : natural := floor_log2(value);` needs
-    for (const Decl& decl : candidate->decls) {
+    for (const Decl& decl : candidatep->decls) {
         auto valuep = std::make_unique<Expr>(Expr::INT_LIT);
         valuep->flp = decl.flp;
         int64_t intValue = 0;
@@ -472,11 +471,11 @@ bool Lowering::pushPureCall(const Expr& call, const Expr*& returnp) const {
             m_pureCalls.back().args[name.first] = std::move(binding);
         }
     }
-    if (!closedOverFormals(*candidate->body[0]->value, m_pureCalls.back().args)) {
+    if (!closedOverFormals(*candidatep->body[0]->value, m_pureCalls.back().args)) {
         popPureCall();
         return false;
     }
-    returnp = candidate->body[0]->value.get();
+    returnp = candidatep->body[0]->value.get();
     return true;
 }
 
@@ -494,7 +493,7 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
     case Expr::REAL_LIT: value = expr.realValue; return true;
     case Expr::NAME: {
         if (!m_pureCalls.empty()) {
-            const auto& args = m_pureCalls.back().args;
+            const std::map<std::string, ExprP>& args = m_pureCalls.back().args;
             const auto argIt = args.find(expr.text);
             if (argIt != args.end()) return evalReal(*argIt->second, value);
         }

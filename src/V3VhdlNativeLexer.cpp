@@ -24,7 +24,6 @@
 
 #include "V3VhdlNativeAst.h"
 
-#include <cstdint>
 #include <string>
 
 namespace vhdlnative {

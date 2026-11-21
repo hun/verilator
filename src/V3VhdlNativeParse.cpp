@@ -29,7 +29,6 @@
 #include "V3VhdlNativeAst.h"
 
 #include <cmath>
-#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -515,10 +514,10 @@ class Parser final {
     void parseSubprogramInto(std::vector<SubprogramDecl>& out);
     bool parseSubprogramSpec(SubprogramDecl& sub);
     void parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
-                             std::vector<Decl>* decls = nullptr,
-                             std::vector<TypeDecl>* types = nullptr,
-                             std::vector<SubprogramDecl>* subprograms = nullptr,
-                             std::vector<ComponentDecl>* components = nullptr);
+                             std::vector<Decl>* declsp = nullptr,
+                             std::vector<TypeDecl>* typesp = nullptr,
+                             std::vector<SubprogramDecl>* subprogramsp = nullptr,
+                             std::vector<ComponentDecl>* componentsp = nullptr);
     bool parseGenerateEnd();
     void parseProcess(Architecture& arch, FileLine* flp);
     std::vector<StmtP> parseStmtList(bool stopAtElse);
@@ -2624,9 +2623,9 @@ void Parser::parseConcurrentAssignOrCall(FileLine* flp, Architecture& arch) {
 
 //! Parse concurrent statements up to `end [generate|block]`, without the terminator
 void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
-                                 std::vector<Decl>* decls, std::vector<TypeDecl>* types,
-                                 std::vector<SubprogramDecl>* subprograms,
-                                 std::vector<ComponentDecl>* components) {
+                                 std::vector<Decl>* declsp, std::vector<TypeDecl>* typesp,
+                                 std::vector<SubprogramDecl>* subprogramsp,
+                                 std::vector<ComponentDecl>* componentsp) {
     LabelScope labelScope{*this};
     Architecture scratch;  // The statements of a generate body
     while (!m_failed && !isId("end") && !isId("elsif") && !isId("else")
@@ -2637,40 +2636,40 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
             continue;
         }
         // A generate body may carry declarative items before its statements
-        if (decls && isId("signal")) {
+        if (declsp && isId("signal")) {
             advance();
-            parseDeclInto(*decls, Decl::SIGNAL);
+            parseDeclInto(*declsp, Decl::SIGNAL);
             continue;
         }
-        if (decls && isId("shared")) {
+        if (declsp && isId("shared")) {
             advance();
             if (!expectId("variable")) return;
-            parseDeclInto(*decls, Decl::VARIABLE);
+            parseDeclInto(*declsp, Decl::VARIABLE);
             continue;
         }
-        if (decls && isId("variable")) {
+        if (declsp && isId("variable")) {
             advance();
-            parseDeclInto(*decls, Decl::VARIABLE);
+            parseDeclInto(*declsp, Decl::VARIABLE);
             continue;
         }
-        if (decls && isId("constant")) {
+        if (declsp && isId("constant")) {
             advance();
-            parseDeclInto(*decls, Decl::CONSTANT);
+            parseDeclInto(*declsp, Decl::CONSTANT);
             continue;
         }
-        if (types && isId("type")) {
+        if (typesp && isId("type")) {
             advance();
-            parseTypeDeclInto(*types);
+            parseTypeDeclInto(*typesp);
             continue;
         }
-        if (types && isId("subtype")) {
+        if (typesp && isId("subtype")) {
             advance();
-            parseSubtypeInto(*types);
+            parseSubtypeInto(*typesp);
             continue;
         }
-        if (subprograms
+        if (subprogramsp
             && (isId("function") || isId("procedure") || isId("pure") || isId("impure"))) {
-            parseSubprogramInto(*subprograms);
+            parseSubprogramInto(*subprogramsp);
             continue;
         }
         if (isId("attribute") || isId("default")) {
@@ -2683,12 +2682,12 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
             unsupported("disconnection specification");
             return;
         }
-        if (components && isId("component")) {
+        if (componentsp && isId("component")) {
             advance();
-            parseComponentDecl(*components);
+            parseComponentDecl(*componentsp);
             continue;
         }
-        if (decls && isId("alias")) {
+        if (declsp && isId("alias")) {
             advance();
             parseAliasInto(scratch.aliases);
             continue;

@@ -34,7 +34,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -369,9 +368,9 @@ void reportUnspecializedPorts(const EntityUnit& entity, const UnconstrainedRecor
 
 bool lower(AstNetlist* rootp, const EntityUnit& entity, const Architecture& arch, AstModule* modp,
            const PackageTable& table, const ModuleMap& modules, Design& design,
-           const PortBoundsMap* portBounds) {
+           const PortBoundsMap* portBoundsp) {
     Lowering lowering{rootp, &table.impl(), &modules, &design};
-    return lowering.emit(entity, arch, modp, nullptr, portBounds);
+    return lowering.emit(entity, arch, modp, nullptr, portBoundsp);
 }
 
 }  // namespace vhdlnative

@@ -28,7 +28,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -58,22 +57,22 @@ bool Lowering::containsEdgeCall(const Expr& expr) const {
     return false;
 }
 
-AstNodeExpr* Lowering::lowerCharLiteral(FileLine* flp, const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerCharLiteral(FileLine* flp, const Expr& expr, const VType* contextp) {
     // A character can itself be an enumeration literal ('z'); resolve it to the
     // enum value before treating it as a logic value or 8-bit character code.
-    if (context && context->kind == VType::ENUM) {
+    if (contextp && contextp->kind == VType::ENUM) {
         const std::string key = std::string{"'"} + expr.charValue + "'";
-        for (size_t i = 0; i < context->literals.size(); ++i) {
-            if (context->literals[i] != key) continue;
+        for (size_t i = 0; i < contextp->literals.size(); ++i) {
+            if (contextp->literals[i] != key) continue;
             AstConst* const constp
-                = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
-            constp->dtypep(context->dtp);
+                = new AstConst{flp, V3Number{flp, contextp->width, static_cast<uint32_t>(i)}};
+            constp->dtypep(contextp->dtp);
             return constp;
         }
     }
     // A character in an 8-bit character context is its code; otherwise a logic value
-    if (context && context->isVector() && context->width == 8) {
-        return makeVectorConst(flp, *context, static_cast<unsigned char>(expr.charValue));
+    if (contextp && contextp->isVector() && contextp->width == 8) {
+        return makeVectorConst(flp, *contextp, static_cast<unsigned char>(expr.charValue));
     }
     const char bit = vhdlLogicBit(expr.charValue);
     if (bit == 0) {
@@ -85,38 +84,38 @@ AstNodeExpr* Lowering::lowerCharLiteral(FileLine* flp, const Expr& expr, const V
 }
 
 AstNodeExpr* Lowering::lowerBitStringLiteral(FileLine* flp, const Expr& expr,
-                                             const VType* context) {
+                                             const VType* contextp) {
     // A string literal whose characters are all logic characters is a bit vector in a
     // logic context, but a string in a character-array context: `"ZU"` is a legal
     // std_logic_vector and a legal `string` (IEEE 1076-2008 9.3.2, 15.5)
-    if (context && !expr.spelling.empty()
-        && ((context->kind == VType::ARRAY && context->elemp
-             && context->elemp->typeName == "character")
-            || context->typeName == "string")) {
+    if (contextp && !expr.spelling.empty()
+        && ((contextp->kind == VType::ARRAY && contextp->elemp
+             && contextp->elemp->typeName == "character")
+            || contextp->typeName == "string")) {
         return makeStringConst(flp, expr.spelling);
     }
     const int width = static_cast<int>(expr.bits.size());
     AstNodeDType* dtp = nullptr;
-    if (context && context->isVector() && context->width == width) {
-        dtp = context->dtp;
+    if (contextp && contextp->isVector() && contextp->width == width) {
+        dtp = contextp->dtp;
     } else {
         dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, width);
     }
     return makeBitsConst(flp, dtp, expr.bits);
 }
 
-AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* contextp) {
     if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, false);
     // An expected enumeration type picks its own literal, even when another visible
     // enumeration declares the same name (IEEE 1076-2008 12.5)
-    if (context && context->kind == VType::ENUM) {
-        for (size_t i = 0; i < context->literals.size(); ++i) {
-            if (VString::downcase(context->literals[i]) != VString::downcase(expr.text)) {
+    if (contextp && contextp->kind == VType::ENUM) {
+        for (size_t i = 0; i < contextp->literals.size(); ++i) {
+            if (VString::downcase(contextp->literals[i]) != VString::downcase(expr.text)) {
                 continue;
             }
             AstConst* const constp
-                = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
-            constp->dtypep(context->dtp);
+                = new AstConst{flp, V3Number{flp, contextp->width, static_cast<uint32_t>(i)}};
+            constp->dtypep(contextp->dtp);
             return constp;
         }
     }
@@ -151,7 +150,7 @@ AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* c
             call.flp = flp;
             call.text = expr.text;
             call.spelling = expr.spelling;
-            return lowerFunctionCall(call, context);
+            return lowerFunctionCall(call, contextp);
         }
         flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'.");
         return nullptr;
@@ -159,7 +158,7 @@ AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* c
     return new AstVarRef{flp, it->second.varp, VAccess::READ};
 }
 
-AstNodeExpr* Lowering::lowerQualification(FileLine* flp, const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerQualification(FileLine* flp, const Expr& expr, const VType* contextp) {
     // A type qualification fixes the operand's type and keeps its width. A
     // vector mark without a constraint takes an aggregate operand's bounds
     // from the choices it covers.
@@ -193,7 +192,7 @@ AstNodeExpr* Lowering::lowerQualification(FileLine* flp, const Expr& expr, const
                          aggregateType.right, aggregateType.ascending);
         valuep = lowerExpr(*expr.a, &aggregateType);
     } else {
-        valuep = lowerExpr(*expr.a, context);
+        valuep = lowerExpr(*expr.a, contextp);
     }
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
@@ -215,9 +214,9 @@ AstNodeExpr* Lowering::lowerQualification(FileLine* flp, const Expr& expr, const
     return resizeExpr(valuep, target, flp);
 }
 
-AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* contextp) {
     bool userFound = false;
-    if (AstNodeExpr* const userp = lowerUserUnary(expr, context, userFound)) return userp;
+    if (AstNodeExpr* const userp = lowerUserUnary(expr, contextp, userFound)) return userp;
     if (userFound) return nullptr;
     AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
     if (!operandp) return nullptr;
@@ -237,11 +236,11 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
         // |x| is x when x is not negative, and -x otherwise
         AstNodeExpr* const zerop = type.isInt() ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
                                                 : makeVectorConst(flp, type, 0);
-        AstNodeExpr* const ltZeroP = new AstLtS{flp, operandp->cloneTree(false), zerop};
-        ltZeroP->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        AstNodeExpr* const ltZerop = new AstLtS{flp, operandp->cloneTree(false), zerop};
+        ltZerop->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
         AstNegate* const negp = new AstNegate{flp, operandp->cloneTree(false)};
         negp->dtypep(operandp->dtypep());
-        AstCond* const resultp = new AstCond{flp, ltZeroP, negp, operandp};
+        AstCond* const resultp = new AstCond{flp, ltZerop, negp, operandp};
         resultp->dtypep(operandp->dtypep());
         return resultp;
     }
@@ -293,7 +292,7 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     return nullptr;
 }
 
-AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* contextp) {
     // An expression that converts a real back to an integer folds whole at
     // elaboration time: the real itself has no form in the model, but the integer
     // result does. math_pkg's `floor_log2` is `natural(log2(real(value)))`
@@ -308,16 +307,16 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
     std::string packageName;
     if (expr.a && expr.a->kind == Expr::SELECTED && expr.a->a
         && packageNameOf(*expr.a->a, packageName)) {
-        return lowerFunctionCall(expr, context);
+        return lowerFunctionCall(expr, contextp);
     }
     if (expr.a && expr.a->kind == Expr::NAME) {
         if (expr.a->text == "rising_edge" || expr.a->text == "falling_edge") {
             return lowerEdgeCall(expr);
         }
         // A user subprogram shadows a standard-package function of the same name
-        if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, context);
+        if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, contextp);
         if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
-        if (isConversion(expr.a->text)) return lowerConversion(expr, context);
+        if (isConversion(expr.a->text)) return lowerConversion(expr, contextp);
         // A real has no synthesizable form, so a conversion to one is refused by name
         if (expr.a->text == "real") {
             unsupportedError(flp, "conversion to a real value");
@@ -368,8 +367,8 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
 }
 
 AstNodeExpr* Lowering::lowerOthersAssociation(FileLine* flp, const Expr& expr,
-                                              const VType* context) {
-    if (!context) {
+                                              const VType* contextp) {
+    if (!contextp) {
         unsupportedError(flp, "aggregate without a known target type");
         return nullptr;
     }
@@ -379,20 +378,20 @@ AstNodeExpr* Lowering::lowerOthersAssociation(FileLine* flp, const Expr& expr,
     } else if (expr.a->kind == Expr::BITS_LIT && expr.a->bits.size() == 1) {
         bit = expr.a->bits[0];
     }
-    if (bit != 0) return makeRepeatedConst(flp, *context, bit);
+    if (bit != 0) return makeRepeatedConst(flp, *contextp, bit);
     // An arbitrary value is replicated across every element
-    if (!context->isVector()) {
+    if (!contextp->isVector()) {
         unsupportedError(flp, "aggregate value for a non-array type");
         return nullptr;
     }
-    VType elemType = elementType(*context, flp);
+    VType elemType = elementType(*contextp, flp);
     AstNodeExpr* valuep = lowerExpr(*expr.a, &elemType);
     if (!valuep) return nullptr;
     valuep = resizeExpr(valuep, elemType, flp);
-    return repeatValue(flp, valuep, context->length(), context->dtp);
+    return repeatValue(flp, valuep, contextp->length(), contextp->dtp);
 }
 
-AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     switch (expr.kind) {
     case Expr::INT_LIT: return makeIntConst(flp, expr.intValue);
@@ -407,27 +406,27 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return nullptr;
     case Expr::TRUE_LIT: return bitConst(flp, '1');
     case Expr::FALSE_LIT: return bitConst(flp, '0');
-    case Expr::CHAR_LIT: return lowerCharLiteral(flp, expr, context);
-    case Expr::BITS_LIT: return lowerBitStringLiteral(flp, expr, context);
-    case Expr::NAME: return lowerName(flp, expr, context);
+    case Expr::CHAR_LIT: return lowerCharLiteral(flp, expr, contextp);
+    case Expr::BITS_LIT: return lowerBitStringLiteral(flp, expr, contextp);
+    case Expr::NAME: return lowerName(flp, expr, contextp);
     case Expr::AGG_POSITIONAL:
     case Expr::AGG_NAMED: {
-        if (!context) {
+        if (!contextp) {
             // The aggregate's own choices say how wide it is, which is all an operand of `&`
             // needs; only an `others` association leaves the length open
             VType derived;
             if (!deriveAggregateType(expr, derived)) return nullptr;
             return lowerAggregate(expr, derived);
         }
-        VType aggType = *context;
+        VType aggType = *contextp;
         constrainAggregateType(expr, aggType);
         return lowerAggregate(expr, aggType);
     }
-    case Expr::QUAL: return lowerQualification(flp, expr, context);
+    case Expr::QUAL: return lowerQualification(flp, expr, contextp);
     case Expr::ATTR: return lowerAttr(expr);
     case Expr::SELECTED: return lowerSelectedExpr(expr);
-    case Expr::PAREN: return lowerExpr(*expr.a, context);
-    case Expr::UNARY: return lowerUnary(flp, expr, context);
+    case Expr::PAREN: return lowerExpr(*expr.a, contextp);
+    case Expr::UNARY: return lowerUnary(flp, expr, contextp);
     case Expr::STRING_LIT: {
         // A string literal is an array of character; pack it as an unsigned vector
         // of 8-bit codes, first character most significant, matching a string
@@ -438,8 +437,8 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         }
         return makeStringConst(flp, expr.spelling);
     }
-    case Expr::BINARY: return lowerBinary(expr, context);
-    case Expr::INDEX: return lowerIndexedCall(flp, expr, context);
+    case Expr::BINARY: return lowerBinary(expr, contextp);
+    case Expr::INDEX: return lowerIndexedCall(flp, expr, contextp);
     case Expr::CALL: {
         // An operator-symbol call to a unary reduction, e.g. `"or"(a)`
         const std::string& name = expr.text;
@@ -450,10 +449,10 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
             if (!operandp) return nullptr;
             return makeReduction(flp, operandp, name);
         }
-        return lowerFunctionCall(expr, context);
+        return lowerFunctionCall(expr, contextp);
     }
     case Expr::SLICE: return lowerDesignator(expr, false);
-    case Expr::AGG_OTHERS: return lowerOthersAssociation(flp, expr, context);
+    case Expr::AGG_OTHERS: return lowerOthersAssociation(flp, expr, contextp);
     }
     return nullptr;
 }
@@ -547,21 +546,21 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
     const int commonElems = std::min(lLen, rLen);
     const int commonBits = commonElems * elemWidth;
     const VType prefixType = vectorType(flp, lt.kwd, VSigning::NOSIGN, commonBits);
-    AstSel* const lpfx = new AstSel{flp, lp->cloneTree(false), lt.width - commonBits, commonBits};
-    lpfx->dtypep(prefixType.dtp);
-    AstSel* const rpfx = new AstSel{flp, rp->cloneTree(false), rt.width - commonBits, commonBits};
-    rpfx->dtypep(prefixType.dtp);
+    AstSel* const lpfxp = new AstSel{flp, lp->cloneTree(false), lt.width - commonBits, commonBits};
+    lpfxp->dtypep(prefixType.dtp);
+    AstSel* const rpfxp = new AstSel{flp, rp->cloneTree(false), rt.width - commonBits, commonBits};
+    rpfxp->dtypep(prefixType.dtp);
     lp->deleteTree();
     rp->deleteTree();
     lp = nullptr;
     rp = nullptr;
-    AstNodeExpr* const eqp = new AstEqCase{flp, lpfx->cloneTree(false), rpfx->cloneTree(false)};
+    AstNodeExpr* const eqp = new AstEqCase{flp, lpfxp->cloneTree(false), rpfxp->cloneTree(false)};
     eqp->dtypep(bitDtp);
     AstNodeExpr* prefixp = nullptr;
     if (cmpOp == "<" || cmpOp == "<=") {
-        prefixp = new AstLt{flp, lpfx, rpfx};
+        prefixp = new AstLt{flp, lpfxp, rpfxp};
     } else {
-        prefixp = new AstGt{flp, lpfx, rpfx};
+        prefixp = new AstGt{flp, lpfxp, rpfxp};
     }
     prefixp->dtypep(bitDtp);
     // The prefix is equal and the lengths differ; the shorter array is the smaller one
@@ -1315,7 +1314,7 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
     return resultp;
 }
 
-AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
     if (!binaryStaticFits(flp, expr)) return nullptr;
@@ -1323,7 +1322,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     // the built-in operator of the same symbol
     if (expr.a && expr.b) {
         bool userFound = false;
-        if (AstNodeExpr* const userp = lowerUserOperator(expr, context, userFound)) return userp;
+        if (AstNodeExpr* const userp = lowerUserOperator(expr, contextp, userFound)) return userp;
         if (userFound) return nullptr;
         if (AstNodeExpr* const bitp = foldRealRelation(flp, expr, op)) return bitp;
     }
@@ -1790,7 +1789,7 @@ AstNodeExpr* Lowering::lowerIntrinsicMinMax(FileLine* flp, const std::string& fn
     return resultp;
 }
 
-AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
+AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     const std::string& name = expr.a->text;
     if (expr.args.size() == 2) {
@@ -1800,8 +1799,8 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
                 = staticIntFold(expr.args[1], width) && width > 0 && width <= MAX_FOLD_WIDTH;
             // A width only the consumer knows takes that width: to_unsigned pads with
             // zeros, and the elements beyond the run-time width are never selected
-            if (!staticWidth && name == "to_unsigned" && context && context->isVector()
-                && context->width > 0) {
+            if (!staticWidth && name == "to_unsigned" && contextp && contextp->isVector()
+                && contextp->width > 0) {
                 AstNodeExpr* const operandp = lowerExpr(*expr.args[0], nullptr);
                 if (!operandp) return nullptr;
                 if (!typeOfDType(operandp->dtypep()).isInt()) {
@@ -1809,7 +1808,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
                     operandp->deleteTree();
                     return nullptr;
                 }
-                return resizeExpr(operandp, *context, flp);
+                return resizeExpr(operandp, *contextp, flp);
             }
             AstNodeExpr* valuep = lowerExpr(*expr.args[0], nullptr);
             if (!valuep) return nullptr;
@@ -1866,7 +1865,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
     }
     AstNodeExpr* valuep = (!vectorOperand && evalInt(*expr.args[0], folded))
                               ? makeIntConst(flp, folded)
-                              : lowerExpr(*expr.args[0], operandNeedsContext ? context : nullptr);
+                              : lowerExpr(*expr.args[0], operandNeedsContext ? contextp : nullptr);
     if (!valuep) return nullptr;
     UASSERT_OBJ(valuep->dtypep(), valuep, "VHDL conversion operand has no data type");
     const VType valueType = typeOfDType(valuep->dtypep());
@@ -1915,8 +1914,8 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
     if (!valueType.isVector()) {
         // A conversion of a value whose width only the consumer knows, e.g. one that
         // holds a run-time-width to_unsigned: the packed form is the same
-        if (context && context->isVector() && context->width > 0 && valueType.isInt()) {
-            return resizeExpr(valuep, *context, flp);
+        if (contextp && contextp->isVector() && contextp->width > 0 && valueType.isInt()) {
+            return resizeExpr(valuep, *contextp, flp);
         }
         unsupportedError(flp, "conversion of a non-vector value");
         valuep->deleteTree();
@@ -2566,7 +2565,7 @@ VType Lowering::typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const {
 
 const VType* Lowering::typeOfName(const Expr& expr) const {
     if (expr.kind != Expr::NAME) return nullptr;
-    auto& bindings = activeEnv();
+    const InlineEnv& bindings = activeEnv();
     const auto bindIt = bindings.find(expr.text);
     if (bindIt != bindings.end()) {
         if (!bindIt->second.type.dtp) return nullptr;
