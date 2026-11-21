@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: Unsupported: VHDL with -E; VHDL has no preprocessor: t/t_vhdl_cnt.vhdl
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

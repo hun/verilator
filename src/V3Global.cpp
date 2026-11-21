@@ -117,7 +117,7 @@ void V3Global::readFiles() {
     const auto parseDesignFile = [&](FileLine* flp, const string& filename, bool inLibrary,
                                      const string& libname, const string& errmsg) {
         if (v3Global.opt.fileSourceLang(filename) == V3SourceLang::VHDL) {
-            vhdlParserp->parseFile(flp, filename, inLibrary, false, libname, errmsg);
+            vhdlParserp->parseFile(flp, filename, inLibrary, libname, errmsg);
         } else {
             parser.parseFile(flp, filename, inLibrary, false, libname, errmsg);
         }

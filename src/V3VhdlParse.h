@@ -42,10 +42,9 @@ public:
     explicit V3VhdlParse(AstNetlist* rootp) VL_MT_DISABLED;
     ~V3VhdlParse() VL_MT_DISABLED;
 
-    //! Parse one file into the design library; may add an AstNotFoundModule for a missing file
-    void parseFile(FileLine* fileline, const std::string& filename, bool inLibrary, bool inLibMap,
-                   const std::string& libname, const std::string& errmsg,
-                   const std::string& notFoundName = "") VL_MT_DISABLED;
+    //! Collect one file into the design library
+    void parseFile(FileLine* fileline, const std::string& filename, bool inLibrary,
+                   const std::string& libname, const std::string& errmsg) VL_MT_DISABLED;
     //! Analyze and elaborate all design units, then emit AstModules
     void finish() VL_MT_DISABLED;
     //! Modules finish() emitted, for checks that must not see Verilog modules
