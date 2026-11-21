@@ -8,7 +8,7 @@ RFC: native VHDL frontend for Verilator
 
 Status: draft for maintainer discussion. This is a design proposal, not a pull
 request. Please decide the scope questions at the end before review effort is
-spent on the 371-commit working branch.
+spent on the working branch of about 380 commits.
 
 1. Motivation
 =============
@@ -79,9 +79,11 @@ silently ignored.
        message prints, ``severity failure`` ends the run, and a non-literal
        message is dropped.
    * - Timing
-     - ``after``, ``transport``, ``inertial``, ``reject`` and ``wait for`` are
-       refused; a limited top-level clock-wait testbench model exists under
-       ``--binary``.
+     - A process with one ``wait for`` and a nonzero ``after`` on a concurrent
+       assignment lower to timed blocks under ``--binary``, at the absolute
+       VHDL time whatever ``--timescale`` says. A zero ``after`` is a delta.
+       A process with several waits, a nonzero ``after`` inside a process,
+       ``transport``, ``inertial`` and ``reject`` are refused.
 
 An object initialized with no value or reset starts at 0, including
 ``integer`` (VHDL would give ``T'left``). This is a deliberate divergence for
@@ -144,15 +146,15 @@ tree.
   units (``types``, ``expr``, ``stmt``, ``subprog``, ``process``, ``package``,
   ``elab``) with two private headers. The largest unit is ~3.5k lines; the
   ``Lowering`` class declaration is ~1.1k lines.
-* Frontend total is ~20.2k lines. Against base ``53a72711`` the branch is 371
-  commits, 1005 files, ~58k insertions (including tests).
+* Frontend total is ~20.9k lines. Against base ``53a72711`` the branch is about
+  380 commits, 1014 files, ~58k insertions (including tests).
 
 7. Evidence
 ===========
 
-* 324 regression drivers, 76 diagnostic/tree goldens, 329 ``.vhdl`` fixtures,
-  227 value-checked C++ harnesses, 237 ``vlt_all`` tests.
-* Full VHDL suite: 324 passed / 0 failed in ~15 s on 16 cores locally. Both
+* 329 regression drivers, 77 diagnostic/tree goldens, 331 ``.vhdl`` fixtures,
+  228 value-checked C++ harnesses, 237 ``vlt_all`` tests.
+* Full VHDL suite: 329 passed / 0 failed in ~15 s on 16 cores locally. Both
   distribution tests (``t_dist_test_style``, ``t_dist_copyright``) pass. The
   suite needs only the built Verilator and a C++ compiler; no test invokes GHDL
   or nvc.
