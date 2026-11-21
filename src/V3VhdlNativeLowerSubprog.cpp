@@ -1932,21 +1932,157 @@ AstNodeExpr* Lowering::evalFileInit(const SubprogramDecl& subp, const Expr& call
     return makeBitsConst(call.flp, retType.dtp, result.bits);
 }
 
+//! The visible reference to a subprogram declaration, or nullptr if it is hidden
+const Lowering::SubprogramRef* Lowering::visibleRef(const SubprogramDecl* declp) const {
+    for (const auto& entry : m_subprograms) {
+        for (const SubprogramRef& ref : entry.second) {
+            if (ref.declp == declp) return &ref;
+        }
+    }
+    return nullptr;
+}
+
+//! Bind an inlined function's aliases, local types and local variables into its
+//! environment; false if one of them could not be lowered
+bool Lowering::bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env) {
+    // A local type may name a constant of the same declarative part, so the types register
+    // in source order here, once the constants before them are bound
+    std::vector<const TypeDecl*> pendingTypes;
+    for (const TypeDecl& typeDecl : subp.types) pendingTypes.push_back(&typeDecl);
+    const auto registerTypesBefore = [this, &pendingTypes](int lineno) {
+        for (auto it = pendingTypes.begin(); it != pendingTypes.end();) {
+            if ((*it)->flp->lineno() > lineno) {
+                ++it;
+                continue;
+            }
+            registerType(**it);
+            it = pendingTypes.erase(it);
+        }
+    };
+    registerSubprograms(subp.subprograms, static_cast<int>(m_inlineFrames.size() - 1));
+    // An alias denotes its designator; its subtype mark gives it bounds of its own. An
+    // alias with a signature renames a subprogram, so it is registered as one instead of
+    // being valued like an object alias would be
+    for (const AliasDecl& alias : subp.aliases) {
+        if (!alias.designator) continue;
+        if (alias.hasSignature) {
+            registerSubprogramAlias(alias);
+            continue;
+        }
+        AstNodeExpr* const valuep = lowerExpr(*alias.designator, nullptr);
+        if (!valuep) return false;
+        InlineBinding binding{valuep, false, true, VType{}, nullptr};
+        VType aliasType;
+        if (alias.mark.flp && resolveType(alias.mark, aliasType)
+            && aliasType.width == valuep->width()) {
+            valuep->dtypep(aliasType.dtp);
+            binding.type = aliasType;
+        } else {
+            binding.type = typeOfDType(valuep->dtypep());
+        }
+        env[alias.name] = std::move(binding);
+    }
+    // Locals are bound to values; assignments rebuild the whole bound expression
+    for (const Decl& decl : subp.decls) {
+        registerTypesBefore(decl.flp->lineno());
+        VType declType;
+        const bool resolved = resolveType(decl.type, declType);
+        AstNodeExpr* initp = nullptr;
+        if (decl.init) {
+            initp = lowerExpr(*decl.init, resolved ? &declType : nullptr);
+        } else if (resolved) {
+            initp = makeVectorConst(decl.flp, declType, 0);
+        }
+        if (!initp) return false;
+        // An element write rebuilds an array local's whole value, and each read of the
+        // local copies that value into the rebuild, so its expression can grow by a
+        // factor per write (open-logic's ppcOr). Where the call has a statement sink the
+        // local becomes a real variable and its writes are statements.
+        const bool materialize = m_materializeLocals && decl.kind == Decl::VARIABLE && resolved
+                                 && declType.kind == VType::ARRAY && declType.dtp;
+        bool first = true;
+        for (const auto& name : decl.names) {
+            if (materialize) {
+                AstVar* const varp = new AstVar{
+                    decl.flp, VVarType::VAR,
+                    "__Vfn_" + std::to_string(++m_localVarSeq) + "__" + name.first, declType.dtp};
+                m_modp->addStmtsp(varp);
+                addPendingStmt(
+                    new AstAssign{decl.flp, new AstVarRef{decl.flp, varp, VAccess::WRITE},
+                                  resizeExpr(initp->cloneTree(false), declType, decl.flp)});
+                InlineBinding binding{new AstVarRef{decl.flp, varp, VAccess::READ}, true, true,
+                                      VType{}, nullptr};
+                binding.type = declType;
+                binding.materializedp = varp;
+                env[name.first] = std::move(binding);
+                continue;
+            }
+            InlineBinding binding{first ? initp : initp->cloneTree(false), false, true, VType{},
+                                  nullptr};
+            binding.type = resolved ? declType : typeOfDType(binding.exprp->dtypep());
+            env[name.first] = std::move(binding);
+            first = false;
+        }
+        if (materialize) initp->deleteTree();
+    }
+    // A type no declaration follows still belongs to the part
+    for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
+    return true;
+}
+
+//! Give an inlined call's result the declared return type, or the caller's type when the
+//! widths agree, and record the element structure of an array result
+AstNodeExpr* Lowering::adoptCallResultType(AstNodeExpr* resultp, const SubprogramDecl& subp,
+                                           const VType& retType, const VType* contextp,
+                                           FileLine* flp) {
+    if (retType.dtp && retType.width > 0) {
+        // The return expression was lowered without the return type; normalize it so an
+        // enum-backed std_ulogic adopts the one-bit logic type and vice versa
+        if (resultp->width() == retType.width) {
+            resultp->dtypep(retType.dtp);
+        } else {
+            resultp = resizeExpr(resultp, retType, flp);
+        }
+    }
+    if (contextp && contextp->dtp && resultp->width() == contextp->width) {
+        resultp->dtypep(contextp->dtp);
+    }
+    // A constrained array return type keeps the element structure that the packed dtype
+    // would otherwise lose; comparisons of a direct call need it. An unconstrained return
+    // takes the element type from the declaration and the element count from the result.
+    VType structType;
+    bool haveStruct = retType.kind == VType::ARRAY && retType.elemWidth > 0;
+    if (haveStruct) {
+        structType = retType;
+    } else {
+        const auto typeIt = m_types.find(subp.returnType.mark);
+        if (typeIt != m_types.end() && typeIt->second.kind == VType::ARRAY
+            && typeIt->second.elemWidth > 0) {
+            structType = typeIt->second;
+            haveStruct = true;
+        }
+    }
+    if (haveStruct && resultp->width() % structType.elemWidth == 0) {
+        structType.width = resultp->width();
+        const int elements = structType.width / structType.elemWidth;
+        if (elements > 0 && structType.length() != elements) {
+            // Packed order: the first element is the most significant one
+            structType.left = elements - 1;
+            structType.right = 0;
+            structType.ascending = false;
+        }
+        m_arrayDtypes[resultp->dtypep()] = structType;
+    }
+    return resultp;
+}
+
 AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp,
                                          const SubprogramDecl* forcedp) {
     const SubprogramRef* refp = nullptr;
     const SubprogramDecl* subp = nullptr;
     if (forcedp) {
         subp = forcedp;
-        for (const auto& entry : m_subprograms) {
-            for (const SubprogramRef& ref : entry.second) {
-                if (ref.declp == forcedp) {
-                    refp = &ref;
-                    break;
-                }
-            }
-            if (refp) break;
-        }
+        refp = visibleRef(forcedp);
         if (!refp) {
             call.flp->v3error("VHDL: operator '" + call.text + "' is no longer visible.");
             return nullptr;
@@ -1984,7 +2120,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
         importInlineScope(subp->unitName);
     }
     m_inlinep = &env;
-    const auto fail = [&](AstNodeExpr* nullp) -> AstNodeExpr* {
+    const auto finish = [&](AstNodeExpr* nullp) -> AstNodeExpr* {
         deleteInlineEnv(env);
         m_inlineFrames.pop_back();
         m_inlinep = savedInlinep;
@@ -1993,88 +2129,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
         return nullp;
     };
 
-    // A local type may name a constant of the same declarative part, so the types register
-    // in source order here, once the constants before them are bound
-    std::vector<const TypeDecl*> pendingTypes;
-    for (const TypeDecl& typeDecl : subp->types) pendingTypes.push_back(&typeDecl);
-    const auto registerTypesBefore = [this, &pendingTypes](int lineno) {
-        for (auto it = pendingTypes.begin(); it != pendingTypes.end();) {
-            if ((*it)->flp->lineno() > lineno) {
-                ++it;
-                continue;
-            }
-            registerType(**it);
-            it = pendingTypes.erase(it);
-        }
-    };
-    registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
-    // An alias denotes its designator; its subtype mark gives it bounds of its own. An
-    // alias with a signature renames a subprogram, so it is registered as one instead of
-    // being valued like an object alias would be
-    for (const AliasDecl& alias : subp->aliases) {
-        if (!alias.designator) continue;
-        if (alias.hasSignature) {
-            registerSubprogramAlias(alias);
-            continue;
-        }
-        AstNodeExpr* const valuep = lowerExpr(*alias.designator, nullptr);
-        if (!valuep) return fail(nullptr);
-        InlineBinding binding{valuep, false, true, VType{}, nullptr};
-        VType aliasType;
-        if (alias.mark.flp && resolveType(alias.mark, aliasType)
-            && aliasType.width == valuep->width()) {
-            valuep->dtypep(aliasType.dtp);
-            binding.type = aliasType;
-        } else {
-            binding.type = typeOfDType(valuep->dtypep());
-        }
-        env[alias.name] = std::move(binding);
-    }
-    // Locals are bound to values; assignments rebuild the whole bound expression
-    for (const Decl& decl : subp->decls) {
-        registerTypesBefore(decl.flp->lineno());
-        VType declType;
-        const bool resolved = resolveType(decl.type, declType);
-        AstNodeExpr* initp = nullptr;
-        if (decl.init) {
-            initp = lowerExpr(*decl.init, resolved ? &declType : nullptr);
-        } else if (resolved) {
-            initp = makeVectorConst(decl.flp, declType, 0);
-        }
-        if (!initp) return fail(nullptr);
-        // An element write rebuilds an array local's whole value, and each read of the
-        // local copies that value into the rebuild, so its expression can grow by a
-        // factor per write (open-logic's ppcOr). Where the call has a statement sink the
-        // local becomes a real variable and its writes are statements.
-        const bool materialize = m_materializeLocals && decl.kind == Decl::VARIABLE && resolved
-                                 && declType.kind == VType::ARRAY && declType.dtp;
-        bool first = true;
-        for (const auto& name : decl.names) {
-            if (materialize) {
-                AstVar* const varp = new AstVar{
-                    decl.flp, VVarType::VAR,
-                    "__Vfn_" + std::to_string(++m_localVarSeq) + "__" + name.first, declType.dtp};
-                m_modp->addStmtsp(varp);
-                addPendingStmt(
-                    new AstAssign{decl.flp, new AstVarRef{decl.flp, varp, VAccess::WRITE},
-                                  resizeExpr(initp->cloneTree(false), declType, decl.flp)});
-                InlineBinding binding{new AstVarRef{decl.flp, varp, VAccess::READ}, true, true,
-                                      VType{}, nullptr};
-                binding.type = declType;
-                binding.materializedp = varp;
-                env[name.first] = std::move(binding);
-                continue;
-            }
-            InlineBinding binding{first ? initp : initp->cloneTree(false), false, true, VType{},
-                                  nullptr};
-            binding.type = resolved ? declType : typeOfDType(binding.exprp->dtypep());
-            env[name.first] = std::move(binding);
-            first = false;
-        }
-        if (materialize) initp->deleteTree();
-    }
-    // A type no declaration follows still belongs to the part
-    for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
+    if (!bindFunctionLocals(*subp, env)) return finish(nullptr);
     VType retType;
     const VType* const outerRetp = m_funcRetp;
     // An unconstrained array return type takes its width from the body and the context
@@ -2086,47 +2141,8 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
     const InlineCont noCont = [](InlineEnv&) -> AstNodeExpr* { return nullptr; };
     AstNodeExpr* resultp = evalFuncBlock(subp->body, 0, env, noCont, nullptr, 0);
     m_funcRetp = outerRetp;
-    if (resultp && retType.dtp && retType.width > 0) {
-        // The return expression was lowered without the return type; normalize it so an
-        // enum-backed std_ulogic adopts the one-bit logic type and vice versa
-        if (resultp->width() == retType.width) {
-            resultp->dtypep(retType.dtp);
-        } else {
-            resultp = resizeExpr(resultp, retType, call.flp);
-        }
-    }
-    if (resultp && contextp && contextp->dtp && resultp->width() == contextp->width) {
-        resultp->dtypep(contextp->dtp);
-    }
-    // A constrained array return type keeps the element structure that the packed dtype
-    // would otherwise lose; comparisons of a direct call need it. An unconstrained return
-    // takes the element type from the declaration and the element count from the result.
-    if (resultp) {
-        VType structType;
-        bool haveStruct = retType.kind == VType::ARRAY && retType.elemWidth > 0;
-        if (haveStruct) {
-            structType = retType;
-        } else {
-            const auto typeIt = m_types.find(subp->returnType.mark);
-            if (typeIt != m_types.end() && typeIt->second.kind == VType::ARRAY
-                && typeIt->second.elemWidth > 0) {
-                structType = typeIt->second;
-                haveStruct = true;
-            }
-        }
-        if (haveStruct && resultp->width() % structType.elemWidth == 0) {
-            structType.width = resultp->width();
-            const int elements = structType.width / structType.elemWidth;
-            if (elements > 0 && structType.length() != elements) {
-                // Packed order: the first element is the most significant one
-                structType.left = elements - 1;
-                structType.right = 0;
-                structType.ascending = false;
-            }
-            m_arrayDtypes[resultp->dtypep()] = structType;
-        }
-    }
-    return fail(resultp);
+    if (resultp) resultp = adoptCallResultType(resultp, *subp, retType, contextp, call.flp);
+    return finish(resultp);
 }
 
 AstNodeExpr* Lowering::evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index,
@@ -2145,6 +2161,197 @@ AstNodeExpr* Lowering::evalFuncBlock(const std::vector<StmtP>& stmts, std::size_
     return resultp;
 }
 
+//! Assign a local of an inlined function body: a whole local takes the new value, an
+//! element rebuilds the local's value around it; false if the assignment cannot fold
+bool Lowering::evalFuncVarAssign(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    const Expr& target = *stmt.target;
+    if (target.kind != Expr::NAME) return evalFuncElementAssign(stmt);
+    InlineEnv& bindings = activeEnv();
+    const auto it = bindings.find(target.text);
+    if (it == bindings.end()) {
+        unsupportedError(flp, "assignment to a name that is not local to the inlined subprogram");
+        return false;
+    }
+    // The target constrains the value, e.g. an aggregate's width
+    AstNodeExpr* const valuep
+        = lowerExpr(*stmt.value, it->second.type.dtp ? &it->second.type : nullptr);
+    if (!valuep) return false;
+    if (it->second.materializedp) {
+        // The evaluator lowers both sides of a run-time branch, so a
+        // statement here would run on both paths
+        if (m_runtimeBranchDepth > 0) {
+            unsupportedError(flp, "array local assigned under a run-time condition");
+            return false;
+        }
+        // A real variable takes the assignment as a statement
+        addPendingStmt(new AstAssign{flp,
+                                     new AstVarRef{flp, it->second.materializedp, VAccess::WRITE},
+                                     resizeExpr(valuep, it->second.type, flp)});
+        return true;
+    }
+    it->second.exprp->deleteTree();
+    it->second.exprp = valuep;
+    return true;
+}
+
+//! Assign one element of a local of an inlined function body
+bool Lowering::evalFuncElementAssign(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    const Expr& target = *stmt.target;
+    // Locals are bound to values: rebuild the whole value around the element update
+    const Expr* basep = nullptr;
+    for (const Expr* prefixp = &target;;) {
+        if (prefixp->kind == Expr::NAME) {
+            basep = prefixp;
+            break;
+        }
+        // A designator's own parts nest the same way the lowered selects do
+        if ((prefixp->kind != Expr::INDEX && prefixp->kind != Expr::SLICE
+             && prefixp->kind != Expr::SELECTED)
+            || !prefixp->a) {
+            break;
+        }
+        prefixp = prefixp->a.get();
+    }
+    if (!basep) {
+        unsupportedError(flp, "assignment target form in an inlined function body");
+        return false;
+    }
+    InlineEnv& bindings = activeEnv();
+    const auto it = bindings.find(basep->text);
+    if (it == bindings.end()) {
+        unsupportedError(flp, "assignment to an element outside the inlined subprogram");
+        return false;
+    }
+    if (it->second.materializedp) {
+        // The evaluator lowers both sides of a run-time branch, so a statement
+        // here would run on both paths
+        if (m_runtimeBranchDepth > 0) {
+            unsupportedError(flp, "array local assigned under a run-time condition");
+            return false;
+        }
+        // A real variable takes one element assignment as one statement, with no
+        // rebuild of the value around it
+        AstNodeExpr* const lhsp = lowerDesignator(target, true);
+        if (!lhsp) return false;
+        // The declared type keeps a record element's fields; the lowered lvalue is
+        // the packed vector, which would turn `r(i) := (a, b, c)` into an array
+        // aggregate that covers no field
+        const VType elemType = typeOfTarget(target, lhsp);
+        AstNodeExpr* const valuep = lowerExpr(*stmt.value, &elemType);
+        if (!valuep) {
+            lhsp->deleteTree();
+            return false;
+        }
+        addPendingStmt(new AstAssign{flp, lhsp, resizeExpr(valuep, elemType, flp)});
+        return true;
+    }
+    // Each element write rebuilds the local's whole value, and a body that reads
+    // the local back grows the rebuilt tree by that read too. The budget follows
+    // the value's size, which is what every write copies
+    m_funcWriteCost += 64 + it->second.exprp->width() / 64 + it->second.exprp->nodeCount();
+    if (m_funcWriteCost > MAX_FOLD_WRITE_COST) {
+        unsupportedError(flp, "function body with too many element assignments");
+        return false;
+    }
+    AstNodeExpr* const readp = lowerDesignator(target, false);
+    AstSel* const selp = VN_CAST(readp, Sel);
+    if (!selp) {
+        if (readp) readp->deleteTree();
+        unsupportedError(flp, "assignment to an element of a non-vector value");
+        return false;
+    }
+    // A nested target selects inside a select, so its offset in the local's value
+    // is the sum of the levels: `v(i)(j)` lands inside `v`. The selects that came
+    // from binding the local to its actual are not part of the target -- the
+    // local's own value is what is rebuilt -- so summing stops at the level whose
+    // width is the local's
+    const int localWidth = it->second.exprp->width();
+    AstNodeExpr* offsetp = selp->lsbp()->cloneTree(false);
+    for (AstSel* subjectp = VN_CAST(selp->fromp(), Sel);
+         subjectp && subjectp->width() != localWidth; subjectp = VN_CAST(subjectp->fromp(), Sel)) {
+        AstNodeExpr* const summed = new AstAdd{flp, offsetp, subjectp->lsbp()->cloneTree(false)};
+        summed->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+        offsetp = summed;
+    }
+    // The declared element type keeps a record's fields; the lowered select is the
+    // packed vector, which would turn `r(i) := (a, b, c)` into an array aggregate
+    VType elemType;
+    if (!typeOfDesignator(target, elemType)) elemType = typeOfDType(selp->dtypep());
+    AstNodeExpr* valuep = lowerExpr(*stmt.value, &elemType);
+    if (!valuep) {
+        readp->deleteTree();
+        offsetp->deleteTree();
+        return false;
+    }
+    AstNodeExpr* const updatedp
+        = updateLocalElement(flp, it->second.exprp->cloneTree(false), valuep, selp->dtypep(),
+                             offsetp, selp->widthConst());
+    readp->deleteTree();
+    it->second.exprp->deleteTree();
+    it->second.exprp = updatedp;
+    return true;
+}
+
+//! An exit or next statement of an inlined function body; a conditional one selects
+//! between its target and the rest of the body
+AstNodeExpr* Lowering::evalFuncExitNext(const std::vector<StmtP>& stmts, std::size_t i,
+                                        const InlineCont& cont, const InlineCont* exitContp,
+                                        int depth) {
+    const Stmt& stmt = *stmts[i];
+    FileLine* const flp = stmt.flp;
+    AstNodeExpr* const condExprp = stmt.value ? lowerCond(*stmt.value) : nullptr;
+    if (stmt.value && !condExprp) return nullptr;
+    AstNodeExpr* targetp = nullptr;
+    // A conditional exit lowers the rest of the body as well, and only one of
+    // the two paths runs
+    const RuntimeBranchScope exitScope{stmt.value ? m_runtimeBranchDepth : m_unusedDepth};
+    if (!stmt.loopLabel.empty()) {
+        // A label selects that active loop; the innermost match wins
+        const InlineCont* foundp = nullptr;
+        for (std::size_t t = m_funcLoopTargets.size(); t-- > 0;) {
+            if (m_funcLoopTargets[t].label != stmt.loopLabel) continue;
+            foundp = stmt.kind == Stmt::EXIT ? m_funcLoopTargets[t].exitp
+                                             : m_funcLoopTargets[t].nextp;
+            break;
+        }
+        if (!foundp) {
+            unsupportedError(flp, "exit/next to a loop that is not visible here");
+            if (condExprp) condExprp->deleteTree();
+            return nullptr;
+        }
+        targetp = (*foundp)(activeEnv());
+    } else if (stmt.kind == Stmt::EXIT) {
+        if (!exitContp) {
+            unsupportedError(flp, "exit statement outside a static loop in a function");
+            if (condExprp) condExprp->deleteTree();
+            return nullptr;
+        }
+        targetp = (*exitContp)(activeEnv());
+    } else {
+        targetp = cont(activeEnv());
+    }
+    if (!condExprp) return targetp;
+    // The statements after a conditional exit/next only run when it is not taken
+    AstNodeExpr* restp = evalFuncBlockBody(stmts, i + 1, cont, exitContp, depth);
+    if (!targetp || !restp) {
+        if (targetp) targetp->deleteTree();
+        if (restp) restp->deleteTree();
+        return nullptr;
+    }
+    if (targetp->width() != restp->width()) {
+        if (targetp->width() > restp->width()) {
+            restp = resizeExpr(restp, typeOfDType(targetp->dtypep()), flp);
+        } else {
+            targetp = resizeExpr(targetp, typeOfDType(restp->dtypep()), flp);
+        }
+    }
+    AstCond* const resultp = new AstCond{flp, condExprp, targetp, restp};
+    resultp->dtypep(targetp->dtypep());
+    return resultp;
+}
+
 AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::size_t index,
                                          const InlineCont& cont, const InlineCont* exitContp,
                                          int depth) {
@@ -2157,130 +2364,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             return nullptr;
         }
         if (stmt.kind == Stmt::VAR_ASSIGN) {
-            const Expr& target = *stmt.target;
-            if (target.kind == Expr::NAME) {
-                InlineEnv& bindings = activeEnv();
-                const auto it = bindings.find(target.text);
-                if (it == bindings.end()) {
-                    unsupportedError(flp, "assignment to a name that is not local to the "
-                                          "inlined subprogram");
-                    return nullptr;
-                }
-                // The target constrains the value, e.g. an aggregate's width
-                AstNodeExpr* const valuep
-                    = lowerExpr(*stmt.value, it->second.type.dtp ? &it->second.type : nullptr);
-                if (!valuep) return nullptr;
-                if (it->second.materializedp) {
-                    // The evaluator lowers both sides of a run-time branch, so a
-                    // statement here would run on both paths
-                    if (m_runtimeBranchDepth > 0) {
-                        unsupportedError(flp, "array local assigned under a run-time condition");
-                        return nullptr;
-                    }
-                    // A real variable takes the assignment as a statement
-                    addPendingStmt(new AstAssign{
-                        flp, new AstVarRef{flp, it->second.materializedp, VAccess::WRITE},
-                        resizeExpr(valuep, it->second.type, flp)});
-                    continue;
-                }
-                it->second.exprp->deleteTree();
-                it->second.exprp = valuep;
-                continue;
-            }
-            // Locals are bound to values: rebuild the whole value around the element update
-            const Expr* basep = nullptr;
-            for (const Expr* prefixp = &target;;) {
-                if (prefixp->kind == Expr::NAME) {
-                    basep = prefixp;
-                    break;
-                }
-                // A designator's own parts nest the same way the lowered selects do
-                if ((prefixp->kind != Expr::INDEX && prefixp->kind != Expr::SLICE
-                     && prefixp->kind != Expr::SELECTED)
-                    || !prefixp->a) {
-                    break;
-                }
-                prefixp = prefixp->a.get();
-            }
-            if (!basep) {
-                unsupportedError(flp, "assignment target form in an inlined function body");
-                return nullptr;
-            }
-            InlineEnv& bindings = activeEnv();
-            const auto it = bindings.find(basep->text);
-            if (it == bindings.end()) {
-                unsupportedError(flp, "assignment to an element outside the inlined subprogram");
-                return nullptr;
-            }
-            if (it->second.materializedp) {
-                // The evaluator lowers both sides of a run-time branch, so a statement
-                // here would run on both paths
-                if (m_runtimeBranchDepth > 0) {
-                    unsupportedError(flp, "array local assigned under a run-time condition");
-                    return nullptr;
-                }
-                // A real variable takes one element assignment as one statement, with no
-                // rebuild of the value around it
-                AstNodeExpr* const lhsp = lowerDesignator(target, true);
-                if (!lhsp) return nullptr;
-                // The declared type keeps a record element's fields; the lowered lvalue is
-                // the packed vector, which would turn `r(i) := (a, b, c)` into an array
-                // aggregate that covers no field
-                const VType elemType = typeOfTarget(target, lhsp);
-                AstNodeExpr* const valuep = lowerExpr(*stmt.value, &elemType);
-                if (!valuep) {
-                    lhsp->deleteTree();
-                    return nullptr;
-                }
-                addPendingStmt(new AstAssign{flp, lhsp, resizeExpr(valuep, elemType, flp)});
-                continue;
-            }
-            // Each element write rebuilds the local's whole value, and a body that reads
-            // the local back grows the rebuilt tree by that read too. The budget follows
-            // the value's size, which is what every write copies
-            m_funcWriteCost += 64 + it->second.exprp->width() / 64 + it->second.exprp->nodeCount();
-            if (m_funcWriteCost > MAX_FOLD_WRITE_COST) {
-                unsupportedError(flp, "function body with too many element assignments");
-                return nullptr;
-            }
-            AstNodeExpr* const readp = lowerDesignator(target, false);
-            AstSel* const selp = VN_CAST(readp, Sel);
-            if (!selp) {
-                if (readp) readp->deleteTree();
-                unsupportedError(flp, "assignment to an element of a non-vector value");
-                return nullptr;
-            }
-            // A nested target selects inside a select, so its offset in the local's value
-            // is the sum of the levels: `v(i)(j)` lands inside `v`. The selects that came
-            // from binding the local to its actual are not part of the target -- the
-            // local's own value is what is rebuilt -- so summing stops at the level whose
-            // width is the local's
-            const int localWidth = it->second.exprp->width();
-            AstNodeExpr* offsetp = selp->lsbp()->cloneTree(false);
-            for (AstSel* subjectp = VN_CAST(selp->fromp(), Sel);
-                 subjectp && subjectp->width() != localWidth;
-                 subjectp = VN_CAST(subjectp->fromp(), Sel)) {
-                AstNodeExpr* const summed
-                    = new AstAdd{flp, offsetp, subjectp->lsbp()->cloneTree(false)};
-                summed->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
-                offsetp = summed;
-            }
-            // The declared element type keeps a record's fields; the lowered select is the
-            // packed vector, which would turn `r(i) := (a, b, c)` into an array aggregate
-            VType elemType;
-            if (!typeOfDesignator(target, elemType)) elemType = typeOfDType(selp->dtypep());
-            AstNodeExpr* valuep = lowerExpr(*stmt.value, &elemType);
-            if (!valuep) {
-                readp->deleteTree();
-                offsetp->deleteTree();
-                return nullptr;
-            }
-            AstNodeExpr* const updatedp
-                = updateLocalElement(flp, it->second.exprp->cloneTree(false), valuep,
-                                     selp->dtypep(), offsetp, selp->widthConst());
-            readp->deleteTree();
-            it->second.exprp->deleteTree();
-            it->second.exprp = updatedp;
+            if (!evalFuncVarAssign(stmt)) return nullptr;
             continue;
         }
         if (stmt.kind == Stmt::REPORT || stmt.kind == Stmt::ASSERT) continue;
@@ -2315,55 +2399,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             return evalFuncFor(stmt, restCont, depth + 1);
         }
         if (stmt.kind == Stmt::EXIT || stmt.kind == Stmt::NEXT) {
-            AstNodeExpr* const condExprp = stmt.value ? lowerCond(*stmt.value) : nullptr;
-            if (stmt.value && !condExprp) return nullptr;
-            AstNodeExpr* targetp = nullptr;
-            // A conditional exit lowers the rest of the body as well, and only one of
-            // the two paths runs
-            const RuntimeBranchScope exitScope{stmt.value ? m_runtimeBranchDepth : m_unusedDepth};
-            if (!stmt.loopLabel.empty()) {
-                // A label selects that active loop; the innermost match wins
-                const InlineCont* foundp = nullptr;
-                for (std::size_t t = m_funcLoopTargets.size(); t-- > 0;) {
-                    if (m_funcLoopTargets[t].label != stmt.loopLabel) continue;
-                    foundp = stmt.kind == Stmt::EXIT ? m_funcLoopTargets[t].exitp
-                                                     : m_funcLoopTargets[t].nextp;
-                    break;
-                }
-                if (!foundp) {
-                    unsupportedError(flp, "exit/next to a loop that is not visible here");
-                    if (condExprp) condExprp->deleteTree();
-                    return nullptr;
-                }
-                targetp = (*foundp)(activeEnv());
-            } else if (stmt.kind == Stmt::EXIT) {
-                if (!exitContp) {
-                    unsupportedError(flp, "exit statement outside a static loop in a function");
-                    if (condExprp) condExprp->deleteTree();
-                    return nullptr;
-                }
-                targetp = (*exitContp)(activeEnv());
-            } else {
-                targetp = cont(activeEnv());
-            }
-            if (!condExprp) return targetp;
-            // The statements after a conditional exit/next only run when it is not taken
-            AstNodeExpr* restp = evalFuncBlockBody(stmts, i + 1, cont, exitContp, depth);
-            if (!targetp || !restp) {
-                if (targetp) targetp->deleteTree();
-                if (restp) restp->deleteTree();
-                return nullptr;
-            }
-            if (targetp->width() != restp->width()) {
-                if (targetp->width() > restp->width()) {
-                    restp = resizeExpr(restp, typeOfDType(targetp->dtypep()), flp);
-                } else {
-                    targetp = resizeExpr(targetp, typeOfDType(restp->dtypep()), flp);
-                }
-            }
-            AstCond* const resultp = new AstCond{flp, condExprp, targetp, restp};
-            resultp->dtypep(targetp->dtypep());
-            return resultp;
+            return evalFuncExitNext(stmts, i, cont, exitContp, depth);
         }
         unsupportedError(flp, "this statement form in an inlined VHDL function body");
         return nullptr;

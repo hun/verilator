@@ -1118,7 +1118,11 @@ class Lowering final {
                                     AstNodeDType* bitDtp);
     AstNodeExpr* lowerConversion(const Expr& expr, const VType* contextp);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
-    AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType, bool write);
+    AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType);
+    AstNodeExpr* lowerRangeAttrSlice(FileLine* flp, const Expr& rangeExpr, AstNodeExpr* basep,
+                                     const VType& baseType);
+    AstNodeExpr* lowerIndexChain(const Expr& expr, AstNodeExpr* basep, const VType& baseType);
+    AstNodeExpr* lowerDynamicSlice(const Expr& expr, AstNodeExpr* basep, const VType& baseType);
     bool sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
                     int64_t& out);
     AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
@@ -1399,8 +1403,16 @@ class Lowering final {
                                AstNodeStmt*& prologsp, bool lvalueFormals, bool concurrent);
     AstNodeExpr* lowerFunctionCall(const Expr& call, const VType* contextp,
                                    const SubprogramDecl* forcedp = nullptr);
+    const SubprogramRef* visibleRef(const SubprogramDecl* declp) const;
+    bool bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env);
+    AstNodeExpr* adoptCallResultType(AstNodeExpr* resultp, const SubprogramDecl& subp,
+                                     const VType& retType, const VType* contextp, FileLine* flp);
     AstNodeExpr* evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index, InlineEnv& env,
                                const InlineCont& cont, const InlineCont* exitContp, int depth);
+    bool evalFuncVarAssign(const Stmt& stmt);
+    bool evalFuncElementAssign(const Stmt& stmt);
+    AstNodeExpr* evalFuncExitNext(const std::vector<StmtP>& stmts, std::size_t i,
+                                  const InlineCont& cont, const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncBlockBody(const std::vector<StmtP>& stmts, std::size_t index,
                                    const InlineCont& cont, const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,
@@ -1510,6 +1522,8 @@ public:
     void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
                      const GenericBindings* bindingsp = nullptr,
                      const std::string& publishName = {});
+    void completeDeferredConsts();
+    PackageInfo publishedInfo(const PackageUnit& pkg);
     void instantiatePackage(const std::vector<PackageUnit>& packages, const PackageInstance& inst,
                             PackageTable::Impl& table);
 };

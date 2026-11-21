@@ -2021,7 +2021,7 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
                 baseType = typeOfDType(basep->dtypep());
             }
         }
-        return lowerSel(expr, basep, baseType, write);
+        return lowerSel(expr, basep, baseType);
     }
     if (expr.kind == Expr::SELECTED) {
         VType prefixType;
@@ -2082,172 +2082,108 @@ bool Lowering::sliceBound(const ExprP& exprp, const std::string& prefix, const V
     return false;
 }
 
-AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType,
-                                bool write) {
-    (void)write;
+//! A slice by the bounds of `prefix'range`, whose prefix names the bounds' type
+AstNodeExpr* Lowering::lowerRangeAttrSlice(FileLine* flp, const Expr& rangeExpr,
+                                           AstNodeExpr* basep, const VType& baseType) {
+    if (!rangeExpr.a || rangeExpr.a->kind != Expr::NAME) {
+        unsupportedError(flp, "'range of a non-name prefix");
+        basep->deleteTree();
+        return nullptr;
+    }
+    // The bounds come from the prefix name's type, not from the sliced array
+    const VType* const prefixTypep = typeOfName(*rangeExpr.a);
+    if (!prefixTypep) {
+        flp->v3error("VHDL: unknown name '" + rangeExpr.a->spelling + "' in 'range.");
+        basep->deleteTree();
+        return nullptr;
+    }
+    // The attribute's own index selects which of the prefix's ranges is meant
+    const VType* const levelp = indexRangeLevel(rangeExpr, *prefixTypep);
+    if (!levelp) {
+        unsupportedError(flp, "index of attribute 'range'");
+        basep->deleteTree();
+        return nullptr;
+    }
+    int hi = levelp->ascending ? levelp->right : levelp->left;
+    int lo = levelp->ascending ? levelp->left : levelp->right;
+    if (hi < lo) std::swap(hi, lo);
+    return sliceOf(flp, basep, baseType, baseType.elemWidth, hi, lo, levelp->ascending);
+}
+
+//! Index one array level per argument of `m(i, j)`; a nested `m(i)(j)` arrives here as
+//! separate single-argument indexes
+AstNodeExpr* Lowering::lowerIndexChain(const Expr& expr, AstNodeExpr* basep,
+                                       const VType& baseType) {
     FileLine* const flp = expr.flp;
-    if (!baseType.isVector()) {
-        unsupportedError(flp, "index or slice of a non-array value");
-        basep->deleteTree();
-        return nullptr;
-    }
-    // A VECTOR is an array of a scalar element type; an ARRAY names its element type
-    VType elemType;
-    if (baseType.kind == VType::ARRAY && baseType.elemp) {
-        elemType = *baseType.elemp;
-    } else {
-        elemType.kind = baseType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
-        elemType.dtp = findBasic(flp, baseType.kwd);
-    }
-    const int elemWidth = baseType.elemWidth;
-    if (elemWidth <= 0) {
-        // An array of unconstrained elements has no element width to select
-        unsupportedError(flp, "index of an array with an unconstrained element");
-        basep->deleteTree();
-        return nullptr;
-    }
-    // Only `prefix'range` is a slice by the prefix's own bounds. Any other attribute used
-    // as an index (`v(x'high)`) or slice bound (`v(x'high downto 0)`) lowers as an expression
-    const auto rangeAttr = [](const ExprP& e) -> const Expr* {
-        return e && e->kind == Expr::ATTR && e->text == "range" ? e.get() : nullptr;
-    };
-    const Expr* rangep = expr.kind == Expr::INDEX && expr.args.size() == 1
-                             ? rangeAttr(expr.args[0])
-                             : rangeAttr(expr.b);
-    if (rangep) {
-        if (!rangep->a || rangep->a->kind != Expr::NAME) {
-            unsupportedError(flp, "'range of a non-name prefix");
-            basep->deleteTree();
+    // A multi-dimensional index `m(i, j)` descends one array level per argument; a
+    // nested `m(i)(j)` yields one single-argument INDEX per level and shares this path
+    AstNodeExpr* curp = basep;
+    VType levelType = baseType;
+    for (size_t ai = 0; ai < expr.args.size(); ++ai) {
+        if (!levelType.isVector()) {
+            unsupportedError(flp, "index into a non-array value");
+            curp->deleteTree();
             return nullptr;
         }
-        // The bounds come from the prefix name's type, not from the sliced array
-        const VType* const prefixTypep = typeOfName(*rangep->a);
-        if (!prefixTypep) {
-            flp->v3error("VHDL: unknown name '" + rangep->a->spelling + "' in 'range.");
-            basep->deleteTree();
+        // A second comma index would descend into a flat vector element. An array of
+        // vectors is one-dimensional, so `v(i, j)` has too many indices; the valid form
+        // is the chained `v(i)(j)`, which reaches here as separate single-index steps
+        if (ai > 0 && levelType.kind == VType::VECTOR) {
+            unsupportedError(flp, "multi-dimensional index on a vector element");
+            curp->deleteTree();
             return nullptr;
         }
-        // The attribute's own index selects which of the prefix's ranges is meant
-        const VType* const levelp = indexRangeLevel(*rangep, *prefixTypep);
-        if (!levelp) {
-            unsupportedError(flp, "index of attribute 'range'");
-            basep->deleteTree();
-            return nullptr;
-        }
-        int hi = levelp->ascending ? levelp->right : levelp->left;
-        int lo = levelp->ascending ? levelp->left : levelp->right;
-        if (hi < lo) std::swap(hi, lo);
-        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, levelp->ascending);
-    }
-    if (expr.kind == Expr::INDEX) {
-        // A single name argument that denotes a declared subtype is a discrete range
-        // rather than a value: `v(some_range_t)` selects the elements those bounds denote
-        // (IEEE 1076-2008 8.5). An object name is not a discrete range, so `v(i)` still
-        // indexes; the subtype's direction decides whether the selected elements come out
-        // reversed, which `sliceOf` already handles.
-        if (expr.args.size() == 1) {
-            if (const VType* const markp = discreteRangeType(*expr.args[0])) {
-                if (markp->ascending != baseType.ascending) {
-                    flp->v3error("VHDL: slice direction does not match the array.");
-                    basep->deleteTree();
-                    return nullptr;
-                }
-                const int hi = std::max(markp->left, markp->right);
-                const int lo = std::min(markp->left, markp->right);
-                return sliceOf(flp, basep, baseType, elemWidth, hi, lo, markp->ascending);
-            }
-        }
-        // A multi-dimensional index `m(i, j)` descends one array level per argument; a
-        // nested `m(i)(j)` yields one single-argument INDEX per level and shares this path
-        AstNodeExpr* curp = basep;
-        VType levelType = baseType;
-        for (size_t ai = 0; ai < expr.args.size(); ++ai) {
-            if (!levelType.isVector()) {
-                unsupportedError(flp, "index into a non-array value");
-                curp->deleteTree();
-                return nullptr;
-            }
-            // A second comma index would descend into a flat vector element. An array of
-            // vectors is one-dimensional, so `v(i, j)` has too many indices; the valid form
-            // is the chained `v(i)(j)`, which reaches here as separate single-index steps
-            if (ai > 0 && levelType.kind == VType::VECTOR) {
-                unsupportedError(flp, "multi-dimensional index on a vector element");
-                curp->deleteTree();
-                return nullptr;
-            }
-            VType levelElem;
-            if (levelType.kind == VType::ARRAY && levelType.elemp) {
-                levelElem = *levelType.elemp;
-            } else {
-                levelElem.kind = levelType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
-                levelElem.dtp = findBasic(flp, levelType.kwd);
-            }
-            const int levelWidth = levelType.elemWidth;
-            AstNodeExpr* indexp = lowerExpr(*expr.args[ai], nullptr);
-            if (!indexp) {
-                curp->deleteTree();
-                return nullptr;
-            }
-            if (!typeOfDType(indexp->dtypep()).isInt()) {
-                // An enumeration value as an index is its position (IEEE 1076-2008 9.3.6):
-                // a literal, a constant, or a formal an inlined body bound to one
-                int64_t position = 0;
-                if (!evalInt(*expr.args[ai], position)) {
-                    unsupportedError(flp, "non-integer index");
-                    indexp->deleteTree();
-                    curp->deleteTree();
-                    return nullptr;
-                }
-                indexp->deleteTree();
-                indexp = makeIntConst(flp, position);
-            }
-            // The right bound is the least significant element in either direction
-            AstNodeExpr* offsetp = indexp;
-            if (levelType.ascending) {
-                offsetp = new AstSub{flp, makeIntConst(flp, levelType.right), indexp};
-            } else if (levelType.right != 0) {
-                offsetp = new AstSub{flp, indexp, makeIntConst(flp, levelType.right)};
-            }
-            offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
-            if (levelWidth != 1) {
-                AstNodeExpr* const scaledp
-                    = new AstMul{flp, offsetp, makeIntConst(flp, levelWidth)};
-                scaledp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
-                offsetp = scaledp;
-            }
-            AstSel* const selp = new AstSel{flp, curp, offsetp, levelWidth};
-            selp->dtypep(levelElem.dtp);
-            curp = selp;
-            levelType = levelElem;
-        }
-        return curp;
-    }
-    // A bound may be an attribute of the sliced prefix itself, e.g. `s(s'left-1 downto 1)`:
-    // the prefix's own type fixes it, so it needs no scope lookup of a record element
-    const auto boundValue = [&](const ExprP& bound, int64_t& out) -> bool {
-        return sliceBound(bound, expr.a ? expr.a->spelling : std::string(), baseType, out);
-    };
-    int64_t leftValue = 0;
-    int64_t rightValue = 0;
-    if (boundValue(expr.b, leftValue) && boundValue(expr.c, rightValue)) {
-        int hi = 0;
-        int lo = 0;
-        if (expr.text == "downto") {
-            hi = static_cast<int>(leftValue);
-            lo = static_cast<int>(rightValue);
+        VType levelElem;
+        if (levelType.kind == VType::ARRAY && levelType.elemp) {
+            levelElem = *levelType.elemp;
         } else {
-            lo = static_cast<int>(leftValue);
-            hi = static_cast<int>(rightValue);
+            levelElem.kind = levelType.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
+            levelElem.dtp = findBasic(flp, levelType.kwd);
         }
-        if (hi < lo) {
-            flp->v3error("VHDL: empty or reversed slice.");
-            basep->deleteTree();
+        const int levelWidth = levelType.elemWidth;
+        AstNodeExpr* indexp = lowerExpr(*expr.args[ai], nullptr);
+        if (!indexp) {
+            curp->deleteTree();
             return nullptr;
         }
-        // A literal range in the other direction stays the documented extension `t_vhdl_range`
-        // pins: its left bound is the most significant element
-        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, expr.text != "downto");
+        if (!typeOfDType(indexp->dtypep()).isInt()) {
+            // An enumeration value as an index is its position (IEEE 1076-2008 9.3.6):
+            // a literal, a constant, or a formal an inlined body bound to one
+            int64_t position = 0;
+            if (!evalInt(*expr.args[ai], position)) {
+                unsupportedError(flp, "non-integer index");
+                indexp->deleteTree();
+                curp->deleteTree();
+                return nullptr;
+            }
+            indexp->deleteTree();
+            indexp = makeIntConst(flp, position);
+        }
+        // The right bound is the least significant element in either direction
+        AstNodeExpr* offsetp = indexp;
+        if (levelType.ascending) {
+            offsetp = new AstSub{flp, makeIntConst(flp, levelType.right), indexp};
+        } else if (levelType.right != 0) {
+            offsetp = new AstSub{flp, indexp, makeIntConst(flp, levelType.right)};
+        }
+        offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+        if (levelWidth != 1) {
+            AstNodeExpr* const scaledp = new AstMul{flp, offsetp, makeIntConst(flp, levelWidth)};
+            scaledp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+            offsetp = scaledp;
+        }
+        AstSel* const selp = new AstSel{flp, curp, offsetp, levelWidth};
+        selp->dtypep(levelElem.dtp);
+        curp = selp;
+        levelType = levelElem;
     }
+    return curp;
+}
+
+//! A slice with a run-time position and a static width, in the base's direction
+AstNodeExpr* Lowering::lowerDynamicSlice(const Expr& expr, AstNodeExpr* basep,
+                                         const VType& baseType) {
+    FileLine* const flp = expr.flp;
     // A dynamic slice position keeps the width static and runs in the base's
     // direction, so the selected elements need no reordering
     const bool ascendingSlice = expr.text != "downto";
@@ -2275,10 +2211,82 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         offsetp = new AstSub{flp, rightp, makeIntConst(flp, baseType.right)};
     }
     offsetp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
-    const int width = static_cast<int>(count) * elemWidth;
+    const int width = static_cast<int>(count) * baseType.elemWidth;
     AstSel* const selp = new AstSel{flp, basep, offsetp, width};
     selp->dtypep(findVectorWidth(flp, baseType.kwd, baseType.signing, width));
     return selp;
+}
+
+AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType) {
+    FileLine* const flp = expr.flp;
+    if (!baseType.isVector()) {
+        unsupportedError(flp, "index or slice of a non-array value");
+        basep->deleteTree();
+        return nullptr;
+    }
+    const int elemWidth = baseType.elemWidth;
+    if (elemWidth <= 0) {
+        // An array of unconstrained elements has no element width to select
+        unsupportedError(flp, "index of an array with an unconstrained element");
+        basep->deleteTree();
+        return nullptr;
+    }
+    // Only `prefix'range` is a slice by the prefix's own bounds. Any other attribute used
+    // as an index (`v(x'high)`) or slice bound (`v(x'high downto 0)`) lowers as an expression
+    const auto rangeAttr = [](const ExprP& e) -> const Expr* {
+        return e && e->kind == Expr::ATTR && e->text == "range" ? e.get() : nullptr;
+    };
+    const Expr* rangep = expr.kind == Expr::INDEX && expr.args.size() == 1
+                             ? rangeAttr(expr.args[0])
+                             : rangeAttr(expr.b);
+    if (rangep) return lowerRangeAttrSlice(flp, *rangep, basep, baseType);
+    if (expr.kind == Expr::INDEX) {
+        // A single name argument that denotes a declared subtype is a discrete range
+        // rather than a value: `v(some_range_t)` selects the elements those bounds denote
+        // (IEEE 1076-2008 8.5). An object name is not a discrete range, so `v(i)` still
+        // indexes; the subtype's direction decides whether the selected elements come out
+        // reversed, which `sliceOf` already handles.
+        if (expr.args.size() == 1) {
+            if (const VType* const markp = discreteRangeType(*expr.args[0])) {
+                if (markp->ascending != baseType.ascending) {
+                    flp->v3error("VHDL: slice direction does not match the array.");
+                    basep->deleteTree();
+                    return nullptr;
+                }
+                const int hi = std::max(markp->left, markp->right);
+                const int lo = std::min(markp->left, markp->right);
+                return sliceOf(flp, basep, baseType, elemWidth, hi, lo, markp->ascending);
+            }
+        }
+        return lowerIndexChain(expr, basep, baseType);
+    }
+    // A bound may be an attribute of the sliced prefix itself, e.g. `s(s'left-1 downto 1)`:
+    // the prefix's own type fixes it, so it needs no scope lookup of a record element
+    const auto boundValue = [&](const ExprP& bound, int64_t& out) -> bool {
+        return sliceBound(bound, expr.a ? expr.a->spelling : std::string(), baseType, out);
+    };
+    int64_t leftValue = 0;
+    int64_t rightValue = 0;
+    if (boundValue(expr.b, leftValue) && boundValue(expr.c, rightValue)) {
+        int hi = 0;
+        int lo = 0;
+        if (expr.text == "downto") {
+            hi = static_cast<int>(leftValue);
+            lo = static_cast<int>(rightValue);
+        } else {
+            lo = static_cast<int>(leftValue);
+            hi = static_cast<int>(rightValue);
+        }
+        if (hi < lo) {
+            flp->v3error("VHDL: empty or reversed slice.");
+            basep->deleteTree();
+            return nullptr;
+        }
+        // A literal range in the other direction stays the documented extension `t_vhdl_range`
+        // pins: its left bound is the most significant element
+        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, expr.text != "downto");
+    }
+    return lowerDynamicSlice(expr, basep, baseType);
 }
 
 //! Slice assignment with a run-time width: VHDL bounds the result by the source, so every

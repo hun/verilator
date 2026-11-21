@@ -322,6 +322,124 @@ void Lowering::importInlineScope(const std::string& name) {
     for (const SubprogramDecl* const subp : pkgIt->second.bodySubprograms) declareOwn(subp);
 }
 
+//! Add what one more emission of a package publishes to its existing entry
+static void mergePackageInfo(PackageInfo& dest, PackageInfo& info) {
+    for (const auto& alias : info.aliases) dest.aliases[alias.first] = alias.second;
+    for (const auto& type : info.types) dest.types[type.first] = type.second;
+    for (const auto& constant : info.consts) dest.consts[constant.first] = constant.second;
+    for (const auto& value : info.constValues) dest.constValues[value.first] = value.second;
+    for (const auto& type : info.constTypes) dest.constTypes[type.first] = type.second;
+    for (const auto& literal : info.enumConsts) dest.enumConsts[literal.first] = literal.second;
+    for (const auto& realConst : info.realConsts) {
+        dest.realConsts[realConst.first] = realConst.second;
+    }
+    for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
+    for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
+    for (const auto& component : info.components) {
+        dest.components[component.first] = component.second;
+    }
+    for (const SubprogramDecl* const subp : info.bodySubprograms) {
+        if (std::find(dest.bodySubprograms.begin(), dest.bodySubprograms.end(), subp)
+            == dest.bodySubprograms.end()) {
+            dest.bodySubprograms.push_back(subp);
+        }
+    }
+    for (const auto& use : info.uses) {
+        if (std::find(dest.uses.begin(), dest.uses.end(), use) == dest.uses.end()) {
+            dest.uses.push_back(use);
+        }
+    }
+    for (const AliasDecl* const aliasp : info.subprogramAliases) {
+        dest.subprogramAliases.push_back(aliasp);
+    }
+}
+
+//! Complete the constants this unit deferred because a call had no body yet. They run
+//! after the unit's own constants, because the call may name one of them, and only the
+//! unit that declared one completes it: the scope of another unit is not its own
+void Lowering::completeDeferredConsts() {
+    std::vector<DeferredConst> owned;
+    std::vector<DeferredConst> others;
+    for (const DeferredConst& deferred : m_deferredConsts) {
+        (deferred.owner == m_unitName ? owned : others).push_back(deferred);
+    }
+    m_deferredConsts = std::move(others);
+    for (const DeferredConst& deferred : owned) {
+        // A later pass may already have emitted it now that the bodies are read
+        bool present = false;
+        for (const auto& name : deferred.names) {
+            if (m_consts.count(name.first) || m_constValues.count(name.first)) present = true;
+        }
+        if (present) continue;
+        emitConstant(deferred.names, *deferred.typep, deferred.initp, deferred.flp, true);
+    }
+    // A type that names a constant this unit could not complete waits for the pass that
+    // does complete it, rather than reporting the name as unknown
+    const bool stillDeferred
+        = std::any_of(m_deferredConsts.begin(), m_deferredConsts.end(),
+                      [&](const DeferredConst& d) { return d.owner == m_unitName; });
+    if (!stillDeferred) finishDeferredTypes();
+}
+
+//! What a package publishes, taken from the tables its emission filled; clears them
+PackageInfo Lowering::publishedInfo(const PackageUnit& pkg) {
+    PackageInfo info;
+    info.aliases = m_aliases;
+    info.types = std::move(m_types);
+    info.consts = std::move(m_consts);
+    info.constValues = std::move(m_constValues);
+    info.constTypes = std::move(m_constTypes);
+    info.enumConsts = std::move(m_enumConsts);
+    info.ambiguousLiterals = m_ambiguousLiterals;
+    info.realConsts = std::move(m_realConsts);
+    info.owned = std::move(m_ownedConsts);
+    for (const ComponentDecl& component : pkg.components) {
+        info.components[component.name] = &component;
+    }
+    // Only what the unit declares publishes: a declaration its `use` clauses made
+    // visible is not part of its interface (IEEE 1076-2008 12.4). A declaration only the
+    // body makes is private to it, unless it completes one the specification published;
+    // poc's configuration declares `ite` in its body, and open-logic's `ppcOr` calls
+    // `log2ceil` of the math package, which is inlined with that package's scope
+    for (const auto& entry : m_subprograms) {
+        for (const SubprogramRef& ref : entry.second) {
+            if (ref.imported) continue;
+            const bool completesSpec = std::any_of(
+                entry.second.begin(), entry.second.end(), [&](const SubprogramRef& other) {
+                    return other.ownSpec && homograph(*other.declp, *ref.declp);
+                });
+            if (pkg.isBody && !completesSpec) {
+                info.bodySubprograms.push_back(ref.declp);
+                continue;
+            }
+            if (std::find(info.subprograms.begin(), info.subprograms.end(), ref.declp)
+                == info.subprograms.end()) {
+                info.subprograms.push_back(ref.declp);
+            }
+        }
+    }
+    for (const auto& use : pkg.uses) {
+        const std::pair<std::string, std::string> entry{use.pkg, use.decl};
+        if (std::find(info.uses.begin(), info.uses.end(), entry) == info.uses.end()) {
+            info.uses.push_back(entry);
+        }
+    }
+    for (const AliasDecl& alias : pkg.aliases) {
+        if (alias.hasSignature) info.subprogramAliases.push_back(&alias);
+    }
+    m_types.clear();
+    m_consts.clear();
+    m_constValues.clear();
+    m_constTypes.clear();
+    m_enumConsts.clear();
+    m_ambiguousLiterals.clear();
+    m_realConsts.clear();
+    m_preConsts.clear();
+    m_ownedConsts.clear();
+    m_aliases.clear();
+    return info;
+}
+
 void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
                            const GenericBindings* bindingsp, const std::string& publishName) {
     const std::string& pubName = publishName.empty() ? pkg.name : publishName;
@@ -378,86 +496,9 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
         // sees it (IEEE 1076-2008 4.7)
         m_moduleScope = saveScope();
     }
-    // A constant whose call had no body when the unit was first read is completed now
-    // that the bodies are read. It runs after the unit's own constants, because the call
-    // may name one of them, and only the unit that declared it completes it: the scope
-    // of another unit is not its own
-    std::vector<DeferredConst> owned;
-    std::vector<DeferredConst> others;
-    for (const DeferredConst& deferred : m_deferredConsts) {
-        (deferred.owner == m_unitName ? owned : others).push_back(deferred);
-    }
-    m_deferredConsts = std::move(others);
-    for (const DeferredConst& deferred : owned) {
-        // A later pass may already have emitted it now that the bodies are read
-        bool present = false;
-        for (const auto& name : deferred.names) {
-            if (m_consts.count(name.first) || m_constValues.count(name.first)) present = true;
-        }
-        if (present) continue;
-        emitConstant(deferred.names, *deferred.typep, deferred.initp, deferred.flp, true);
-    }
-    // A type that names a constant this unit could not complete waits for the pass that
-    // does complete it, rather than reporting the name as unknown
-    const bool stillDeferred
-        = std::any_of(m_deferredConsts.begin(), m_deferredConsts.end(),
-                      [&](const DeferredConst& d) { return d.owner == m_unitName; });
-    if (!stillDeferred) finishDeferredTypes();
+    completeDeferredConsts();
 
-    PackageInfo info;
-    info.aliases = m_aliases;
-    info.types = std::move(m_types);
-    info.consts = std::move(m_consts);
-    info.constValues = std::move(m_constValues);
-    info.constTypes = std::move(m_constTypes);
-    info.enumConsts = std::move(m_enumConsts);
-    info.ambiguousLiterals = m_ambiguousLiterals;
-    info.realConsts = std::move(m_realConsts);
-    info.owned = std::move(m_ownedConsts);
-    for (const ComponentDecl& component : pkg.components) {
-        info.components[component.name] = &component;
-    }
-    // Only what the unit declares publishes: a declaration its `use` clauses made
-    // visible is not part of its interface (IEEE 1076-2008 12.4). A declaration only the
-    // body makes is private to it, unless it completes one the specification published;
-    // poc's configuration declares `ite` in its body, and open-logic's `ppcOr` calls
-    // `log2ceil` of the math package, which is inlined with that package's scope
-    for (const auto& entry : m_subprograms) {
-        for (const SubprogramRef& ref : entry.second) {
-            if (ref.imported) continue;
-            const bool completesSpec = std::any_of(
-                entry.second.begin(), entry.second.end(), [&](const SubprogramRef& other) {
-                    return other.ownSpec && homograph(*other.declp, *ref.declp);
-                });
-            if (pkg.isBody && !completesSpec) {
-                info.bodySubprograms.push_back(ref.declp);
-                continue;
-            }
-            if (std::find(info.subprograms.begin(), info.subprograms.end(), ref.declp)
-                == info.subprograms.end()) {
-                info.subprograms.push_back(ref.declp);
-            }
-        }
-    }
-    for (const auto& use : pkg.uses) {
-        const std::pair<std::string, std::string> entry{use.pkg, use.decl};
-        if (std::find(info.uses.begin(), info.uses.end(), entry) == info.uses.end()) {
-            info.uses.push_back(entry);
-        }
-    }
-    for (const AliasDecl& alias : pkg.aliases) {
-        if (alias.hasSignature) info.subprogramAliases.push_back(&alias);
-    }
-    m_types.clear();
-    m_consts.clear();
-    m_constValues.clear();
-    m_constTypes.clear();
-    m_enumConsts.clear();
-    m_ambiguousLiterals.clear();
-    m_realConsts.clear();
-    m_preConsts.clear();
-    m_ownedConsts.clear();
-    m_aliases.clear();
+    PackageInfo info = publishedInfo(pkg);
 
     const auto existing = table.packages.find(pubName);
     if (existing == table.packages.end()) {
@@ -465,35 +506,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
         return;
     }
     // A package body (or a repeated declaration) adds to what is already published
-    PackageInfo& dest = existing->second;
-    for (const auto& alias : info.aliases) dest.aliases[alias.first] = alias.second;
-    for (const auto& type : info.types) dest.types[type.first] = type.second;
-    for (const auto& constant : info.consts) dest.consts[constant.first] = constant.second;
-    for (const auto& value : info.constValues) dest.constValues[value.first] = value.second;
-    for (const auto& type : info.constTypes) dest.constTypes[type.first] = type.second;
-    for (const auto& literal : info.enumConsts) dest.enumConsts[literal.first] = literal.second;
-    for (const auto& realConst : info.realConsts) {
-        dest.realConsts[realConst.first] = realConst.second;
-    }
-    for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
-    for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
-    for (const auto& component : info.components) {
-        dest.components[component.first] = component.second;
-    }
-    for (const SubprogramDecl* const subp : info.bodySubprograms) {
-        if (std::find(dest.bodySubprograms.begin(), dest.bodySubprograms.end(), subp)
-            == dest.bodySubprograms.end()) {
-            dest.bodySubprograms.push_back(subp);
-        }
-    }
-    for (const auto& use : info.uses) {
-        if (std::find(dest.uses.begin(), dest.uses.end(), use) == dest.uses.end()) {
-            dest.uses.push_back(use);
-        }
-    }
-    for (const AliasDecl* const aliasp : info.subprogramAliases) {
-        dest.subprogramAliases.push_back(aliasp);
-    }
+    mergePackageInfo(existing->second, info);
 }
 
 bool Lowering::emitPrelude(const EntityUnit& entity, const Architecture& arch,
