@@ -51,17 +51,17 @@ listed below.
 
 | Measure | Value |
 |---|---:|
-| Commits | 373 |
+| Commits | 383 |
 | Files changed | 1006 |
 | Insertions | ~58.3k |
 | Non-test insertions | ~23.0k |
 | Frontend C++ | ~20.9k lines (`V3Vhdl*`) |
 | Lowering units | Seven `V3VhdlNativeLower*.cpp` files plus `V3VhdlNativeLowerImpl.h` and `V3VhdlNativeTypes.h` |
-| VHDL test drivers | 324 |
+| VHDL test drivers | 329 |
 | `.vhdl` sources | 329 |
 | C++ harnesses | 227 |
 | Golden `.out` files | 76 |
-| Test result | 324 passed, 0 failed (local run; not reproducible from tree) |
+| Test result | 329 passed, 0 failed (local run; not reproducible from tree) |
 
 ### 2.1 What is genuinely strong
 
@@ -107,16 +107,16 @@ The contradictions were resolved in the shipped docs:
   no IEEE 1164-1993 resolution, and the `--pins-inout-enables` interface for
   external drivers. `t_tri_inout_top` still expects an OR, so that test needs to
   be reconciled with the documented contract.
-- Refusals are documented as `%Error: ... Unsupported: VHDL ...`; the false
-  `%Error-UNSUPPORTED` claim and the non-reproducible corpus classification
-  were removed.
+- Refusals print `%Error-UNSUPPORTED: ... Unsupported: VHDL ...` at the
+  token's line and column, like every other Verilator unsupported construct.
+  The non-reproducible corpus classification was removed.
 - `usage.rst` now uses `design.vhdl` in the `--language` example.
 - Mixed-language policy is one contract: an SV top instantiating a VHDL entity
   in one invocation, and a VHDL hierarchy as a `--lib-create` library. A VHDL
   design cannot instantiate an SV module directly.
 - Known limitations are listed in `docs/vhdl/limitations.rst` under "Known
   limitations"; there is no audit page in the branch.
-- Counts are current: 324 drivers, 75 negative drivers (76 goldens). The
+- Counts are current: 329 drivers, 76 negative drivers (77 goldens). The
   lowerer is split across seven translation units plus two headers. All drivers
   are git mode `100755`.
 - Historical process logs were removed from the PR tree: the root planning
@@ -128,15 +128,16 @@ The contradictions were resolved in the shipped docs:
 
 These are code-review issues independent of the frontend itself:
 
-- `vhdlMode` is global. `--language vhdl` on a `.v` file still parses that file
-  as SV; only SV module auto-load (`V3LinkCells.cpp:344-361`) and top-name
-  folding (`:44-47`) are disabled globally. Package auto-load is not gated.
-- `topModuleName()` lowercases the top whenever VHDL is the default language,
-  even for an SV top in a mixed run. Inverse gap: an uppercase VHDL top is not
-  folded without `--language vhdl`.
-- `STAT_SOURCE_MODULES` is double-counted: the VHDL driver adds it and
-  `V3LinkParse` runs unconditionally over the emitted modules.
-- `--language vhdl` applies to any unknown or extensionless file.
+- `vhdlMode` is global: any VHDL source disables SV module auto-load
+  (`V3LinkCells::resolveModule`) for the whole run, so a mixed design that
+  relies on `-y` breaks. Package auto-load is not gated. Deciding per
+  instantiating module would fix both.
+- Resolved: `--top-module` folds to lowercase whenever VHDL sources are
+  present unless a module matches exactly, so an SV top in a mixed run keeps
+  its case and `.vhd` files need no `--language vhdl`.
+- Resolved: `STAT_SOURCE_MODULES` is counted once, by `V3LinkParse`.
+- `--language vhdl` applies to extensionless files and extensions no option
+  maps; `.v`, `.sv`, `.vh`, `.svh` and `+<lang>ext+` mappings stay SV.
 - Mixed-mode libmap mapping can assign an SV library name to a VHDL `work` file.
 - Specialization now uses a typed `SpecKey` (`entity`, `portPart`, `arch`,
   `genericPart`) with explicit coverage predicates; the `entity|` collision is gone.
@@ -149,15 +150,15 @@ These are code-review issues independent of the frontend itself:
 
 Not blockers, but they weaken the "independent verification" story:
 
-- Only one test exercises extension-based dispatch; 323 pass `--language vhdl`.
-- No `.vhd` test, no `--default-language vhdl` test, no positive test of
-  `--language vhdl` on a non-VHDL extension (the `.sv` negative case only proves
-  extension precedence).
+- Few tests exercise extension-based dispatch; most pass `--language vhdl`.
+- No `.vhd` test and no `--default-language vhdl` test. `t_vhdl_lang_ext`
+  checks that `--language vhdl` keeps a `.vh` header SystemVerilog.
 - Two lint-only tests and two positive compile-only tests;
   `t_vhdl_proc_multiple` checks no values.
-- 17 `--binary` tests (15 use `wait for`, 3 assert absolute times), but zero
-  pass `--trace*`/`--timing`; only one `--pins-inout-enables` test.
-- All 324 VHDL drivers are git mode `100755`; direct invocation works.
+- 18 `--binary` tests (16 use `wait for`); `t_vhdl_timescale` checks delays
+  under `--timescale`. `t_vhdl_trace` is the only `--trace*` test; none pass
+  `--timing`; only one `--pins-inout-enables` test.
+- All 329 VHDL drivers are git mode `100755`; direct invocation works.
 - The `vhdl_frontend.flags()` shim was deleted; drivers pass flags directly.
 - Duplicate/near-duplicate tests: `t_vhdl_native_cnt` (duplicate of
   `t_vhdl_cnt`), `dyn_slice`/`dynslice`, repeated bare-`wait;` coverage in
@@ -192,7 +193,7 @@ Sections:
    AST, elaboration and lowering, then the unchanged V3 passes.
 6. **Integration** -- extension detection, `--language vhdl`, mixed-language
    stance, build changes, core-file diff size.
-7. **Evidence** -- 324 drivers, 76 goldens, 237 `vlt_all`, ~15 s on 16 cores;
+7. **Evidence** -- 329 drivers, 77 goldens, 237 `vlt_all`, ~15 s on 16 cores;
    corpus and real-design sweeps clearly labelled as external/non-reproducible.
 8. **Known limitations** -- the items listed in `docs/vhdl/limitations.rst`:
    imprecise dynamic-index driver counts and `std_logic_vector` MULTIDRIVEN
