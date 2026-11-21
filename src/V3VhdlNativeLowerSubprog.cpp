@@ -2082,11 +2082,9 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
     const SubprogramDecl* subp = nullptr;
     if (forcedp) {
         subp = forcedp;
+        // The forced declaration came from visibleSubprograms, which reads the same table
         refp = visibleRef(forcedp);
-        if (!refp) {
-            call.flp->v3error("VHDL: operator '" + call.text + "' is no longer visible.");
-            return nullptr;
-        }
+        UASSERT(refp, "Forced operator declaration is not visible");
     } else {
         subp = resolveCall(call, true, &refp, contextp);
         if (!subp) return nullptr;  // resolveCall reported why

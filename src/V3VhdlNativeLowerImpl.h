@@ -1486,8 +1486,8 @@ public:
                                GenericBindings& bindings);
     bool bindRealGeneric(const PortAssoc& assoc, const std::string& folded,
                          GenericBindings& bindings);
-    bool bindStringGeneric(const InstanceGeneric& item, const GenericDecl& gen,
-                           const PortAssoc* assocp, GenericBindings& bindings);
+    bool bindStringGeneric(const InstanceGeneric& item, const PortAssoc& assoc,
+                           GenericBindings& bindings);
     bool bindValueGeneric(const Concurrent& conc, const EntityUnit& entity,
                           const InstanceGeneric& item, const PortAssoc& assoc,
                           GenericBindings& bindings);

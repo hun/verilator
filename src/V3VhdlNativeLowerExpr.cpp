@@ -510,12 +510,9 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
         }
         return bitConst(flp, result ? '1' : '0');
     }
-    if (lLen * elemWidth != lt.width || rLen * elemWidth != rt.width) {
-        flp->v3error("VHDL: comparison of arrays with different element widths.");
-        lp->deleteTree();
-        rp->deleteTree();
-        return nullptr;
-    }
+    // Related array types share their element type, and an array's width is its elements'
+    UASSERT_OBJ(lLen * elemWidth == lt.width && rLen * elemWidth == rt.width, lp,
+                "Related array operands differ in element width");
     const auto flipSigns = [&](AstNodeExpr* nodep, int elements) -> AstNodeExpr* {
         V3Number maskNum{flp, nodep->width(), 0u};
         for (int i = 0; i < elements; ++i) { maskNum.setBit(i * elemWidth + elemWidth - 1, '1'); }

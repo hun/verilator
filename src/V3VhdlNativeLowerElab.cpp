@@ -864,14 +864,9 @@ bool Lowering::bindRealGeneric(const PortAssoc& assoc, const std::string& folded
     return true;
 }
 
-bool Lowering::bindStringGeneric(const InstanceGeneric& item, const GenericDecl& gen,
-                                 const PortAssoc* assocp, GenericBindings& bindings) {
-    const Expr* const actualp = assocp ? assocp->actual.get() : gen.init.get();
-    if (!actualp) {
-        assocp->flp->v3error("VHDL: string generic '" + item.spelling
-                             + "' has no default value and no association.");
-        return false;
-    }
+bool Lowering::bindStringGeneric(const InstanceGeneric& item, const PortAssoc& assoc,
+                                 GenericBindings& bindings) {
+    const Expr* const actualp = assoc.actual.get();
     std::string stringValue;
     bool found = false;
     if (actualp->kind == Expr::STRING_LIT) {
@@ -1023,7 +1018,7 @@ bool Lowering::bindOneGeneric(const Concurrent& conc, const EntityUnit& entity,
     if (gen.isType) return bindTypeGeneric(*assocp, item.folded, bindings);
     if (gen.isSubprogram) return bindSubprogramGeneric(*assocp, item.folded, bindings);
     if (gen.type.mark == "real") return bindRealGeneric(*assocp, item.folded, bindings);
-    if (gen.type.mark == "string") return bindStringGeneric(item, gen, assocp, bindings);
+    if (gen.type.mark == "string") return bindStringGeneric(item, *assocp, bindings);
     return bindValueGeneric(conc, entity, item, *assocp, bindings);
 }
 
