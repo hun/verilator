@@ -990,6 +990,21 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
     const VType resultType = vectorType(flp, named.kwd, named.signing, lt.width + rt.width);
     AstConcat* const concatp = new AstConcat{flp, lp, rp};
     concatp->dtypep(resultType.dtp);
+    // An array with an element, or with another array of its element type, is an array of
+    // that element type (IEEE 1076-2008 9.2.5), which ordering needs to see
+    const VType& arrayType = lt.kind == VType::ARRAY ? lt : rt;
+    if (arrayType.kind == VType::ARRAY) {
+        VType structType = resultType;
+        structType.kind = VType::ARRAY;
+        structType.elemp = arrayType.elemp;
+        structType.elemWidth = arrayType.elemWidth;
+        structType.ascending = arrayType.ascending;
+        structType.left = arrayType.left;
+        const int elements = structType.width / structType.elemWidth;
+        structType.right = arrayType.ascending ? structType.left + elements - 1
+                                               : structType.left - elements + 1;
+        m_exprTypes[&expr] = structType;
+    }
     return concatp;
 }
 

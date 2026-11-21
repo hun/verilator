@@ -529,10 +529,14 @@ class Lowering final {
         UASSERT_OBJ(nodep->dtypep(), nodep, "VHDL expression has no data type");
         VType type;
         if (typeOfDesignator(expr, type) && type.width == nodep->width()) return type;
-        const auto exprIt = m_exprTypes.find(&expr);
+        const Expr* structp = &expr;
+        while (structp->kind == Expr::PAREN && structp->a) structp = structp->a.get();
+        const auto exprIt = m_exprTypes.find(structp);
         if (exprIt != m_exprTypes.end() && exprIt->second.width == nodep->width()) {
             return exprIt->second;
         }
+        // An enumeration value has the ENUM type its declared objects have
+        if (enumTypeOfDType(nodep->dtypep(), type)) return type;
         const auto arrayIt = m_arrayDtypes.find(nodep->dtypep());
         if (arrayIt != m_arrayDtypes.end() && arrayIt->second.width == nodep->width()) {
             return arrayIt->second;
