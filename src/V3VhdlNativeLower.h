@@ -42,15 +42,15 @@ using ModuleMap = std::map<std::string, AstModule*>;
 
 //! Index range fixed for an unconstrained entity port by one instantiation
 struct PortBounds final {
-    int left = 0;
-    int right = 0;
-    bool ascending = false;
+    int left = 0;  // Index range left bound
+    int right = 0;  // Index range right bound
+    bool ascending = false;  // Index range is `to`, not `downto`
     // A port of an unconstrained record: one member entry per element, declaration order
     bool isRecord = false;
-    std::vector<std::string> memberNames;
-    std::vector<int> memberLeft;
-    std::vector<int> memberRight;
-    std::vector<bool> memberAscending;
+    std::vector<std::string> memberNames;  // Record member names
+    std::vector<int> memberLeft;  // Index range left bound of each member
+    std::vector<int> memberRight;  // Index range right bound of each member
+    std::vector<bool> memberAscending;  // Index range direction of each member
 };
 using PortBoundsMap = std::map<std::string, PortBounds>;
 
@@ -116,6 +116,7 @@ struct Design final {
     // Physical unit name -> multiple of its type's step unit, and the names two physical
     // types give different multiples to, which no literal can name without its type
     std::unordered_map<std::string, int64_t> unitFactors;
+    // Unit names with conflicting multiples; no literal can name them
     std::unordered_set<std::string> ambiguousUnits;
     int specSeq = 0;  // Disambiguates the specialized module names
     int specDepth = 0;  // Generic specialization recursion depth

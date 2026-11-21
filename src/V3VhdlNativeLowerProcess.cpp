@@ -49,7 +49,7 @@ void Lowering::lowerProcess(const Process& process) {
     m_edgePrevVars.clear();
     // Tracked variable values hold only within one process
     struct VarValsScope final {
-        std::map<std::string, ExprP>& vals;
+        std::map<std::string, ExprP>& vals;  // Process variable values, cleared on entry
         explicit VarValsScope(std::map<std::string, ExprP>& vals_)
             : vals{vals_} {
             vals.clear();

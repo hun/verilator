@@ -59,7 +59,7 @@ struct Token final {
     int64_t intValue = 0;  // INT
     double realValue = 0;  // REAL
     char charValue = 0;  // CHAR
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
 };
 
 class Lexer final {
@@ -120,13 +120,13 @@ public:
 
     //! Save/restore point for one-token lookahead
     struct State final {
-        size_t pos;
-        int line;
-        size_t lineStart;
-        bool prevEndsDesignator;
-        bool prevId;
-        std::string prevText;
-        int translateOff;
+        size_t pos;  // Offset of the next character
+        int line;  // Current line number
+        size_t lineStart;  // Offset of the current line's first character
+        bool prevEndsDesignator;  // Last token can precede an attribute/qualification mark
+        bool prevId;  // The last token was an identifier
+        std::string prevText;  // The last identifier, to tell a mark from a keyword
+        int translateOff;  // Comment pragma translate_off regions still open
     };
     State state() const {
         return {m_pos,    m_line,     m_lineStart,   m_prevEndsDesignator,
@@ -180,15 +180,15 @@ struct Expr final {
         AGG_NAMED,  // args=values, choices=one choice list per value
         UNAFFECTED,  // `unaffected`: a waveform that leaves the assignment target unchanged
     } kind;
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     std::string text;  // Name/operator, folded
     std::string spelling;  // Name as written
-    int64_t intValue = 0;
-    double realValue = 0;
-    char charValue = 0;
-    std::string bits;
-    ExprP a, b, c;
-    std::vector<ExprP> args;
+    int64_t intValue = 0;  // INT_LIT value
+    double realValue = 0;  // REAL_LIT value; PHYS_LIT: the abstract literal, unscaled
+    char charValue = 0;  // CHAR_LIT value
+    std::string bits;  // BITS_LIT: one character per bit, msb first
+    ExprP a, b, c;  // Operands and prefixes; roles depend on kind
+    std::vector<ExprP> args;  // Arguments and elements; roles depend on kind
     // AGG_NAMED: the choices associated with each element value; an empty list marks a
     // positional association
     std::vector<std::vector<ExprP>> choices;
@@ -219,7 +219,7 @@ struct Stmt final {
         RETURN,  // Subprogram return; value is the function result, null for a procedure
         CALL,  // Procedure call statement; value is the call
     } kind;
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     ExprP target;  // ASSIGN/VAR_ASSIGN
     ExprP value;  // ASSIGN/VAR_ASSIGN/RETURN; CALL: the call expression
     // ASSIGN/VAR_ASSIGN: a conditional waveform `v1 when c1 else ... vN`; empty for a
@@ -240,10 +240,10 @@ struct Stmt final {
     enum Severity : uint8_t { SEV_NOTE, SEV_WARNING, SEV_ERROR, SEV_FAILURE } severity = SEV_NOTE;
     // FOR: loop variable over b..c, ascending when rangeAscending
     std::string loopVar;
-    bool rangeAscending = true;
-    std::string loopLabel;
-    ExprP b, c;
-    std::vector<StmtP> body;
+    bool rangeAscending = true;  // FOR: true for an ascending range
+    std::string loopLabel;  // Label of the loop, empty when unlabeled
+    ExprP b, c;  // FOR: range bounds b..c, in written order
+    std::vector<StmtP> body;  // Loop body statements
 
     explicit Stmt(Kind kind_)
         : kind{kind_} {}
@@ -254,11 +254,11 @@ struct TypeSpec final {
     std::string pkg;  // Package qualifier of a `work.pkg.mark` reference, if any
     std::string objectName;  // A `name'subtype` indication: the mark above is an object
     bool elementMark = false;  // The indication is `name'element`: an array's element type
-    FileLine* flp = nullptr;
-    bool hasRange = false;
+    FileLine* flp = nullptr;  // Source location
+    bool hasRange = false;  // A range constraint is present, bounded by left and right
     bool ascending = false;  // "to", else "downto"
     std::string constraintMark;  // Index constraint that names a subtype, e.g. mark(constraint)
-    ExprP left, right;
+    ExprP left, right;  // Range bounds, in written order; see hasRange
     // A record subtype constraint names a discrete range per member: rec_t(x(3 downto 0), ...)
     struct MemberConstraint final {
         std::string name;  // Folded member name
@@ -266,6 +266,7 @@ struct TypeSpec final {
         ExprP lo, hi;  // Bounds in written order, e.g. 3 downto 0 -> lo=3, hi=0
         ExprP range;  // A range attribute instead: rec_t(x(sig'range)), IEEE 1076-2008 6.3
     };
+    // Per-member discrete ranges of a record subtype constraint
     std::vector<MemberConstraint> memberConstraints;
     // A nested-array subtype indication `t(r1)(r2, ...)` beyond the first index range
     // (which lives in this spec's own hasRange/left/right), outermost first, innermost last
@@ -273,19 +274,20 @@ struct TypeSpec final {
 };
 
 struct PortDecl final {
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     std::vector<std::pair<std::string, std::string>> names;  // (folded, spelling)
-    PortMode dir = PortMode::IN;
-    TypeSpec type;
+    PortMode dir = PortMode::IN;  // Port mode
+    TypeSpec type;  // Subtype indication
     ExprP init;  // Default value for an unassociated input
 };
 
 struct Decl final {
     enum Kind : uint8_t { SIGNAL, CONSTANT, VARIABLE, FILE } kind;
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
+    // Declared names as (folded, spelling)
     std::vector<std::pair<std::string, std::string>> names;
-    TypeSpec type;
-    ExprP init;
+    TypeSpec type;  // Subtype indication of the declared objects
+    ExprP init;  // Initial value, if any
     std::string fileMode;  // FILE: the open mode
     explicit Decl(Kind kind_)
         : kind{kind_} {}
@@ -293,20 +295,21 @@ struct Decl final {
 
 //! One entity generic: a constant with an optional default value
 struct GenericDecl final {
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     bool isType = false;  // A generic type parameter; type and init are unused
     bool isSubprogram = false;  // A generic subprogram parameter; only names is modelled
+    // Declared names as (folded, spelling)
     std::vector<std::pair<std::string, std::string>> names;
-    TypeSpec type;
-    ExprP init;
+    TypeSpec type;  // Subtype indication
+    ExprP init;  // Default value, if any
 };
 
 //! `alias name [: subtype_mark] is designator [ signature ];` renames an existing
 //! object, slice or subprogram
 struct AliasDecl final {
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     std::string name;  // Folded
-    std::string spelling;
+    std::string spelling;  // As written
     bool hasSignature = false;  // `[ ... ]`: the designator denotes a subprogram
     TypeSpec mark;  // Optional subtype indication, which fixes the alias's index bounds
     ExprP designator;  // The aliased object, slice or subprogram
@@ -315,9 +318,9 @@ struct AliasDecl final {
 //! A type, subtype or alias declaration
 struct TypeDecl final {
     enum Kind : uint8_t { ENUM, ARRAY, RECORD, SUBTYPE, PHYSICAL } kind;
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     std::string name;  // Folded
-    std::string spelling;
+    std::string spelling;  // As written
     std::vector<std::pair<std::string, std::string>> literals;  // ENUM: (folded, spelling)
     TypeSpec base;  // SUBTYPE: base mark and optional constraint; ARRAY: element type
     TypeSpec index;  // ARRAY: index constraint
@@ -325,8 +328,9 @@ struct TypeDecl final {
     // outermost first; `index` holds the first
     std::vector<TypeSpec> indexes;
     struct Member final {
+        // Field names as (folded, spelling)
         std::vector<std::pair<std::string, std::string>> names;
-        TypeSpec type;
+        TypeSpec type;  // Field subtype indication
     };
     std::vector<Member> members;  // RECORD
 
@@ -334,8 +338,8 @@ struct TypeDecl final {
     // unit of the same type, or a predefined unit of `time'
     struct Unit final {
         std::string name;  // Folded
-        std::string spelling;
-        ExprP value;
+        std::string spelling;  // As written
+        ExprP value;  // Scale: a physical literal in an earlier unit; null for the base unit
     };
     std::vector<Unit> units;  // PHYSICAL, in declaration order; the first sets the step unit
 
@@ -346,9 +350,10 @@ struct TypeDecl final {
 //! One formal parameter of a subprogram
 struct FormalDecl final {
     enum Class : uint8_t { CONSTANT, VARIABLE, SIGNAL } cls = CONSTANT;
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
+    // Declared names as (folded, spelling)
     std::vector<std::pair<std::string, std::string>> names;
-    PortMode mode = PortMode::IN;
+    PortMode mode = PortMode::IN;  // Parameter mode
     TypeSpec type;  // No range and no constraint mark: unconstrained
     ExprP init;  // Default actual
 };
@@ -358,26 +363,26 @@ struct FormalDecl final {
 struct SubprogramDecl final {
     enum Kind : uint8_t { FUNCTION, PROCEDURE } kind;
     bool impure = false;  // `impure` prefix; no subprogram may read a signal yet
-    bool hasBody = false;
-    FileLine* flp = nullptr;
+    bool hasBody = false;  // False for a package prototype with no body yet
+    FileLine* flp = nullptr;  // Source location
     std::string unitName;  // The package that declares it, if any: a body sees that package
     std::string name;  // Folded
-    std::string spelling;
-    std::vector<FormalDecl> formals;
+    std::string spelling;  // As written
+    std::vector<FormalDecl> formals;  // Formal parameters
     TypeSpec returnType;  // FUNCTION
     std::vector<TypeDecl> types;  // Declarative part of the body
-    std::vector<Decl> decls;
-    std::vector<AliasDecl> aliases;
+    std::vector<Decl> decls;  // Object declarations of the body
+    std::vector<AliasDecl> aliases;  // Alias declarations of the body
     std::vector<SubprogramDecl> subprograms;  // Nested declarations, visible in the body
-    std::vector<StmtP> body;
+    std::vector<StmtP> body;  // Statements of the body
 
     explicit SubprogramDecl(Kind kind_)
         : kind{kind_} {}
 };
 
 struct Process final {
-    FileLine* flp = nullptr;
-    bool hasSensitivity = false;
+    FileLine* flp = nullptr;  // Source location
+    bool hasSensitivity = false;  // Sensitivity list is present, including process(all)
     bool sensitivityAll = false;  // process(all): every signal the body reads
     std::vector<std::string> sensitivity;  // Folded names
     // Element designators (`rec.field`, `v(i)`, `v(hi downto lo)`): each denotes a
@@ -387,21 +392,21 @@ struct Process final {
     std::vector<TypeDecl> types;  // Types declared by the process
     std::vector<SubprogramDecl> subprograms;  // Procedures and functions of the process
     std::vector<AliasDecl> aliases;  // Aliases of the process declarative part
-    std::vector<StmtP> body;
+    std::vector<StmtP> body;  // Sequential statements of the process
 };
 
 //! One `formal => actual` of a port map; an `open` actual has no expression
 struct PortAssoc final {
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     std::string formal;  // Folded
-    std::string formalSpelling;
+    std::string formalSpelling;  // As written
     // A formal naming one element of a record port: `rec.field => ...`
     std::string formalMember;  // Folded
-    std::string formalMemberSpelling;
+    std::string formalMemberSpelling;  // As written
     // A formal that names part of a port: `a(7 downto 4) => ...`
     bool hasFormalRange = false;
     bool formalAscending = true;  // "to", else "downto"
-    ExprP formalLeft, formalRight;
+    ExprP formalLeft, formalRight;  // Range bounds of a partial formal; see hasFormalRange
     ExprP actual;  // Null for `open`
 };
 
@@ -409,22 +414,22 @@ struct Concurrent;
 
 //! A component declaration: the interface a component instantiation binds to
 struct ComponentDecl final {
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     std::string name;  // Folded
-    std::string spelling;
-    std::vector<GenericDecl> generics;
-    std::vector<PortDecl> ports;
+    std::string spelling;  // As written
+    std::vector<GenericDecl> generics;  // Generic interface
+    std::vector<PortDecl> ports;  // Port interface
 };
 
 //! One branch of a conditional generate. A null condition marks the final else
 //! part, which is taken only when no preceding condition is true.
 struct GenBranch final {
-    ExprP cond;
+    ExprP cond;  // Condition of this branch; null for the final else
     std::vector<Decl> decls;  // The branch's own declarative items
-    std::vector<TypeDecl> types;
-    std::vector<SubprogramDecl> subprograms;
-    std::vector<ComponentDecl> components;
-    std::vector<std::unique_ptr<Concurrent>> stmts;
+    std::vector<TypeDecl> types;  // Type declarations of the branch
+    std::vector<SubprogramDecl> subprograms;  // Subprogram declarations of the branch
+    std::vector<ComponentDecl> components;  // Component declarations of the branch
+    std::vector<std::unique_ptr<Concurrent>> stmts;  // Concurrent statements of the branch
 };
 
 struct Concurrent final {
@@ -442,7 +447,7 @@ struct Concurrent final {
     } kind;
     //! Severity of a concurrent assertion, which decides whether the run continues
     Stmt::Severity severity = Stmt::SEV_NOTE;
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
     ExprP target;  // ASSIGN/COND_ASSIGN/SEL_ASSIGN
     ExprP value;  // ASSIGN/SEL_ASSIGN
     // COND_ASSIGN: (value, condition); a null condition marks the final else
@@ -453,8 +458,8 @@ struct Concurrent final {
     std::unique_ptr<Process> process;  // PROCESS
     // GEN_FOR: loop variable over lo..hi; BLOCK: plain statement list
     std::string loopVar;
-    bool rangeAscending = true;
-    ExprP lo, hi;
+    bool rangeAscending = true;  // GEN_FOR: true for an ascending range
+    ExprP lo, hi;  // GEN_FOR: range bounds lo..hi
     // INSTANCE: the instantiated entity and its port associations
     std::string instanceLabel;
     std::string instanceName;  // Folded entity or component name
@@ -466,7 +471,7 @@ struct Concurrent final {
     ExprP delay;
     // ASSIGN: further waveform elements of a list, each with its own `after` delay
     std::vector<std::pair<ExprP, ExprP>> waveform;
-    std::vector<PortAssoc> associations;
+    std::vector<PortAssoc> associations;  // INSTANCE: port map associations
     // INSTANCE: the `generic map` associations, formal names the generic constant
     std::vector<PortAssoc> genericAssociations;
     std::vector<Decl> decls;  // BLOCK: declarative items
@@ -491,22 +496,22 @@ struct UseClause final {
 
 struct EntityUnit final {
     std::string name;  // Folded
-    std::string spelling;
-    std::string libname;
-    bool inLibrary = false;
-    FileLine* flp = nullptr;
-    std::vector<PortDecl> ports;
+    std::string spelling;  // As written
+    std::string libname;  // Library name the file was requested in
+    bool inLibrary = false;  // File came from a -v/--library file
+    FileLine* flp = nullptr;  // Source location
+    std::vector<PortDecl> ports;  // Port clause
     // Entity declarative items, visible in every architecture of the entity
     std::vector<Decl> decls;
-    std::vector<TypeDecl> types;
+    std::vector<TypeDecl> types;  // Type declarations of the entity
     // Packages named by the enclosing context clause
     std::vector<UseClause> uses;
     // Context declarations named by the enclosing context clause
     std::vector<std::string> contextNames;
     // Generic constants, visible in the port clause and every architecture
     std::vector<GenericDecl> generics;
-    std::vector<SubprogramDecl> subprograms;
-    std::vector<ComponentDecl> components;
+    std::vector<SubprogramDecl> subprograms;  // Subprogram declarations of the entity
+    std::vector<ComponentDecl> components;  // Component declarations of the entity
     // The entity statement part: concurrent assertions and passive processes
     std::vector<std::unique_ptr<Concurrent>> stmts;
 };
@@ -514,86 +519,86 @@ struct EntityUnit final {
 struct Architecture final {
     std::string name;  // Folded
     std::string entityName;  // Folded
-    std::string libname;
-    bool inLibrary = false;
-    FileLine* flp = nullptr;
-    std::vector<Decl> decls;
-    std::vector<TypeDecl> types;
-    std::vector<AliasDecl> aliases;
-    std::vector<SubprogramDecl> subprograms;
-    std::vector<ComponentDecl> components;
-    std::vector<std::unique_ptr<Concurrent>> stmts;
-    std::vector<UseClause> uses;
-    std::vector<std::string> contextNames;
+    std::string libname;  // Library name the file was requested in
+    bool inLibrary = false;  // File came from a -v/--library file
+    FileLine* flp = nullptr;  // Source location
+    std::vector<Decl> decls;  // Object declarations of the architecture
+    std::vector<TypeDecl> types;  // Type declarations of the architecture
+    std::vector<AliasDecl> aliases;  // Alias declarations of the architecture
+    std::vector<SubprogramDecl> subprograms;  // Subprogram declarations of the architecture
+    std::vector<ComponentDecl> components;  // Component declarations of the architecture
+    std::vector<std::unique_ptr<Concurrent>> stmts;  // Concurrent statements of the architecture
+    std::vector<UseClause> uses;  // Use clauses of the context clause
+    std::vector<std::string> contextNames;  // Context declarations named by the context clause
 };
 
 //! A package declaration or body; its declarative part is elaborated once
 struct PackageUnit final {
     std::string name;  // Folded
-    std::string spelling;
-    std::string libname;
+    std::string spelling;  // As written
+    std::string libname;  // Library name the file was requested in
     std::vector<GenericDecl> generics;  // Generic parameters: the package is a template
-    bool inLibrary = false;
+    bool inLibrary = false;  // File came from a -v/--library file
     bool isBody = false;  // Package body: completes the constants declared by the spec
-    FileLine* flp = nullptr;
-    std::vector<Decl> decls;
-    std::vector<TypeDecl> types;
-    std::vector<AliasDecl> aliases;
+    FileLine* flp = nullptr;  // Source location
+    std::vector<Decl> decls;  // Object declarations of the package
+    std::vector<TypeDecl> types;  // Type declarations of the package
+    std::vector<AliasDecl> aliases;  // Alias declarations of the package
     // Use clauses made visible around the package
     std::vector<UseClause> uses;
-    std::vector<std::string> contextNames;
+    std::vector<std::string> contextNames;  // Context declarations named by the context clause
     std::vector<SubprogramDecl> subprograms;  // Prototypes in a spec, bodies in a body
-    std::vector<ComponentDecl> components;
+    std::vector<ComponentDecl> components;  // Component declarations of the package
 };
 //! `package NAME is new BASE [generic map (...)];` instantiates a generic package
 struct PackageInstance final {
     std::string name;  // Folded
-    std::string spelling;
-    std::string libname;
-    bool inLibrary = false;
-    FileLine* flp = nullptr;
+    std::string spelling;  // As written
+    std::string libname;  // Library name the file was requested in
+    bool inLibrary = false;  // File came from a -v/--library file
+    FileLine* flp = nullptr;  // Source location
     std::string baseName;  // Folded generic package being instantiated
-    std::vector<PortAssoc> genericAssociations;
-    std::vector<UseClause> uses;
-    std::vector<std::string> contextNames;
+    std::vector<PortAssoc> genericAssociations;  // Generic map associations
+    std::vector<UseClause> uses;  // Use clauses of the context clause
+    std::vector<std::string> contextNames;  // Context declarations named by the context clause
 };
 
 //! One component binding of a configuration: `for <instances> : <comp> use entity <lib>.<ent>;`
 struct ConfigBinding final {
     std::string instances;  // Folded instance labels, comma separated as written
     std::string component;  // Folded component name
-    std::string libname;
+    std::string libname;  // Library named by the `use entity` clause
     std::string entity;  // Folded entity name the `use entity` clause binds
-    FileLine* flp = nullptr;
+    FileLine* flp = nullptr;  // Source location
 };
 
 //! A configuration design unit: binds the component specifications of one architecture
 struct ConfigurationUnit final {
     std::string name;  // Folded
-    std::string spelling;
-    std::string libname;
-    bool inLibrary = false;
-    FileLine* flp = nullptr;
+    std::string spelling;  // As written
+    std::string libname;  // Library name the file was requested in
+    bool inLibrary = false;  // File came from a -v/--library file
+    FileLine* flp = nullptr;  // Source location
     std::string entityName;  // Folded entity the configuration configures
     std::string archName;  // Folded architecture of that entity
-    std::vector<ConfigBinding> bindings;
+    std::vector<ConfigBinding> bindings;  // Component bindings
 };
 
 //! A context declaration: a named bundle of library and use clauses
 struct ContextUnit final {
     std::string name;  // Folded
-    FileLine* flp = nullptr;
-    std::vector<UseClause> uses;
+    FileLine* flp = nullptr;  // Source location
+    std::vector<UseClause> uses;  // Use clauses of the context
     std::vector<std::string> contextNames;  // Contexts this one references
 };
 
 //! Design units parsed from all source files, in source order
 struct DesignLibrary final {
-    std::vector<EntityUnit> entities;
-    std::vector<Architecture> archs;
+    std::vector<EntityUnit> entities;  // Entity units
+    std::vector<Architecture> archs;  // Architecture units
     std::vector<PackageUnit> packages;  // Specs and bodies, in source order
     std::vector<PackageInstance> packageInstances;  // Generic-package instances
-    std::vector<ConfigurationUnit> configurations;
+    std::vector<ConfigurationUnit> configurations;  // Configuration units
     std::vector<ContextUnit> contexts;  // Context declarations, in source order
 };
 

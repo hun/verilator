@@ -47,18 +47,18 @@ static constexpr int MAX_FOLD_CONST_WIDTH = 1 << 20;
 static constexpr int64_t MAX_FOLD_WRITE_COST = 1 << 18;
 
 struct AliasInfo final {
-    const Expr* designatorp = nullptr;
-    VType type;
-    bool hasType = false;
+    const Expr* designatorp = nullptr;  // Aliased object, slice or subprogram
+    VType type;  // Subtype of the alias; see hasType
+    bool hasType = false;  // The alias has a subtype indication
 };
 
 struct PackageInfo final {
-    std::map<std::string, AliasInfo> aliases;
-    std::map<std::string, VType> types;
-    std::map<std::string, int64_t> consts;
-    std::map<std::string, AstConst*> constValues;
-    std::map<std::string, VType> constTypes;
-    std::map<std::string, AstConst*> enumConsts;
+    std::map<std::string, AliasInfo> aliases;  // Aliases by folded name
+    std::map<std::string, VType> types;  // Declared types by folded name
+    std::map<std::string, int64_t> consts;  // Integer constants by folded name
+    std::map<std::string, AstConst*> constValues;  // Typed constants by folded name
+    std::map<std::string, VType> constTypes;  // Type of each typed constant
+    std::map<std::string, AstConst*> enumConsts;  // Enumeration literals by folded name
     std::set<std::string> ambiguousLiterals;  // Literals declared by more than one type
     std::map<std::string, double> realConsts;  // Elaboration-time reals, by folded name
     std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
@@ -77,15 +77,15 @@ struct PackageTable::Impl final {
 
 //! Statically bound value of one generic actual
 struct GenericBinding final {
-    bool isInt = false;
-    int64_t intValue = 0;
-    bool isReal = false;
-    double realValue = 0.0;
-    bool isString = false;
-    std::string stringValue;
-    bool isType = false;
+    bool isInt = false;  // Value is an integer, in intValue
+    int64_t intValue = 0;  // Integer value, when isInt
+    bool isReal = false;  // Value is a real, in realValue
+    double realValue = 0.0;  // Real value, when isReal
+    bool isString = false;  // Value is a string, in stringValue
+    std::string stringValue;  // String value, when isString
+    bool isType = false;  // Actual is a type mark, in typeValue
     VType typeValue;  // The actual type mark of a generic type parameter
-    bool hasValueType = false;
+    bool hasValueType = false;  // Whether valueType is set
     VType valueType;  // The declared type, specialized by the actual's bounds
     AstConst* valuep = nullptr;  // Typed constant; cloned when registered, else owned here
     const SubprogramDecl* subp = nullptr;  // The actual of a generic subprogram parameter
@@ -150,29 +150,32 @@ class Lowering final {
     AstNetlist* const m_rootp;  // Netlist to emit into
     AstModule* m_modp = nullptr;  // Module being emitted
     struct VarInfo final {
-        AstVar* varp = nullptr;
-        VType type;
+        AstVar* varp = nullptr;  // Signal or variable this name denotes
+        VType type;  // Resolved type of the name
     };
     //! A visible subprogram: its declaration and whether a process declared it
     struct SubprogramRef final {
-        const SubprogramDecl* declp = nullptr;
-        bool processLocal = false;
+        const SubprogramDecl* declp = nullptr;  // Declaration of the subprogram
+        bool processLocal = false;  // Declared inside a process
         int frame = -1;  // Active inline frame that owns it, or -1
         bool imported = false;  // Came from another unit, so a local homograph hides it
         bool ownSpec = false;  // This unit's own specification: the body completes it
     };
     //! Module-level declarations a process hides, restored when it ends
     struct ScopeSave final {
-        CowMap<VarInfo> scope;
-        std::map<std::string, int64_t> consts;
+        CowMap<VarInfo> scope;  // Visible signals and ports by folded name
+        std::map<std::string, int64_t> consts;  // Integer constants by folded name
+        // Integer constants visible while registering types
         std::map<std::string, int64_t> preConsts;
-        std::map<std::string, VType> types;
-        std::set<std::string> ambiguousTypes;
-        std::set<std::string> ambiguousLiterals;
-        std::map<std::string, AstConst*> constValues;
-        std::map<std::string, VType> constTypes;
-        std::map<std::string, AstConst*> enumConsts;
+        std::map<std::string, VType> types;  // Declared types by folded name
+        std::set<std::string> ambiguousTypes;  // Type names imported from two packages
+        std::set<std::string> ambiguousLiterals;  // Enumeration literals from two types
+        std::map<std::string, AstConst*> constValues;  // Typed constants by folded name
+        std::map<std::string, VType> constTypes;  // Type of each typed constant
+        std::map<std::string, AstConst*> enumConsts;  // Enumeration literals by folded name
+        // Visible subprograms by folded name
         std::map<std::string, std::vector<SubprogramRef>> subprograms;
+        // Visible component declarations by folded name
         std::map<std::string, const ComponentDecl*> components;
     };
     //! One name bound during subprogram inlining: an expression value, or an lvalue
@@ -187,24 +190,25 @@ class Lowering final {
     using InlineCont = std::function<AstNodeExpr*(InlineEnv&)>;  // Continuation for inlining
     //! Continuations of active static function loops, for labeled exit/next
     struct FuncLoopTarget final {
-        std::string label;
+        std::string label;  // Loop label, empty when unlabeled
         const InlineCont* nextp = nullptr;  // Continue with the following iteration
         const InlineCont* exitp = nullptr;  // Continue after the loop
     };
     //! An active inlining: the body, the scope its callee captures, and its bindings
     struct InlineFrame final {
-        const SubprogramDecl* declp = nullptr;
+        const SubprogramDecl* declp = nullptr;  // The subprogram body being inlined
         ScopeSave entryScope;  // The caller's scope when the call was made
         ScopeSave liveScope;  // Grows with procedure locals
-        InlineEnv* envp = nullptr;
+        InlineEnv* envp = nullptr;  // Bindings of this inlining
     };
     //! Active bindings, referenced before the scope tables: a callee owns its map while
     //! its body lowers, so nested lowering sees it
     InlineEnv m_ownEnv;  // Bindings outside any inlining: always empty
-    InlineEnv* m_inlinep = &m_ownEnv;
+    InlineEnv* m_inlinep = &m_ownEnv;  // Bindings of the innermost active inlining
     InlineEnv& activeEnv() { return *m_inlinep; }
     const InlineEnv& activeEnv() const { return *m_inlinep; }
-    std::deque<InlineFrame> m_inlineFrames;
+    std::deque<InlineFrame> m_inlineFrames;  // Active inlinings, innermost last
+    // Loops of the active static function inlinings, innermost last
     std::vector<FuncLoopTarget> m_funcLoopTargets;
     std::set<const SubprogramDecl*> m_inlineBodies;  // Recursion guard
     //! Cost of the element writes folded into one inlined body; each rebuilds the local value
@@ -226,7 +230,7 @@ class Lowering final {
     int m_runtimeBranchDepth = 0;
     int m_unusedDepth = 0;  // For a scope that has to exist unconditionally
     struct RuntimeBranchScope final {
-        int& depth;
+        int& depth;  // Counter incremented while this scope is alive
         explicit RuntimeBranchScope(int& d)
             : depth(d) {
             ++depth;
@@ -263,12 +267,14 @@ class Lowering final {
     //! A package specification constant whose initializer calls a subprogram with no body
     //! yet: the body's pass completes it
     struct DeferredConst final {
+        // Declared (folded, spelling) names
         std::vector<std::pair<std::string, std::string>> names;
-        const TypeSpec* typep = nullptr;
-        const Expr* initp = nullptr;
-        FileLine* flp = nullptr;
+        const TypeSpec* typep = nullptr;  // Declared subtype indication
+        const Expr* initp = nullptr;  // Initial value expression
+        FileLine* flp = nullptr;  // Source location
         std::string owner;  // Unit that declared it: only that unit completes it
     };
+    // Package constants whose initialization is deferred
     std::vector<DeferredConst> m_deferredConsts;
     std::string m_unitName;  // Unit being emitted, which owns its deferred constants
     //! A pure function call the elaboration-time folders are evaluating: its formals
@@ -277,19 +283,19 @@ class Lowering final {
     //! valued, so an evaluation over a body cannot re-enter itself. Pushed and popped
     //! around one evaluation, so this is empty outside a fold.
     struct PureCall final {
-        std::map<std::string, ExprP> args;
-        const SubprogramDecl* subp = nullptr;
+        std::map<std::string, ExprP> args;  // Formal values bound to the actuals, by folded name
+        const SubprogramDecl* subp = nullptr;  // Subprogram being folded
     };
-    mutable std::vector<PureCall> m_pureCalls;
+    mutable std::vector<PureCall> m_pureCalls;  // Pure calls being folded, innermost last
     std::map<std::string, VType> m_types;  // Declared types by folded name
     //! A type the declarative part deferred, with the sequence number of the part that
     //! deferred it: `resolveType` registers one at its first use, once the emitter has
     //! computed the constant its constraint names, and only its own part may finish it
     struct DeferredType final {
-        const TypeDecl* declp;
-        size_t seq;
+        const TypeDecl* declp;  // Type declaration that was deferred
+        size_t seq;  // Sequence number of the part that deferred it
     };
-    std::map<std::string, DeferredType> m_deferredTypes;
+    std::map<std::string, DeferredType> m_deferredTypes;  // Deferred types by folded name
     size_t m_deferSeq = 0;  // Sequence number of the part being registered
     std::map<std::string, AstConst*> m_constValues;  // Typed constants by folded name
     std::map<std::string, VType> m_constTypes;  // Type of each typed constant
@@ -306,8 +312,8 @@ class Lowering final {
         std::map<size_t, std::string> elems;  // Image elements by index
     };
     struct FileReader final {
-        std::ifstream in;
-        bool eof = false;
+        std::ifstream in;  // Stream reading the file
+        bool eof = false;  // End of file reached
     };
     using FileVals = std::map<std::string, FileVal>;
     using FileReaders = std::map<std::string, FileReader>;
@@ -320,8 +326,8 @@ class Lowering final {
     std::map<std::string, AstConst*> m_enumConsts;  // Enumeration literals by folded name
     std::vector<std::unique_ptr<AstConst>> m_ownedConsts;  // Owns constants in the tables
     struct Edge final {
-        AstVar* varp = nullptr;
-        VEdgeType type = VEdgeType::ET_CHANGED;
+        AstVar* varp = nullptr;  // Signal whose edge is tested
+        VEdgeType type = VEdgeType::ET_CHANGED;  // Edge kind tested on varp
     };
     std::vector<Edge> m_edges;  // Clock edges collected while lowering a process
     bool m_initial = false;  // Emitting the time-zero evaluation
@@ -350,10 +356,10 @@ class Lowering final {
     struct LoopFrame final {
         AstVar* exitp = nullptr;  // Set when an exit condition fired
         AstVar* nextp = nullptr;  // Set when a next condition fired
-        std::string label;
+        std::string label;  // Loop label, empty when unlabeled
         bool guard = false;  // The body uses exit/next, so statements need guarding
     };
-    std::vector<LoopFrame> m_loops;
+    std::vector<LoopFrame> m_loops;  // Active loops, innermost last
     int m_loopSeq = 0;  // Disambiguates the loop flag variables
     int m_genSeq = 0;  // Disambiguates sibling generate bodies
     std::string m_genSuffix;  // Suffix for names created inside a generate
@@ -373,7 +379,7 @@ class Lowering final {
     //! Signals whose type has no resolution function: at most one driver (IEEE 1076-2008
     //! 6.4.2.3), unlike std_logic and the arrays built from it
     std::set<AstVar*> m_unresolvedSignals;
-    std::map<std::string, AliasInfo> m_aliases;
+    std::map<std::string, AliasInfo> m_aliases;  // Aliases visible in the unit, by folded name
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
     Design* const m_designp;  // Design context for generic specialization
 
@@ -642,9 +648,9 @@ class Lowering final {
                       const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk);
     //! Resolved type of a constant, with a value lowered early when the type needed it
     struct ConstantTypeInfo final {
-        VType type;
-        bool intConstant = true;
-        bool realConstant = false;
+        VType type;  // Resolved type of the constant
+        bool intConstant = true;  // The constant has an integer type
+        bool realConstant = false;  // The constant has type real
         AstNodeExpr* valuep = nullptr;  // A value lowered early, when the type needed it
     };
     bool deferUnresolvedConstant(const std::vector<std::pair<std::string, std::string>>& names,
@@ -1084,10 +1090,10 @@ class Lowering final {
     AstNodeExpr* lowerOthersAssociation(FileLine* flp, const Expr& expr, const VType* contextp);
     //! Lowered operands of a binary expression with their resolved VHDL types
     struct BinaryOperands final {
-        AstNodeExpr* lp = nullptr;
-        AstNodeExpr* rp = nullptr;
-        VType lt;
-        VType rt;
+        AstNodeExpr* lp = nullptr;  // Lowered left operand
+        AstNodeExpr* rp = nullptr;  // Lowered right operand
+        VType lt;  // Resolved type of the left operand
+        VType rt;  // Resolved type of the right operand
     };
     //! Rejects a static integer result that overflows a 32-bit integer
     bool binaryStaticFits(FileLine* flp, const Expr& expr);
@@ -1138,13 +1144,13 @@ class Lowering final {
     void lowerWaitProcess(const Process& process);
     //! State shared by the helpers lowering a process that suspends on a wait
     struct WaitProcessLowering final {
-        const Process* processp = nullptr;
-        FileLine* flp = nullptr;
-        std::size_t waitIndex = 0;
-        std::size_t stopIndex = 0;
-        const Stmt* waitp = nullptr;
-        bool singleShot = false;
-        bool bareWaitInBody = false;
+        const Process* processp = nullptr;  // Process being lowered
+        FileLine* flp = nullptr;  // Source location of the process
+        std::size_t waitIndex = 0;  // Index of the wait statement, or the body size when none
+        std::size_t stopIndex = 0;  // Index of the trailing bare wait, or the body size
+        const Stmt* waitp = nullptr;  // The process's wait statement
+        bool singleShot = false;  // A trailing bare wait: never resumes after the first run
+        bool bareWaitInBody = false;  // A bare `wait;` occurs in the body
     };
     const Stmt* findProcessWait(const Process& process, std::size_t& waitIndex) const;
     void lowerWaitWithoutWait(const Process& process, FileLine* flp);
@@ -1196,10 +1202,10 @@ class Lowering final {
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
     //! Type information resolved for an attribute prefix
     struct AttrTypeInfo final {
-        VType resolved;
-        VType predefined;
-        const VType* typep = nullptr;
-        bool typeMark = false;
+        VType resolved;  // Type of the prefix when it names an object
+        VType predefined;  // Predefined type when the prefix names one, e.g. integer
+        const VType* typep = nullptr;  // Type the attribute applies to, null when unknown
+        bool typeMark = false;  // The prefix names a type, not an object
     };
     bool lowerIndexedEventAttr(FileLine* flp, const Expr& expr, AstNodeExpr*& resultp);
     bool resolveAttrDesignator(FileLine* flp, const Expr& prefix, AttrTypeInfo& info);
@@ -1217,9 +1223,9 @@ class Lowering final {
     AstNodeExpr* lowerAttr(const Expr& expr);
     //! One run of elements covered by one associated value
     struct AggregateSegment final {
-        int offset = 0;
-        int width = 1;
-        const Expr* exprp = nullptr;
+        int offset = 0;  // Bit offset of the segment
+        int width = 1;  // Bit width of the segment
+        const Expr* exprp = nullptr;  // Value covering the segment
     };
     bool packedBitAggregateApplies(const Expr& expr, const VType& type);
     AstNodeExpr* lowerPackedBitAggregate(FileLine* flp, const Expr& expr, const VType& type);
@@ -1262,15 +1268,15 @@ class Lowering final {
     AstNodeStmt* lowerSelected(const Concurrent& conc);
     //! Lowered pieces of a selected assignment, shared by its conditional and case forms
     struct SelectedLowering final {
-        FileLine* flp = nullptr;
-        const Concurrent* concp = nullptr;
-        VType targetType;
-        VType selectorType;
-        AstNodeDType* selDtp = nullptr;
-        AstNodeExpr* selectorp = nullptr;
-        AstNodeExpr* lhsp = nullptr;
-        std::vector<AstNodeExpr*> values;
-        bool tristate = false;
+        FileLine* flp = nullptr;  // Source location
+        const Concurrent* concp = nullptr;  // The selected assignment
+        VType targetType;  // Resolved type of the target
+        VType selectorType;  // Resolved type of the selector
+        AstNodeDType* selDtp = nullptr;  // Data type of the selector
+        AstNodeExpr* selectorp = nullptr;  // Lowered selector expression
+        AstNodeExpr* lhsp = nullptr;  // Lowered target
+        std::vector<AstNodeExpr*> values;  // Lowered value of each alternative
+        bool tristate = false;  // A value is high-impedance, so the assignment is tristate
 
         void deleteValues(std::size_t from) const {
             for (std::size_t i = from; i < values.size(); ++i) {
@@ -1451,18 +1457,18 @@ public:
     AstNode* lowerInstance(const Concurrent& conc);
     //! One generic of an entity, as seen from an instance's generic map
     struct InstanceGeneric final {
-        const GenericDecl* declp;
-        std::string folded;
-        std::string spelling;
+        const GenericDecl* declp;  // The generic declaration
+        std::string folded;  // Folded name
+        std::string spelling;  // As written
     };
 
     //! State shared while binding one instance's port associations
     struct InstancePortBind final {
-        const Concurrent& conc;
-        const EntityUnit* entityp;
-        const PortBoundsMap& portBounds;
-        bool positional;
-        bool defaultError;
+        const Concurrent& conc;  // Instance statement binding the ports
+        const EntityUnit* entityp;  // Entity being instantiated, null when unknown
+        const PortBoundsMap& portBounds;  // Bounds of the unconstrained ports, from the instance
+        bool positional;  // The port map is positional
+        bool defaultError;  // The port default was rejected, with its error reported
     };
 
     bool emitPrelude(const EntityUnit& entity, const Architecture& arch,

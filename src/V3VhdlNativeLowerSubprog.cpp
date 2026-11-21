@@ -2486,8 +2486,8 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
     bool kept = false;
     struct Branch final {
         AstNodeExpr* condp = nullptr;  // null for the "others" alternative
-        AstNodeExpr* resultp = nullptr;
-        InlineEnv env;
+        AstNodeExpr* resultp = nullptr;  // Lowered value of the alternative
+        InlineEnv env;  // Bindings in effect while lowering the value
     };
     std::vector<Branch> branches;
     const auto cleanup = [&]() {

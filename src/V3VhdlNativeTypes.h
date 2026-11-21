@@ -34,9 +34,9 @@ using VTypeP = std::shared_ptr<VType>;
 //! One record element: its bit offset from the least significant bit of the record
 struct VField final {
     std::string name;  // Folded
-    int offset = 0;
-    int width = 1;
-    VTypeP type;
+    int offset = 0;  // Bit offset of the element
+    int width = 1;  // Bit width of the element
+    VTypeP type;  // Subtype of the element
 };
 
 //! VHDL type as it survives into the committed AST
@@ -44,16 +44,16 @@ struct VType final {
     enum Kind : uint8_t {
         LOGIC, BIT, BOOLEAN, INT, VECTOR, ARRAY, RECORD, ENUM, REAL, FILE, LINE
     } kind = LOGIC;
-    AstNodeDType* dtp = nullptr;
-    int width = 1;
-    VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
-    VSigning signing = VSigning::UNSIGNED;
+    AstNodeDType* dtp = nullptr;  // AST data type of the committed type
+    int width = 1;  // Bit width of the type
+    VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;  // Keyword of the basic AST data type
+    VSigning signing = VSigning::UNSIGNED;  // Signedness of the basic AST data type
     std::string typeName;  // Base type identity for overload resolution
-    int left = 0;
-    int right = 0;
-    bool ascending = false;
+    int left = 0;  // Index range left bound
+    int right = 0;  // Index range right bound
+    bool ascending = false;  // Index range is `to`, not `downto`
     int intLow = 0;  // INTEGER subtype bounds
-    int intHigh = 0;
+    int intHigh = 0;  // Upper bound of the INTEGER subtype
     VTypeP elemp;  // ARRAY: element type
     int elemWidth = 1;  // ARRAY: width of one element
     std::vector<VField> fields;  // RECORD: most significant element first

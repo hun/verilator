@@ -183,15 +183,18 @@ struct EmitContext final {
     explicit EmitContext(AstNetlist* netlistp)
         : m_rootp{netlistp} {}
     AstNetlist* const m_rootp;  // Netlist the frontend emits into
-    vhdlnative::DesignLibrary library;
-    vhdlnative::Design design;
-    vhdlnative::PackageTable packages;
-    vhdlnative::ModuleMap modules;
-    ArchByEntity archByEntity;
+    vhdlnative::DesignLibrary library;  // Design units parsed from all files
+    vhdlnative::Design design;  // Design context shared by the lowering steps
+    vhdlnative::PackageTable packages;  // Elaborated packages
+    vhdlnative::ModuleMap modules;  // Module of each entity, by folded name
+    ArchByEntity archByEntity;  // Architecture bound to each entity
+    // Entities in elaboration order, instantiated entities first
     std::vector<const vhdlnative::EntityUnit*> order;
-    std::set<std::string> entityNames;
-    std::set<std::string> deletedModules;
+    std::set<std::string> entityNames;  // Entity names elaborated so far, to reject duplicates
+    std::set<std::string> deletedModules;  // Entity names whose base module is removed
+    // Entities whose generics lack defaults, elaborated per instance
     std::vector<const vhdlnative::EntityUnit*> unelaborated;
+    // Entities with unconstrained ports, elaborated per instance
     std::vector<const vhdlnative::EntityUnit*> portUnelaborated;
 };
 

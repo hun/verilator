@@ -339,8 +339,8 @@ void Lowering::instantiatePackage(const std::vector<PackageUnit>& packages,
     };
     // Flatten the generics so a positional map can be matched by declaration order
     struct Item final {
-        const GenericDecl* declp;
-        std::string folded;
+        const GenericDecl* declp;  // Generic declaration of the item
+        std::string folded;  // Folded name of the generic
     };
     std::vector<Item> items;
     for (const GenericDecl& gen : specp->generics)

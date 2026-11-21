@@ -233,6 +233,7 @@ class Parser final {
         }
         ~LabelScope() { m_parser.m_labelScopes.pop_back(); }
     };
+    // Labels declared in each open scope, innermost last
     std::vector<std::set<std::string>> m_labelScopes;
     bool addLabel(const std::string& label, FileLine* flp) {
         if (label.empty()) return true;

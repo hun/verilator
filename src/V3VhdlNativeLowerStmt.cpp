@@ -426,9 +426,9 @@ void Lowering::checkDrivers() {
     // is not static is taken to cover the whole signal. A declared initial value is not
     // a driver.
     struct Range final {
-        int lsb = 0;
-        int width = 0;
-        int driver = 0;
+        int lsb = 0;  // Least significant bit of the driven range
+        int width = 0;  // Bit width of the driven range
+        int driver = 0;  // Driver that writes the range
     };
     std::map<AstVar*, std::vector<Range>> ranges;
     int driver = 0;

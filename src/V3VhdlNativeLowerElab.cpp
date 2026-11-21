@@ -1870,9 +1870,9 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
     FileLine* const flp = ctx.conc.flp;
     //! One association of a port, resolved to the bit range it connects
     struct Connection final {
-        int lsb = 0;
-        int width = 1;
-        const PortAssoc* assocp = nullptr;
+        int lsb = 0;  // Least significant bit of the connected range
+        int width = 1;  // Width of the connected range
+        const PortAssoc* assocp = nullptr;  // The association that connects the range
     };
     // Collect the bit range each association connects
     std::vector<Connection> connections;
@@ -2282,8 +2282,8 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
     // The assignment body is a statement list, so an inlined function's array local can
     // be a real variable here; a failure leaves statements behind, so they are dropped
     struct MaterializeScope final {
-        Lowering* const selfp;
-        const bool saved;
+        Lowering* const selfp;  // Lowering whose flag is set
+        const bool saved;  // Value of m_materializeLocals to restore
         explicit MaterializeScope(Lowering* lowerp)
             : selfp{lowerp}
             , saved{lowerp->m_materializeLocals} {
