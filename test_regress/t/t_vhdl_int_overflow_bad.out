@@ -1,5 +1,5 @@
-%Error: t/t_vhdl_int_overflow_bad.vhdl:17:1: VHDL: integer overflow in a static expression.
+%Error: t/t_vhdl_int_overflow_bad.vhdl:17:21: VHDL: integer overflow in a static expression.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_int_overflow_bad.vhdl:18:1: VHDL: integer overflow in a static expression.
-%Error: t/t_vhdl_int_overflow_bad.vhdl:19:1: VHDL: integer overflow in a static expression.
+%Error: t/t_vhdl_int_overflow_bad.vhdl:18:10: VHDL: integer overflow in a static expression.
+%Error: t/t_vhdl_int_overflow_bad.vhdl:19:10: VHDL: integer overflow in a static expression.
 %Error: Exiting due to

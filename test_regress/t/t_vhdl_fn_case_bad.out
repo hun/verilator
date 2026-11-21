@@ -1,3 +1,3 @@
-%Error-UNSUPPORTED: t/t_vhdl_fn_case_bad.vhdl:17:1: Unsupported: VHDL function does not return a value on all paths.
+%Error-UNSUPPORTED: t/t_vhdl_fn_case_bad.vhdl:17:12: Unsupported: VHDL function does not return a value on all paths.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
 %Error: Exiting due to

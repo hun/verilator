@@ -1,5 +1,5 @@
-%Error-UNSUPPORTED: t/t_vhdl_phys_obj_unsup.vhdl:21:1: Unsupported: VHDL physical value at run time.
+%Error-UNSUPPORTED: t/t_vhdl_phys_obj_unsup.vhdl:21:14: Unsupported: VHDL physical value at run time.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: t/t_vhdl_phys_obj_unsup.vhdl:23:1: VHDL: unknown identifier 'd'.
+%Error: t/t_vhdl_phys_obj_unsup.vhdl:23:5: VHDL: unknown identifier 'd'.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

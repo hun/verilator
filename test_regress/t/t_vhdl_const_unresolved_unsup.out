@@ -1,3 +1,3 @@
-%Error-UNSUPPORTED: t/t_vhdl_const_unresolved_unsup.vhdl:20:1: Unsupported: VHDL constant of an array of unconstrained elements.
+%Error-UNSUPPORTED: t/t_vhdl_const_unresolved_unsup.vhdl:20:12: Unsupported: VHDL constant of an array of unconstrained elements.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
 %Error: Exiting due to

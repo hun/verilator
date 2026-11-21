@@ -68,6 +68,7 @@ class Lexer final {
     const std::string m_text;  // File contents
     size_t m_pos = 0;  // Current offset
     int m_line = 1;  // Current line number
+    size_t m_lineStart = 0;  // Offset of the current line's first character
     bool m_prevEndsDesignator = false;  // Last token can precede an attribute/qualification mark
     bool m_prevId = false;  // The last token was an identifier: `mark'(` needs one
     std::string m_prevText;  // The last identifier, to tell a mark from a keyword
@@ -76,6 +77,8 @@ class Lexer final {
     FileLine* newFileLine() const {
         FileLine* const flp = new FileLine{m_filename};
         flp->lineno(m_line);
+        const int column = static_cast<int>(m_pos - m_lineStart) + 1;
+        flp->column(column, column);
         flp->applyIgnores();  // Respect .vlt lint waivers
         return flp;
     }
@@ -120,17 +123,20 @@ public:
     struct State final {
         size_t pos;
         int line;
+        size_t lineStart;
         bool prevEndsDesignator;
         bool prevId;
         std::string prevText;
         int translateOff;
     };
     State state() const {
-        return {m_pos, m_line, m_prevEndsDesignator, m_prevId, m_prevText, m_translateOff};
+        return {m_pos,    m_line,     m_lineStart,   m_prevEndsDesignator,
+                m_prevId, m_prevText, m_translateOff};
     }
     void restore(const State& st) {
         m_pos = st.pos;
         m_line = st.line;
+        m_lineStart = st.lineStart;
         m_prevEndsDesignator = st.prevEndsDesignator;
         m_prevId = st.prevId;
         m_prevText = st.prevText;

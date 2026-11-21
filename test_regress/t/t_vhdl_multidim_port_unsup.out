@@ -1,3 +1,3 @@
-%Error-UNSUPPORTED: t/t_vhdl_multidim_port_unsup.vhdl:19:1: Unsupported: VHDL port of type 'arr2d' has no resolvable index constraint.
+%Error-UNSUPPORTED: t/t_vhdl_multidim_port_unsup.vhdl:19:5: Unsupported: VHDL port of type 'arr2d' has no resolvable index constraint.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
 %Error: Exiting due to

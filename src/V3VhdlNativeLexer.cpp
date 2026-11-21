@@ -98,6 +98,7 @@ void Lexer::skipSpace() {
         if (c == '\n') {
             ++m_line;
             ++m_pos;
+            m_lineStart = m_pos;
         } else if (std::isspace(static_cast<unsigned char>(c))) {
             ++m_pos;
         } else if (c == '-' && peek(1) == '-') {
@@ -108,7 +109,10 @@ void Lexer::skipSpace() {
             m_pos += 2;
             const size_t start = m_pos;
             while (m_pos < m_text.size() && !(m_text[m_pos] == '*' && peek(1) == '/')) {
-                if (m_text[m_pos] == '\n') ++m_line;
+                if (m_text[m_pos] == '\n') {
+                    ++m_line;
+                    m_lineStart = m_pos + 1;
+                }
                 ++m_pos;
             }
             const size_t end = m_pos;

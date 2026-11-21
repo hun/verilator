@@ -1,3 +1,3 @@
-%Error-UNSUPPORTED: t/t_vhdl_bit_inout_unsup.vhdl:15:1: Unsupported: VHDL inout port of a two-state type.
+%Error-UNSUPPORTED: t/t_vhdl_bit_inout_unsup.vhdl:15:5: Unsupported: VHDL inout port of a two-state type.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
 %Error: Exiting due to
