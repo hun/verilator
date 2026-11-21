@@ -916,7 +916,6 @@ public:
     bool sourceLangVhdl() const { return m_sourceLang == V3SourceLang::VHDL; }
     //! Source language of a design file: explicit extension wins, else the --language default
     V3SourceLang fileSourceLang(const string& filename) const;
-    static bool isVhdlFileName(const string& filename);
     static bool fileStatNormal(const string& filename);
 
     // METHODS (other OS)

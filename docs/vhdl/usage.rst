@@ -27,8 +27,9 @@ Selecting the language
 ----------------------
 
 The file extension selects the language: :file:`.vhd` and :file:`.vhdl` are
-VHDL, :file:`.v` and :file:`.sv` are SystemVerilog. A VHDL design kept in
-files with other extensions is selected with
+VHDL; :file:`.v`, :file:`.sv`, :file:`.vh`, :file:`.svh`, and any extension
+mapped by an option such as :vlopt:`+1800-2017ext+<ext>` are SystemVerilog. A
+VHDL design kept in files with other extensions is selected with
 :vlopt:`--language vhdl \<--language\>`:
 
 .. code-block:: bash
@@ -36,7 +37,7 @@ files with other extensions is selected with
    verilator --lint-only --language vhdl design.vhdl
 
 The extension wins, so :vlopt:`--language vhdl \<--language\>` never
-reinterprets a :file:`.v` or :file:`.sv` file as VHDL.
+reinterprets a SystemVerilog source or header as VHDL.
 
 ----------------
 A first design

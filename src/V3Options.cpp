@@ -700,23 +700,17 @@ V3LangCode V3Options::fileLanguage(const string& filename) {
     return m_defaultLanguage;
 }
 
-bool V3Options::isVhdlFileName(const string& filename) {
-    const string name = V3Os::filenameNonDir(filename);
-    const string::size_type pos = name.rfind('.');
-    if (pos == string::npos) return false;
-    const string ext = name.substr(pos + 1);
-    return ext == "vhd" || ext == "vhdl";
-}
-
 V3SourceLang V3Options::fileSourceLang(const string& filename) const {
-    // Explicit extensions win over the --language default, so `--language vhdl` does not
-    // silently reinterpret a .v/.sv file as VHDL.
-    if (isVhdlFileName(filename)) return V3SourceLang::VHDL;
+    // An extension that names a language wins over --language vhdl, so the VHDL default
+    // does not reinterpret a Verilog source or header
     const string name = V3Os::filenameNonDir(filename);
     const string::size_type pos = name.rfind('.');
-    if (pos != string::npos) {
-        const string ext = name.substr(pos + 1);
-        if (ext == "v" || ext == "sv") return V3SourceLang::SV;
+    if (pos == string::npos) return m_sourceLang;
+    const string ext = name.substr(pos + 1);
+    if (ext == "vhd" || ext == "vhdl") return V3SourceLang::VHDL;
+    if (ext == "v" || ext == "sv" || ext == "vh" || ext == "svh"
+        || m_impp->m_langExts.count(ext)) {
+        return V3SourceLang::SV;
     }
     return m_sourceLang;
 }
