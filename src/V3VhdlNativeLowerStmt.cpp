@@ -415,9 +415,6 @@ bool Lowering::choicesComplete(AstNodeDType* selDtp, const VType& selType,
 void Lowering::addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message) {
     AstNodeStmt* bodyp
         = new AstDisplay{flp, VDisplayType::DT_ERROR, message, nullptr, nullptr, 'd'};
-    VTimescale unit = m_modp->timeunit();
-    if (unit.isNone()) unit = VTimescale{VTimescale::TS_1PS};
-    VN_AS(bodyp, Display)->fmtp()->timeunit(unit);
     bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstFinish{flp});
     m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS_COMB, nullptr,
                                     new AstIf{flp, condp, bodyp, nullptr}});
@@ -1736,18 +1733,13 @@ AstNodeStmt* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
         unsupportedError(flp, "delay that is not static");
         return nullptr;
     }
-    VTimescale unit = m_modp->timeunit();
-    if (unit.isNone()) unit = VTimescale{VTimescale::TS_1PS};
-    const double seconds = unit.multiplier();
-    if (seconds <= 0) {
-        unsupportedError(flp, "delay without a timescale");
-        return nullptr;
-    }
-    AstDelay* const delayp = new AstDelay{
-        flp, new AstConst{flp, static_cast<uint32_t>(static_cast<double>(fs) * 1e-15 / seconds)},
-        false};
-    delayp->timeunit(unit);
-    return delayp;
+    // Like an SV time literal: V3Width scales the seconds to the module's timeunit, which
+    // is only known after the frontend has run
+    AstConst* const secondsp
+        = new AstConst{flp, AstConst::RealDouble{}, static_cast<double>(fs) * 1e-15};
+    AstTimeImport* const timep = new AstTimeImport{flp, secondsp};
+    timep->dtypeSetDouble();
+    return new AstDelay{flp, timep, false};
 }
 
 AstNodeStmt* Lowering::lowerWhile(const Stmt& stmt) {
