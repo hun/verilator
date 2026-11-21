@@ -701,6 +701,13 @@ bool Lowering::evalCond(const Expr& expr, bool& value) const {
                 return true;
             }
         }
+        // A real never compares with an integer; the lowered operator reports it
+        VType lhsType;
+        VType rhsType;
+        if (actualType(*expr.a, lhsType) && actualType(*expr.b, rhsType)
+            && (lhsType.kind == VType::REAL) != (rhsType.kind == VType::REAL)) {
+            return false;
+        }
         double lhs = 0.0;
         double rhs = 0.0;
         int64_t lhsInt = 0;

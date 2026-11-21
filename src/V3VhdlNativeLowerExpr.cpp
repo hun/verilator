@@ -1318,12 +1318,17 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
     if (!binaryStaticFits(flp, expr)) return nullptr;
+    const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
+                              || op == ">=" || op == "?=" || op == "?/=" || op == "?<"
+                              || op == "?<=" || op == "?>" || op == "?>=";
     // An explicitly declared operator with matching parameter types takes precedence over
     // the built-in operator of the same symbol
     if (expr.a && expr.b) {
         bool userFound = false;
         if (AstNodeExpr* const userp = lowerUserOperator(expr, contextp, userFound)) return userp;
         if (userFound) return nullptr;
+        // Checked before the real fold, which would otherwise compare a real with an integer
+        if (relationalOp && !relationalOperandsConform(*expr.a, *expr.b)) return nullptr;
         if (AstNodeExpr* const bitp = foldRealRelation(flp, expr, op)) return bitp;
     }
     // A logical operator combines a scalar character literal element-wise with the
@@ -1345,14 +1350,6 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* contextp) {
     lt = typeOfLowered(*expr.a, lp);
     rt = typeOfLowered(*expr.b, rp);
     if (logicalOp && !logicalOperandsConform(*expr.a, *expr.b, lt, rt)) {
-        lp->deleteTree();
-        rp->deleteTree();
-        return nullptr;
-    }
-    const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
-                              || op == ">=" || op == "?=" || op == "?/=" || op == "?<"
-                              || op == "?<=" || op == "?>" || op == "?>=";
-    if (relationalOp && !relationalOperandsConform(*expr.a, *expr.b)) {
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;

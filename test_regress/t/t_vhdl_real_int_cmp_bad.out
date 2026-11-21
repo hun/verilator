@@ -1,0 +1,4 @@
+%Error: t/t_vhdl_real_int_cmp_bad.vhdl:23:17: VHDL: relational operator compares a real with an integer.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_real_int_cmp_bad.vhdl:26:8: VHDL: relational operator compares a real with an integer.
+%Error: Exiting due to
