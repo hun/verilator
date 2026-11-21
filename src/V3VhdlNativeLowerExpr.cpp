@@ -3581,6 +3581,8 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
         unsupportedError(flp, "aggregate for a non-composite type");
         return nullptr;
     }
+    // typeOfLowered sees only the packed dtype, so keep the structure for it
+    m_exprTypes[&expr] = type;
     if (packedBitAggregateApplies(expr, type)) return lowerPackedBitAggregate(flp, expr, type);
     std::vector<AggregateSegment> segments;
     const Expr* othersValuep = nullptr;  // Value of an `others` association

@@ -457,6 +457,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_imported.clear();
     m_ambiguousTypes.clear();
     m_arrayDtypes.clear();
+    m_exprTypes.clear();
     m_stdLogicSigned = false;
     m_stdLogicUnsigned = false;
     m_stdLogicArith = false;

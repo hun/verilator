@@ -375,6 +375,8 @@ class Lowering final {
     bool m_numericStdSigned = false;  // `use ieee.numeric_std_signed.all`
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
+    //! Array structure of an aggregate, which its lowered packed dtype does not carry
+    std::map<const Expr*, VType> m_exprTypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
     //! Signals whose type has no resolution function: at most one driver (IEEE 1076-2008
     //! 6.4.2.3), unlike std_logic and the arrays built from it
@@ -527,6 +529,10 @@ class Lowering final {
         UASSERT_OBJ(nodep->dtypep(), nodep, "VHDL expression has no data type");
         VType type;
         if (typeOfDesignator(expr, type) && type.width == nodep->width()) return type;
+        const auto exprIt = m_exprTypes.find(&expr);
+        if (exprIt != m_exprTypes.end() && exprIt->second.width == nodep->width()) {
+            return exprIt->second;
+        }
         const auto arrayIt = m_arrayDtypes.find(nodep->dtypep());
         if (arrayIt != m_arrayDtypes.end() && arrayIt->second.width == nodep->width()) {
             return arrayIt->second;

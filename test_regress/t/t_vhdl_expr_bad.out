@@ -8,7 +8,7 @@
 %Error: t/t_vhdl_expr_bad.vhdl:34:20: VHDL: unknown identifier 'a'.
 %Error: t/t_vhdl_expr_bad.vhdl:37:8: VHDL: unknown identifier 'a'.
 %Error: t/t_vhdl_expr_bad.vhdl:38:8: VHDL: slice is out of range of the array.
-%Error: t/t_vhdl_expr_bad.vhdl:39:27: VHDL: comparison of unrelated array types.
+%Error: t/t_vhdl_expr_bad.vhdl:39:27: VHDL: array ordering requires a discrete element type.
 %Error: t/t_vhdl_expr_bad.vhdl:42:5: VHDL: cannot assign to constant 'c'.
 %Error: t/t_vhdl_expr_bad.vhdl:43:5: VHDL: cannot assign to input port 'i'.
 %Error: Exiting due to
