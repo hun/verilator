@@ -121,7 +121,7 @@ The contradictions were resolved in the shipped docs:
   are git mode `100755`.
 - Historical process logs were removed from the PR tree: the root planning
   files, `docs/vhdl/findings.rst`, `journal.rst`, and `vhdl_synth_subset.md`.
-  `journal-guide.md` was converted to `.rst` but deliberately left untracked.
+  `journal-guide.rst` lives outside the repository.
   A short user-facing `docs/vhdl/limitations.rst` replaces the subset plan.
 
 #### C. Core integration risks
