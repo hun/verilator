@@ -7,8 +7,14 @@ RFC: native VHDL frontend for Verilator
 #########################################
 
 Status: draft for maintainer discussion. This is a design proposal, not a pull
-request. Please decide the scope questions at the end before review effort is
-spent on the working branch of about 380 commits.
+request. Please decide the scope questions in section 11 before review effort is
+spent on the working branch of about 400 commits.
+
+In short: the frontend parses a synthesizable VHDL-2008 subset and lowers it
+straight into the existing pre-width V3 AST, adding no AST node, pass or runtime
+primitive. The core diff is about 180 lines in eight files; everything else is
+new files under ``src/V3Vhdl*`` plus tests and documentation. The decision most
+needed is section 5's: whether a committed pre-width AST is acceptable.
 
 1. Motivation
 =============
@@ -18,6 +24,44 @@ needs an external analyzer or a VHDL-to-Verilog translator, with a second set of
 diagnostics and a translation boundary that hides the real source location.
 ``--language vhdl`` should be a first-class Verilator mode: one invocation, one
 AST, one set of diagnostics, no external process.
+
+Alternatives considered:
+
+* **External translator** (for example GHDL synthesis to Verilog): the current
+  workflow. It adds a tool dependency, loses source locations, and its
+  diagnostics are not Verilator's.
+* **Out-of-process analyzer via GHDL's XML export:** this branch first took that
+  route and abandoned it as too fragile; see "History of this branch" below.
+* **Linking GHDL or nvc as a library:** brings a large dependency and, for GHDL,
+  GPL licensing into an LGPL/Artistic project.
+* **Native frontend (this RFC):** costs maintainable code in the tree, which is
+  why the scope is a bounded subset and the delivery is staged.
+
+History of this branch
+----------------------
+
+The first implementation ran GHDL out of process with ``--file-to-xml`` and
+lowered the analyzed design units to the V3 AST. It worked for a small subset,
+but the XML export is not a foundation for a compiler frontend. GHDL documents
+``--file-to-xml`` as a dump of the decorated syntax tree for tooling such as
+style checkers and documentation extraction, warns that "the AST slightly
+changes from time to time" (whenever nodes are added for new language features)
+and that the XML "can be quite large so consider it only during prototyping",
+and states that there is no XML dump of the elaborated design. An importer built
+on it would track every GHDL release. It was developed against a GHDL close to
+its git HEAD, while most users have their distribution's GHDL, which is
+typically older, so the XML an importer sees would differ from the one it was
+written for. No breakage was observed; the risk is the documented instability
+combined with that version spread. It also needs GHDL installed at verilation
+time, and diagnostics depend on what GHDL emits.
+
+The branch therefore moved to a hand-written in-tree lexer, parser and lowering,
+and the GHDL-XML importer was removed entirely, so no GHDL code or runtime
+dependency remains. The deciding argument is long-term maintenance: a native
+frontend has its own bugs, but they are in-tree, reproducible and fixable by
+Verilator maintainers, whereas breakage in an external tool's internal dump
+format is not. GHDL is now used only as a test oracle for the corpus trace
+comparisons in section 7.
 
 2. Proposal
 ===========
@@ -135,8 +179,10 @@ tree.
 6. Integration
 ==============
 
-* Core surface: one language enum, one ``V3Global`` bool, per-file dispatch in
-  ``readFiles``, a 45-line change in ``V3LinkCells``, build-list entries, and
+* Core surface (about 180 lines added in eight files): one language enum and
+  option plumbing in ``V3Options``, one ``V3Global`` bool and per-file dispatch
+  in ``readFiles``, a 50-line change in ``V3LinkCells``, a two-line guard in
+  ``V3Coalesce`` so an ``inout`` is not coalesced away, build-list entries, and
   the contract-check unit. No changes to pass order.
 * Mixed language: an SV top may instantiate a VHDL entity in one invocation;
   a VHDL hierarchy can be built as a ``--lib-create`` library and instantiated
@@ -145,20 +191,22 @@ tree.
   imports or cross-language hierarchical references.
 * Source layout: lexer, parser/AST, package elaboration, and seven lowering
   units (``types``, ``expr``, ``stmt``, ``subprog``, ``process``, ``package``,
-  ``elab``) with two private headers. The largest unit is ~3.5k lines; the
-  ``Lowering`` class declaration is ~1.1k lines.
-* Frontend total is ~20.9k lines. Against base ``53a72711`` the branch is about
-  380 commits, 1014 files, ~58k insertions (including tests).
+  ``elab``) with two private headers. The largest unit is ~3.7k lines; the
+  ``Lowering`` class declaration is ~1.4k lines.
+* Frontend total is ~21.1k lines. Against base ``53a72711`` the branch is about
+  405 commits, 1083 files, ~60k insertions (including tests).
 
 7. Evidence
 ===========
 
-* 329 regression drivers, 77 diagnostic/tree goldens, 331 ``.vhdl`` fixtures,
-  228 value-checked C++ harnesses, 237 ``vlt_all`` tests.
-* Full VHDL suite: 329 passed / 0 failed in ~15 s on 16 cores locally. Both
+* 353 regression drivers, 97 diagnostic/tree goldens, 355 ``.vhdl`` fixtures,
+  228 value-checked C++ harnesses.
+* Full VHDL suite (``t_vhdl*``, ``--vlt``): 353 passed / 0 failed in ~15 s on
+  16 cores locally. Both
   distribution tests (``t_dist_test_style``, ``t_dist_copyright``) pass. The
   suite needs only the built Verilator and a C++ compiler; no test invokes GHDL
   or nvc.
+
 Open-source corpus
 ------------------
 
@@ -166,7 +214,8 @@ Beyond the regression tests, the frontend runs against a corpus of 18 pinned
 open-source VHDL projects: PoC, open-logic, hdl-modules, microwatt, neorv32,
 neo430, neoTRNG, potato, RPU, T65, T80, nandland spi-master, spi-fpga and
 others. The corpus lives in a separate repository: a manifest of pinned upstream
-revisions, a fetch script, and 88 ported testcases. Each testcase keeps the
+revisions, a fetch script, and 88 ported testcases (the table below covers the
+86 run for this summary). Each testcase keeps the
 upstream design unmodified, drives it from a self-checking C++ testbench, and
 many also compare a cycle-by-cycle trace against GHDL. Upstream sources are
 fetched, not copied, so each keeps its own license.
@@ -214,9 +263,12 @@ against GHDL 7):
      - An enumeration actual on a port of another type is not accepted
 
 In total 64 of 86 testcases simulate with every check passing. All 45 GHDL
-trace comparisons that build match cycle for cycle; none mismatches. Two of the failures, open-logic's
-CAM and one PoC harness, fail only because ``--enable-ccwarn`` turns a C++
-warning into an error.
+trace comparisons that build match cycle for cycle; none mismatches. Two of the
+failures, open-logic's CAM and one PoC harness, fail only because
+``--enable-ccwarn`` turns a C++ warning into an error. The rest fall into three
+groups: a configuration-package blocker in PoC, enumeration actuals on ports of
+another type (potato, T65), and elaboration gaps in microwatt's caches and the
+neorv32 SoC top.
 
 The corpus repository is not yet public, so these results cannot be reproduced
 from a Verilator checkout. Publishing it is part of the maintenance plan; until
@@ -251,6 +303,9 @@ then the numbers are reported for information.
 10. Staged delivery
 ===================
 
+Each stage lands with its own tests and passes the full regression suite, so the
+tree never holds a half-working ``--language vhdl``.
+
 .. list-table::
    :header-rows: 1
    :widths: 8 52 40
@@ -283,8 +338,8 @@ then the numbers are reported for information.
      - Mixed-language and ``--lib-create``
      - Defer unless required for merge
 
-Questions for maintainers
--------------------------
+11. Questions for maintainers
+=============================
 
 1. Is VHDL in scope for Verilator at all?
 2. Is emitting a committed pre-width AST acceptable, or must width/link gain
