@@ -3475,7 +3475,8 @@ void Parser::parseDesignFile() {
 void parseFile(const V3VhdlNativeFile& file, DesignLibrary& library) {
     const std::unique_ptr<std::ifstream> ifsp{V3File::new_ifstream(file.filename)};
     if (!*ifsp) {
-        v3Global.rootp()->fileline()->v3error("Cannot read VHDL file '" + file.filename + "'.");
+        v3Global.rootp()->fileline()->v3error("Cannot find file containing module: "
+                                              + file.filename);
         return;
     }
     const std::string text{std::istreambuf_iterator<char>{*ifsp},
