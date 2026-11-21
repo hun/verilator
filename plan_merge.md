@@ -200,10 +200,10 @@ Sections:
 5. **Architecture** -- one diagram and the pass boundaries. Explicitly state
    that the frontend emits committed pre-width AST before `V3Width`, and why;
    this is the biggest thing maintainers must accept or reject. Name the
-   `V3VhdlLink` contract and its current `--debug-check` gating.
+   `V3VhdlLink` contract and its debug-build gating.
 6. **Integration** -- extension detection, `--language vhdl`, mixed-language
    stance, build changes, core-file diff size.
-7. **Evidence** -- 323 tests, 75 goldens, 236 `vlt_all`, 17 s on 8 cores;
+7. **Evidence** -- 324 drivers, 76 goldens, 237 `vlt_all`, ~15 s on 16 cores;
    corpus and real-design sweeps clearly labelled as external/non-reproducible.
 8. **Known limitations** -- the open items from `review.rst`: dynamic-index
    driver counts, `std_logic_vector` MULTIDRIVEN, `std_logic_signed`, PSL
@@ -290,7 +290,8 @@ Give reviewers a one-page guide before the diff:
 2. Fix docs contradictions and test permissions -- done. CI blockers, licenses,
    process-log removal, and the limitations page are in place.
 3. Mechanical lowerer split + unconditional contract check -- done.
-4. Open the RFC/design issue.
+4. RFC/design issue: draft prepared at `rfc_native_vhdl_frontend.md`; posting
+   awaits maintainer-facing cleanup and a human in the loop.
 5. Open PR 0 (plumbing) with a green VHDL option/extension test.
 6. Build the stacked PRs on top only after maintainers accept the architecture
    and staging.
