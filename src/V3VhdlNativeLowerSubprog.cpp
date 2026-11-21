@@ -2798,6 +2798,7 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
             const std::string mangled
                 = "__Vproc_" + std::to_string(++m_procVarSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, ltype.dtp};
+            traceDeclared(varp);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, ltype};
             m_variables.insert(name.first);

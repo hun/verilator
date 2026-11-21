@@ -19,6 +19,7 @@
 #include "config_build.h"
 #include "verilatedos.h"
 
+#include "V3Global.h"
 #include "V3VhdlNativeLower.h"
 #include "V3VhdlNativeTypes.h"
 
@@ -377,6 +378,10 @@ class Lowering final {
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
     Design* const m_designp;  // Design context for generic specialization
 
+    //! Trace a declared object, as the SystemVerilog grammar does for its variables
+    static void traceDeclared(AstVar* varp) {
+        varp->trace(v3Global.opt.trace() && varp->fileline()->tracingOn());
+    }
     AstNodeDType* findBasic(FileLine* flp, VBasicDTypeKwd kwd) const {
         return m_rootp->typeTablep()->findBasicDType(flp, kwd);
     }

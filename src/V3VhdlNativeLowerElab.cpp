@@ -559,6 +559,7 @@ void Lowering::emitEntityDecls(const EntityUnit& entity, const Architecture& arc
             const std::string mangled
                 = "__Vext_" + std::to_string(++entityVarSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+            traceDeclared(varp);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
@@ -662,6 +663,7 @@ void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoun
             // the input plus output-enable/output pins of the two-state model.
             const VVarType varType = port.dir == PortMode::INOUT ? VVarType::WIRE : VVarType::PORT;
             AstVar* const varp = new AstVar{port.flp, varType, name.first, type.dtp};
+            traceDeclared(varp);
             const VDirection direction = port.dir == PortMode::IN    ? VDirection::INPUT
                                          : port.dir == PortMode::OUT ? VDirection::OUTPUT
                                                                      : VDirection::INOUT;
@@ -696,6 +698,7 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.first, type.dtp};
+            traceDeclared(varp);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
@@ -2081,6 +2084,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
             const std::string mangled
                 = std::string{prefix} + std::to_string(++m_loopSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+            traceDeclared(varp);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);

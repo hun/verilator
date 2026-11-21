@@ -366,6 +366,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
             // Mangle so the same variable name in two processes stays distinct
             const std::string mangled = "__Vvar_" + std::to_string(++m_varSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
+            traceDeclared(varp);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
             varNames.insert(name.first);
