@@ -1,0 +1,4 @@
+%Error: t/t_vhdl_lex_bitlen_ovf_bad.vhdl:15:30: VHDL bit-string length that overflows.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_lex_bitlen_ovf_bad.vhdl:15:30: VHDL: expected an expression, got ''.
+%Error: Exiting due to

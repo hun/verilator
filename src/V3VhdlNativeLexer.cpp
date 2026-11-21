@@ -24,6 +24,7 @@
 
 #include "V3VhdlNativeAst.h"
 
+#include <limits>
 #include <string>
 
 namespace vhdlnative {
@@ -76,14 +77,17 @@ bool Lexer::bitsFromDigits(const std::string& digits, int base, std::string& out
     }
     return true;
 }
-//! Convert a decimal digit string to an integer, skipping underscores
+//! Convert a decimal digit string to an integer, skipping underscores; false if it is
+//! not a decimal number or does not fit
 bool Lexer::decimalValue(const std::string& digits, int64_t& out) {
     int64_t value = 0;
     bool any = false;
     for (const char c : digits) {
         if (c == '_') continue;
         if (!std::isdigit(static_cast<unsigned char>(c))) return false;
-        value = value * 10 + (c - '0');
+        const int digit = c - '0';
+        if (value > (std::numeric_limits<int64_t>::max() - digit) / 10) return false;
+        value = value * 10 + digit;
         any = true;
     }
     out = value;
@@ -342,7 +346,7 @@ Token Lexer::lexIntegerLiteral(FileLine* flp, const std::string& first) {
     if (peek(0) == '#') return lexBasedLiteral(flp, first);
     int64_t value = 0;
     if (!decimalValue(first, value)) {
-        tok.flp->v3error("Malformed VHDL integer literal.");
+        tok.flp->v3error("VHDL integer literal that overflows.");
         tok.kind = Token::END;
         return tok;
     }
@@ -441,8 +445,8 @@ Token Lexer::lexNumber(FileLine* flp) {
         && peek(1) == '"') {
         ++m_pos;  // The base letter
         int64_t bitLength = 0;
-        if (!decimalValue(first, bitLength)) {
-            tok.flp->v3error("Malformed VHDL bit-string length.");
+        if (!decimalValue(first, bitLength) || bitLength > std::numeric_limits<int>::max()) {
+            tok.flp->v3error("VHDL bit-string length that overflows.");
             tok.kind = Token::END;
             return tok;
         }
