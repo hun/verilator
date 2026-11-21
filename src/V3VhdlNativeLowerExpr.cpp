@@ -1009,7 +1009,7 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
         const int elements = structType.width / structType.elemWidth;
         structType.right = arrayType.ascending ? structType.left + elements - 1
                                                : structType.left - elements + 1;
-        m_exprTypes[&expr] = structType;
+        m_exprTypes[&expr] = LoweredType{concatp, structType};
     }
     return concatp;
 }
@@ -3597,13 +3597,18 @@ AstNodeExpr* Lowering::assembleAggregate(FileLine* flp, const VType& type,
 }
 
 AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
+    AstNodeExpr* const nodep = lowerAggregateValue(expr, type);
+    // typeOfLowered sees only the packed dtype, so keep the structure for it
+    if (nodep) m_exprTypes[&expr] = LoweredType{nodep, type};
+    return nodep;
+}
+
+AstNodeExpr* Lowering::lowerAggregateValue(const Expr& expr, const VType& type) {
     FileLine* const flp = expr.flp;
     if (!type.isVector() && type.kind != VType::RECORD) {
         unsupportedError(flp, "aggregate for a non-composite type");
         return nullptr;
     }
-    // typeOfLowered sees only the packed dtype, so keep the structure for it
-    m_exprTypes[&expr] = type;
     if (packedBitAggregateApplies(expr, type)) return lowerPackedBitAggregate(flp, expr, type);
     std::vector<AggregateSegment> segments;
     const Expr* othersValuep = nullptr;  // Value of an `others` association

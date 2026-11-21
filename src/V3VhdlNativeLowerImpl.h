@@ -375,8 +375,13 @@ class Lowering final {
     bool m_numericStdSigned = false;  // `use ieee.numeric_std_signed.all`
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
-    //! Array structure of an aggregate, which its lowered packed dtype does not carry
-    std::map<const Expr*, VType> m_exprTypes;
+    //! The array structure of one lowering of an expression, which its packed dtype loses
+    struct LoweredType final {
+        const AstNodeExpr* nodep;  // The lowered expression the type belongs to
+        VType type;  // Its array structure
+    };
+    //! Latest lowering of each aggregate or concatenation; an earlier one does not match
+    std::map<const Expr*, LoweredType> m_exprTypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
     //! Signals whose type has no resolution function: at most one driver (IEEE 1076-2008
     //! 6.4.2.3), unlike std_logic and the arrays built from it
@@ -532,8 +537,8 @@ class Lowering final {
         const Expr* structp = &expr;
         while (structp->kind == Expr::PAREN && structp->a) structp = structp->a.get();
         const auto exprIt = m_exprTypes.find(structp);
-        if (exprIt != m_exprTypes.end() && exprIt->second.width == nodep->width()) {
-            return exprIt->second;
+        if (exprIt != m_exprTypes.end() && exprIt->second.nodep == nodep) {
+            return exprIt->second.type;
         }
         // An enumeration value has the ENUM type its declared objects have
         if (enumTypeOfDType(nodep->dtypep(), type)) return type;
@@ -1254,6 +1259,7 @@ class Lowering final {
     AstNodeExpr* assembleAggregate(FileLine* flp, const VType& type,
                                    const std::vector<AggregateSegment>& segments);
     AstNodeExpr* lowerAggregate(const Expr& expr, const VType& type);
+    AstNodeExpr* lowerAggregateValue(const Expr& expr, const VType& type);
     //! Replicate an element value `count` times, folding a constant and chunking a
     //! run-time replication to stay below the Verilator replication limit
     AstNodeExpr* repeatValue(FileLine* flp, AstNodeExpr* valuep, int count, AstNodeDType* dtp);
