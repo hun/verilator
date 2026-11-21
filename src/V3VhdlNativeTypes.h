@@ -52,6 +52,7 @@ struct VType final {
     int left = 0;  // Index range left bound
     int right = 0;  // Index range right bound
     bool ascending = false;  // Index range is `to`, not `downto`
+    bool unconstrainedBase = false;  // ARRAY: the base type's index range is open, as in `<>`
     int intLow = 0;  // INTEGER subtype bounds
     int intHigh = 0;  // Upper bound of the INTEGER subtype
     VTypeP elemp;  // ARRAY: element type

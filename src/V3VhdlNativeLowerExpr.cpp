@@ -710,15 +710,21 @@ bool Lowering::lowerBinaryOperands(const Expr& expr, const std::string& op, bool
             // aggregate operand keeps the bounds its own choices give it
             // (IEEE 1076-2008 9.3.3.3): `ac + bc + (0 to 0 => c)` adds a one-element vector
             const Expr& untyped = lowerLeftFirst ? *expr.b : *expr.a;
+            const bool aggregateOperand
+                = untyped.kind == Expr::AGG_POSITIONAL || untyped.kind == Expr::AGG_NAMED;
             const bool arithmeticOp
                 = op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem";
             const bool selfTypedAggregate
-                = arithmeticOp
-                  && (untyped.kind == Expr::AGG_POSITIONAL || untyped.kind == Expr::AGG_NAMED)
-                  && !aggregateHasOthers(untyped);
+                = arithmeticOp && aggregateOperand && !aggregateHasOthers(untyped);
+            // An unconstrained base type gives an aggregate the index range of its own choices,
+            // even when the known operand is a constrained subtype of it (IEEE 1076-2008 9.3.3.3)
+            VType ctxType = known;
+            if (known.unconstrainedBase && aggregateOperand && !aggregateHasOthers(untyped)) {
+                ctxType.width = 0;
+            }
             const VType* const ctxp
                 = !selfTypedAggregate && (known.isVector() || known.kind == VType::ARRAY)
-                      ? &known
+                      ? &ctxType
                       : nullptr;
             if (lowerLeftFirst) {
                 lp = knownp;

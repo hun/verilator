@@ -1000,6 +1000,7 @@ bool Lowering::registerArrayType(const TypeDecl& decl, VType& type) {
             arr.intLow = static_cast<int>(indexLows[k]);
             inner = arr;
         }
+        inner.unconstrainedBase = true;
         type = inner;
         return true;
     }
