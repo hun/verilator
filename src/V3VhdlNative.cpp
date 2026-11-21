@@ -15,27 +15,15 @@
 //*************************************************************************
 //
 // In-tree VHDL frontend. It is the only VHDL frontend: a hand-written
-// lexer/parser and a lowerer that emit the committed (post-width) Verilator AST
-// directly, so no external analyzer is invoked.
+// lexer/parser and a lowerer that emit an AST with committed dtypes before V3Width runs,
+// so no external analyzer is invoked.
 //
 // Structure: Lexer -> Parser (frontend syntax tree) -> Lowering (Verilator AST).
 // The parse of every file completes before any lowering, because VHDL design
 // units are order independent and an architecture may name an entity declared in
 // a later file.
 //
-// Implemented subset (see vhdl_synth_subset.md for the target set):
-//   - entity with ports; architecture with signal/constant declarations
-//   - scalar std_logic/std_ulogic/bit/boolean, integer subtypes, constrained
-//     std_logic_vector/std_ulogic_vector/bit_vector/unsigned/signed
-//   - concurrent signal assignments
-//   - processes with an explicit sensitivity list, if/elsif/else, signal
-//     assignments, rising_edge/falling_edge clock idioms (including an
-//     asynchronous reset branch)
-//   - literals, names, indexing/slicing with a statically known width,
-//     arithmetic/logic/relational/concat operators, vector conversions,
-//     `(others => ...)` aggregates, static integer expressions
-// Everything else reports `Unsupported: VHDL ...` with the source
-// location.
+// Implemented subset and known divergences: docs/vhdl/limitations.rst.
 //
 //*************************************************************************
 
@@ -60,7 +48,7 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 namespace vhdlnative {
 
 void unsupportedError(FileLine* flp, const std::string& what) {
-    flp->v3error("Unsupported: VHDL " + what);
+    flp->v3error("Unsupported: VHDL " + what + ".");
 }
 
 }  // namespace vhdlnative
@@ -74,7 +62,7 @@ namespace {
 std::vector<std::string> splitLabels(const std::string& list) {
     std::vector<std::string> out;
     std::size_t begin = 0;
-    for (;;) {
+    while (true) {
         const std::size_t comma = list.find(',', begin);
         const std::size_t end = comma == std::string::npos ? list.size() : comma;
         if (end > begin) out.push_back(list.substr(begin, end - begin));
@@ -187,19 +175,30 @@ void expandContexts(vhdlnative::DesignLibrary& library) {
     }
 }
 
-}  // namespace
+//! Entity name -> the last analyzed architecture implementing it
+using ArchByEntity = std::map<std::string, const vhdlnative::Architecture*>;
 
-void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& files) {
-    const int errorsBefore = V3Error::errorCount();
+//! State shared by the elaboration steps of one frontend run
+struct EmitContext final {
+    explicit EmitContext(AstNetlist* rootp_)
+        : m_rootp{rootp_} {}
+    AstNetlist* const m_rootp;  // Netlist the frontend emits into
     vhdlnative::DesignLibrary library;
-    for (const V3VhdlNativeFile& file : files) vhdlnative::parseFile(file, library);
-    // A parse error may have dropped design units, so elaboration would report spurious
-    // missing-architecture and unknown-entity errors on top of the real diagnostic
-    if (V3Error::errorCount() != errorsBefore) return;
-    expandContexts(library);
+    vhdlnative::Design design;
+    vhdlnative::PackageTable packages;
+    vhdlnative::ModuleMap modules;
+    ArchByEntity archByEntity;
+    std::vector<const vhdlnative::EntityUnit*> order;
+    std::set<std::string> entityNames;
+    std::set<std::string> deletedModules;
+    std::vector<const vhdlnative::EntityUnit*> unelaborated;
+    std::vector<const vhdlnative::EntityUnit*> portUnelaborated;
+};
 
-    // Bind each entity to one architecture; the last analyzed one is the default
-    std::map<std::string, const vhdlnative::Architecture*> archByEntity;
+//! Bind each entity to one architecture and check the configuration bindings
+ArchByEntity resolveArchitectures(const vhdlnative::DesignLibrary& library) {
+    // The last analyzed architecture is the default
+    ArchByEntity archByEntity;
     for (const vhdlnative::Architecture& arch : library.archs) {
         archByEntity[arch.entityName] = &arch;
     }
@@ -209,13 +208,13 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
         const auto archIt = archByEntity.find(config.entityName);
         if (archIt == archByEntity.end()) {
             config.flp->v3error("VHDL configuration '" + config.spelling + "' configures entity '"
-                                + config.entityName + "', which has no architecture");
+                                + config.entityName + "', which has no architecture.");
             continue;
         }
         if (archIt->second->name != config.archName) {
             config.flp->v3error("VHDL configuration '" + config.spelling + "' names architecture '"
                                 + config.archName + "', but the analyzed one is '"
-                                + archIt->second->name + "'");
+                                + archIt->second->name + "'.");
             continue;
         }
         for (const vhdlnative::ConfigBinding& binding : config.bindings) {
@@ -224,176 +223,202 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
                 if (!instp) {
                     binding.flp->v3error("VHDL configuration '" + config.spelling
                                          + "' binds instance '" + label
-                                         + "', which the architecture does not instantiate");
+                                         + "', which the architecture does not instantiate.");
                 } else if (!instp->entityInstantiation) {
                     binding.flp->v3error("Unsupported: VHDL configuration '" + config.spelling
                                          + "' binds component '" + binding.component
-                                         + "'; component instantiation");
+                                         + "'; component instantiation.");
                 } else if (instp->instanceName != binding.entity) {
                     binding.flp->v3error("VHDL configuration '" + config.spelling
                                          + "' rebinds instance '" + label + "' to entity '"
                                          + binding.entity + "', not to the '" + instp->instanceName
-                                         + "' it instantiates");
+                                         + "' it instantiates.");
                 }
             }
         }
     }
+    return archByEntity;
+}
 
+//! Lower the declarative parts and create the module of every entity first, so instances
+//! can bind to any of them
+void prepareModules(EmitContext& ctx) {
     // A physical literal names its unit but not its type, and a generic default lowers
     // before the declarations around it, so the unit names are read from the library first
-    vhdlnative::Design design;
-    vhdlnative::collectPhysicalUnits(library, design);
-
-    vhdlnative::PackageTable packages;
-    vhdlnative::lowerPackages(library, rootp, packages, design);
-
-    // Create the module of every entity first, so instances can bind to any of them
-    vhdlnative::ModuleMap modules;
-    vhdlnative::createModules(library.entities, rootp, modules);
-    for (const vhdlnative::EntityUnit& entity : library.entities) {
-        design.entities[entity.name] = &entity;
+    vhdlnative::collectPhysicalUnits(ctx.library, ctx.design);
+    vhdlnative::lowerPackages(ctx.library, ctx.m_rootp, ctx.packages, ctx.design);
+    vhdlnative::createModules(ctx.library.entities, ctx.m_rootp, ctx.modules);
+    for (const vhdlnative::EntityUnit& entity : ctx.library.entities) {
+        ctx.design.entities[entity.name] = &entity;
     }
-    for (const auto& entry : archByEntity) design.archs[entry.first] = entry.second;
-    for (const vhdlnative::Architecture& arch : library.archs) {
-        design.archsByName[arch.entityName][arch.name] = &arch;
+    for (const auto& entry : ctx.archByEntity) ctx.design.archs[entry.first] = entry.second;
+    for (const vhdlnative::Architecture& arch : ctx.library.archs) {
+        ctx.design.archsByName[arch.entityName][arch.name] = &arch;
     }
     // Record ports whose element widths come from the actual, like unconstrained arrays
-    vhdlnative::collectUnconstrainedRecordMembers(library, design.unconstrainedRecordMembers);
+    vhdlnative::collectUnconstrainedRecordMembers(ctx.library,
+                                                  ctx.design.unconstrainedRecordMembers);
+}
+
+//! Create a module for each architecture explicitly selected by an instance
+void createSelectedArchModules(EmitContext& ctx) {
     // An instance that names an architecture gets a module lowered with it. An entity whose
     // base module needs instance bindings is specialized instead, and that path picks the
     // architecture per instance.
     std::set<std::pair<std::string, std::string>> archSelections;
-    for (const vhdlnative::Architecture& arch : library.archs) {
+    for (const vhdlnative::Architecture& arch : ctx.library.archs) {
         collectArchSelections(arch.stmts, archSelections);
     }
     for (const auto& selection : archSelections) {
-        const auto entityIt = design.entities.find(selection.first);
-        if (entityIt == design.entities.end()) continue;  // Reported at the instance
-        const auto archIt = design.archsByName[selection.first].find(selection.second);
-        if (archIt == design.archsByName[selection.first].end()) continue;  // Reported
-        if (vhdlnative::entityNeedsSpecialization(*entityIt->second, design)) continue;
-        const auto defaultIt = design.archs.find(selection.first);
-        if (defaultIt != design.archs.end() && defaultIt->second->name == selection.second) {
+        const auto entityIt = ctx.design.entities.find(selection.first);
+        if (entityIt == ctx.design.entities.end()) continue;  // Reported at the instance
+        const auto archIt = ctx.design.archsByName[selection.first].find(selection.second);
+        if (archIt == ctx.design.archsByName[selection.first].end()) continue;  // Reported
+        if (vhdlnative::entityNeedsSpecialization(*entityIt->second, ctx.design)) continue;
+        const auto defaultIt = ctx.design.archs.find(selection.first);
+        if (defaultIt != ctx.design.archs.end() && defaultIt->second->name == selection.second) {
             continue;  // The base module already uses this architecture
         }
         const std::string moduleName
-            = selection.first + "__Varch" + std::to_string(++design.specSeq);
+            = selection.first + "__Varch" + std::to_string(++ctx.design.specSeq);
         AstModule* const modp
             = new AstModule{archIt->second->flp, moduleName, archIt->second->libname};
         modp->inLibrary(archIt->second->inLibrary);
-        rootp->addModulesp(modp);
-        modules[moduleName] = modp;
-        design.archModules[selection] = modp;
+        ctx.m_rootp->addModulesp(modp);
+        ctx.modules[moduleName] = modp;
+        ctx.design.archModules[selection] = modp;
     }
+}
 
-    // Elaborate every entity after the entities its architecture instantiates: an instance
-    // binds the ports its child's own elaboration declares, so in source order a user written
-    // first would bind a module whose ports are not there yet.
+//! Order entities so an entity follows the ones its architectures instantiate
+void orderEntities(EmitContext& ctx) {
     std::map<std::string, const vhdlnative::EntityUnit*> entityByName;
     std::map<std::string, std::set<std::string>> instantiatedBy;
-    for (const vhdlnative::EntityUnit& entity : library.entities) {
+    for (const vhdlnative::EntityUnit& entity : ctx.library.entities) {
         entityByName.emplace(entity.name, &entity);
     }
     // Every architecture of an entity contributes dependencies: an instance may select one
     // that the default architecture does not use
-    for (const vhdlnative::Architecture& arch : library.archs) {
+    for (const vhdlnative::Architecture& arch : ctx.library.archs) {
         if (entityByName.count(arch.entityName)) {
             collectInstances(arch.stmts, instantiatedBy[arch.entityName]);
         }
     }
-    std::vector<const vhdlnative::EntityUnit*> order;
     {
         std::set<std::string> done;
         std::set<std::string> visiting;
-        for (const vhdlnative::EntityUnit& entity : library.entities) {
+        for (const vhdlnative::EntityUnit& entity : ctx.library.entities) {
             if (entityByName[entity.name] != &entity) {
-                order.push_back(&entity);  // A second entity of this name; reported below
+                ctx.order.push_back(&entity);  // A second entity of this name; reported below
                 continue;
             }
             if (!done.count(entity.name)) {
-                orderVisit(entity.name, entityByName, instantiatedBy, done, visiting, order);
+                orderVisit(entity.name, entityByName, instantiatedBy, done, visiting, ctx.order);
             }
         }
     }
-    std::set<std::string> entityNames;
-    std::set<std::string> deletedModules;  // Base modules no instance ends up binding to
-    std::vector<const vhdlnative::EntityUnit*> unelaborated;
-    std::vector<const vhdlnative::EntityUnit*> portUnelaborated;
-    for (const vhdlnative::EntityUnit* const entryp : order) {
+}
+
+//! Elaborate every entity in dependency order, recording the ones needing an instance
+void elaborateEntities(EmitContext& ctx) {
+    for (const vhdlnative::EntityUnit* const entryp : ctx.order) {
         const vhdlnative::EntityUnit& entity = *entryp;
-        if (!entityNames.insert(entity.name).second) {
-            entity.flp->v3error("Duplicate VHDL entity: '" + entity.spelling + "'");
+        if (!ctx.entityNames.insert(entity.name).second) {
+            entity.flp->v3error("Duplicate VHDL entity: '" + entity.spelling + "'.");
             continue;
         }
-        const auto it = archByEntity.find(entity.name);
-        if (it == archByEntity.end()) {
+        const auto it = ctx.archByEntity.find(entity.name);
+        if (it == ctx.archByEntity.end()) {
             entity.flp->v3error("Entity '" + entity.spelling
-                                + "' has no architecture; cannot elaborate it");
+                                + "' has no architecture; cannot elaborate it.");
             continue;
         }
-        if (vhdlnative::hasUnconstrainedPorts(entity, design.unconstrainedRecordMembers)) {
+        if (vhdlnative::hasUnconstrainedPorts(entity, ctx.design.unconstrainedRecordMembers)) {
             // Only an instance's actuals fix the port ranges
-            portUnelaborated.push_back(&entity);
+            ctx.portUnelaborated.push_back(&entity);
             continue;
         }
-        if (!vhdlnative::lower(rootp, entity, *it->second, modules[entity.name], packages, modules,
-                               design)) {
-            unelaborated.push_back(&entity);
+        if (!vhdlnative::lower(ctx.m_rootp, entity, *it->second, ctx.modules[entity.name],
+                               ctx.packages, ctx.modules, ctx.design)) {
+            ctx.unelaborated.push_back(&entity);
             continue;
         }
         // Lower every additional architecture an instance selects, with the same generic
         // defaults the base module used
-        for (const auto& entry : design.archModules) {
+        for (const auto& entry : ctx.design.archModules) {
             if (entry.first.first != entity.name) continue;
-            const auto byName = design.archsByName.find(entity.name);
-            if (byName == design.archsByName.end()) continue;
+            const auto byName = ctx.design.archsByName.find(entity.name);
+            if (byName == ctx.design.archsByName.end()) continue;
             const auto archIt = byName->second.find(entry.first.second);
             if (archIt == byName->second.end()) continue;
-            vhdlnative::lower(rootp, entity, *archIt->second, entry.second, packages, modules,
-                              design);
+            vhdlnative::lower(ctx.m_rootp, entity, *archIt->second, entry.second, ctx.packages,
+                              ctx.modules, ctx.design);
         }
     }
-    for (const vhdlnative::Architecture& arch : library.archs) {
-        if (!entityNames.count(arch.entityName)) {
-            arch.flp->v3error("VHDL architecture does not name a declared entity");
+}
+
+//! Report unelaborated entities and remove the base modules no instance binds to
+void finishElaboration(EmitContext& ctx) {
+    for (const vhdlnative::Architecture& arch : ctx.library.archs) {
+        if (!ctx.entityNames.count(arch.entityName)) {
+            arch.flp->v3error("VHDL architecture does not name a declared entity.");
         }
     }
     // An entity whose generics have no defaults elaborates only through instances
-    for (const vhdlnative::EntityUnit* const entityp : unelaborated) {
-        const bool covered = vhdlnative::specializationCovers(design, entityp->name, false);
+    for (const vhdlnative::EntityUnit* const entityp : ctx.unelaborated) {
+        const bool covered = vhdlnative::specializationCovers(ctx.design, entityp->name, false);
         if (covered) {
             // Only the specializations are referenced; the empty base would look like a top
-            deletedModules.insert(entityp->name);
-        } else if (design.instantiated.count(entityp->name)) {
+            ctx.deletedModules.insert(entityp->name);
+        } else if (ctx.design.instantiated.count(entityp->name)) {
             entityp->flp->v3error("VHDL: entity '" + entityp->spelling
                                   + "' has a generic without a default value, and no instance "
-                                    "binds it");
-        } else if (modules[entityp->name]) {
+                                    "binds it.");
+        } else if (ctx.modules[entityp->name]) {
             // An entity no instance names is not part of the design: nothing binds its
             // generics, and an empty module would look like another top
-            deletedModules.insert(entityp->name);
+            ctx.deletedModules.insert(entityp->name);
         }
     }
     // An entity with unconstrained ports elaborates only through its instances
-    for (const vhdlnative::EntityUnit* const entityp : portUnelaborated) {
-        const bool covered = vhdlnative::specializationCovers(design, entityp->name, true);
+    for (const vhdlnative::EntityUnit* const entityp : ctx.portUnelaborated) {
+        const bool covered = vhdlnative::specializationCovers(ctx.design, entityp->name, true);
         if (covered) {
-            deletedModules.insert(entityp->name);
+            ctx.deletedModules.insert(entityp->name);
         } else {
-            vhdlnative::reportUnspecializedPorts(*entityp, design.unconstrainedRecordMembers);
+            vhdlnative::reportUnspecializedPorts(*entityp, ctx.design.unconstrainedRecordMembers);
         }
     }
     // A base module no instance binds to is dead: it has no parent and would look like
     // another top. An instance that binds nothing uses the base itself.
-    for (const auto& entry : modules) {
-        if (!design.instantiated.count(entry.first)) continue;
-        if (design.baseUsed.count(entry.first)) continue;
-        deletedModules.insert(entry.first);
+    for (const auto& entry : ctx.modules) {
+        if (!ctx.design.instantiated.count(entry.first)) continue;
+        if (ctx.design.baseUsed.count(entry.first)) continue;
+        ctx.deletedModules.insert(entry.first);
     }
-    for (const std::string& name : deletedModules) {
-        if (AstModule* const modp = modules[name]) {
-            modules[name] = nullptr;
+    for (const std::string& name : ctx.deletedModules) {
+        if (AstModule* const modp = ctx.modules[name]) {
+            ctx.modules[name] = nullptr;
             VL_DO_DANGLING(modp->unlinkFrBack()->deleteTree(), modp);
         }
     }
+}
+
+}  // namespace
+
+void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& files) {
+    const int errorsBefore = V3Error::errorCount();
+    EmitContext ctx{rootp};
+    for (const V3VhdlNativeFile& file : files) vhdlnative::parseFile(file, ctx.library);
+    // A parse error may have dropped design units, so elaboration would report spurious
+    // missing-architecture and unknown-entity errors on top of the real diagnostic
+    if (V3Error::errorCount() != errorsBefore) return;
+    expandContexts(ctx.library);
+
+    ctx.archByEntity = resolveArchitectures(ctx.library);
+    prepareModules(ctx);
+    createSelectedArchModules(ctx);
+    orderEntities(ctx);
+    elaborateEntities(ctx);
+    finishElaboration(ctx);
 }

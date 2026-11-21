@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_pkg_body_orphan_bad.vhdl:9:1: VHDL: package body 'p' has no package specification
+%Error: t/t_vhdl_pkg_body_orphan_bad.vhdl:9:1: VHDL: package body 'p' has no package specification.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

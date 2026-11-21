@@ -1,6 +1,6 @@
-%Error: t/t_vhdl_case_selector_bad.vhdl:30:1: VHDL: case selector is not discrete (IEEE 1076-2008 10.9)
+%Error: t/t_vhdl_case_selector_bad.vhdl:30:1: VHDL: case selector is not discrete (IEEE 1076-2008 10.9).
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_case_selector_bad.vhdl:33:1: VHDL: case selector is not discrete (IEEE 1076-2008 10.9)
-%Error: t/t_vhdl_case_selector_bad.vhdl:38:1: VHDL: selected assignment selector is not discrete (IEEE 1076-2008 10.9)
-%Error: t/t_vhdl_case_selector_bad.vhdl:39:1: VHDL: selected assignment selector is not discrete (IEEE 1076-2008 10.9)
+%Error: t/t_vhdl_case_selector_bad.vhdl:33:1: VHDL: case selector is not discrete (IEEE 1076-2008 10.9).
+%Error: t/t_vhdl_case_selector_bad.vhdl:38:1: VHDL: selected assignment selector is not discrete (IEEE 1076-2008 10.9).
+%Error: t/t_vhdl_case_selector_bad.vhdl:39:1: VHDL: selected assignment selector is not discrete (IEEE 1076-2008 10.9).
 %Error: Exiting due to

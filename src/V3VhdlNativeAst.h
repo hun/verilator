@@ -99,6 +99,16 @@ class Lexer final {
     void notePragma(int direction);
     Token scanToken();  // One token, translate_off regions included
     Token nextRaw();  // One token, before the designator-context update
+    void skipDigits();  // Consume a run of digits and underscores
+    bool consumeExponent();  // Consume an exponent with digits, if present
+    Token lexIdentifier(FileLine* flp);
+    Token lexExtendedIdentifier(FileLine* flp);
+    Token lexNumber(FileLine* flp);
+    Token lexIntegerLiteral(FileLine* flp, const std::string& first);
+    Token lexBasedLiteral(FileLine* flp, const std::string& first);
+    Token makeRealToken(FileLine* flp, size_t start);
+    Token lexCharOrMark(FileLine* flp);
+    Token lexStringLiteral(FileLine* flp);
 
 public:
     Lexer(std::string filename, std::string text)

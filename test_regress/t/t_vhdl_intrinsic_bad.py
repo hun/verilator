@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_intrinsic_bad.vhdl'
 # IEEE 1164 3.2.6 and 1076-2008 16.8.5: rising_edge and to_integer are declared
 # only for std_ulogic and unsigned/signed; GHDL rejects every call below.
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

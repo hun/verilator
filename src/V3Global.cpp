@@ -182,7 +182,7 @@ void V3Global::readFiles() {
     }
 
     // VHDL: analyze and elaborate all collected design units, then emit AstModules
-    std::set<const AstNodeModule*> vhdlModules;
+    std::set<AstNodeModule*> vhdlModules;
     if (vhdlParserp) {
         vhdlParserp->finish();
         vhdlModules = vhdlParserp->modules();

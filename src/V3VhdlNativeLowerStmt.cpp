@@ -14,11 +14,7 @@
 //
 //*************************************************************************
 //
-// Lowers one analyzed entity/architecture pair into the committed pre-width
-// Verilator AST: the node shapes, dtype canonicalization and re-entry contract
-// match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
-// is emitted under its folded (lowercase) form -- the spelling as written stays
-// available for diagnostics only.
+// Lowers VHDL sequential and concurrent statements into the V3 AST
 //
 //*************************************************************************
 
@@ -200,7 +196,7 @@ AstNodeExpr* Lowering::lowerAlternatives(const Concurrent& conc, const VType& ty
             return nullptr;
         }
         if (condp->width() != 1) {
-            condp->v3error("VHDL: condition is not a 1-bit value");
+            condp->v3error("VHDL: condition is not a 1-bit value.");
             condp->deleteTree();
             valuep->deleteTree();
             if (restp) restp->deleteTree();
@@ -309,7 +305,7 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
             }
             const int64_t step = choicep->text == "to" ? 1 : -1;
             if ((right - left) * step < 0) {
-                choicep->flp->v3error("VHDL: empty choice range");
+                choicep->flp->v3error("VHDL: empty choice range.");
                 return false;
             }
             for (int64_t value = left;; value += step) {
@@ -381,7 +377,7 @@ bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, std::set<int6
                                                     : static_cast<int64_t>(cop->num().toUInt());
         if (covered.insert(value).second) continue;
         cop->v3error(std::string{"VHDL: duplicate choice in a "} + what
-                     + " (IEEE 1076-2008 10.9, 11.5)");
+                     + " (IEEE 1076-2008 10.9).");
         ok = false;
     }
     return ok;
@@ -429,7 +425,7 @@ void Lowering::addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::str
 
 void Lowering::checkDrivers() {
     // A composite signal's scalar subelements are separate signals (IEEE 1076-2008
-    // 12.6.4), so drivers are compared per bit position. Each emitted always/initial
+    // 6.4.2.3), so drivers are compared per bit position. Each emitted always/initial
     // statement and each bare continuous assignment is one driver; a write whose index
     // is not static is taken to cover the whole signal. A declared initial value is not
     // a driver.
@@ -456,10 +452,10 @@ void Lowering::checkDrivers() {
             range.width = varp->width();
             // Compose the selects around the write, so a record element or array element
             // covers only its own bits; the indices are folded here rather than later
-            const AstNode* nodep = refp;
-            while (const AstSel* const selp = VN_CAST(nodep->backp(), Sel)) {
+            AstNode* nodep = refp;
+            while (AstSel* const selp = VN_CAST(nodep->backp(), Sel)) {
                 if (selp->fromp() != nodep) break;
-                AstConst* const lsbp = foldStatic(const_cast<AstNodeExpr*>(selp->lsbp()));
+                AstConst* const lsbp = foldStatic(selp->lsbp());
                 if (!lsbp) break;
                 range.lsb += static_cast<int>(lsbp->toUInt());
                 lsbp->deleteTree();
@@ -477,8 +473,8 @@ void Lowering::checkDrivers() {
                 if (vec[i].driver == vec[j].driver) continue;
                 if (vec[i].lsb >= vec[j].lsb + vec[j].width) continue;
                 if (vec[j].lsb >= vec[i].lsb + vec[i].width) continue;
-                entry.first->v3error("VHDL: unresolved signal '" + entry.first->name()
-                                     + "' has more than one driver (IEEE 1076-2008 12.6.4)");
+                entry.first->v3error("VHDL: unresolved signal " + entry.first->prettyNameQ()
+                                     + " has more than one driver (IEEE 1076-2008 6.4.2.3).");
                 reported = true;
                 break;
             }
@@ -488,121 +484,138 @@ void Lowering::checkDrivers() {
 
 AstNodeStmt* Lowering::lowerSelected(const Concurrent& conc) {
     FileLine* const flp = conc.flp;
-    AstNodeExpr* const selectorp = lowerExpr(*conc.selector, nullptr);
-    if (!selectorp) return nullptr;
-    AstNodeExpr* const lhsp = lowerDesignator(*conc.target, true);
-    if (!lhsp) {
-        selectorp->deleteTree();
+    SelectedLowering ctx;
+    ctx.flp = flp;
+    ctx.concp = &conc;
+    ctx.selectorp = lowerExpr(*conc.selector, nullptr);
+    if (!ctx.selectorp) return nullptr;
+    ctx.lhsp = lowerDesignator(*conc.target, true);
+    if (!ctx.lhsp) {
+        ctx.selectorp->deleteTree();
         return nullptr;
     }
-    const VType ltype = typeOfTarget(*conc.target, lhsp);
-    AstNodeDType* const selDtp = selectorp->dtypep();
-    VType selType;
-    if (!actualType(*conc.selector, selType)) selType = typeOfDType(selDtp);
-    if (!discreteSelectorType(selType)) {
+    ctx.targetType = typeOfTarget(*conc.target, ctx.lhsp);
+    ctx.selDtp = ctx.selectorp->dtypep();
+    if (!actualType(*conc.selector, ctx.selectorType)) {
+        ctx.selectorType = typeOfDType(ctx.selDtp);
+    }
+    if (!discreteSelectorType(ctx.selectorType)) {
         flp->v3error("VHDL: selected assignment selector is not discrete "
-                     "(IEEE 1076-2008 10.9)");
-        lhsp->deleteTree();
-        selectorp->deleteTree();
+                     "(IEEE 1076-2008 10.9).");
+        ctx.lhsp->deleteTree();
+        ctx.selectorp->deleteTree();
         return nullptr;
     }
+    if (!lowerSelectedValues(ctx)) return nullptr;
+    return ctx.tristate ? lowerSelectedTristate(ctx) : lowerSelectedCase(ctx);
+}
+
+//! Lower each alternative's value once, checking it against the target's type
+bool Lowering::lowerSelectedValues(SelectedLowering& ctx) {
+    const Concurrent& conc = *ctx.concp;
     // Lower every value once. Checking the lowered value also catches a high-impedance
     // constant produced by a folded call, not only a literal in the source.
-    std::vector<AstNodeExpr*> values;
-    values.reserve(conc.choices.size());
-    bool tristate = false;
+    ctx.values.reserve(conc.choices.size());
     for (const auto& alternative : conc.choices) {
-        AstNodeExpr* valuep = lowerExpr(*alternative.second, &ltype);
+        AstNodeExpr* valuep = lowerExpr(*alternative.second, &ctx.targetType);
         if (!valuep) {
-            for (AstNodeExpr* const ownedp : values) ownedp->deleteTree();
-            lhsp->deleteTree();
-            selectorp->deleteTree();
-            return nullptr;
+            ctx.deleteValues(0);
+            ctx.lhsp->deleteTree();
+            ctx.selectorp->deleteTree();
+            return false;
         }
-        if (!valueConforms(ltype, *alternative.second, "selected assignment value")) {
+        if (!valueConforms(ctx.targetType, *alternative.second, "selected assignment value")) {
             valuep->deleteTree();
-            for (AstNodeExpr* const ownedp : values) ownedp->deleteTree();
-            lhsp->deleteTree();
-            selectorp->deleteTree();
-            return nullptr;
+            ctx.deleteValues(0);
+            ctx.lhsp->deleteTree();
+            ctx.selectorp->deleteTree();
+            return false;
         }
-        valuep = resizeExpr(valuep, ltype, flp);
-        if (astHasZ(valuep)) tristate = true;
-        values.push_back(valuep);
+        valuep = resizeExpr(valuep, ctx.targetType, ctx.flp);
+        if (astHasZ(valuep)) ctx.tristate = true;
+        ctx.values.push_back(valuep);
     }
-    const auto deleteValues = [&values](std::size_t from) {
-        for (std::size_t i = from; i < values.size(); ++i) {
-            if (values[i]) values[i]->deleteTree();
-        }
-    };
+    return true;
+}
+
+//! Lower a selected assignment with a high-impedance value as a conditional expression
+AstNodeStmt* Lowering::lowerSelectedTristate(SelectedLowering& ctx) {
+    FileLine* const flp = ctx.flp;
+    const Concurrent& conc = *ctx.concp;
+    std::vector<AstNodeExpr*>& values = ctx.values;
     // V3Tristate derives the output enable from a conditional expression, not from a
     // case item, so a selected assignment that releases the driver is lowered to the
     // equivalent if/elsif chain.
-    if (tristate) {
-        AstNodeExpr* restp = nullptr;
-        std::set<int64_t> covered;
-        bool bad = false;
-        for (std::size_t i = conc.choices.size(); i-- > 0;) {
-            AstNodeExpr* const valuep = values[i];
-            values[i] = nullptr;
-            std::vector<AstConst*> cops;
-            if (!lowerChoiceConsts(conc.choices[i].first, selDtp, cops)) {
-                for (AstConst* const cop : cops) cop->deleteTree();
-                valuep->deleteTree();
-                deleteValues(0);
-                if (restp) restp->deleteTree();
-                lhsp->deleteTree();
-                selectorp->deleteTree();
-                return nullptr;
-            }
-            if (cops.empty()) {  // The `others` alternative is the fall-through
-                if (restp) {
-                    // A second `others` can never be selected (IEEE 1076-2008 11.5)
-                    flp->v3error("VHDL: more than one 'others' choice in a selected "
-                                 "assignment");
-                    bad = true;
-                    valuep->deleteTree();
-                } else {
-                    restp = valuep;
-                }
-                continue;
-            }
-            if (!addChoiceValues(cops, covered, "selected assignment")) bad = true;
-            AstNodeExpr* condp = nullptr;
-            for (AstConst* const cop : cops) {
-                AstEq* const eqp = new AstEq{flp, selectorp->cloneTree(false), cop};
-                eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-                if (!condp) {
-                    condp = eqp;
-                } else {
-                    AstOr* const orp = new AstOr{flp, condp, eqp};
-                    orp->dtypep(eqp->dtypep());
-                    condp = orp;
-                }
-            }
-            AstCond* const condexprp = new AstCond{flp, condp, valuep, restp};
-            condexprp->dtypep(ltype.dtp);
-            restp = condexprp;
-        }
-        selectorp->deleteTree();
-        if (!restp) {
-            // A selected assignment without `others` must be exhaustive; the
-            // fall-through is then unreachable, but a conditional expression needs one.
-            if (bad || !choicesComplete(selDtp, selType, covered)) {
-                flp->v3error("VHDL: selected assignment does not cover every value of "
-                             "its selector (IEEE 1076-2008 11.5)");
-                lhsp->deleteTree();
-                return nullptr;
-            }
-            restp = makeRepeatedConst(flp, ltype, '0');
-        } else if (bad) {
-            restp->deleteTree();
-            lhsp->deleteTree();
+    AstNodeExpr* restp = nullptr;
+    std::set<int64_t> covered;
+    bool bad = false;
+    for (std::size_t i = conc.choices.size(); i-- > 0;) {
+        AstNodeExpr* const valuep = values[i];
+        values[i] = nullptr;
+        std::vector<AstConst*> cops;
+        if (!lowerChoiceConsts(conc.choices[i].first, ctx.selDtp, cops)) {
+            for (AstConst* const cop : cops) cop->deleteTree();
+            valuep->deleteTree();
+            ctx.deleteValues(0);
+            if (restp) restp->deleteTree();
+            ctx.lhsp->deleteTree();
+            ctx.selectorp->deleteTree();
             return nullptr;
         }
-        // The caller wraps this in the conditional-assignment always
-        return new AstAssignW{flp, lhsp, restp};
+        if (cops.empty()) {  // The `others` alternative is the fall-through
+            if (restp) {
+                // A second `others` can never be selected (IEEE 1076-2008 11.6)
+                flp->v3error("VHDL: more than one 'others' choice in a selected "
+                             "assignment.");
+                bad = true;
+                valuep->deleteTree();
+            } else {
+                restp = valuep;
+            }
+            continue;
+        }
+        if (!addChoiceValues(cops, covered, "selected assignment")) bad = true;
+        AstNodeExpr* condp = nullptr;
+        for (AstConst* const cop : cops) {
+            AstEq* const eqp = new AstEq{flp, ctx.selectorp->cloneTree(false), cop};
+            eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            if (!condp) {
+                condp = eqp;
+            } else {
+                AstOr* const orp = new AstOr{flp, condp, eqp};
+                orp->dtypep(eqp->dtypep());
+                condp = orp;
+            }
+        }
+        AstCond* const condexprp = new AstCond{flp, condp, valuep, restp};
+        condexprp->dtypep(ctx.targetType.dtp);
+        restp = condexprp;
     }
+    ctx.selectorp->deleteTree();
+    if (!restp) {
+        // A selected assignment without `others` must be exhaustive; the
+        // fall-through is then unreachable, but a conditional expression needs one.
+        if (bad || !choicesComplete(ctx.selDtp, ctx.selectorType, covered)) {
+            flp->v3error("VHDL: selected assignment does not cover every value of "
+                         "its selector (IEEE 1076-2008 11.6).");
+            ctx.lhsp->deleteTree();
+            return nullptr;
+        }
+        restp = makeRepeatedConst(flp, ctx.targetType, '0');
+    } else if (bad) {
+        restp->deleteTree();
+        ctx.lhsp->deleteTree();
+        return nullptr;
+    }
+    // The caller wraps this in the conditional-assignment always
+    return new AstAssignW{flp, ctx.lhsp, restp};
+}
+
+//! Lower a selected assignment without high-impedance values as a case statement
+AstNodeStmt* Lowering::lowerSelectedCase(SelectedLowering& ctx) {
+    FileLine* const flp = ctx.flp;
+    const Concurrent& conc = *ctx.concp;
+    std::vector<AstNodeExpr*>& values = ctx.values;
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;
     std::set<int64_t> covered;
@@ -610,20 +623,20 @@ AstNodeStmt* Lowering::lowerSelected(const Concurrent& conc) {
     for (std::size_t i = 0; i < conc.choices.size(); ++i) {
         AstNodeExpr* const valuep = values[i];
         values[i] = nullptr;
-        AstNodeStmt* const assignp = new AstAssignW{flp, lhsp->cloneTree(false), valuep};
+        AstNodeStmt* const assignp = new AstAssignW{flp, ctx.lhsp->cloneTree(false), valuep};
         std::vector<AstConst*> cops;
-        if (!lowerChoiceConsts(conc.choices[i].first, selDtp, cops)) {
+        if (!lowerChoiceConsts(conc.choices[i].first, ctx.selDtp, cops)) {
             for (AstConst* const cop : cops) cop->deleteTree();
             assignp->deleteTree();
-            deleteValues(i + 1);
+            ctx.deleteValues(i + 1);
             if (itemsp) itemsp->deleteTree();
-            lhsp->deleteTree();
-            selectorp->deleteTree();
+            ctx.lhsp->deleteTree();
+            ctx.selectorp->deleteTree();
             return nullptr;
         }
         if (cops.empty() && currentp) {
-            // A second "others" alternative can never be selected (IEEE 1076-2008 11.5)
-            flp->v3error("VHDL: more than one 'others' choice in a selected assignment");
+            // A second "others" alternative can never be selected (IEEE 1076-2008 11.6)
+            flp->v3error("VHDL: more than one 'others' choice in a selected assignment.");
             bad = true;
             assignp->deleteTree();
             continue;
@@ -635,22 +648,22 @@ AstNodeStmt* Lowering::lowerSelected(const Concurrent& conc) {
         if (cops.empty()) currentp = itemp;
         itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, itemp) : itemp;
     }
-    lhsp->deleteTree();
+    ctx.lhsp->deleteTree();
     if (!itemsp) {
-        selectorp->deleteTree();
+        ctx.selectorp->deleteTree();
         return nullptr;
     }
-    if (!bad && !currentp && !choicesComplete(selDtp, selType, covered)) {
+    if (!bad && !currentp && !choicesComplete(ctx.selDtp, ctx.selectorType, covered)) {
         flp->v3error("VHDL: selected assignment does not cover every value of its selector "
-                     "(IEEE 1076-2008 11.5)");
+                     "(IEEE 1076-2008 11.6).");
         bad = true;
     }
     if (bad) {
         itemsp->deleteTree();
-        selectorp->deleteTree();
+        ctx.selectorp->deleteTree();
         return nullptr;
     }
-    return makeCase(flp, selectorp, itemsp);
+    return makeCase(flp, ctx.selectorp, itemsp);
 }
 
 AstNodeStmt* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
@@ -717,7 +730,7 @@ AstNodeStmt* Lowering::lowerAggregateAssign(FileLine* flp, const Expr& target, c
 
 AstNodeStmt* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool variable) {
     if (m_passive) {
-        stmt.flp->v3error("VHDL: assignment in the entity statement part");
+        stmt.flp->v3error("VHDL: assignment in the entity statement part.");
         return nullptr;
     }
     // A delay of zero is a delta, which a cycle model already has; a longer one needs a
@@ -838,7 +851,7 @@ Lowering::lowerConditionalChain(FileLine* flp,
             return nullptr;
         }
         if (condp->width() != 1) {
-            condp->v3error("VHDL: condition is not a 1-bit value");
+            condp->v3error("VHDL: condition is not a 1-bit value.");
             condp->deleteTree();
             valuep->deleteTree();
             if (restp) restp->deleteTree();
@@ -923,7 +936,7 @@ AstNodeStmt* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) return lowerWhile(stmt);
     if (stmt.kind == Stmt::WAIT) {
         // A bare wait reached at run time suspends the process for good (IEEE
-        // 1076-2008 8.1); any other wait inside a body has no model here
+        // 1076-2008 10.2); any other wait inside a body has no model here
         if (stmt.waitForever && m_suspendFlagp) {
             return new AstAssign{stmt.flp, new AstVarRef{stmt.flp, m_suspendFlagp, VAccess::WRITE},
                                  bitConst(stmt.flp, '1')};
@@ -945,12 +958,12 @@ AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
     VType selType;
     if (!actualType(*stmt.selector, selType)) selType = typeOfDType(selDtp);
     if (!discreteSelectorType(selType)) {
-        flp->v3error("VHDL: case selector is not discrete (IEEE 1076-2008 10.9)");
+        flp->v3error("VHDL: case selector is not discrete (IEEE 1076-2008 10.9).");
         selectorp->deleteTree();
         return nullptr;
     }
     if (stmt.caseItems.empty()) {
-        flp->v3error("VHDL: case statement has no alternatives");
+        flp->v3error("VHDL: case statement has no alternatives.");
         selectorp->deleteTree();
         return nullptr;
     }
@@ -971,7 +984,7 @@ AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
         }
         if (cops.empty() && currentp) {
             // A second "others" alternative can never be selected (IEEE 1076-2008 10.9)
-            flp->v3error("VHDL: more than one 'others' choice in a case statement");
+            flp->v3error("VHDL: more than one 'others' choice in a case statement.");
             bad = true;
             if (bodyp) bodyp->deleteTree();
             continue;
@@ -990,7 +1003,7 @@ AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
     }
     if (!bad && !currentp && !choicesComplete(selDtp, selType, covered)) {
         flp->v3error("VHDL: case statement does not cover every value of its selector "
-                     "(IEEE 1076-2008 10.9)");
+                     "(IEEE 1076-2008 10.9).");
         bad = true;
     }
     if (bad) {
@@ -1064,7 +1077,7 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
         headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, nodep) : nodep;
         // A wait suspends the process at once: the rest of this list never runs
         if (stmtp->kind == Stmt::WAIT) break;
-        // Severity failure ends the run at the statement (IEEE 1076-2008 8.3):
+        // Severity failure ends the run at the statement (IEEE 1076-2008 10.3, 10.4):
         // nothing after an unconditional report runs, and the statements after a
         // failing assert run only when it did not fail
         if (stmtp->severity != Stmt::SEV_FAILURE) continue;
@@ -1098,7 +1111,7 @@ Lowering::LoopFrame* Lowering::findLoop(const std::string& label) {
 }
 
 AstVar* Lowering::newLoopFlag(FileLine* flp, const char* what) {
-    const std::string name = std::string{"vhdlloop_"} + std::to_string(++m_loopSeq) + "__" + what;
+    const std::string name = std::string{"__Vloop_"} + std::to_string(++m_loopSeq) + "__" + what;
     AstVar* const varp
         = new AstVar{flp, VVarType::VAR, name, findBasic(flp, VBasicDTypeKwd::LOGIC)};
     m_modp->addStmtsp(varp);
@@ -1237,7 +1250,7 @@ bool Lowering::usesBareWait(const std::vector<StmtP>& stmts) {
 }
 
 //! Whether a statement list (recursively) ends the run: a report or assert of
-//! severity failure (IEEE 1076-2008 8.3)
+//! severity failure (IEEE 1076-2008 10.3, 10.4)
 bool Lowering::usesSeverityFailure(const std::vector<StmtP>& stmts) {
     for (const StmtP& stmtp : stmts) {
         if (!stmtp) continue;
@@ -1279,112 +1292,156 @@ AstNodeExpr* Lowering::loopGuard(FileLine* flp) const {
 //! Lower a process that suspends on a wait statement instead of a sensitivity list
 void Lowering::lowerWaitProcess(const Process& process) {
     FileLine* const flp = process.flp;
-    const ScopeSave saved = saveScope();
+    const ScopeGuard scopeGuard{*this};
     std::set<std::string> varNames;
     emitProcessDecls(process, varNames);
-    // Find the first wait; statements around it run at time zero and per activation
-    std::size_t waitIndex = process.body.size();
-    const Stmt* waitp = nullptr;
-    for (std::size_t i = 0; i < process.body.size(); ++i) {
-        if (process.body[i] && process.body[i]->kind == Stmt::WAIT) {
-            waitIndex = i;
-            waitp = process.body[i].get();
-            break;
-        }
-    }
-    if (!waitp) {
-        // A severity-failure report or assert, when the process reaches it, ends
-        // the run (IEEE 1076-2008 8.3), which is a valid process stopper: the body
-        // runs once, at time zero, and the run ends at the failure
-        if (!usesSeverityFailure(process.body)) {
-            unsupportedError(flp, "process without a sensitivity list or wait statement");
-            return;
-        }
-        m_initial = true;
-        m_varVals.clear();
-        AstNodeStmt* const initp = lowerStmtList(process.body);
-        m_initial = false;
-        if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
-        restoreScope(saved);
+    WaitProcessLowering ctx;
+    ctx.processp = &process;
+    ctx.flp = flp;
+    ctx.waitIndex = process.body.size();
+    ctx.stopIndex = process.body.size();
+    ctx.waitp = findProcessWait(process, ctx.waitIndex);
+    if (!ctx.waitp) {
+        lowerWaitWithoutWait(process, flp);
         return;
     }
-    // A trailing bare wait makes the process single-shot: it suspends forever after
-    // the first activation
-    std::size_t stopIndex = process.body.size();
-    bool singleShot = false;
-    for (std::size_t i = waitIndex + 1; i < process.body.size(); ++i) {
-        if (!process.body[i] || process.body[i]->kind != Stmt::WAIT) continue;
-        const Stmt* const laterp = process.body[i].get();
-        const bool last = i + 1 == process.body.size();
-        if (!last || !laterp->waitForever) {
-            unsupportedError(flp, "process with more than one wait statement");
-            return;
-        }
-        singleShot = true;
-        stopIndex = i;
-        break;
-    }
+    if (!findTrailingWait(process, ctx)) return;
     const std::vector<StmtP>& bodyStmts = process.body;
     // A bare `wait;` in the body, other than the process's own first wait, suspends
-    // the process when reached (IEEE 1076-2008 8.1): a flag gates every later
+    // the process when reached (IEEE 1076-2008 10.2): a flag gates every later
     // activation, and the reached wait sets it
     m_suspendFlagp = nullptr;
-    const bool bareWaitInBody = !waitp->waitForever && usesBareWait(bodyStmts);
-    const auto makeSuspendFlag = [&]() {
-        m_suspendFlagp
-            = new AstVar{flp, VVarType::VAR, "vhdlwait_" + std::to_string(++m_loopSeq) + "__done",
-                         findBasic(flp, VBasicDTypeKwd::LOGIC)};
-        m_modp->addStmtsp(m_suspendFlagp);
-    };
-    if (waitp->delay) {
-        if (bareWaitInBody) makeSuspendFlag();
-        // A timed wait suspends the process until the delay expires and the process then
-        // runs again from the top, so its whole body repeats
-        AstNodeStmt* bodyp = lowerStmtRange(process.body, 0, waitIndex);
-        AstNodeStmt* const delayp = lowerDelay(*waitp->delay, flp);
-        if (!delayp) {
-            m_suspendFlagp = nullptr;
-            restoreScope(saved);
-            return;
-        }
-        bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp) : delayp;
-        if (AstNodeStmt* const postp
-            = lowerStmtRange(process.body, waitIndex + 1, process.body.size())) {
-            bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, postp);
-        }
-        AstLoop* const loopp = new AstLoop{flp};
-        // The repeated body stops for good when it reaches a bare wait
-        AstNodeExpr* runp = bitConst(flp, '1');
-        if (m_suspendFlagp) {
-            runp = new AstNot{flp, new AstVarRef{flp, m_suspendFlagp, VAccess::READ}};
-            runp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-        }
-        loopp->addStmtsp(new AstLoopTest{flp, loopp, runp});
-        if (bodyp) loopp->addStmtsp(bodyp);
-        m_modp->addStmtsp(new AstInitial{flp, loopp});
-        m_suspendFlagp = nullptr;
-        restoreScope(saved);
+    ctx.bareWaitInBody = !ctx.waitp->waitForever && usesBareWait(bodyStmts);
+    if (ctx.waitp->delay) {
+        lowerTimedWaitProcess(ctx);
         return;
     }
     // The statements before the wait run once at time zero
     m_initial = true;
-    AstNodeStmt* const preInitp = lowerStmtRange(bodyStmts, 0, waitIndex);
+    AstNodeStmt* const preInitp = lowerStmtRange(bodyStmts, 0, ctx.waitIndex);
     m_initial = false;
     if (preInitp) m_modp->addStmtsp(new AstInitialStatic{flp, preInitp});
-    if (waitp->waitForever) {
+    if (ctx.waitp->waitForever) {
         // A bare wait suspends the process forever
-        restoreScope(saved);
         return;
     }
-    if (!waitp->value) {
+    if (!ctx.waitp->value) {
         unsupportedError(flp, "wait on a sensitivity list");
         return;
     }
     m_edges.clear();
-    AstNodeExpr* const condp = lowerCond(*waitp->value);
+    AstNodeExpr* const condp = lowerCond(*ctx.waitp->value);
     if (!condp) return;
     const std::vector<Edge> edges = m_edges;
     m_edges.clear();
+    AstSenItem* const itemsp = makeWaitSensitivity(*ctx.waitp->value, edges, flp);
+    if (!itemsp) {
+        unsupportedError(flp, "wait statement without a sensitivity item");
+        condp->deleteTree();
+        return;
+    }
+    // Each activation runs the statements after the wait, then those before it
+    m_initial = false;
+    if (ctx.bareWaitInBody && !ctx.singleShot) makeWaitSuspendFlag(flp);
+    AstNodeStmt* const bodyp = makeWaitActivationBody(ctx, condp);
+    if (bodyp) {
+        m_modp->addStmtsp(
+            new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, bodyp});
+    } else {
+        itemsp->deleteTree();
+    }
+    m_suspendFlagp = nullptr;
+}
+
+//! First wait in a process body, whose surrounding statements bracket each activation
+const Stmt* Lowering::findProcessWait(const Process& process, std::size_t& waitIndex) const {
+    // Find the first wait; statements around it run at time zero and per activation
+    for (std::size_t i = 0; i < process.body.size(); ++i) {
+        if (process.body[i] && process.body[i]->kind == Stmt::WAIT) {
+            waitIndex = i;
+            return process.body[i].get();
+        }
+    }
+    return nullptr;
+}
+
+//! Lower a process with no wait, which runs once unless it ends the run itself
+void Lowering::lowerWaitWithoutWait(const Process& process, FileLine* flp) {
+    // A severity-failure report or assert, when the process reaches it, ends
+    // the run (IEEE 1076-2008 10.3, 10.4), which is a valid process stopper: the body
+    // runs once, at time zero, and the run ends at the failure
+    if (!usesSeverityFailure(process.body)) {
+        unsupportedError(flp, "process without a sensitivity list or wait statement");
+        return;
+    }
+    m_initial = true;
+    m_varVals.clear();
+    AstNodeStmt* const initp = lowerStmtList(process.body);
+    m_initial = false;
+    if (initp) m_modp->addStmtsp(new AstInitialStatic{flp, initp});
+}
+
+//! Find a trailing bare wait, which makes the process single-shot
+bool Lowering::findTrailingWait(const Process& process, WaitProcessLowering& ctx) const {
+    // A trailing bare wait makes the process single-shot: it suspends forever after
+    // the first activation
+    for (std::size_t i = ctx.waitIndex + 1; i < process.body.size(); ++i) {
+        if (!process.body[i] || process.body[i]->kind != Stmt::WAIT) continue;
+        const Stmt* const laterp = process.body[i].get();
+        const bool last = i + 1 == process.body.size();
+        if (!last || !laterp->waitForever) {
+            unsupportedError(ctx.flp, "process with more than one wait statement");
+            return false;
+        }
+        ctx.singleShot = true;
+        ctx.stopIndex = i;
+        break;
+    }
+    return true;
+}
+
+//! Create the flag a reached bare wait sets to gate later activations
+void Lowering::makeWaitSuspendFlag(FileLine* flp) {
+    m_suspendFlagp
+        = new AstVar{flp, VVarType::VAR, "__Vwait_" + std::to_string(++m_loopSeq) + "__done",
+                     findBasic(flp, VBasicDTypeKwd::LOGIC)};
+    m_modp->addStmtsp(m_suspendFlagp);
+}
+
+//! Lower a process whose first wait is a delay, repeating its whole body each time
+void Lowering::lowerTimedWaitProcess(const WaitProcessLowering& ctx) {
+    FileLine* const flp = ctx.flp;
+    const Process& process = *ctx.processp;
+    if (ctx.bareWaitInBody) makeWaitSuspendFlag(flp);
+    // A timed wait suspends the process until the delay expires and the process then
+    // runs again from the top, so its whole body repeats
+    AstNodeStmt* bodyp = lowerStmtRange(process.body, 0, ctx.waitIndex);
+    AstNodeStmt* const delayp = lowerDelay(*ctx.waitp->delay, flp);
+    if (!delayp) {
+        m_suspendFlagp = nullptr;
+        return;
+    }
+    bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp) : delayp;
+    if (AstNodeStmt* const postp
+        = lowerStmtRange(process.body, ctx.waitIndex + 1, process.body.size())) {
+        bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, postp);
+    }
+    AstLoop* const loopp = new AstLoop{flp};
+    // The repeated body stops for good when it reaches a bare wait
+    AstNodeExpr* runp = bitConst(flp, '1');
+    if (m_suspendFlagp) {
+        runp = new AstNot{flp, new AstVarRef{flp, m_suspendFlagp, VAccess::READ}};
+        runp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    }
+    loopp->addStmtsp(new AstLoopTest{flp, loopp, runp});
+    if (bodyp) loopp->addStmtsp(bodyp);
+    m_modp->addStmtsp(new AstInitial{flp, loopp});
+    m_suspendFlagp = nullptr;
+}
+
+//! Sensitivity of a wait condition: its named edges and the levels it reads
+AstSenItem* Lowering::makeWaitSensitivity(const Expr& waitValue, const std::vector<Edge>& edges,
+                                          FileLine* flp) const {
     // Sensitivity: the clock edges the condition names, plus the levels it tests
     AstSenItem* itemsp = nullptr;
     for (const Edge& edge : edges) {
@@ -1393,7 +1450,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
         itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
     }
     std::set<std::string> levelNames;
-    collectExprNames(*waitp->value, levelNames);
+    collectExprNames(waitValue, levelNames);
     for (const std::string& name : levelNames) {
         const auto it = m_scope.find(name);
         if (it == m_scope.end()) continue;
@@ -1405,23 +1462,24 @@ void Lowering::lowerWaitProcess(const Process& process) {
             flp, VEdgeType::ET_CHANGED, new AstVarRef{flp, it->second.varp, VAccess::READ}};
         itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
     }
-    if (!itemsp) {
-        unsupportedError(flp, "wait statement without a sensitivity item");
-        condp->deleteTree();
-        return;
-    }
-    // Each activation runs the statements after the wait, then those before it
-    m_initial = false;
-    if (bareWaitInBody && !singleShot) makeSuspendFlag();
-    AstNodeStmt* const afterp = lowerStmtRange(bodyStmts, waitIndex + 1, stopIndex);
-    AstNodeStmt* const preActp = singleShot ? nullptr : lowerStmtRange(bodyStmts, 0, waitIndex);
+    return itemsp;
+}
+
+//! Body run on each activation, with single-shot and bare-wait gating applied
+AstNodeStmt* Lowering::makeWaitActivationBody(const WaitProcessLowering& ctx, AstNodeExpr* condp) {
+    FileLine* const flp = ctx.flp;
+    const Process& process = *ctx.processp;
+    const std::vector<StmtP>& bodyStmts = process.body;
+    AstNodeStmt* const afterp = lowerStmtRange(bodyStmts, ctx.waitIndex + 1, ctx.stopIndex);
+    AstNodeStmt* const preActp
+        = ctx.singleShot ? nullptr : lowerStmtRange(bodyStmts, 0, ctx.waitIndex);
     AstNodeStmt* bodyp = afterp;
     if (preActp) {
         bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, preActp) : preActp;
     }
-    if (singleShot) {
+    if (ctx.singleShot) {
         // Latch that the single activation has happened
-        const std::string name = "vhdlloop_" + std::to_string(++m_loopSeq) + "__once";
+        const std::string name = "__Vloop_" + std::to_string(++m_loopSeq) + "__once";
         AstVar* const oncep
             = new AstVar{flp, VVarType::VAR, name, findBasic(flp, VBasicDTypeKwd::LOGIC)};
         m_modp->addStmtsp(oncep);
@@ -1450,14 +1508,7 @@ void Lowering::lowerWaitProcess(const Process& process) {
     } else {
         condp->deleteTree();
     }
-    if (bodyp) {
-        m_modp->addStmtsp(
-            new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, bodyp});
-    } else {
-        itemsp->deleteTree();
-    }
-    m_suspendFlagp = nullptr;
-    restoreScope(saved);
+    return bodyp;
 }
 
 AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
@@ -1504,8 +1555,9 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
         // An empty range: the loop body never runs
         return nullptr;
     }
-    if (std::llabs(right - left) > 4096) {
-        unsupportedError(flp, "loop range with more than 4096 iterations");
+    if (std::llabs(right - left) > MAX_FOLD_ITERATIONS) {
+        unsupportedError(flp, "loop range with more than " + std::to_string(MAX_FOLD_ITERATIONS)
+                                  + " iterations");
         return nullptr;
     }
     LoopFrame frame;
@@ -1574,17 +1626,17 @@ AstNodeStmt* Lowering::lowerForRuntime(const Stmt& stmt) {
     // The loop variable is an ordinary variable: the body reads and writes it through the
     // scope, so its references lower to variable references rather than to constants
     AstVar* const varp
-        = new AstVar{flp, VVarType::VAR, "vhdlfor_" + std::to_string(++m_loopSeq), intT.dtp};
+        = new AstVar{flp, VVarType::VAR, "__Vfor_" + std::to_string(++m_loopSeq), intT.dtp};
     m_modp->addStmtsp(varp);
     const ScopeSave savedScope = saveScope();
     m_scope.erase(stmt.loopVar);
     m_scope[stmt.loopVar] = VarInfo{varp, intT};
-    // The discrete range is evaluated once, at loop entry (IEEE 1076-2008 8.9), so a
+    // The discrete range is evaluated once, at loop entry (IEEE 1076-2008 10.10), so a
     // bound the body writes must not re-read on every test: capture it first
     AstNodeStmt* capturep = nullptr;
     if (!VN_CAST(boundp, Const)) {
         AstVar* const boundVarp
-            = new AstVar{flp, VVarType::VAR, "vhdlbound_" + std::to_string(++m_loopSeq), intT.dtp};
+            = new AstVar{flp, VVarType::VAR, "__Vbound_" + std::to_string(++m_loopSeq), intT.dtp};
         m_modp->addStmtsp(boundVarp);
         capturep = new AstAssign{flp, new AstVarRef{flp, boundVarp, VAccess::WRITE}, boundp};
         boundp = new AstVarRef{flp, boundVarp, VAccess::READ};
@@ -1641,14 +1693,14 @@ std::string reportText(const Expr* exprp, const char* fallback) {
 
 AstNodeStmt* Lowering::lowerReport(const Stmt& stmt) {
     // A computed message is not modelled, but the statement still executes: dropping it
-    // would also drop a `severity failure` termination (IEEE 1076-2008 8.3)
+    // would also drop a `severity failure` termination (IEEE 1076-2008 10.4)
     AstNodeStmt* const displayp = new AstDisplay{stmt.flp,
                                                  VDisplayType::DT_DISPLAY,
                                                  reportText(stmt.value.get(), "report"),
                                                  nullptr,
                                                  nullptr,
                                                  'd'};
-    // `report ... severity failure` ends the simulation (IEEE 1076-2008 8.3); the other
+    // `report ... severity failure` ends the simulation (IEEE 1076-2008 10.4); the other
     // severities only report
     if (stmt.severity == Stmt::SEV_FAILURE) {
         return AstNode::addNext<AstNodeStmt, AstNodeStmt>(displayp, new AstFinish{stmt.flp});
@@ -1666,7 +1718,7 @@ AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Ex
                                   Stmt::Severity severity) {
     AstNodeExpr* const condp = lowerCond(condition);
     if (!condp) return nullptr;
-    // A failing assertion reports, and `severity failure` ends the run (IEEE 1076-2008 8.3)
+    // A failing assertion reports, and `severity failure` ends the run (IEEE 1076-2008 10.3)
     AstNodeExpr* const failp = new AstNot{flp, condp};
     failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     AstNodeStmt* bodyp = new AstDisplay{

@@ -31,10 +31,20 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace vhdlnative {
+
+//! Maximum iterations folded out of a static loop or generate
+static constexpr int64_t MAX_FOLD_ITERATIONS = 4096;
+//! Maximum width of a vector expression folded by a conversion
+static constexpr int64_t MAX_FOLD_WIDTH = 4096;
+//! Maximum width of a constant folded into a memory image
+static constexpr int MAX_FOLD_CONST_WIDTH = 1 << 20;
+//! Maximum AST cost of the element writes folded into one function body
+static constexpr int64_t MAX_FOLD_WRITE_COST = 1 << 18;
 
 struct AliasInfo final {
     const Expr* designatorp = nullptr;
@@ -82,12 +92,10 @@ struct GenericBinding final {
 };
 using GenericBindings = std::map<std::string, GenericBinding>;
 
-//! Map with O(1) copies: a scope snapshot shares the table until one side writes.
-//! Value semantics are unchanged, but saving a process scope no longer copies every
-//! signal in the module.
+//! Map with O(1) copies: a scope snapshot shares the table until one side writes
 template <typename Value>
 class CowMap final {
-    using Map = std::map<std::string, Value>;
+    using Map = std::unordered_map<std::string, Value>;
 
 public:
     using iterator = typename Map::iterator;
@@ -135,7 +143,7 @@ private:
     void detach() {
         if (m_mapp.use_count() > 1) m_mapp = std::make_shared<Map>(*m_mapp);
     }
-    std::shared_ptr<Map> m_mapp;
+    std::shared_ptr<Map> m_mapp;  // Shared map, copied on first write if shared
 };
 
 class Lowering final {
@@ -203,7 +211,6 @@ class Lowering final {
     int64_t m_funcWriteCost = 0;
     std::map<std::string, std::vector<SubprogramRef>> m_subprograms;  // Visible, by name
     std::map<std::string, const ComponentDecl*> m_components;  // Visible, by name
-    std::vector<const Stmt*> m_procTail;  // Statements after the current procedure return
     int m_concurrentProc = 0;  // Lowering a concurrent procedure call body
     bool m_passive = false;  // Lowering the entity statement part, which may not assign
     ScopeSave m_moduleScope;  // Module declarative part, hidden by processes
@@ -251,7 +258,7 @@ class Lowering final {
     std::map<std::string, int64_t> m_consts;  // Integer constants by folded name
     //! Integer constants needed while registering types, before full declaration emission
     std::map<std::string, int64_t> m_preConsts;
-    //! Elaboration-time real constants (IEEE 1800 `real`) by folded name
+    //! Elaboration-time real constants by folded name
     std::map<std::string, double> m_realConsts;
     //! A package specification constant whose initializer calls a subprogram with no body
     //! yet: the body's pass completes it
@@ -312,7 +319,6 @@ class Lowering final {
     bool fileCall(const Stmt& stmt, FileVals& vals, FileReaders& files);
     std::map<std::string, AstConst*> m_enumConsts;  // Enumeration literals by folded name
     std::vector<std::unique_ptr<AstConst>> m_ownedConsts;  // Owns constants in the tables
-    std::vector<std::pair<std::string, std::string>> m_pendingNames;  // Duplicate detection
     struct Edge final {
         AstVar* varp = nullptr;
         VEdgeType type = VEdgeType::ET_CHANGED;
@@ -325,7 +331,16 @@ class Lowering final {
     //! The process has several sensitivity signals, so an edge call must compare the
     //! signal with its value at the previous run of the process
     bool m_edgeAsPrev = false;
-    std::map<AstVar*, AstVar*> m_edgePrevVars;  // Edge signal -> its previous value
+    //! Order previous-value variables by source position, then name, for stable emission
+    struct AstVarLess final {
+        bool operator()(const AstVar* const ap, const AstVar* const bp) const {
+            const int cmp = ap->fileline()->operatorCompare(*bp->fileline());
+            if (cmp != 0) return cmp < 0;
+            if (ap->name() != bp->name()) return ap->name() < bp->name();
+            return std::less<const AstVar*>{}(ap, bp);
+        }
+    };
+    std::map<AstVar*, AstVar*, AstVarLess> m_edgePrevVars;  // Edge signal -> its previous value
     int m_edgeSeq = 0;  // Disambiguates the previous-value variables
     //! Set while a wait process lowers its body: a bare `wait;` reached at run time
     //! sets this flag, which gates every later activation
@@ -343,7 +358,6 @@ class Lowering final {
     int m_genSeq = 0;  // Disambiguates sibling generate bodies
     std::string m_genSuffix;  // Suffix for names created inside a generate
     const ModuleMap* m_modulesp = nullptr;  // Modules of the instantiated entities
-    PackageTable::Impl* m_publishp = nullptr;  // Package table to publish into
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
     std::set<std::string> m_imported;  // Names that came from a used package
     std::set<std::string> m_ambiguousTypes;  // Type names imported from two packages
@@ -357,7 +371,7 @@ class Lowering final {
     std::map<AstNodeDType*, VType> m_arrayDtypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
     //! Signals whose type has no resolution function: at most one driver (IEEE 1076-2008
-    //! 12.6.4), unlike std_logic and the arrays built from it
+    //! 6.4.2.3), unlike std_logic and the arrays built from it
     std::set<AstVar*> m_unresolvedSignals;
     std::map<std::string, AliasInfo> m_aliases;
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
@@ -498,7 +512,7 @@ class Lowering final {
         return true;
     }
     //! Type of a lowered operand. A designator keeps the declared array structure,
-    //! which a packed dtype no longer carries.
+    //! which a packed dtype does not carry.
     VType typeOfLowered(const Expr& expr, AstNodeExpr* nodep) const {
         UASSERT_OBJ(nodep->dtypep(), nodep, "VHDL expression has no data type");
         VType type;
@@ -596,7 +610,12 @@ class Lowering final {
     }
 
     bool resolveType(const TypeSpec& spec, VType& out);
+    bool resolveTypePredefined(const TypeSpec& spec, const std::string& mark, VType& out);
     void registerType(const TypeDecl& decl);
+    void registerEnumType(FileLine* flp, const TypeDecl& decl, VType& type);
+    bool resolveArrayElement(const TypeDecl& decl, VType& elem);
+    bool registerArrayType(const TypeDecl& decl, VType& type);
+    bool registerRecordType(const TypeDecl& decl, VType& type);
     void emitPackage(const PackageUnit& pkg);
     //! Register a declarative part's types, deferring one whose constraint names a constant
     //! of the same part written above it that the pre-scan did not fold: the part's
@@ -617,6 +636,20 @@ class Lowering final {
     void preScanIntConstants(const std::vector<Decl>& decls);
     void emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
                       const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk);
+    //! Resolved type of a constant, with a value lowered early when the type needed it
+    struct ConstantTypeInfo final {
+        VType type;
+        bool intConstant = true;
+        bool realConstant = false;
+        AstNodeExpr* valuep = nullptr;  // A value lowered early, when the type needed it
+    };
+    bool deferUnresolvedConstant(const std::vector<std::pair<std::string, std::string>>& names,
+                                 const TypeSpec& type, const Expr& init, FileLine* flp);
+    bool resolveConstantType(const TypeSpec& type, const Expr& init, FileLine* flp,
+                             ConstantTypeInfo& info);
+    bool storeIntConstant(const std::vector<std::pair<std::string, std::string>>& names,
+                          const TypeSpec& type, const Expr& init, FileLine* flp,
+                          const VType& constType);
     bool registerGenerics(const std::vector<GenericDecl>& generics,
                           const GenericBindings* bindings, bool probe);
     void freeInstanceBindings();  // Releases the bindings kept for one instance's ports
@@ -661,6 +694,10 @@ class Lowering final {
     //! attribute written without an index is the first, IEEE 1076-2008 16.2.3
     const VType* indexRangeLevel(const Expr& expr, const VType& type) const;
     bool evalInt(const Expr& expr, int64_t& value) const;
+    bool evalIntName(const Expr& expr, int64_t& value) const;
+    bool evalIntAttribute(const Expr& expr, int64_t& value) const;
+    bool evalIntBinary(const Expr& expr, int64_t& value) const;
+    bool evalIntIndex(const Expr& expr, int64_t& value) const;
     //! Text of a string operand whose characters are fixed at elaboration
     bool stringOperandText(const Expr& expr, std::string& out) const;
     //! Evaluate a locally static real-valued expression
@@ -1002,6 +1039,11 @@ class Lowering final {
         return false;
     }
     AstNodeExpr* lowerIntrinsic(const Expr& expr);
+    AstNodeExpr* lowerIntrinsicStdMatch(FileLine* flp, const std::vector<ExprP>& argsp);
+    AstNodeExpr* lowerIntrinsicResize(FileLine* flp, const std::string& fn,
+                                      const std::vector<ExprP>& argsp);
+    AstNodeExpr* lowerIntrinsicMinMax(FileLine* flp, const std::string& fn,
+                                      const std::vector<ExprP>& argsp);
     //! Unary reduction `and`/`or`/`xor` and their negations
     AstNodeExpr* makeReduction(FileLine* flp, AstNodeExpr* operandp, const std::string& op);
     AstNodeExpr* lowerEdgeCall(const Expr& expr);
@@ -1029,6 +1071,42 @@ class Lowering final {
     }
 
     AstNodeExpr* lowerExpr(const Expr& expr, const VType* context);
+    AstNodeExpr* lowerCharLiteral(FileLine* flp, const Expr& expr, const VType* context);
+    AstNodeExpr* lowerBitStringLiteral(FileLine* flp, const Expr& expr, const VType* context);
+    AstNodeExpr* lowerName(FileLine* flp, const Expr& expr, const VType* context);
+    AstNodeExpr* lowerQualification(FileLine* flp, const Expr& expr, const VType* context);
+    AstNodeExpr* lowerUnary(FileLine* flp, const Expr& expr, const VType* context);
+    AstNodeExpr* lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* context);
+    AstNodeExpr* lowerOthersAssociation(FileLine* flp, const Expr& expr, const VType* context);
+    //! Lowered operands of a binary expression with their resolved VHDL types
+    struct BinaryOperands final {
+        AstNodeExpr* lp = nullptr;
+        AstNodeExpr* rp = nullptr;
+        VType lt;
+        VType rt;
+    };
+    //! Rejects a static integer result that overflows a 32-bit integer
+    bool binaryStaticFits(FileLine* flp, const Expr& expr);
+    AstNodeExpr* foldRealRelation(FileLine* flp, const Expr& expr, const std::string& op);
+    bool isCharacterArrayOperand(const Expr& other);
+    bool lowerBinaryOperands(const Expr& expr, const std::string& op, bool logicalOp,
+                             BinaryOperands& ops);
+    AstNodeExpr* lowerMatchingRelation(FileLine* flp, const Expr& expr, const std::string& op,
+                                       BinaryOperands& ops);
+    void reconcileRelationOperands(FileLine* flp, const Expr& expr, BinaryOperands& ops);
+    void reSignBitStringLiteral(FileLine* flp, const Expr& side, AstNodeExpr*& operandp,
+                                VType& opType, const VType& modelType);
+    AstNodeExpr* lowerRelation(FileLine* flp, const Expr& expr, const std::string& cmpOp,
+                               BinaryOperands& ops, AstNodeDType* bitDtp);
+    AstNodeExpr* lowerConcat(FileLine* flp, const Expr& expr, BinaryOperands& ops);
+    AstNodeExpr* lowerLogicalBinary(FileLine* flp, const std::string& op, BinaryOperands& ops);
+    AstNodeExpr* lowerShiftBinary(FileLine* flp, const Expr& expr, const std::string& op,
+                                  BinaryOperands& ops);
+    AstNodeExpr* lowerPowerBinary(FileLine* flp, const Expr& expr, BinaryOperands& ops);
+    AstNodeExpr* lowerIntArithmetic(FileLine* flp, const Expr& expr, const std::string& op,
+                                    BinaryOperands& ops);
+    AstNodeExpr* lowerVectorArithmetic(FileLine* flp, const Expr& expr, const std::string& op,
+                                       BinaryOperands& ops);
     AstNodeExpr* lowerBinary(const Expr& expr, const VType* context);
     //! Lexicographic ordering of two VHDL arrays; consumes the operands
     AstNodeExpr* lowerArrayRelation(FileLine* flp, const std::string& cmpOp, const VType& lt,
@@ -1050,8 +1128,37 @@ class Lowering final {
         return casep;
     }
     void lowerWaitProcess(const Process& process);
+    //! State shared by the helpers lowering a process that suspends on a wait
+    struct WaitProcessLowering final {
+        const Process* processp = nullptr;
+        FileLine* flp = nullptr;
+        std::size_t waitIndex = 0;
+        std::size_t stopIndex = 0;
+        const Stmt* waitp = nullptr;
+        bool singleShot = false;
+        bool bareWaitInBody = false;
+    };
+    const Stmt* findProcessWait(const Process& process, std::size_t& waitIndex) const;
+    void lowerWaitWithoutWait(const Process& process, FileLine* flp);
+    bool findTrailingWait(const Process& process, WaitProcessLowering& ctx) const;
+    void makeWaitSuspendFlag(FileLine* flp);
+    void lowerTimedWaitProcess(const WaitProcessLowering& ctx);
+    AstSenItem* makeWaitSensitivity(const Expr& waitValue, const std::vector<Edge>& edges,
+                                    FileLine* flp) const;
+    AstNodeStmt* makeWaitActivationBody(const WaitProcessLowering& ctx, AstNodeExpr* condp);
     ScopeSave saveScope() const;
     void restoreScope(const ScopeSave& saved);
+    //! Restores the enclosing declaration scope on every exit path
+    class ScopeGuard final {
+        Lowering& m_lowering;  // Lowering whose scope tables are restored
+        const ScopeSave m_saved;  // Scope tables captured on construction
+
+    public:
+        explicit ScopeGuard(Lowering& lowering)
+            : m_lowering{lowering}
+            , m_saved{lowering.saveScope()} {}
+        ~ScopeGuard() { m_lowering.restoreScope(m_saved); }
+    };
     void emitProcessDecls(const Process& process, std::set<std::string>& varNames);
     AstNodeStmt* lowerFor(const Stmt& stmt);
     AstNodeStmt* lowerForRuntime(const Stmt& stmt);
@@ -1065,7 +1172,7 @@ class Lowering final {
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
     static void collectExprNames(const Expr& expr, std::set<std::string>& names);
     //! The names an assignment target reads: an indexed name evaluates its index
-    //! and a slice its bounds (IEEE 1076-2008 8.4); the target name is only written
+    //! and a slice its bounds (IEEE 1076-2008 8.5); the target name is only written
     static void collectTargetReadNames(const Expr& expr, std::set<std::string>& names);
     static bool usesExitNext(const std::vector<StmtP>& stmts);
     static bool usesBareWait(const std::vector<StmtP>& stmts);
@@ -1079,7 +1186,49 @@ class Lowering final {
     AstNodeExpr* lowerCond(const Expr& expr);
     bool containsEdgeCall(const Expr& expr) const;
     AstNodeExpr* lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp);
+    //! Type information resolved for an attribute prefix
+    struct AttrTypeInfo final {
+        VType resolved;
+        VType predefined;
+        const VType* typep = nullptr;
+        bool typeMark = false;
+    };
+    bool lowerIndexedEventAttr(FileLine* flp, const Expr& expr, AstNodeExpr*& resultp);
+    bool resolveAttrDesignator(FileLine* flp, const Expr& prefix, AttrTypeInfo& info);
+    void resolveAttrNameType(FileLine* flp, const Expr& prefix, AttrTypeInfo& info);
+    AstNodeExpr* lowerEventAttr(FileLine* flp, const Expr& expr);
+    AstNodeExpr* lowerLogicMarkAttr(FileLine* flp, const Expr& expr, const std::string& attribute,
+                                    const VType& type);
+    AstNodeExpr* lowerCharacterAttr(FileLine* flp, const Expr& expr, const std::string& attribute,
+                                    const VType& type);
+    AstNodeExpr* lowerEnumAttr(FileLine* flp, const Expr& expr, const std::string& attribute,
+                               const VType& type);
+    AstNodeExpr* lowerAttrWithArgs(FileLine* flp, const Expr& expr, const std::string& attribute,
+                                   const VType& type);
+    AstNodeExpr* lowerRangeAttr(FileLine* flp, const std::string& attribute, const VType& type);
     AstNodeExpr* lowerAttr(const Expr& expr);
+    //! One run of elements covered by one associated value
+    struct AggregateSegment final {
+        int offset = 0;
+        int width = 1;
+        const Expr* exprp = nullptr;
+    };
+    bool packedBitAggregateApplies(const Expr& expr, const VType& type);
+    AstNodeExpr* lowerPackedBitAggregate(FileLine* flp, const Expr& expr, const VType& type);
+    bool collectRecordAggregateSegments(FileLine* flp, const Expr& expr, const VType& type,
+                                        std::vector<AggregateSegment>& segments,
+                                        const Expr*& othersValuep);
+    bool collectArrayAggregateSegments(FileLine* flp, const Expr& expr, const VType& type,
+                                       std::vector<AggregateSegment>& segments,
+                                       const Expr*& othersValuep);
+    void fillAggregateOthers(const VType& type, std::vector<AggregateSegment>& segments,
+                             const Expr* othersValuep);
+    bool verifyAggregateCoverage(FileLine* flp, const VType& type,
+                                 std::vector<AggregateSegment>& segments);
+    AstNodeExpr* lowerAggregateSegment(FileLine* flp, const VType& type,
+                                       const AggregateSegment& segment);
+    AstNodeExpr* assembleAggregate(FileLine* flp, const VType& type,
+                                   const std::vector<AggregateSegment>& segments);
     AstNodeExpr* lowerAggregate(const Expr& expr, const VType& type);
     //! Replicate an element value `count` times, folding a constant and chunking a
     //! run-time replication to stay below the Verilator replication limit
@@ -1103,28 +1252,50 @@ class Lowering final {
                                           AstNodeExpr* lhsp);
     bool concHasEdge(const Concurrent& conc) const;
     AstNodeStmt* lowerSelected(const Concurrent& conc);
+    //! Lowered pieces of a selected assignment, shared by its conditional and case forms
+    struct SelectedLowering final {
+        FileLine* flp = nullptr;
+        const Concurrent* concp = nullptr;
+        VType targetType;
+        VType selectorType;
+        AstNodeDType* selDtp = nullptr;
+        AstNodeExpr* selectorp = nullptr;
+        AstNodeExpr* lhsp = nullptr;
+        std::vector<AstNodeExpr*> values;
+        bool tristate = false;
+
+        void deleteValues(std::size_t from) const {
+            for (std::size_t i = from; i < values.size(); ++i) {
+                if (values[i]) values[i]->deleteTree();
+            }
+        }
+    };
+    bool lowerSelectedValues(SelectedLowering& ctx);
+    AstNodeStmt* lowerSelectedTristate(SelectedLowering& ctx);
+    AstNodeStmt* lowerSelectedCase(SelectedLowering& ctx);
     void emitConcurrent(const Concurrent& conc);
+    void emitGenerateFor(const Concurrent& stmt);
     void emitLocalDecls(const std::vector<Decl>& decls, const std::vector<TypeDecl>& types,
                         const char* prefix);
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
                            std::vector<AstConst*>& cops);
     //! Add the values one choice list covers; a value already there is a duplicate
-    //! or overlapping choice (IEEE 1076-2008 10.9, 11.5)
+    //! or overlapping choice (IEEE 1076-2008 10.9)
     static bool addChoiceValues(const std::vector<AstConst*>& cops, std::set<int64_t>& covered,
                                 const char* what);
     //! Whether the choices cover every value the selector can take; a selector too
-    //! wide to enumerate needs an `others` arm (IEEE 1076-2008 10.9, 11.5)
+    //! wide to enumerate needs an `others` arm (IEEE 1076-2008 10.9)
     bool choicesComplete(AstNodeDType* selDtp, const VType& selType,
                          const std::set<int64_t>& covered) const;
     //! Whether a type has a resolution function: std_logic and the arrays built from
-    //! it do, so several drivers are legal (IEEE 1076-2008 12.6.4)
+    //! it do, so several drivers are legal (IEEE 1076-2008 6.4.2.3)
     static bool isResolvedType(const VType& type) {
         if (type.typeName == "std_logic" || type.typeName == "std_logic_vector"
             || type.typeName == "unsigned" || type.typeName == "signed") {
             return true;
         }
         // A composite is resolved when every scalar subelement is (IEEE 1076-2008
-        // 12.6.4); a record's fields and an array's element carry their own types
+        // 6.4.2.3); a record's fields and an array's element carry their own types
         if (type.isVector()) return type.elemp && isResolvedType(*type.elemp);
         if (type.kind == VType::RECORD) {
             if (type.fields.empty()) return false;
@@ -1145,6 +1316,10 @@ class Lowering final {
     AstNodeStmt* lowerStmt(const Stmt& stmt);
     //! One concurrent assignment, with the statements an inlined call's locals produced
     void emitConcurrentAssign(const Concurrent& stmt);
+    void emitClockedConcurrentAssign(const Concurrent& stmt, const VType& ltype,
+                                     AstNodeExpr* lhsp);
+    void emitConcurrentWaveform(const Concurrent& stmt, const VType& ltype, AstNodeExpr* lhsp,
+                                AstNodeExpr* rhsp);
     AstNodeStmt* lowerStmtList(const std::vector<StmtP>& stmts);
     AstNodeStmt* lowerStmtRange(const std::vector<StmtP>& stmts, std::size_t begin,
                                 std::size_t end);
@@ -1162,6 +1337,12 @@ class Lowering final {
     AstNodeStmt* lowerAggregateAssign(FileLine* flp, const Expr& target, const Expr& value,
                                       bool variable, bool concurrentProc);
     void lowerProcess(const Process& process);
+    bool resolveProcessSensitivity(const Process& process, const std::set<std::string>& varNames,
+                                   std::vector<AstVar*>& sensVars);
+    AstSenItem* buildProcessSensitivity(const Process& process,
+                                        const std::vector<AstVar*>& sensVars,
+                                        const std::vector<Edge>& edges,
+                                        const std::set<std::string>& varNames);
     //! Emit the asynchronous-reset flip-flop idiom as an edge-triggered always, whose
     //! sensitivity then carries the clock. False when the process is not that idiom.
     bool lowerFlopIdiom(const Process& process);
@@ -1175,6 +1356,12 @@ class Lowering final {
     bool markKind(const std::string& mark, VType::Kind& out) const;
     bool actualKind(const Expr& expr, VType::Kind& out) const;
     bool actualType(const Expr& expr, VType& out) const;
+    bool actualTypeUnary(const Expr& expr, VType& out) const;
+    bool actualTypeBinary(const Expr& expr, VType& out) const;
+    bool actualTypeName(const Expr& expr, VType& out) const;
+    bool actualTypeIndex(const Expr& expr, VType& out) const;
+    bool actualTypeAttr(const Expr& expr, VType& out) const;
+    bool actualTypeCall(const Expr& expr, VType& out) const;
     bool formalType(const TypeSpec& spec, VType& out) const;
     static bool typesMatch(const VType& formal, const VType& actual);
     static bool kindAccepts(VType::Kind formal, VType::Kind actual);
@@ -1246,6 +1433,71 @@ public:
               const GenericBindings* bindings = nullptr,
               const PortBoundsMap* portBounds = nullptr);
     AstNode* lowerInstance(const Concurrent& conc);
+    //! One generic of an entity, as seen from an instance's generic map
+    struct InstanceGeneric final {
+        const GenericDecl* declp;
+        std::string folded;
+        std::string spelling;
+    };
+
+    //! State shared while binding one instance's port associations
+    struct InstancePortBind final {
+        const Concurrent& conc;
+        const EntityUnit* entityp;
+        const PortBoundsMap& portBounds;
+        bool positional;
+        bool defaultError;
+    };
+
+    bool emitPrelude(const EntityUnit& entity, const Architecture& arch,
+                     const GenericBindings* bindings);
+    void emitEntityDecls(const EntityUnit& entity, const Architecture& arch);
+    void emitPorts(const EntityUnit& entity, const PortBoundsMap* portBounds);
+    void emitArchitectureDecls(const Architecture& arch);
+
+    const Architecture* selectInstanceArchitecture(const Concurrent& conc,
+                                                   const EntityUnit& entity);
+    static void freeGenericBindings(GenericBindings& bindings);
+    bool bindTypeGeneric(const PortAssoc& assoc, const std::string& folded,
+                         GenericBindings& bindings);
+    bool bindSubprogramGeneric(const PortAssoc& assoc, const std::string& folded,
+                               GenericBindings& bindings);
+    bool bindRealGeneric(const PortAssoc& assoc, const std::string& folded,
+                         GenericBindings& bindings);
+    bool bindStringGeneric(const InstanceGeneric& item, const GenericDecl& gen,
+                           const PortAssoc* assocp, GenericBindings& bindings);
+    bool bindValueGeneric(const Concurrent& conc, const EntityUnit& entity,
+                          const InstanceGeneric& item, const PortAssoc& assoc,
+                          GenericBindings& bindings);
+    bool bindOneGeneric(const Concurrent& conc, const EntityUnit& entity,
+                        const InstanceGeneric& item, const PortAssoc* assocp,
+                        GenericBindings& bindings);
+    bool bindInstanceGenerics(const Concurrent& conc, const EntityUnit& entity,
+                              GenericBindings& bindings);
+
+    bool lookupInstanceModule(const Concurrent& conc, AstModule*& modp,
+                              const EntityUnit*& entityp);
+    bool checkComponentConformance(const Concurrent& conc, const EntityUnit& entity);
+    bool selectInstanceArchitecture(const Concurrent& conc, const EntityUnit* entityp,
+                                    AstModule*& modp);
+    bool specializeInstancePorts(const Concurrent& conc, const EntityUnit* entityp,
+                                 AstModule*& modp, PortBoundsMap& portBounds);
+    bool collectInstancePorts(const Concurrent& conc, AstModule* modp, std::vector<AstVar*>& ports,
+                              bool& positional);
+    VType instanceRecordPortType(const EntityUnit* entityp, const AstVar* portp) const;
+    static const VField* findRecordField(const VType& rec, const std::string& member);
+    AstNodeExpr* instanceDeclaredDefault(const Concurrent& conc, const EntityUnit* entityp,
+                                         const AstVar* portp, const VType& aggType,
+                                         const VType& portType, bool& defaultError);
+    bool bindRecordMemberPort(InstancePortBind& ctx, AstVar* portp,
+                              const std::vector<const PortAssoc*>& assocs, const VType& recType,
+                              AstNodeExpr*& actualp);
+    bool bindWholePort(InstancePortBind& ctx, AstVar* portp, const PortAssoc& assoc,
+                       const VType& aggType, const VType& portType, AstNodeExpr*& actualp);
+    bool bindPartialPort(InstancePortBind& ctx, AstVar* portp,
+                         const std::vector<const PortAssoc*>& assocs, const VType& portType,
+                         AstNodeExpr*& actualp);
+    bool bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t portIndex, AstPin*& pinsp);
     bool hasDeferredConsts() const { return !m_deferredConsts.empty(); }
     std::string deferredOwner() const {
         return m_deferredConsts.empty() ? std::string{} : m_deferredConsts.front().owner;

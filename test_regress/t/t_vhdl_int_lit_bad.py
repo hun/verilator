@@ -14,7 +14,7 @@ test.top_filename = 't/t_vhdl_int_lit_bad.vhdl'
 
 # IEEE 1076-2008 15.5: an integer literal fits the integer type
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

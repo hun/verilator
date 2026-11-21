@@ -80,8 +80,8 @@ by name, and a VHDL entity can instantiate others below a SystemVerilog top.
 A VHDL design cannot instantiate a SystemVerilog module.
 
 What the VHDL frontend accepts, and where its model diverges from a VHDL
-simulator, is summarized in :doc:`../vhdl/limitations` and assessed in
-:doc:`../vhdl/review`; :doc:`../vhdl/usage` shows the flow.
+simulator, is documented in :doc:`../vhdl/limitations`; :doc:`../vhdl/usage`
+shows the flow.
 
 
 Verilog AMS Support
@@ -171,10 +171,10 @@ controls at the top of the process. Forks cause this error as well, except:
 
 Timing controls and forks can also be ignored in specific files or parts of
 files. The :option:`/*verilator&32;timing_off*/` and
-:option:`/*verilator&32;timing_off*/` metacomments will make Verilator
+:option:`/*verilator&32;timing_on*/` metacomments will make Verilator
 ignore the encompassed timing controls and forks, regardless of the chosen
 :vlopt:`--timing` or :vlopt:`--no-timing` option. This can also be achieved
-using the :option:`timing_off` and :option:`timing_off` options in
+using the :option:`timing_off` and :option:`timing_on` options in
 Verilator Control Files.
 
 
@@ -399,12 +399,11 @@ This section describes specific limitations for each language keyword.
 
 .. Hack to get long definition list:
 
-.. |cmdslong1| replace:: \`__FILE__, \`__LINE__, \`begin_keywords,
-   \`begin_keywords, \`begin_keywords, \`begin_keywords, \`begin_keywords,
-   \`define, \`else, \`elsif, \`end_keywords, \`endif, \`error, \`ifdef,
-   \`ifndef, \`include, \`line, \`systemc_ctor, \`systemc_dtor,
-   \`systemc_header, \`systemc_header_post, \`systemc_imp_header,
-   \`systemc_implementation, \`systemc_interface, \`undef, \`verilog
+.. |cmdslong1| replace:: \`__FILE__, \`__LINE__, \`begin_keywords, \`define,
+   \`else, \`elsif, \`end_keywords, \`endif, \`error, \`ifdef, \`ifndef,
+   \`include, \`line, \`systemc_ctor, \`systemc_dtor, \`systemc_header,
+   \`systemc_header_post, \`systemc_imp_header, \`systemc_implementation,
+   \`systemc_interface, \`undef, \`verilog
 
 |cmdslong1|
    Fully supported.

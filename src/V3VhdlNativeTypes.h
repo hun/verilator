@@ -76,7 +76,7 @@ struct VType final {
     int length() const {
         if (!isVector()) return 1;
         // An ascending range that ends below its start (or a descending one that ends
-        // above it) has no elements: IEEE 1076-2008 5.3.2 calls it a null range
+        // above it) has no elements: IEEE 1076-2008 5.2.1 calls it a null range
         if (ascending ? right < left : right > left) return 0;
         return std::abs(left - right) + 1;
     }

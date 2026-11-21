@@ -4,9 +4,9 @@
 
 .. _vhdl_usage:
 
-###########
+===========
 Using VHDL
-###########
+===========
 
 Verilator reads VHDL directly. A design file whose name ends in
 :file:`.vhd` or :file:`.vhdl` is analyzed by the frontend built into
@@ -19,12 +19,12 @@ C++, the same runtime library, and the same C++ testbench idiom as
 
 The frontend accepts the synthesizable subset of IEEE 1076-2008 plus a
 limited testbench idiom. What is inside that subset, and where the
-two-state model diverges from VHDL, is tabulated in :doc:`review`; this
+two-state model diverges from VHDL, is documented in :doc:`limitations`; this
 guide shows the flow rather than the full matrix.
 
-______________________
+----------------------
 Selecting the language
-______________________
+----------------------
 
 The file extension selects the language: :file:`.vhd` and :file:`.vhdl` are
 VHDL, :file:`.v` and :file:`.sv` are SystemVerilog. A VHDL design kept in
@@ -38,9 +38,9 @@ files with other extensions is selected with
 The extension wins, so :vlopt:`--language vhdl \<--language\>` never
 reinterprets a :file:`.v` or :file:`.sv` file as VHDL.
 
-________________
+----------------
 A first design
-________________
+----------------
 
 We'll verilize a small counter and drive it from C++. Create a working
 directory with the design, :file:`counter.vhdl`:
@@ -145,12 +145,12 @@ What the C++ side sees:
   after every input change, exactly as for a SystemVerilog design.
 
 - The model is two-state: a signal that VHDL would leave at ``'U'`` starts
-  at 0 in the model. See the semantic divergences in :doc:`review` for
+  at 0 in the model. See the known divergences in :doc:`limitations` for
   what this means for metavalue checks and resolution.
 
-_______________________
+-----------------------
 A hierarchical design
-_______________________
+-----------------------
 
 The second design is an accumulator that instantiates an adder. One file,
 :file:`accum.vhdl`, holds both entities, and the accumulator passes its
@@ -288,9 +288,9 @@ What this example adds over the counter:
 - In the testbench, ``d`` and ``q`` are byte-wide members, since ``WIDTH``
   defaults to 8.
 
-______________________________________
+--------------------------------------
 Mixed VHDL and SystemVerilog sources
-______________________________________
+--------------------------------------
 
 One invocation may analyze both languages: each file is analyzed by the
 frontend of its own language, chosen by the file extension or by
@@ -398,9 +398,9 @@ separately, for example to lint each in its own invocation:
    verilator --lint-only top.vhdl
    verilator --lint-only helper.sv
 
-________________
+----------------
 Linting a design
-________________
+----------------
 
 :vlopt:`--lint-only` analyzes and elaborates the design and stops without
 generating C++:
@@ -415,14 +415,14 @@ choice twice, an integer literal or constant must respect its declared
 range, two processes may not drive the same unresolved bit, and a port
 actual must conform to the formal it binds. Unsupported constructs are
 refused with a source-located ``Unsupported:`` diagnostic rather than
-accepted silently. The complete support matrix is in :doc:`review`.
+accepted silently. The complete support matrix is in :doc:`limitations`.
 
-________________
+----------------
 Where to go next
-________________
+----------------
 
 - :doc:`architecture` for how the frontend is built,
-- :doc:`review` for the complete support matrix and known divergences,
+- :doc:`limitations` for the supported subset and known divergences,
 - :doc:`../guide/connecting` and :doc:`../guide/simulating` for everything
   between the generated model and a running simulation, which is the same
   for VHDL and SystemVerilog designs.

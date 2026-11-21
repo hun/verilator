@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_rel_array_bad.vhdl'
 # IEEE 1076-2008 9.2.3: relational operators take operands of one base type.
 # GHDL rejects each comparison below.
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

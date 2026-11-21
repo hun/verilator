@@ -14,11 +14,7 @@
 //
 //*************************************************************************
 //
-// Lowers one analyzed entity/architecture pair into the committed pre-width
-// Verilator AST: the node shapes, dtype canonicalization and re-entry contract
-// match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
-// is emitted under its folded (lowercase) form -- the spelling as written stays
-// available for diagnostics only.
+// Elaborates VHDL package declarations and publishes their contents
 //
 //*************************************************************************
 
@@ -68,63 +64,145 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
                             bool deferredOk) {
     if (!initp) {
         // A package body completes the constants its specification deferred
-        if (!deferredOk) flp->v3error("VHDL: constant without a value");
+        if (!deferredOk) flp->v3error("VHDL: constant without a value.");
         return;
     }
+    if (deferredOk && deferUnresolvedConstant(names, type, *initp, flp)) return;
+    ConstantTypeInfo info;
+    if (!resolveConstantType(type, *initp, flp, info)) return;
+    VType& constType = info.type;
+    if (!valueConforms(constType, *initp, "constant value")) return;
+    // A packed constant of that many bits is copied once per write into it, so a memory
+    // image is reported rather than folded
+    if (constType.width > MAX_FOLD_CONST_WIDTH) {
+        unsupportedError(flp, "constant value that is too wide to fold");
+        return;
+    }
+    // A real survives only as an elaboration-time constant: fold it to a value that
+    // `evalReal` and real comparisons consume, so no floating type reaches the model.
+    if (info.realConstant) {
+        double realVal = 0.0;
+        if (!evalReal(*initp, realVal)) {
+            unsupportedError(flp, "real constant value that is not static");
+            return;
+        }
+        for (const auto& name : names) {
+            if (!reserveName(name.first, name.second, flp)) continue;
+            m_realConsts[name.first] = realVal;
+        }
+        return;
+    }
+    if (info.intConstant && storeIntConstant(names, type, *initp, flp, constType)) return;
+    if (!constType.dtp) constType = intType(flp);
+    if (!constType.dtp) {
+        // An unconstrained array of records whose elements leave a member unconstrained
+        // has no width until its aggregate supplies one
+        unsupportedError(flp, "constant of an unresolved type");
+        if (info.valuep) info.valuep->deleteTree();
+        return;
+    }
+    AstNodeExpr* valuep = info.valuep;
+    if (!valuep) valuep = lowerExpr(*initp, &constType);
+    if (!valuep) return;
+    if (AstConst* const foldedp = foldStatic(valuep)) {
+        valuep->deleteTree();
+        valuep = foldedp;
+    }
+    AstConst* const constp = VN_CAST(valuep, Const);
+    if (!constp) {
+        unsupportedError(flp, "constant value that is not static");
+        valuep->deleteTree();
+        return;
+    }
+    // IEEE 1076-2008 9.3.2: an explicit value must have the declared type's length. The
+    // width is not visible to valueConforms for a literal or a simple designator; an
+    // operator expression takes its width from the context instead.
+    const bool sized = initp->kind == Expr::STRING_LIT || initp->kind == Expr::BITS_LIT
+                       || initp->kind == Expr::NAME || initp->kind == Expr::SELECTED
+                       || initp->kind == Expr::SLICE;
+    if (sized && constType.width > 0 && valuep->width() != constType.width) {
+        flp->v3error("VHDL: constant value does not have the type's length.");
+        valuep->deleteTree();
+        return;
+    }
+    constp->dtypep(constType.dtp);
+    for (size_t i = 0; i < names.size(); ++i) {
+        const auto& name = names[i];
+        if (!reserveName(name.first, name.second, flp)) continue;
+        const bool last = i + 1 == names.size();
+        m_ownedConsts.push_back(
+            std::unique_ptr<AstConst>(last ? constp : constp->cloneTree(false)));
+        m_constValues[name.first] = m_ownedConsts.back().get();
+        m_constTypes[name.first] = constType;
+        // A string value's text is what a string generic or a comparison needs, and a
+        // constant can be bound to a generic just as a generic can be forwarded
+        if (constType.kind == VType::ARRAY && constType.elemWidth == 8) {
+            m_stringConsts[name.first] = stringTextOfConst(m_ownedConsts.back().get());
+        }
+    }
+}
+
+//! Defer a constant initialized by a call whose body is not available yet
+bool Lowering::deferUnresolvedConstant(
+    const std::vector<std::pair<std::string, std::string>>& names, const TypeSpec& type,
+    const Expr& init, FileLine* flp) {
     // A call whose body this pass cannot read: the body's pass completes the constant
-    // rather than reporting the call (IEEE 1800-2023 6.6.1). The specifications are
+    // rather than reporting the call (IEEE 1076-2008 6.4.2.2). The specifications are
     // emitted before any body, so a call to a function another package defines in its
     // body has none yet. A name with arguments parses as an indexed name and becomes a
     // call once the prefix names a subprogram.
-    if (deferredOk) {
-        std::string callName;
-        const Expr* namep = nullptr;
-        if (initp->kind == Expr::CALL) {
-            callName = initp->text;
-            namep = initp;
-        } else if (initp->kind == Expr::INDEX && initp->a) {
-            callName = initp->a->text;
-            namep = initp->a.get();
-        } else if (initp->kind == Expr::NAME) {
-            // A function may be called by naming it alone when its formals have defaults
-            callName = initp->text;
-            namep = initp;
-        }
-        if (!callName.empty()) {
-            // A call qualified by a package name imports it, as resolving the call does
-            std::string packageName;
-            if (namep && namep->kind == Expr::SELECTED && namep->a
-                && packageNameOf(*namep->a, packageName)) {
-                importPackage(packageName);
-            }
-            const auto refs = visibleSubprograms(callName);
-            const bool anyBody
-                = std::any_of(refs.begin(), refs.end(),
-                              [](const SubprogramDecl* const subp) { return subp->hasBody; });
-            if (!refs.empty() && !anyBody) {
-                m_deferredConsts.push_back(DeferredConst{names, &type, initp, flp, m_unitName});
-                return;
-            }
-        }
+    std::string callName;
+    const Expr* namep = nullptr;
+    if (init.kind == Expr::CALL) {
+        callName = init.text;
+        namep = &init;
+    } else if (init.kind == Expr::INDEX && init.a) {
+        callName = init.a->text;
+        namep = init.a.get();
+    } else if (init.kind == Expr::NAME) {
+        // A function may be called by naming it alone when its formals have defaults
+        callName = init.text;
+        namep = &init;
     }
-    VType constType;
-    bool intConstant = true;
-    bool realConstant = false;
-    AstNodeExpr* valuep = nullptr;  // A value lowered early, when the type needed it
-    if (isLiteralSizedVector(type, initp)) {
+    if (callName.empty()) return false;
+    // A call qualified by a package name imports it, as resolving the call does
+    std::string packageName;
+    if (namep && namep->kind == Expr::SELECTED && namep->a
+        && packageNameOf(*namep->a, packageName)) {
+        importPackage(packageName);
+    }
+    const auto refs = visibleSubprograms(callName);
+    const bool anyBody = std::any_of(
+        refs.begin(), refs.end(), [](const SubprogramDecl* const subp) { return subp->hasBody; });
+    if (!refs.empty() && !anyBody) {
+        m_deferredConsts.push_back(DeferredConst{names, &type, &init, flp, m_unitName});
+        return true;
+    }
+    return false;
+}
+
+//! Fix a constant's type from its declaration and initializer, lowering a value early
+//! when the type depends on it
+bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileLine* flp,
+                                   ConstantTypeInfo& info) {
+    VType& constType = info.type;
+    bool& intConstant = info.intConstant;
+    bool& realConstant = info.realConstant;
+    AstNodeExpr*& valuep = info.valuep;
+    if (isLiteralSizedVector(type, &init)) {
         // The mark leaves the width open, so the literal fixes it
-        constType = literalVectorType(flp, type.mark, static_cast<int>(initp->bits.size()));
+        constType = literalVectorType(flp, type.mark, static_cast<int>(init.bits.size()));
         intConstant = false;
-    } else if (initp->kind == Expr::STRING_LIT && type.mark == "string" && !type.hasRange
+    } else if (init.kind == Expr::STRING_LIT && type.mark == "string" && !type.hasRange
                && type.constraintMark.empty()) {
         // An unconstrained string takes its bounds from the literal, as a vector does
-        constType = stringType(flp, static_cast<int>(initp->spelling.size()));
+        constType = stringType(flp, static_cast<int>(init.spelling.size()));
         intConstant = false;
     } else if (type.mark == "string" && !type.hasRange && type.constraintMark.empty()) {
         // An unconstrained string takes its bounds from a static expression too, such as
         // the image of a value, so the value is folded before the type is fixed
-        valuep = lowerExpr(*initp, nullptr);
-        if (!valuep) return;
+        valuep = lowerExpr(init, nullptr);
+        if (!valuep) return false;
         if (AstConst* const foldedp = foldStatic(valuep)) {
             if (foldedp != valuep) valuep->deleteTree();
             valuep = foldedp;
@@ -135,7 +213,7 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         // A record constant whose type leaves a member unconstrained takes that member's
         // bounds from the initial value, as a vector does
         TypeSpec declaredType = copySpec(type);
-        if (initp) completeRecordType(declaredType, *initp);
+        completeRecordType(declaredType, init);
         if (declaredType.flp && resolveType(declaredType, constType)) {
             intConstant = constType.isInt();
             realConstant = constType.kind == VType::REAL;
@@ -145,18 +223,17 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         if (!constType.dtp && constType.kind == VType::ARRAY
             && (!constType.elemp || constType.elemp->width == 0)) {
             unsupportedError(flp, "constant of an array of unconstrained elements");
-            return;
+            return false;
         }
         // An unconstrained array constant whose initializer is a value rather than an
         // aggregate takes its length from that value, as a function returning an
         // unconstrained array constrains it: poc's `RAM_Type_Depth` is
         // `integer_vector := get_ram_type(...)` (IEEE 1076-2008 5.3.2)
-        if (!constType.dtp && constType.kind == VType::ARRAY && initp
-            && initp->kind != Expr::AGG_POSITIONAL && initp->kind != Expr::AGG_NAMED
-            && !type.hasRange && type.constraintMark.empty() && type.indexConstraints.empty()
-            && constType.elemWidth > 0) {
-            valuep = lowerExpr(*initp, nullptr);
-            if (!valuep) return;
+        if (!constType.dtp && constType.kind == VType::ARRAY && init.kind != Expr::AGG_POSITIONAL
+            && init.kind != Expr::AGG_NAMED && !type.hasRange && type.constraintMark.empty()
+            && type.indexConstraints.empty() && constType.elemWidth > 0) {
+            valuep = lowerExpr(init, nullptr);
+            if (!valuep) return false;
             if (AstConst* const foldedp = foldStatic(valuep)) {
                 if (foldedp != valuep) valuep->deleteTree();
                 valuep = foldedp;
@@ -180,9 +257,9 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         }
         // An unconstrained array constant takes its bounds from its aggregate, one element
         // per aggregate element from the index subtype's low bound (IEEE 1076-2008 9.3.3.2)
-        if (!constType.dtp && constType.kind == VType::ARRAY && initp
-            && initp->kind == Expr::AGG_POSITIONAL && !initp->args.empty() && !type.hasRange
-            && type.constraintMark.empty() && type.indexConstraints.empty()) {
+        if (!constType.dtp && constType.kind == VType::ARRAY && init.kind == Expr::AGG_POSITIONAL
+            && !init.args.empty() && !type.hasRange && type.constraintMark.empty()
+            && type.indexConstraints.empty()) {
             TypeSpec bounded = copySpec(type);
             bounded.hasRange = true;
             bounded.ascending = true;
@@ -192,105 +269,40 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
             bounded.right = std::unique_ptr<Expr>(new Expr{Expr::INT_LIT});
             bounded.right->flp = flp;
             bounded.right->intValue
-                = constType.intLow + static_cast<int64_t>(initp->args.size()) - 1;
+                = constType.intLow + static_cast<int64_t>(init.args.size()) - 1;
             if (resolveType(bounded, constType)) {
                 intConstant = constType.isInt();
                 realConstant = constType.kind == VType::REAL;
             }
         }
     }
-    if (initp && !valueConforms(constType, *initp, "constant value")) return;
-    // A packed constant of that many bits is copied once per write into it, so a memory
-    // image is reported rather than folded
-    if (constType.width > (1 << 20)) {
-        unsupportedError(flp, "constant value that is too wide to fold");
-        return;
+    return true;
+}
+
+//! Store an integer constant's folded value, including its subtype range check
+bool Lowering::storeIntConstant(const std::vector<std::pair<std::string, std::string>>& names,
+                                const TypeSpec& type, const Expr& init, FileLine* flp,
+                                const VType& constType) {
+    int64_t value = 0;
+    if (!evalInt(init, value)) return false;
+    // IEEE 1076-2008 5.4: the value is within its declared subtype's bounds. Only
+    // a subtype of a predefined integer type carries bounds that are complete here
+    // (a physical type is modelled as an integer too, without them).
+    const auto subtypeIt = m_types.find(type.mark);
+    const bool integerSubtype = subtypeIt != m_types.end() && subtypeIt->second.kind == VType::INT
+                                && isPredefinedIntegerMark(subtypeIt->second.typeName);
+    if (integerSubtype
+        && (value < subtypeIt->second.intLow || value > subtypeIt->second.intHigh)) {
+        flp->v3error("VHDL: constant value is out of the range of subtype '" + type.mark
+                     + "' (IEEE 1076-2008 5.2.1).");
+        return true;  // The diagnostic ends this declaration
     }
-    // A real survives only as an elaboration-time constant: fold it to a value that
-    // `evalReal` and real comparisons consume, so no floating type reaches the model.
-    if (realConstant) {
-        double realVal = 0.0;
-        if (!evalReal(*initp, realVal)) {
-            unsupportedError(flp, "real constant value that is not static");
-            return;
-        }
-        for (const auto& name : names) {
-            if (!reserveName(name.first, name.second, flp)) continue;
-            m_realConsts[name.first] = realVal;
-        }
-        return;
-    }
-    if (intConstant) {
-        int64_t value = 0;
-        if (evalInt(*initp, value)) {
-            // IEEE 1076-2008 5.4: the value is within its declared subtype's bounds. Only
-            // a subtype of a predefined integer type carries bounds that are complete here
-            // (a physical type is modelled as an integer too, without them).
-            const auto subtypeIt = m_types.find(type.mark);
-            const bool integerSubtype = subtypeIt != m_types.end()
-                                        && subtypeIt->second.kind == VType::INT
-                                        && isPredefinedIntegerMark(subtypeIt->second.typeName);
-            if (integerSubtype
-                && (value < subtypeIt->second.intLow || value > subtypeIt->second.intHigh)) {
-                flp->v3error("VHDL: constant value is out of the range of subtype '" + type.mark
-                             + "' (IEEE 1076-2008 5.4)");
-                return;
-            }
-            for (const auto& name : names) {
-                if (!reserveName(name.first, name.second, flp)) continue;
-                m_consts[name.first] = value;
-                m_constTypes[name.first] = constType;
-            }
-            return;
-        }
-        // A call to a declared function is static as well: lower and fold it below
-        if (!constType.dtp) constType = intType(flp);
-    }
-    if (!constType.dtp) {
-        // An unconstrained array of records whose elements leave a member unconstrained
-        // has no width until its aggregate supplies one
-        unsupportedError(flp, "constant of an unresolved type");
-        if (valuep) valuep->deleteTree();
-        return;
-    }
-    if (!valuep) valuep = lowerExpr(*initp, &constType);
-    if (!valuep) return;
-    if (AstConst* const foldedp = foldStatic(valuep)) {
-        valuep->deleteTree();
-        valuep = foldedp;
-    }
-    AstConst* const constp = VN_CAST(valuep, Const);
-    if (!constp) {
-        unsupportedError(flp, "constant value that is not static");
-        valuep->deleteTree();
-        return;
-    }
-    // IEEE 1076-2008 9.3.2: an explicit value must have the declared type's length. The
-    // width is not visible to valueConforms for a literal or a simple designator; an
-    // operator expression takes its width from the context instead.
-    const bool sized = initp->kind == Expr::STRING_LIT || initp->kind == Expr::BITS_LIT
-                       || initp->kind == Expr::NAME || initp->kind == Expr::SELECTED
-                       || initp->kind == Expr::SLICE;
-    if (sized && constType.width > 0 && valuep->width() != constType.width) {
-        flp->v3error("VHDL: constant value does not have the type's length");
-        valuep->deleteTree();
-        return;
-    }
-    constp->dtypep(constType.dtp);
-    for (size_t i = 0; i < names.size(); ++i) {
-        const auto& name = names[i];
+    for (const auto& name : names) {
         if (!reserveName(name.first, name.second, flp)) continue;
-        const bool last = i + 1 == names.size();
-        m_ownedConsts.push_back(
-            std::unique_ptr<AstConst>(last ? constp : constp->cloneTree(false)));
-        m_constValues[name.first] = m_ownedConsts.back().get();
+        m_consts[name.first] = value;
         m_constTypes[name.first] = constType;
-        // A string value's text is what a string generic or a comparison needs, and a
-        // constant can be bound to a generic just as a generic can be forwarded
-        if (constType.kind == VType::ARRAY && constType.elemWidth == 8) {
-            m_stringConsts[name.first] = stringTextOfConst(m_ownedConsts.back().get());
-        }
     }
+    return true;
 }
 
 //! Register the entity's generics as constants; bindings hold the bound actuals and
@@ -350,14 +362,14 @@ void Lowering::instantiatePackage(const std::vector<PackageUnit>& packages,
             if (!gen.init) {
                 inst.flp->v3error("VHDL: package generic '" + items[k].folded + "' of '"
                                   + inst.baseName + "' is not bound in instance '" + inst.spelling
-                                  + "'");
+                                  + "'.");
                 freeBindings(bindings);
                 return;
             }
             continue;  // The generic keeps its own default value
         }
         if (!assocp->actual) {
-            assocp->flp->v3error("VHDL: 'open' is not allowed on a package generic association");
+            assocp->flp->v3error("VHDL: 'open' is not allowed on a package generic association.");
             freeBindings(bindings);
             return;
         }

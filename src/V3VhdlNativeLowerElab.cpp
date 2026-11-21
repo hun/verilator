@@ -14,11 +14,7 @@
 //
 //*************************************************************************
 //
-// Lowers one analyzed entity/architecture pair into the committed pre-width
-// Verilator AST: the node shapes, dtype canonicalization and re-entry contract
-// match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
-// is emitted under its folded (lowercase) form -- the spelling as written stays
-// available for diagnostics only.
+// Elaborates entity instances, generic specializations and port bindings
 //
 //*************************************************************************
 
@@ -501,10 +497,8 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     }
 }
 
-bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
-                    const GenericBindings* bindings, const PortBoundsMap* portBounds) {
-    m_modp = modp;
-
+bool Lowering::emitPrelude(const EntityUnit& entity, const Architecture& arch,
+                           const GenericBindings* bindings) {
     m_subprograms.clear();  // Packages published these only through importPackage
     m_components.clear();
     for (const auto& use : entity.uses) importPackage(use.pkg, use.decl);
@@ -527,21 +521,22 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     registerComponents(entity.components);
 
     // Generics are constants visible to the port clause and the architecture
-    if (!registerGenerics(entity.generics, bindings, false)) {
-        m_modp = nullptr;
-        m_scope.clear();
-        m_consts.clear();
-        m_constValues.clear();
-        m_constTypes.clear();
-        m_enumConsts.clear();
-        m_ambiguousLiterals.clear();
-        m_ownedConsts.clear();
-        m_types.clear();
-        m_deferredTypes.clear();
-        m_preConsts.clear();
-        return false;
-    }
+    if (registerGenerics(entity.generics, bindings, false)) return true;
+    m_modp = nullptr;
+    m_scope.clear();
+    m_consts.clear();
+    m_constValues.clear();
+    m_constTypes.clear();
+    m_enumConsts.clear();
+    m_ambiguousLiterals.clear();
+    m_ownedConsts.clear();
+    m_types.clear();
+    m_deferredTypes.clear();
+    m_preConsts.clear();
+    return false;
+}
 
+void Lowering::emitEntityDecls(const EntityUnit& entity, const Architecture& arch) {
     // With generics bound, integer constants can size the architecture's types
     preScanIntConstants(entity.decls);
     preScanIntConstants(arch.decls);
@@ -562,7 +557,7 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             const std::string mangled
-                = "vhdlext_" + std::to_string(++entityVarSeq) + "__" + name.first;
+                = "__Vext_" + std::to_string(++entityVarSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
@@ -599,7 +594,9 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     }
     // Preliminary snapshot: declarative items may already call subprograms
     m_moduleScope = saveScope();
+}
 
+void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBounds) {
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
         VType type;
@@ -683,7 +680,9 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
             if (!isResolvedType(type)) m_unresolvedSignals.insert(varp);
         }
     }
+}
 
+void Lowering::emitArchitectureDecls(const Architecture& arch) {
     for (const Decl& decl : arch.decls) {
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
@@ -727,6 +726,15 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
         if (alias.hasSignature) continue;
         registerAlias(alias);
     }
+}
+
+bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
+                    const GenericBindings* bindings, const PortBoundsMap* portBounds) {
+    m_modp = modp;
+    if (!emitPrelude(entity, arch, bindings)) return false;
+    emitEntityDecls(entity, arch);
+    emitPorts(entity, portBounds);
+    emitArchitectureDecls(arch);
 
     // Subprograms of the declarative part capture the module scope as it stands here
     m_moduleScope = saveScope();
@@ -763,65 +771,266 @@ bool isBuiltinGenericMark(const std::string& mark) {
     return false;
 }
 
-//! Bind an instance's generics and its unconstrained port ranges, and return the module
-//! specialized for that binding; the base module when there is nothing to bind
-AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit& entity,
-                                        AstModule* basep, const PortBoundsMap& portBounds) {
+//! Select the architecture whose generics and declarations an instance specializes
+const Architecture* Lowering::selectInstanceArchitecture(const Concurrent& conc,
+                                                         const EntityUnit& entity) {
     FileLine* const flp = conc.flp;
-    const Architecture* archp = nullptr;
     if (!conc.architectureName.empty()) {
         const auto byName = m_designp->archsByName.find(entity.name);
         if (byName == m_designp->archsByName.end()
             || !byName->second.count(conc.architectureName)) {
             flp->v3error("VHDL: entity '" + entity.spelling + "' has no architecture '"
-                         + conc.architectureName + "'");
+                         + conc.architectureName + "'.");
             return nullptr;
         }
-        archp = byName->second.at(conc.architectureName);
-    } else {
-        const auto archIt = m_designp->archs.find(entity.name);
-        if (archIt == m_designp->archs.end()) {
-            flp->v3error("VHDL: entity '" + entity.spelling
-                         + "' has no architecture to specialize for this instance");
-            return nullptr;
-        }
-        archp = archIt->second;
+        return byName->second.at(conc.architectureName);
     }
-    struct Item final {
-        const GenericDecl* declp;
-        std::string folded;
-        std::string spelling;
-    };
-    std::vector<Item> items;
+    const auto archIt = m_designp->archs.find(entity.name);
+    if (archIt == m_designp->archs.end()) {
+        flp->v3error("VHDL: entity '" + entity.spelling
+                     + "' has no architecture to specialize for this instance.");
+        return nullptr;
+    }
+    return archIt->second;
+}
+
+void Lowering::freeGenericBindings(GenericBindings& bindings) {
+    for (auto& entry : bindings) {
+        if (entry.second.valuep) entry.second.valuep->deleteTree();
+    }
+}
+
+bool Lowering::bindTypeGeneric(const PortAssoc& assoc, const std::string& folded,
+                               GenericBindings& bindings) {
+    GenericBinding binding;
+    binding.isType = true;
+    if (!resolveTypeActual(*assoc.actual, binding.typeValue)) {
+        unsupportedError(assoc.flp, "generic type actual");
+        return false;
+    }
+    bindings[folded] = binding;
+    return true;
+}
+
+bool Lowering::bindSubprogramGeneric(const PortAssoc& assoc, const std::string& folded,
+                                     GenericBindings& bindings) {
+    // The actual names a subprogram visible where the instance is declared
+    GenericBinding binding;
+    const std::vector<const SubprogramDecl*> visible = visibleSubprograms(assoc.actual->text);
+    if (visible.empty()) {
+        unsupportedError(assoc.flp, "generic subprogram parameter actual");
+        return false;
+    }
+    binding.subp = visible.back();
+    bindings[folded] = binding;
+    return true;
+}
+
+bool Lowering::bindRealGeneric(const PortAssoc& assoc, const std::string& folded,
+                               GenericBindings& bindings) {
+    // A real generic is an elaboration-time value, like a real constant
+    GenericBinding binding;
+    if (!evalReal(*assoc.actual, binding.realValue)) {
+        unsupportedError(assoc.flp, "real generic actual");
+        return false;
+    }
+    binding.isReal = true;
+    bindings[folded] = binding;
+    return true;
+}
+
+bool Lowering::bindStringGeneric(const InstanceGeneric& item, const GenericDecl& gen,
+                                 const PortAssoc* assocp, GenericBindings& bindings) {
+    const Expr* const actualp = assocp ? assocp->actual.get() : gen.init.get();
+    if (!actualp) {
+        assocp->flp->v3error("VHDL: string generic '" + item.spelling
+                             + "' has no default value and no association.");
+        return false;
+    }
+    std::string stringValue;
+    bool found = false;
+    if (actualp->kind == Expr::STRING_LIT) {
+        stringValue = actualp->spelling;
+        found = true;
+    } else if (actualp->kind == Expr::BITS_LIT) {
+        // A string of logic characters parses as a bit-string literal, e.g.
+        // `InitString_g => ""` or `Mode_g => "1100"`
+        stringValue = actualp->bits;
+        found = true;
+    } else if (actualp->kind == Expr::NAME) {
+        // A string generic passed on from the enclosing unit, so its text
+        // comes from that unit's generic
+        const auto outer = m_stringConsts.find(actualp->text);
+        if (outer != m_stringConsts.end()) {
+            stringValue = outer->second;
+            found = true;
+        }
+    }
+    if (!found) {
+        unsupportedError(actualp->flp, "string generic actual");
+        return false;
+    }
+    GenericBinding binding;
+    binding.isString = true;
+    binding.stringValue = stringValue;
+    bindings[item.folded] = binding;
+    return true;
+}
+
+//! Bind a generic whose value is an integer or a typed static expression
+bool Lowering::bindValueGeneric(const Concurrent& conc, const EntityUnit& entity,
+                                const InstanceGeneric& item, const PortAssoc& assoc,
+                                GenericBindings& bindings) {
+    FileLine* const flp = conc.flp;
+    const GenericDecl& gen = *item.declp;
+    // The declared type resolves in the entity's scope, where the generics that
+    // precede this one already carry the value bound at this instance
+    ScopeSave saved = saveScope();
+    const std::set<std::string> savedImported = m_imported;
+    for (const auto& use : entity.uses) importPackage(use.pkg, use.decl);
+    for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
+    registerGenerics(entity.generics, &bindings, true);
+    // The declared type may itself call a function, whose body evaluates against the
+    // module scope, so take it with this instance's bindings and the entity's packages
+    m_moduleScope = saveScope();
+    VType declared;
+    bool haveType = false;
+    if (unconstrainedVectorSpec(gen.type)) {
+        // An unconstrained vector generic takes its bounds from the actual, as a
+        // port of that type does
+        AstNodeExpr* const valuep = lowerExpr(*assoc.actual, nullptr);
+        if (valuep) {
+            declared = typeOfDType(valuep->dtypep());
+            valuep->deleteTree();
+            haveType = declared.isVector() && declared.width > 0;
+        }
+    } else {
+        haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
+                   && resolveType(gen.type, declared);
+        if (haveType && declared.isVector() && declared.width <= 0) {
+            // A declared unconstrained array generic takes its bounds from the actual,
+            // as a predefined vector one does: poc's `TAPS : natural_vector` is an
+            // aggregate like `(1, 3, 5)` that names its own index range. Only the
+            // bounds come from the actual; the element type stays the declared one.
+            if (assoc.actual->kind == Expr::AGG_POSITIONAL
+                || assoc.actual->kind == Expr::AGG_NAMED) {
+                constrainAggregateType(*assoc.actual, declared);
+            } else {
+                AstNodeExpr* const valuep = lowerExpr(*assoc.actual, nullptr);
+                if (valuep) {
+                    const VType actualType = typeOfDType(valuep->dtypep());
+                    valuep->deleteTree();
+                    if (actualType.isVector() && actualType.width > 0) {
+                        declared.left = actualType.left;
+                        declared.right = actualType.right;
+                        declared.ascending = actualType.ascending;
+                        declared.width = actualType.width;
+                        declared.dtp
+                            = findVectorWidth(flp, declared.kwd, declared.signing, declared.width);
+                    }
+                }
+            }
+            haveType = declared.width > 0;
+        }
+    }
+    restoreScope(saved);
+    m_imported = savedImported;
+    if (!haveType && isBuiltinGenericMark(gen.type.mark)) {
+        unsupportedError(gen.flp, "generic of type '" + gen.type.mark + "'");
+        return false;
+    }
+    if (!haveType) {
+        unsupportedError(assoc.flp, "generic of type '" + gen.type.mark + "'");
+        return false;
+    }
+    if (!valueConforms(declared, *assoc.actual, "generic actual")) return false;
+    GenericBinding binding;
+    if (declared.isVector()) {
+        binding.valueType = declared;
+        binding.hasValueType = true;
+    }
+    bool bound = false;
+    if (declared.isInt()) {
+        bound = evalInt(*assoc.actual, binding.intValue);
+        binding.isInt = bound;
+    }
+    if (!bound) {
+        AstNodeExpr* const valuep = lowerExpr(*assoc.actual, &declared);
+        AstConst* const foldedp = valuep ? foldStatic(valuep) : nullptr;
+        if (foldedp) {
+            if (declared.width > 0 && foldedp->width() != declared.width) {
+                assoc.flp->v3error("VHDL: generic actual does not have the generic's length.");
+                foldedp->deleteTree();
+                valuep->deleteTree();
+                return false;
+            }
+            valuep->deleteTree();
+            binding.valuep = foldedp;
+            bound = true;
+        } else {
+            if (valuep) valuep->deleteTree();
+            if (!V3Error::errorCount()) {
+                unsupportedError(assoc.flp, "generic actual that is not static");
+            }
+            return false;
+        }
+    }
+    bindings[item.folded] = binding;
+    return true;
+}
+
+bool Lowering::bindOneGeneric(const Concurrent& conc, const EntityUnit& entity,
+                              const InstanceGeneric& item, const PortAssoc* assocp,
+                              GenericBindings& bindings) {
+    const GenericDecl& gen = *item.declp;
+    if (!assocp) {
+        if (!gen.init) {
+            conc.flp->v3error("VHDL: generic '" + item.spelling + "' of entity '" + entity.spelling
+                              + "' has no default value and no association.");
+            return false;
+        }
+        return true;
+    }
+    if (!assocp->actual) {
+        assocp->flp->v3error("VHDL: 'open' is not allowed on a generic association.");
+        return false;
+    }
+    if (gen.isType) return bindTypeGeneric(*assocp, item.folded, bindings);
+    if (gen.isSubprogram) return bindSubprogramGeneric(*assocp, item.folded, bindings);
+    if (gen.type.mark == "real") return bindRealGeneric(*assocp, item.folded, bindings);
+    if (gen.type.mark == "string") return bindStringGeneric(item, gen, assocp, bindings);
+    return bindValueGeneric(conc, entity, item, *assocp, bindings);
+}
+
+//! Bind every generic of the entity against the instance's generic associations
+bool Lowering::bindInstanceGenerics(const Concurrent& conc, const EntityUnit& entity,
+                                    GenericBindings& bindings) {
+    FileLine* const flp = conc.flp;
+    std::vector<InstanceGeneric> items;
     for (const GenericDecl& gen : entity.generics) {
         for (const auto& name : gen.names) items.push_back({&gen, name.first, name.second});
     }
     const std::vector<PortAssoc>& assocs = conc.genericAssociations;
     const bool positional = std::any_of(
         assocs.begin(), assocs.end(), [](const PortAssoc& assoc) { return assoc.formal.empty(); });
-    auto freeBindings = [](GenericBindings& bs) {
-        for (auto& entry : bs) {
-            if (entry.second.valuep) entry.second.valuep->deleteTree();
-        }
-    };
     if (positional && assocs.size() > items.size()) {
         flp->v3error("VHDL: instance of '" + entity.spelling
-                     + "' binds more generics than the entity has");
-        return nullptr;
+                     + "' binds more generics than the entity has.");
+        return false;
     }
     if (!positional) {
         for (const PortAssoc& assoc : assocs) {
-            const bool known = std::any_of(items.begin(), items.end(), [&](const Item& item) {
-                return item.folded == assoc.formal;
-            });
+            const bool known
+                = std::any_of(items.begin(), items.end(), [&](const InstanceGeneric& item) {
+                      return item.folded == assoc.formal;
+                  });
             if (!known) {
                 assoc.flp->v3error("VHDL: entity '" + entity.spelling + "' has no generic '"
-                                   + assoc.formalSpelling + "'");
-                return nullptr;
+                                   + assoc.formalSpelling + "'.");
+                return false;
             }
         }
     }
-    GenericBindings bindings;
     for (size_t k = 0; k < items.size(); ++k) {
         const PortAssoc* assocp = nullptr;
         if (positional) {
@@ -831,198 +1040,23 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
                 if (assoc.formal == items[k].folded) assocp = &assoc;
             }
         }
-        const GenericDecl& gen = *items[k].declp;
-        if (!assocp) {
-            if (!gen.init) {
-                flp->v3error("VHDL: generic '" + items[k].spelling + "' of entity '"
-                             + entity.spelling + "' has no default value and no association");
-                freeBindings(bindings);
-                return nullptr;
-            }
-            continue;
+        if (!bindOneGeneric(conc, entity, items[k], assocp, bindings)) {
+            freeGenericBindings(bindings);
+            return false;
         }
-        if (!assocp->actual) {
-            assocp->flp->v3error("VHDL: 'open' is not allowed on a generic association");
-            freeBindings(bindings);
-            return nullptr;
-        }
-        if (gen.isType) {
-            GenericBinding binding;
-            binding.isType = true;
-            if (!resolveTypeActual(*assocp->actual, binding.typeValue)) {
-                unsupportedError(assocp->flp, "generic type actual");
-                freeBindings(bindings);
-                return nullptr;
-            }
-            bindings[items[k].folded] = binding;
-            continue;
-        }
-        if (gen.isSubprogram) {
-            // The actual names a subprogram visible where the instance is declared
-            GenericBinding binding;
-            const std::vector<const SubprogramDecl*> visible
-                = visibleSubprograms(assocp->actual->text);
-            if (visible.empty()) {
-                unsupportedError(assocp->flp, "generic subprogram parameter actual");
-                freeBindings(bindings);
-                return nullptr;
-            }
-            binding.subp = visible.back();
-            bindings[items[k].folded] = binding;
-            continue;
-        }
-        if (gen.type.mark == "real") {
-            // A real generic is an elaboration-time value, like a real constant
-            GenericBinding binding;
-            if (!evalReal(*assocp->actual, binding.realValue)) {
-                unsupportedError(assocp->flp, "real generic actual");
-                freeBindings(bindings);
-                return nullptr;
-            }
-            binding.isReal = true;
-            bindings[items[k].folded] = binding;
-            continue;
-        }
-        if (gen.type.mark == "string") {
-            const Expr* const actualp = assocp ? assocp->actual.get() : gen.init.get();
-            if (!actualp) {
-                assocp->flp->v3error("VHDL: string generic '" + items[k].spelling
-                                     + "' has no default value and no association");
-                freeBindings(bindings);
-                return nullptr;
-            }
-            std::string stringValue;
-            bool found = false;
-            if (actualp->kind == Expr::STRING_LIT) {
-                stringValue = actualp->spelling;
-                found = true;
-            } else if (actualp->kind == Expr::BITS_LIT) {
-                // A string of logic characters parses as a bit-string literal, e.g.
-                // `InitString_g => ""` or `Mode_g => "1100"`
-                stringValue = actualp->bits;
-                found = true;
-            } else if (actualp->kind == Expr::NAME) {
-                // A string generic passed on from the enclosing unit, so its text
-                // comes from that unit's generic
-                const auto outer = m_stringConsts.find(actualp->text);
-                if (outer != m_stringConsts.end()) {
-                    stringValue = outer->second;
-                    found = true;
-                }
-            }
-            if (!found) {
-                unsupportedError(actualp->flp, "string generic actual");
-                freeBindings(bindings);
-                return nullptr;
-            }
-            GenericBinding binding;
-            binding.isString = true;
-            binding.stringValue = stringValue;
-            bindings[items[k].folded] = binding;
-            continue;
-        }
-        // The declared type resolves in the entity's scope, where the generics that
-        // precede this one already carry the value bound at this instance
-        ScopeSave saved = saveScope();
-        const std::set<std::string> savedImported = m_imported;
-        for (const auto& use : entity.uses) importPackage(use.pkg, use.decl);
-        for (const TypeDecl& typeDecl : entity.types) registerType(typeDecl);
-        registerGenerics(entity.generics, &bindings, true);
-        // The declared type may itself call a function, whose body evaluates against the
-        // module scope, so take it with this instance's bindings and the entity's packages
-        m_moduleScope = saveScope();
-        VType declared;
-        bool haveType = false;
-        if (unconstrainedVectorSpec(gen.type)) {
-            // An unconstrained vector generic takes its bounds from the actual, as a
-            // port of that type does
-            AstNodeExpr* const valuep = lowerExpr(*assocp->actual, nullptr);
-            if (valuep) {
-                declared = typeOfDType(valuep->dtypep());
-                valuep->deleteTree();
-                haveType = declared.isVector() && declared.width > 0;
-            }
-        } else {
-            haveType = (isBuiltinGenericMark(gen.type.mark) || m_types.count(gen.type.mark))
-                       && resolveType(gen.type, declared);
-            if (haveType && declared.isVector() && declared.width <= 0) {
-                // A declared unconstrained array generic takes its bounds from the actual,
-                // as a predefined vector one does: poc's `TAPS : natural_vector` is an
-                // aggregate like `(1, 3, 5)` that names its own index range. Only the
-                // bounds come from the actual; the element type stays the declared one.
-                if (assocp->actual->kind == Expr::AGG_POSITIONAL
-                    || assocp->actual->kind == Expr::AGG_NAMED) {
-                    constrainAggregateType(*assocp->actual, declared);
-                } else {
-                    AstNodeExpr* const valuep = lowerExpr(*assocp->actual, nullptr);
-                    if (valuep) {
-                        const VType actualType = typeOfDType(valuep->dtypep());
-                        valuep->deleteTree();
-                        if (actualType.isVector() && actualType.width > 0) {
-                            declared.left = actualType.left;
-                            declared.right = actualType.right;
-                            declared.ascending = actualType.ascending;
-                            declared.width = actualType.width;
-                            declared.dtp = findVectorWidth(flp, declared.kwd, declared.signing,
-                                                           declared.width);
-                        }
-                    }
-                }
-                haveType = declared.width > 0;
-            }
-        }
-        restoreScope(saved);
-        m_imported = savedImported;
-        if (!haveType && isBuiltinGenericMark(gen.type.mark)) {
-            unsupportedError(gen.flp, "generic of type '" + gen.type.mark + "'");
-            freeBindings(bindings);
-            return nullptr;
-        }
-        if (!haveType) {
-            unsupportedError(assocp->flp, "generic of type '" + gen.type.mark + "'");
-            freeBindings(bindings);
-            return nullptr;
-        }
-        if (!valueConforms(declared, *assocp->actual, "generic actual")) {
-            freeBindings(bindings);
-            return nullptr;
-        }
-        GenericBinding binding;
-        if (declared.isVector()) {
-            binding.valueType = declared;
-            binding.hasValueType = true;
-        }
-        bool bound = false;
-        if (declared.isInt()) {
-            bound = evalInt(*assocp->actual, binding.intValue);
-            binding.isInt = bound;
-        }
-        if (!bound) {
-            AstNodeExpr* const valuep = lowerExpr(*assocp->actual, &declared);
-            AstConst* const foldedp = valuep ? foldStatic(valuep) : nullptr;
-            if (foldedp) {
-                if (declared.width > 0 && foldedp->width() != declared.width) {
-                    assocp->flp->v3error(
-                        "VHDL: generic actual does not have the generic's length");
-                    foldedp->deleteTree();
-                    valuep->deleteTree();
-                    freeBindings(bindings);
-                    return nullptr;
-                }
-                valuep->deleteTree();
-                binding.valuep = foldedp;
-                bound = true;
-            } else {
-                if (valuep) valuep->deleteTree();
-                if (!V3Error::errorCount()) {
-                    unsupportedError(assocp->flp, "generic actual that is not static");
-                }
-                freeBindings(bindings);
-                return nullptr;
-            }
-        }
-        bindings[items[k].folded] = binding;
     }
+    return true;
+}
+
+//! Bind an instance's generics and its unconstrained port ranges, and return the module
+//! specialized for that binding; the base module when there is nothing to bind
+AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit& entity,
+                                        AstModule* basep, const PortBoundsMap& portBounds) {
+    FileLine* const flp = conc.flp;
+    const Architecture* const archp = selectInstanceArchitecture(conc, entity);
+    if (!archp) return nullptr;
+    GenericBindings bindings;
+    if (!bindInstanceGenerics(conc, entity, bindings)) return nullptr;
     if (bindings.empty() && portBounds.empty()) {
         // Nothing to bind: an instance uses the entity's own module
         m_designp->baseUsed.insert(entity.name);
@@ -1087,7 +1121,7 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
     }
     if (++m_designp->specDepth > 32) {
         unsupportedError(flp, "generic binding recursion that does not terminate");
-        freeBindings(bindings);
+        freeGenericBindings(bindings);
         return nullptr;
     }
     AstModule* const specp
@@ -1298,7 +1332,7 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
     }
     if (anyWhole && assocs.size() > 1) {
         conc.flp->v3error("VHDL: port '" + port.names.front().second
-                          + "' is associated more than once");
+                          + "' is associated more than once.");
         return false;
     }
     // The port's declared record fixes the element order and its constrained elements.
@@ -1343,13 +1377,13 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
             const int field = fieldIndex(assocp->formalMember);
             if (field < 0) {
                 assocp->flp->v3error("VHDL: record port '" + port.names.front().second
-                                     + "' has no element '" + assocp->formalMemberSpelling + "'");
+                                     + "' has no element '" + assocp->formalMemberSpelling + "'.");
                 return false;
             }
             if (seen[field]) {
                 assocp->flp->v3error("VHDL: record port '" + port.names.front().second
                                      + "' element '" + assocp->formalMemberSpelling
-                                     + "' is associated more than once");
+                                     + "' is associated more than once.");
                 return false;
             }
             seen[field] = true;
@@ -1410,13 +1444,14 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
     return true;
 }
 
-//! An instantiation becomes an AstCell bound to the instantiated entity's module
-AstNode* Lowering::lowerInstance(const Concurrent& conc) {
+//! Find the instantiated entity and check the instance's generic map against its interface
+bool Lowering::lookupInstanceModule(const Concurrent& conc, AstModule*& modp,
+                                    const EntityUnit*& entityp) {
     FileLine* const flp = conc.flp;
     freeInstanceBindings();
     if (!m_modulesp) {
         unsupportedError(flp, "instantiation without an elaborated design");
-        return nullptr;
+        return false;
     }
     const auto modIt = m_modulesp->find(conc.instanceName);
     if (modIt == m_modulesp->end()) {
@@ -1425,132 +1460,133 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                      << flp->warnMore()
                      << "... VHDL instantiates only entities analyzed with it; a SystemVerilog"
                         " module must be instantiated from an SV top, with this hierarchy built"
-                        " by --lib-create");
-        return nullptr;
+                        " by --lib-create.");
+        return false;
     }
-    AstModule* modp = modIt->second;
-    const EntityUnit* entityp = nullptr;
+    modp = modIt->second;
     if (m_designp) {
         const auto entityIt = m_designp->entities.find(conc.instanceName);
         if (entityIt != m_designp->entities.end()) entityp = entityIt->second;
     }
     if (!conc.genericAssociations.empty() && (!entityp || entityp->generics.empty())) {
         flp->v3error("VHDL: generic map on instance '" + conc.instanceLabel + "' of '"
-                     + conc.instanceName + "', which has no generics");
-        return nullptr;
+                     + conc.instanceName + "', which has no generics.");
+        return false;
     }
-    // A component declaration's interface must conform to the entity the instance binds,
-    // and the association formals are the component's (IEEE 1076-2008 6.5.2.2)
-    if (!conc.entityInstantiation && entityp) {
-        const auto componentIt = m_components.find(conc.instanceName);
-        if (componentIt != m_components.end()) {
-            const ComponentDecl& component = *componentIt->second;
-            const auto sameBase = [](const TypeSpec& lhs, const TypeSpec& rhs) {
-                return lhs.pkg == rhs.pkg && lhs.mark == rhs.mark
-                       && lhs.objectName == rhs.objectName && lhs.elementMark == rhs.elementMark;
-            };
-            bool ok = true;
-            std::set<std::string> componentPorts;
-            for (const PortDecl& port : component.ports) {
-                for (const auto& name : port.names) {
-                    componentPorts.insert(name.first);
-                    const PortDecl* entityPortp = nullptr;
-                    for (const PortDecl& entityPort : entityp->ports) {
-                        for (const auto& entityName : entityPort.names) {
-                            if (entityName.first == name.first) entityPortp = &entityPort;
-                        }
-                    }
-                    if (!entityPortp) {
-                        port.flp->v3error("VHDL: component '" + component.spelling
-                                          + "' declares port '" + name.second + "', which entity '"
-                                          + entityp->spelling + "' does not have");
-                        ok = false;
-                        continue;
-                    }
-                    if (entityPortp->dir != port.dir) {
-                        port.flp->v3error(
-                            "VHDL: port '" + name.second + "' of component '" + component.spelling
-                            + "' has a different mode from entity '" + entityp->spelling + "'");
-                        ok = false;
-                    }
-                    if (!sameBase(entityPortp->type, port.type)) {
-                        port.flp->v3error(
-                            "VHDL: port '" + name.second + "' of component '" + component.spelling
-                            + "' has a different type from entity '" + entityp->spelling + "'");
-                        ok = false;
-                    }
+    return true;
+}
+
+//! A component declaration's interface must conform to the entity the instance binds,
+//! and the association formals are the component's (IEEE 1076-2008 6.5.2.2)
+bool Lowering::checkComponentConformance(const Concurrent& conc, const EntityUnit& entity) {
+    const auto componentIt = m_components.find(conc.instanceName);
+    if (componentIt == m_components.end()) return true;
+    const ComponentDecl& component = *componentIt->second;
+    const auto sameBase = [](const TypeSpec& lhs, const TypeSpec& rhs) {
+        return lhs.pkg == rhs.pkg && lhs.mark == rhs.mark && lhs.objectName == rhs.objectName
+               && lhs.elementMark == rhs.elementMark;
+    };
+    bool ok = true;
+    std::set<std::string> componentPorts;
+    for (const PortDecl& port : component.ports) {
+        for (const auto& name : port.names) {
+            componentPorts.insert(name.first);
+            const PortDecl* entityPortp = nullptr;
+            for (const PortDecl& entityPort : entity.ports) {
+                for (const auto& entityName : entityPort.names) {
+                    if (entityName.first == name.first) entityPortp = &entityPort;
                 }
             }
-            for (const PortDecl& port : entityp->ports) {
-                for (const auto& name : port.names) {
-                    if (componentPorts.count(name.first)) continue;
-                    port.flp->v3error("VHDL: entity '" + entityp->spelling + "' has port '"
-                                      + name.second + "', which component '" + component.spelling
-                                      + "' does not declare");
-                    ok = false;
-                }
+            if (!entityPortp) {
+                port.flp->v3error("VHDL: component '" + component.spelling + "' declares port '"
+                                  + name.second + "', which entity '" + entity.spelling
+                                  + "' does not have.");
+                ok = false;
+                continue;
             }
-            std::map<std::string, const GenericDecl*> componentGenerics;
-            for (const GenericDecl& generic : component.generics) {
-                for (const auto& name : generic.names) {
-                    componentGenerics[name.first] = &generic;
-                }
-            }
-            std::set<std::string> entityGenerics;
-            for (const GenericDecl& generic : entityp->generics) {
-                for (const auto& name : generic.names) entityGenerics.insert(name.first);
-            }
-            for (const auto& entry : componentGenerics) {
-                const GenericDecl* entityGenericp = nullptr;
-                for (const GenericDecl& generic : entityp->generics) {
-                    for (const auto& name : generic.names) {
-                        if (name.first == entry.first) entityGenericp = &generic;
-                    }
-                }
-                if (!entityGenericp) {
-                    entry.second->flp->v3error("VHDL: component '" + component.spelling
-                                               + "' declares generic '" + entry.first
-                                               + "', which entity '" + entityp->spelling
-                                               + "' does not have");
-                    ok = false;
-                    continue;
-                }
-                const bool sameKind
-                    = entry.second->isType == entityGenericp->isType
-                      && entry.second->isSubprogram == entityGenericp->isSubprogram;
-                if (!sameKind
-                    || (!entry.second->isType && !entry.second->isSubprogram
-                        && !sameBase(entry.second->type, entityGenericp->type))) {
-                    entry.second->flp->v3error(
-                        "VHDL: generic '" + entry.first + "' of component '" + component.spelling
-                        + "' does not conform to entity '" + entityp->spelling + "'");
-                    ok = false;
-                }
-            }
-            for (const std::string& name : entityGenerics) {
-                if (componentGenerics.count(name)) continue;
-                entityp->flp->v3error("VHDL: entity '" + entityp->spelling + "' has generic '"
-                                      + name + "', which component '" + component.spelling
-                                      + "' does not declare");
+            if (entityPortp->dir != port.dir) {
+                port.flp->v3error("VHDL: port '" + name.second + "' of component '"
+                                  + component.spelling + "' has a different mode from entity '"
+                                  + entity.spelling + "'.");
                 ok = false;
             }
-            for (const PortAssoc& assoc : conc.associations) {
-                if (assoc.formal.empty() || componentPorts.count(assoc.formal)) continue;
-                assoc.flp->v3error("VHDL: component '" + component.spelling + "' has no port '"
-                                   + assoc.formalSpelling + "'");
+            if (!sameBase(entityPortp->type, port.type)) {
+                port.flp->v3error("VHDL: port '" + name.second + "' of component '"
+                                  + component.spelling + "' has a different type from entity '"
+                                  + entity.spelling + "'.");
                 ok = false;
             }
-            if (!ok) return nullptr;
         }
     }
+    for (const PortDecl& port : entity.ports) {
+        for (const auto& name : port.names) {
+            if (componentPorts.count(name.first)) continue;
+            port.flp->v3error("VHDL: entity '" + entity.spelling + "' has port '" + name.second
+                              + "', which component '" + component.spelling
+                              + "' does not declare.");
+            ok = false;
+        }
+    }
+    std::map<std::string, const GenericDecl*> componentGenerics;
+    for (const GenericDecl& generic : component.generics) {
+        for (const auto& name : generic.names) componentGenerics[name.first] = &generic;
+    }
+    std::set<std::string> entityGenerics;
+    for (const GenericDecl& generic : entity.generics) {
+        for (const auto& name : generic.names) entityGenerics.insert(name.first);
+    }
+    for (const auto& entry : componentGenerics) {
+        const GenericDecl* entityGenericp = nullptr;
+        for (const GenericDecl& generic : entity.generics) {
+            for (const auto& name : generic.names) {
+                if (name.first == entry.first) entityGenericp = &generic;
+            }
+        }
+        if (!entityGenericp) {
+            entry.second->flp->v3error("VHDL: component '" + component.spelling
+                                       + "' declares generic '" + entry.first + "', which entity '"
+                                       + entity.spelling + "' does not have.");
+            ok = false;
+            continue;
+        }
+        const bool sameKind = entry.second->isType == entityGenericp->isType
+                              && entry.second->isSubprogram == entityGenericp->isSubprogram;
+        if (!sameKind
+            || (!entry.second->isType && !entry.second->isSubprogram
+                && !sameBase(entry.second->type, entityGenericp->type))) {
+            entry.second->flp->v3error("VHDL: generic '" + entry.first + "' of component '"
+                                       + component.spelling + "' does not conform to entity '"
+                                       + entity.spelling + "'.");
+            ok = false;
+        }
+    }
+    for (const std::string& name : entityGenerics) {
+        if (componentGenerics.count(name)) continue;
+        entity.flp->v3error("VHDL: entity '" + entity.spelling + "' has generic '" + name
+                            + "', which component '" + component.spelling + "' does not declare.");
+        ok = false;
+    }
+    for (const PortAssoc& assoc : conc.associations) {
+        if (assoc.formal.empty() || componentPorts.count(assoc.formal)) continue;
+        assoc.flp->v3error("VHDL: component '" + component.spelling + "' has no port '"
+                           + assoc.formalSpelling + "'.");
+        ok = false;
+    }
+    return ok;
+}
+
+//! Select the pre-lowered module when an instance names a non-default architecture
+bool Lowering::selectInstanceArchitecture(const Concurrent& conc, const EntityUnit* entityp,
+                                          AstModule*& modp) {
+    FileLine* const flp = conc.flp;
     if (!conc.architectureName.empty()) {
         const bool known
             = entityp && m_designp && m_designp->archsByName.count(conc.instanceName)
               && m_designp->archsByName.at(conc.instanceName).count(conc.architectureName);
         if (!known) {
             flp->v3error("VHDL: entity '" + conc.instanceName + "' has no architecture '"
-                         + conc.architectureName + "'");
-            return nullptr;
+                         + conc.architectureName + "'.");
+            return false;
         }
         // A specialized module selects its architecture itself; the base module's is the
         // default, so only a different one needs the pre-lowered module
@@ -1563,15 +1599,20 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
                     = m_designp->archModules.find({conc.instanceName, conc.architectureName});
                 if (moduleIt == m_designp->archModules.end()) {
                     flp->v3error("VHDL: no module was lowered for entity '" + conc.instanceName
-                                 + "' and architecture '" + conc.architectureName + "'");
-                    return nullptr;
+                                 + "' and architecture '" + conc.architectureName + "'.");
+                    return false;
                 }
                 modp = moduleIt->second;
             }
         }
     }
+    return true;
+}
+
+//! Derive unconstrained port ranges at this instance and specialize the module
+bool Lowering::specializeInstancePorts(const Concurrent& conc, const EntityUnit* entityp,
+                                       AstModule*& modp, PortBoundsMap& portBounds) {
     if (entityp) m_designp->instantiated.insert(conc.instanceName);
-    PortBoundsMap portBounds;
     if (entityp) {
         for (const PortDecl& port : entityp->ports) {
             const bool unconstrainedRange
@@ -1583,17 +1624,23 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             PortBounds bounds;
             const bool ok = isRecordPort ? deriveRecordBounds(*entityp, conc, port, bounds)
                                          : derivePortBounds(*entityp, conc, port, bounds);
-            if (!ok) return nullptr;
+            if (!ok) return false;
             for (const auto& name : port.names) portBounds[name.first] = bounds;
         }
         if (!entityp->generics.empty() || !portBounds.empty()) {
             modp = specializeInstance(conc, *entityp, modp, portBounds);
-            if (!modp) return nullptr;
+            if (!modp) return false;
         } else {
             m_designp->baseUsed.insert(entityp->name);
         }
     }
-    std::vector<AstVar*> ports;
+    return true;
+}
+
+//! Collect the module's ports in pin order and reject excess positional associations
+bool Lowering::collectInstancePorts(const Concurrent& conc, AstModule* modp,
+                                    std::vector<AstVar*>& ports, bool& positional) {
+    FileLine* const flp = conc.flp;
     for (AstNode* const itemp : modp->stmtspList()) {
         AstVar* const varp = VN_CAST(itemp, Var);
         if (varp && varp->isIO()) ports.push_back(varp);
@@ -1601,358 +1648,402 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     std::sort(ports.begin(), ports.end(),
               [](const AstVar* l, const AstVar* r) { return l->pinNum() < r->pinNum(); });
     // Associations without a formal name are positional: they map to the next port
-    const bool positional
-        = std::any_of(conc.associations.begin(), conc.associations.end(),
-                      [](const PortAssoc& assoc) { return assoc.formal.empty(); });
+    positional = std::any_of(conc.associations.begin(), conc.associations.end(),
+                             [](const PortAssoc& assoc) { return assoc.formal.empty(); });
     if (positional && conc.associations.size() > ports.size()) {
         flp->v3error("VHDL: instance of '" + conc.instanceName
                      + "' associates more ports than "
-                       "the entity has");
-        return nullptr;
+                       "the entity has.");
+        return false;
     }
+    return true;
+}
+
+//! The record type a port was declared with, if any, for member associations
+VType Lowering::instanceRecordPortType(const EntityUnit* entityp, const AstVar* portp) const {
+    VType none;
+    if (!entityp) return none;
+    for (const PortDecl& port : entityp->ports) {
+        const bool match = std::any_of(port.names.begin(), port.names.end(),
+                                       [&](const std::pair<std::string, std::string>& name) {
+                                           return name.first == portp->name();
+                                       });
+        if (!match) continue;
+        VType found;
+        return resolvePortRecordType(*entityp, port, found) ? found : VType{};
+    }
+    return none;
+}
+
+const VField* Lowering::findRecordField(const VType& rec, const std::string& member) {
+    for (const VField& field : rec.fields)
+        if (field.name == member) return &field;
+    return nullptr;
+}
+
+//! An unassociated or `open` input takes its declared default; anything else
+//! stays unconnected (IEEE 1076-2008 6.5.7.1)
+AstNodeExpr* Lowering::instanceDeclaredDefault(const Concurrent& conc, const EntityUnit* entityp,
+                                               const AstVar* portp, const VType& aggType,
+                                               const VType& portType, bool& defaultError) {
+    FileLine* const flp = conc.flp;
+    if (!entityp || !portp->direction().isInput()) return nullptr;
+    for (const PortDecl& port : entityp->ports) {
+        if (!port.init) continue;
+        const bool matches = std::any_of(port.names.begin(), port.names.end(),
+                                         [&](const std::pair<std::string, std::string>& name) {
+                                             return name.first == portp->name();
+                                         });
+        if (!matches) continue;
+        // The default is written in the entity's scope, so its packages are visible
+        // there even when the instance does not import them, and its generics carry
+        // the values this instance binds (IEEE 1076-2008 6.5.7.1)
+        bool conforms = false;
+        AstNodeExpr* defaultp = nullptr;
+        {
+            ScopeSave saved = saveScope();
+            const std::set<std::string> savedImported = m_imported;
+            for (const auto& use : entityp->uses) importPackage(use.pkg, use.decl);
+            for (const TypeDecl& typeDecl : entityp->types) registerType(typeDecl);
+            registerGenerics(entityp->generics, &m_instanceBindings, true);
+            conforms = valueConforms(aggType, *port.init, "port default");
+            if (conforms) defaultp = lowerExpr(*port.init, &aggType);
+            restoreScope(saved);
+            m_imported = savedImported;
+        }
+        if (!conforms || !defaultp) {
+            defaultError = true;
+            return nullptr;
+        }
+        if (aggType.width > 0 && defaultp->width() != aggType.width) {
+            port.flp->v3error("VHDL: default of port " + portp->prettyNameQ()
+                              + " does not have the port's length (IEEE 1076-2008 6.5.7.1).");
+            defaultp->deleteTree();
+            defaultError = true;
+            return nullptr;
+        }
+        return resizeExpr(defaultp, portType, flp);
+    }
+    return nullptr;
+}
+
+//! Bind a record port whose individual elements are associated
+bool Lowering::bindRecordMemberPort(InstancePortBind& ctx, AstVar* portp,
+                                    const std::vector<const PortAssoc*>& assocs,
+                                    const VType& recType, AstNodeExpr*& actualp) {
+    FileLine* const flp = ctx.conc.flp;
+    if (recType.kind != VType::RECORD) {
+        unsupportedError(flp, "record-member association on a non-record port");
+        return false;
+    }
+    for (const PortAssoc* const assocp : assocs) {
+        if (assocp->formalMember.empty()) {
+            unsupportedError(assocp->flp, "mixing whole-port and record-member associations");
+            return false;
+        }
+    }
+    if (portp->direction().isOutput()) {
+        // Each member actual is driven from its element of a packed temp the instance
+        // writes, mirroring how the instance reads and writes record elements
+        AstVar* const tempVarp = new AstVar{
+            flp, VVarType::VAR, "__Vind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
+            portp->dtypep()};
+        m_modp->addStmtsp(tempVarp);
+        AstNodeStmt* headp = nullptr;
+        for (const PortAssoc* const assocp : assocs) {
+            if (!assocp->actual) continue;
+            const VField* const fieldp = findRecordField(recType, assocp->formalMember);
+            if (!fieldp) {
+                assocp->flp->v3error("VHDL: record port " + portp->prettyNameQ()
+                                     + " has no element '" + assocp->formalMemberSpelling + "'.");
+                if (headp) headp->deleteTree();
+                return false;
+            }
+            AstNodeExpr* const lhsp = lowerDesignator(*assocp->actual, true);
+            if (!lhsp) {
+                if (headp) headp->deleteTree();
+                return false;
+            }
+            AstSel* const rhsp = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
+                                            fieldp->offset, fieldp->width};
+            rhsp->dtypep(fieldp->type->dtp);
+            AstNodeStmt* const assp = new AstAssign{flp, lhsp, rhsp};
+            headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, assp) : assp;
+        }
+        if (headp) {
+            m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
+        }
+        actualp = new AstVarRef{flp, tempVarp, VAccess::WRITE};
+    } else {
+        // An input record packs its member actuals exactly like a record aggregate
+        Expr agg{Expr::AGG_NAMED};
+        agg.flp = flp;
+        for (const PortAssoc* const assocp : assocs) {
+            if (!assocp->actual) {
+                unsupportedError(assocp->flp, "open record-member port association");
+                return false;
+            }
+            ExprP choicep = std::make_unique<Expr>(Expr::NAME);
+            choicep->flp = flp;
+            choicep->text = assocp->formalMember;
+            choicep->spelling = assocp->formalMemberSpelling;
+            agg.choices.emplace_back();
+            agg.choices.back().push_back(std::move(choicep));
+            agg.args.push_back(cloneExpr(*assocp->actual));
+        }
+        actualp = lowerAggregate(agg, recType);
+        if (!actualp) return false;
+    }
+    return true;
+}
+
+//! Bind a whole port to one actual, or take its declared default for `open`
+bool Lowering::bindWholePort(InstancePortBind& ctx, AstVar* portp, const PortAssoc& assoc,
+                             const VType& aggType, const VType& portType, AstNodeExpr*& actualp) {
+    FileLine* const flp = ctx.conc.flp;
+    // The whole port connects to one actual; an `open` association leaves
+    // it unconnected, so an input takes its declared default
+    if (assoc.actual) {
+        // IEEE 1076-2008 6.5.2.2: the actual must conform to the formal's
+        // type. A scalar of another base type is a user error, not a resize.
+        if (!valueConforms(aggType, *assoc.actual, "port actual")) return false;
+        const bool driven = portp->direction().isOutput() || portp->direction().isInout();
+        AstNodeExpr* valuep
+            = driven ? lowerDesignator(*assoc.actual, true) : lowerExpr(*assoc.actual, &aggType);
+        if (!valuep) return false;
+        // valueConforms cannot see the element kind of a packed vector, and
+        // cannot size a literal or a context-typed call
+        const VType actualType = typeOfLowered(*assoc.actual, valuep);
+        bool conforms = true;
+        if (actualType.isVector() && portType.isVector()) {
+            conforms = actualType.width == portType.width;
+            if (conforms && assoc.actual->kind == Expr::NAME) {
+                conforms = actualType.kwd == portType.kwd;
+            }
+        }
+        if (!conforms) {
+            assoc.flp->v3error("VHDL: actual of port " + portp->prettyNameQ()
+                               + " does not conform to the port's type "
+                                 "(IEEE 1076-2008 6.5.2.2).");
+            valuep->deleteTree();
+            return false;
+        }
+        if (aggType.width > 0 && valuep->width() != aggType.width) {
+            assoc.flp->v3error("VHDL: actual of port " + portp->prettyNameQ()
+                               + " does not have the port's length "
+                                 "(IEEE 1076-2008 6.5.2.2).");
+            valuep->deleteTree();
+            return false;
+        }
+        actualp = resizeExpr(valuep, portType, flp);
+    } else {
+        actualp = instanceDeclaredDefault(ctx.conc, ctx.entityp, portp, aggType, portType,
+                                          ctx.defaultError);
+        if (!actualp && !ctx.defaultError && portp->direction().isInput()) {
+            assoc.flp->v3error("VHDL: input port " + portp->prettyNameQ()
+                               + " is left open and has no default value.");
+            return false;
+        }
+    }
+    return true;
+}
+
+//! Bind the individual bit ranges of a vector port
+bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
+                               const std::vector<const PortAssoc*>& assocs, const VType& portType,
+                               AstNodeExpr*& actualp) {
+    FileLine* const flp = ctx.conc.flp;
     //! One association of a port, resolved to the bit range it connects
     struct Connection final {
         int lsb = 0;
         int width = 1;
         const PortAssoc* assocp = nullptr;
     };
-    //! The record type a port was declared with, if any, for member associations
-    auto recordPortType = [&](const AstVar* const portp) -> VType {
-        VType none;
-        if (!entityp) return none;
-        for (const PortDecl& port : entityp->ports) {
-            const bool match = std::any_of(port.names.begin(), port.names.end(),
-                                           [&](const std::pair<std::string, std::string>& name) {
-                                               return name.first == portp->name();
-                                           });
-            if (!match) continue;
-            VType found;
-            return resolvePortRecordType(*entityp, port, found) ? found : VType{};
+    // Collect the bit range each association connects
+    std::vector<Connection> connections;
+    bool bad = false;
+    for (const PortAssoc* const assocp : assocs) {
+        int64_t left = 0;
+        int64_t right = 0;
+        if (!assocp->hasFormalRange) {
+            unsupportedError(assocp->flp, "mixing whole-port and part-port associations");
+            bad = true;
+            break;
         }
-        return none;
-    };
-    auto recordField = [](const VType& rec, const std::string& member) -> const VField* {
-        for (const VField& field : rec.fields)
-            if (field.name == member) return &field;
-        return nullptr;
-    };
-    // An unassociated or `open` input takes its declared default; anything else
-    // stays unconnected (IEEE 1076-2008 6.5.7.1)
-    bool defaultError = false;
-    auto declaredDefault = [&](const AstVar* const portp, const VType& aggType,
-                               const VType& portType) -> AstNodeExpr* {
-        if (!entityp || !portp->direction().isInput()) return nullptr;
-        for (const PortDecl& port : entityp->ports) {
-            if (!port.init) continue;
-            const bool matches = std::any_of(port.names.begin(), port.names.end(),
-                                             [&](const std::pair<std::string, std::string>& name) {
-                                                 return name.first == portp->name();
-                                             });
-            if (!matches) continue;
-            // The default is written in the entity's scope, so its packages are visible
-            // there even when the instance does not import them, and its generics carry
-            // the values this instance binds (IEEE 1076-2008 6.5.7.1)
-            bool conforms = false;
-            AstNodeExpr* defaultp = nullptr;
-            {
-                ScopeSave saved = saveScope();
-                const std::set<std::string> savedImported = m_imported;
-                for (const auto& use : entityp->uses) importPackage(use.pkg, use.decl);
-                for (const TypeDecl& typeDecl : entityp->types) registerType(typeDecl);
-                registerGenerics(entityp->generics, &m_instanceBindings, true);
-                conforms = valueConforms(aggType, *port.init, "port default");
-                if (conforms) defaultp = lowerExpr(*port.init, &aggType);
-                restoreScope(saved);
-                m_imported = savedImported;
-            }
-            if (!conforms || !defaultp) {
-                defaultError = true;
-                return nullptr;
-            }
-            if (aggType.width > 0 && defaultp->width() != aggType.width) {
-                port.flp->v3error("VHDL: default of port '" + portp->name()
-                                  + "' does not have the port's length (IEEE 1076-2008 6.5.7.1)");
-                defaultp->deleteTree();
-                defaultError = true;
-                return nullptr;
-            }
-            return resizeExpr(defaultp, portType, flp);
+        const bool haveRight = assocp->formalRight != nullptr;
+        if (!staticInt(assocp->formalLeft, left)
+            || (haveRight && !staticInt(assocp->formalRight, right))) {
+            unsupportedError(assocp->flp, "non-static port association range");
+            bad = true;
+            break;
         }
-        return nullptr;
-    };
-    AstPin* pinsp = nullptr;
-    for (size_t portIndex = 0; portIndex < ports.size(); ++portIndex) {
-        AstVar* const portp = ports[portIndex];
-        std::vector<const PortAssoc*> assocs;
-        if (positional) {
-            if (portIndex < conc.associations.size())
-                assocs.push_back(&conc.associations[portIndex]);
-        } else {
-            for (const PortAssoc& assoc : conc.associations) {
-                if (assoc.formal == portp->name()) assocs.push_back(&assoc);
+        if (!haveRight) right = left;
+        Connection connection;
+        const int offsetLeft = portType.indexOffset(static_cast<int>(left));
+        const int offsetRight = portType.indexOffset(static_cast<int>(right));
+        connection.lsb = std::min(offsetLeft, offsetRight);
+        connection.width = std::abs(offsetLeft - offsetRight) + 1;
+        if (connection.lsb < 0 || connection.lsb + connection.width > portType.width) {
+            assocp->flp->v3error("VHDL: association is out of range of port "
+                                 + portp->prettyNameQ() + ".");
+            bad = true;
+            break;
+        }
+        connection.assocp = assocp;
+        connections.push_back(connection);
+    }
+    if (bad) return false;
+    if (portp->direction().isInput()) {
+        // Concatenate from the most significant connected range down
+        std::sort(connections.begin(), connections.end(),
+                  [](const Connection& lhs, const Connection& rhs) { return lhs.lsb > rhs.lsb; });
+        for (const Connection& connection : connections) {
+            AstNodeExpr* valuep = nullptr;
+            if (connection.assocp->actual) {
+                const VType elementType
+                    = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
+                valuep = lowerExpr(*connection.assocp->actual, &elementType);
+                if (!valuep) return false;
+                valuep = resizeExpr(valuep, elementType, flp);
+            } else {
+                // An open input element contributes unknown bits
+                valuep = makeRepeatedConst(
+                    flp, vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width), 'x');
             }
-            // A whole port may be associated once; only a part of it (a slice or a record
-            // element) may be associated alongside another part
-            if (assocs.size() > 1
-                && std::any_of(assocs.begin(), assocs.end(), [](const PortAssoc* assocp) {
-                       return !assocp->hasFormalRange && assocp->formalMember.empty();
-                   })) {
-                flp->v3error("VHDL: port '" + assocs.front()->formalSpelling
-                             + "' is associated more than once");
-                return nullptr;
+            actualp = actualp ? static_cast<AstNodeExpr*>(new AstConcat{flp, actualp, valuep})
+                              : valuep;
+        }
+        actualp->dtypep(portp->dtypep());
+    } else {
+        // Outputs: each element actual is driven from its slice of a temp
+        AstVar* const tempVarp = new AstVar{
+            flp, VVarType::VAR, "__Vind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
+            portp->dtypep()};
+        m_modp->addStmtsp(tempVarp);
+        AstNodeStmt* headp = nullptr;
+        for (const Connection& connection : connections) {
+            if (!connection.assocp->actual) continue;
+            AstNodeExpr* const lhsp = lowerDesignator(*connection.assocp->actual, true);
+            if (!lhsp) {
+                if (headp) headp->deleteTree();
+                return false;
+            }
+            const VType elementType
+                = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
+            AstSel* const rhsp = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
+                                            connection.lsb, connection.width};
+            rhsp->dtypep(elementType.dtp);
+            AstNodeStmt* const assp = new AstAssign{flp, resizeExpr(lhsp, elementType, flp), rhsp};
+            headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, assp) : assp;
+        }
+        if (headp) {
+            m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
+        }
+        actualp = new AstVarRef{flp, tempVarp, VAccess::WRITE};
+    }
+    return true;
+}
+
+//! Bind one port's associations and append the resulting pin
+bool Lowering::bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t portIndex,
+                                AstPin*& pinsp) {
+    const Concurrent& conc = ctx.conc;
+    FileLine* const flp = conc.flp;
+    std::vector<const PortAssoc*> assocs;
+    if (ctx.positional) {
+        if (portIndex < conc.associations.size()) assocs.push_back(&conc.associations[portIndex]);
+    } else {
+        for (const PortAssoc& assoc : conc.associations) {
+            if (assoc.formal == portp->name()) assocs.push_back(&assoc);
+        }
+        // A whole port may be associated once; only a part of it (a slice or a record
+        // element) may be associated alongside another part
+        if (assocs.size() > 1
+            && std::any_of(assocs.begin(), assocs.end(), [](const PortAssoc* assocp) {
+                   return !assocp->hasFormalRange && assocp->formalMember.empty();
+               })) {
+            flp->v3error("VHDL: port '" + assocs.front()->formalSpelling
+                         + "' is associated more than once.");
+            return false;
+        }
+    }
+    const VType portType = typeOfDType(portp->dtypep());
+    // The packed vector of a record port does not name its elements, so an aggregate
+    // actual or default takes the record type the port is declared with. An
+    // unconstrained record port takes the element ranges this instance fixed.
+    VType recPortType = instanceRecordPortType(ctx.entityp, portp);
+    const auto boundsIt = ctx.portBounds.find(portp->name());
+    if (boundsIt != ctx.portBounds.end() && boundsIt->second.isRecord
+        && recPortType.kind == VType::RECORD) {
+        const PortBounds& bounds = boundsIt->second;
+        for (size_t i = 0; i < bounds.memberNames.size(); ++i) {
+            for (VField& field : recPortType.fields) {
+                if (field.name != bounds.memberNames[i]) continue;
+                setRecordField(flp, field, bounds.memberLeft[i], bounds.memberRight[i],
+                               bounds.memberAscending[i]);
             }
         }
-        const VType portType = typeOfDType(portp->dtypep());
-        // The packed vector of a record port does not name its elements, so an aggregate
-        // actual or default takes the record type the port is declared with. An
-        // unconstrained record port takes the element ranges this instance fixed.
-        VType recPortType = recordPortType(portp);
-        const auto boundsIt = portBounds.find(portp->name());
-        if (boundsIt != portBounds.end() && boundsIt->second.isRecord
-            && recPortType.kind == VType::RECORD) {
-            const PortBounds& bounds = boundsIt->second;
-            for (size_t i = 0; i < bounds.memberNames.size(); ++i) {
-                for (VField& field : recPortType.fields) {
-                    if (field.name != bounds.memberNames[i]) continue;
-                    setRecordField(flp, field, bounds.memberLeft[i], bounds.memberRight[i],
-                                   bounds.memberAscending[i]);
-                }
-            }
-            finalizeRecordFields(flp, recPortType);
+        finalizeRecordFields(flp, recPortType);
+    }
+    const VType& aggType = recPortType.kind == VType::RECORD ? recPortType : portType;
+    AstNodeExpr* actualp = nullptr;
+    if (assocs.empty()) {
+        actualp = instanceDeclaredDefault(conc, ctx.entityp, portp, aggType, portType,
+                                          ctx.defaultError);
+        if (!actualp && !ctx.defaultError && portp->direction().isInput()) {
+            flp->v3error("VHDL: input port " + portp->prettyNameQ()
+                         + " has no default value and is not associated.");
+            return false;
         }
-        const VType& aggType = recPortType.kind == VType::RECORD ? recPortType : portType;
-        if (assocs.empty()) {
-            AstNodeExpr* const defaultp = declaredDefault(portp, aggType, portType);
-            if (!defaultp && !defaultError && portp->direction().isInput()) {
-                flp->v3error("VHDL: input port '" + portp->name()
-                             + "' has no default value and is not associated");
-                return nullptr;
-            }
-            AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), defaultp};
-            pinp->modVarp(portp);
-            pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
-            continue;
-        }
+    } else {
         const bool partial
             = std::any_of(assocs.begin(), assocs.end(),
                           [](const PortAssoc* assocp) { return assocp->hasFormalRange; });
         const bool recordMember
             = std::any_of(assocs.begin(), assocs.end(),
                           [](const PortAssoc* assocp) { return !assocp->formalMember.empty(); });
-        AstNodeExpr* actualp = nullptr;
         if (recordMember) {
-            const VType& recType = recPortType;
-            if (recType.kind != VType::RECORD) {
-                unsupportedError(flp, "record-member association on a non-record port");
-                return nullptr;
-            }
-            for (const PortAssoc* const assocp : assocs) {
-                if (assocp->formalMember.empty()) {
-                    unsupportedError(assocp->flp,
-                                     "mixing whole-port and record-member associations");
-                    return nullptr;
-                }
-            }
-            if (portp->direction().isOutput()) {
-                // Each member actual is driven from its element of a packed temp the instance
-                // writes, mirroring how the instance reads and writes record elements
-                AstVar* const tempVarp
-                    = new AstVar{flp, VVarType::VAR,
-                                 "vhdlind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
-                                 portp->dtypep()};
-                m_modp->addStmtsp(tempVarp);
-                AstNodeStmt* headp = nullptr;
-                for (const PortAssoc* const assocp : assocs) {
-                    if (!assocp->actual) continue;
-                    const VField* const fieldp = recordField(recType, assocp->formalMember);
-                    if (!fieldp) {
-                        assocp->flp->v3error("VHDL: record port '" + portp->name()
-                                             + "' has no element '" + assocp->formalMemberSpelling
-                                             + "'");
-                        if (headp) headp->deleteTree();
-                        return nullptr;
-                    }
-                    AstNodeExpr* const lhsp = lowerDesignator(*assocp->actual, true);
-                    if (!lhsp) {
-                        if (headp) headp->deleteTree();
-                        return nullptr;
-                    }
-                    AstSel* const rhsp
-                        = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
-                                     fieldp->offset, fieldp->width};
-                    rhsp->dtypep(fieldp->type->dtp);
-                    AstNodeStmt* const assp = new AstAssign{flp, lhsp, rhsp};
-                    headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, assp) : assp;
-                }
-                if (headp) {
-                    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
-                }
-                actualp = new AstVarRef{flp, tempVarp, VAccess::WRITE};
-            } else {
-                // An input record packs its member actuals exactly like a record aggregate
-                Expr agg{Expr::AGG_NAMED};
-                agg.flp = flp;
-                for (const PortAssoc* const assocp : assocs) {
-                    if (!assocp->actual) {
-                        unsupportedError(assocp->flp, "open record-member port association");
-                        return nullptr;
-                    }
-                    ExprP choicep = std::make_unique<Expr>(Expr::NAME);
-                    choicep->flp = flp;
-                    choicep->text = assocp->formalMember;
-                    choicep->spelling = assocp->formalMemberSpelling;
-                    agg.choices.emplace_back();
-                    agg.choices.back().push_back(std::move(choicep));
-                    agg.args.push_back(cloneExpr(*assocp->actual));
-                }
-                actualp = lowerAggregate(agg, recType);
-                if (!actualp) return nullptr;
-            }
+            if (!bindRecordMemberPort(ctx, portp, assocs, recPortType, actualp)) return false;
         } else if (!partial) {
-            // The whole port connects to one actual; an `open` association leaves
-            // it unconnected, so an input takes its declared default
-            const PortAssoc& assoc = *assocs.front();
-            if (assoc.actual) {
-                // IEEE 1076-2008 6.5.2.2: the actual must conform to the formal's
-                // type. A scalar of another base type is a user error, not a resize.
-                if (!valueConforms(aggType, *assoc.actual, "port actual")) return nullptr;
-                const bool driven = portp->direction().isOutput() || portp->direction().isInout();
-                AstNodeExpr* valuep = driven ? lowerDesignator(*assoc.actual, true)
-                                             : lowerExpr(*assoc.actual, &aggType);
-                if (!valuep) return nullptr;
-                // valueConforms cannot see the element kind of a packed vector, and
-                // cannot size a literal or a context-typed call
-                const VType actualType = typeOfLowered(*assoc.actual, valuep);
-                bool conforms = true;
-                if (actualType.isVector() && portType.isVector()) {
-                    conforms = actualType.width == portType.width;
-                    if (conforms && assoc.actual->kind == Expr::NAME) {
-                        conforms = actualType.kwd == portType.kwd;
-                    }
-                }
-                if (!conforms) {
-                    assoc.flp->v3error("VHDL: actual of port '" + portp->name()
-                                       + "' does not conform to the port's type "
-                                         "(IEEE 1076-2008 6.5.2.2)");
-                    valuep->deleteTree();
-                    return nullptr;
-                }
-                if (aggType.width > 0 && valuep->width() != aggType.width) {
-                    assoc.flp->v3error("VHDL: actual of port '" + portp->name()
-                                       + "' does not have the port's length "
-                                         "(IEEE 1076-2008 6.5.2.2)");
-                    valuep->deleteTree();
-                    return nullptr;
-                }
-                actualp = resizeExpr(valuep, portType, flp);
-            } else {
-                actualp = declaredDefault(portp, aggType, portType);
-                if (!actualp && !defaultError && portp->direction().isInput()) {
-                    assoc.flp->v3error("VHDL: input port '" + portp->name()
-                                       + "' is left open and has no default value");
-                    return nullptr;
-                }
+            if (!bindWholePort(ctx, portp, *assocs.front(), aggType, portType, actualp)) {
+                return false;
             }
         } else if (!portType.isVector() || portType.elemWidth != 1) {
             unsupportedError(flp, "part of a port that is not a bit vector");
-            return nullptr;
+            return false;
         } else if (portp->direction().isInout()) {
             unsupportedError(flp, "part of an inout port");
-            return nullptr;
-        } else {
-            // Collect the bit range each association connects
-            std::vector<Connection> connections;
-            bool bad = false;
-            for (const PortAssoc* const assocp : assocs) {
-                int64_t left = 0;
-                int64_t right = 0;
-                if (!assocp->hasFormalRange) {
-                    unsupportedError(assocp->flp, "mixing whole-port and part-port associations");
-                    bad = true;
-                    break;
-                }
-                const bool haveRight = assocp->formalRight != nullptr;
-                if (!staticInt(assocp->formalLeft, left)
-                    || (haveRight && !staticInt(assocp->formalRight, right))) {
-                    unsupportedError(assocp->flp, "non-static port association range");
-                    bad = true;
-                    break;
-                }
-                if (!haveRight) right = left;
-                Connection connection;
-                const int offsetLeft = portType.indexOffset(static_cast<int>(left));
-                const int offsetRight = portType.indexOffset(static_cast<int>(right));
-                connection.lsb = std::min(offsetLeft, offsetRight);
-                connection.width = std::abs(offsetLeft - offsetRight) + 1;
-                if (connection.lsb < 0 || connection.lsb + connection.width > portType.width) {
-                    assocp->flp->v3error("VHDL: association is out of range of port '"
-                                         + portp->name() + "'");
-                    bad = true;
-                    break;
-                }
-                connection.assocp = assocp;
-                connections.push_back(connection);
-            }
-            if (bad) return nullptr;
-            if (portp->direction().isInput()) {
-                // Concatenate from the most significant connected range down
-                std::sort(connections.begin(), connections.end(),
-                          [](const Connection& lhs, const Connection& rhs) {
-                              return lhs.lsb > rhs.lsb;
-                          });
-                for (const Connection& connection : connections) {
-                    AstNodeExpr* valuep = nullptr;
-                    if (connection.assocp->actual) {
-                        const VType elementType
-                            = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
-                        valuep = lowerExpr(*connection.assocp->actual, &elementType);
-                        if (!valuep) return nullptr;
-                        valuep = resizeExpr(valuep, elementType, flp);
-                    } else {
-                        // An open input element contributes unknown bits
-                        valuep = makeRepeatedConst(
-                            flp, vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width),
-                            'x');
-                    }
-                    actualp = actualp
-                                  ? static_cast<AstNodeExpr*>(new AstConcat{flp, actualp, valuep})
-                                  : valuep;
-                }
-                actualp->dtypep(portp->dtypep());
-            } else {
-                // Outputs: each element actual is driven from its slice of a temp
-                AstVar* const tempVarp
-                    = new AstVar{flp, VVarType::VAR,
-                                 "vhdlind_" + std::to_string(++m_loopSeq) + "__" + portp->name(),
-                                 portp->dtypep()};
-                m_modp->addStmtsp(tempVarp);
-                AstNodeStmt* headp = nullptr;
-                for (const Connection& connection : connections) {
-                    if (!connection.assocp->actual) continue;
-                    AstNodeExpr* const lhsp = lowerDesignator(*connection.assocp->actual, true);
-                    if (!lhsp) {
-                        if (headp) headp->deleteTree();
-                        return nullptr;
-                    }
-                    const VType elementType
-                        = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
-                    AstSel* const rhsp
-                        = new AstSel{flp, new AstVarRef{flp, tempVarp, VAccess::READ},
-                                     connection.lsb, connection.width};
-                    rhsp->dtypep(elementType.dtp);
-                    AstNodeStmt* const assp
-                        = new AstAssign{flp, resizeExpr(lhsp, elementType, flp), rhsp};
-                    headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, assp) : assp;
-                }
-                if (headp) {
-                    m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, headp});
-                }
-                actualp = new AstVarRef{flp, tempVarp, VAccess::WRITE};
-            }
+            return false;
+        } else if (!bindPartialPort(ctx, portp, assocs, portType, actualp)) {
+            return false;
         }
-        AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), actualp};
-        pinp->modVarp(portp);
-        pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
+    }
+    AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), actualp};
+    pinp->modVarp(portp);
+    pinsp = pinsp ? AstNode::addNext<AstPin, AstPin>(pinsp, pinp) : pinp;
+    return true;
+}
+
+//! An instantiation becomes an AstCell bound to the instantiated entity's module
+AstNode* Lowering::lowerInstance(const Concurrent& conc) {
+    FileLine* const flp = conc.flp;
+    AstModule* modp = nullptr;
+    const EntityUnit* entityp = nullptr;
+    if (!lookupInstanceModule(conc, modp, entityp)) return nullptr;
+    // A component declaration's interface must conform to the entity the instance binds
+    if (!conc.entityInstantiation && entityp && !checkComponentConformance(conc, *entityp)) {
+        return nullptr;
+    }
+    if (!selectInstanceArchitecture(conc, entityp, modp)) return nullptr;
+    PortBoundsMap portBounds;
+    if (!specializeInstancePorts(conc, entityp, modp, portBounds)) return nullptr;
+    std::vector<AstVar*> ports;
+    bool positional = false;
+    if (!collectInstancePorts(conc, modp, ports, positional)) return nullptr;
+    InstancePortBind ctx{conc, entityp, portBounds, positional, false};
+    AstPin* pinsp = nullptr;
+    for (size_t portIndex = 0; portIndex < ports.size(); ++portIndex) {
+        if (!bindInstancePort(ctx, ports[portIndex], portIndex, pinsp)) return nullptr;
     }
     if (!positional) {
         for (const PortAssoc& assoc : conc.associations) {
@@ -1961,7 +2052,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
             });
             if (!known) {
                 flp->v3error("VHDL: entity '" + conc.instanceName + "' has no port '"
-                             + assoc.formalSpelling + "'");
+                             + assoc.formalSpelling + "'.");
             }
         }
     }
@@ -2034,75 +2125,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         return;
     }
     if (stmt.kind == Concurrent::GEN_FOR) {
-        // A generate loop is unrolled with its parameter bound as a constant
-        int64_t left = 0;
-        int64_t right = 0;
-        bool up = stmt.rangeAscending;
-        // `for i in obj'range generate` iterates the object's own bounds, which come from
-        // its type just as a `prefix'range` slice does
-        const Expr* const rangep
-            = !stmt.hi && stmt.lo && stmt.lo->kind == Expr::ATTR
-                      && (stmt.lo->text == "range" || stmt.lo->text == "reverse_range")
-                  ? stmt.lo.get()
-                  : nullptr;
-        if (rangep) {
-            if (!rangep->a || rangep->a->kind != Expr::NAME) {
-                unsupportedError(stmt.flp, "generate over 'range of a non-name prefix");
-                return;
-            }
-            const VType* const rangeTypep = typeOfName(*rangep->a);
-            if (!rangeTypep) {
-                unsupportedError(stmt.flp, "generate over 'range of an unknown name");
-                return;
-            }
-            const bool reverse = rangep->text == "reverse_range";
-            left = reverse ? rangeTypep->right : rangeTypep->left;
-            right = reverse ? rangeTypep->left : rangeTypep->right;
-            up = reverse ? !rangeTypep->ascending : rangeTypep->ascending;
-        } else if (!stmt.hi && stmt.lo && stmt.lo->kind == Expr::NAME) {
-            // `for i in <subtype> generate` iterates the subtype's own bounds
-            // (IEEE 1076-2008 11.8), as a loop over a discrete subtype does
-            const auto subtypeIt = m_types.find(stmt.lo->text);
-            if (subtypeIt == m_types.end() || subtypeIt->second.kind != VType::INT) {
-                unsupportedError(stmt.flp, "generate over a name that is not a subtype");
-                return;
-            }
-            left = subtypeIt->second.intLow;
-            right = subtypeIt->second.intHigh;
-            up = left <= right;
-        } else if (!staticInt(stmt.lo, left) || !staticInt(stmt.hi, right)) {
-            unsupportedError(stmt.flp, "generate range that is not static");
-            return;
-        }
-        if (up ? right < left : right > left) return;  // Empty range
-        if (std::llabs(right - left) > 4096) {
-            unsupportedError(stmt.flp, "generate range with more than 4096 iterations");
-            return;
-        }
-        const auto saved = m_consts.find(stmt.loopVar);
-        const bool hadConst = saved != m_consts.end();
-        const int64_t savedValue = hadConst ? saved->second : 0;
-        for (int64_t value = left;; value += up ? 1 : -1) {
-            const ScopeSave saved = saveScope();
-            const std::string savedSuffix = m_genSuffix;
-            m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
-            m_consts[stmt.loopVar] = value;
-            emitLocalDecls(stmt.decls, stmt.types, "vhdlgen_");
-            registerComponents(stmt.components);
-            registerSubprograms(stmt.subprograms, -1);
-            for (const auto& bodyConcp : stmt.body) {
-                if (bodyConcp) emitConcurrent(*bodyConcp);
-            }
-            m_genSuffix = savedSuffix;
-            restoreScope(saved);
-            m_consts[stmt.loopVar] = value;
-            if (value == right) break;
-        }
-        if (hadConst) {
-            m_consts[stmt.loopVar] = savedValue;
-        } else {
-            m_consts.erase(stmt.loopVar);
-        }
+        emitGenerateFor(stmt);
         return;
     }
     if (stmt.kind == Concurrent::GEN_IF) {
@@ -2132,7 +2155,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         const ScopeSave saved = saveScope();
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
-        emitLocalDecls(takenp->decls, takenp->types, "vhdlgen_");
+        emitLocalDecls(takenp->decls, takenp->types, "__Vgen_");
         registerComponents(takenp->components);
         registerSubprograms(takenp->subprograms, -1);
         for (const auto& bodyConcp : takenp->stmts) {
@@ -2145,7 +2168,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
     if (stmt.kind == Concurrent::BLOCK) {
         // A block's declarative items are visible to its statements only
         const ScopeSave saved = saveScope();
-        emitLocalDecls(stmt.decls, stmt.types, "vhdlblk_");
+        emitLocalDecls(stmt.decls, stmt.types, "__Vblk_");
         registerComponents(stmt.components);
         registerSubprograms(stmt.subprograms, -1);
         for (const auto& bodyConcp : stmt.body) {
@@ -2163,6 +2186,79 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         return;
     }
     emitConcurrentAssign(stmt);
+}
+
+void Lowering::emitGenerateFor(const Concurrent& stmt) {
+    // A generate loop is unrolled with its parameter bound as a constant
+    int64_t left = 0;
+    int64_t right = 0;
+    bool up = stmt.rangeAscending;
+    // `for i in obj'range generate` iterates the object's own bounds, which come from
+    // its type just as a `prefix'range` slice does
+    const Expr* const rangep
+        = !stmt.hi && stmt.lo && stmt.lo->kind == Expr::ATTR
+                  && (stmt.lo->text == "range" || stmt.lo->text == "reverse_range")
+              ? stmt.lo.get()
+              : nullptr;
+    if (rangep) {
+        if (!rangep->a || rangep->a->kind != Expr::NAME) {
+            unsupportedError(stmt.flp, "generate over 'range of a non-name prefix");
+            return;
+        }
+        const VType* const rangeTypep = typeOfName(*rangep->a);
+        if (!rangeTypep) {
+            unsupportedError(stmt.flp, "generate over 'range of an unknown name");
+            return;
+        }
+        const bool reverse = rangep->text == "reverse_range";
+        left = reverse ? rangeTypep->right : rangeTypep->left;
+        right = reverse ? rangeTypep->left : rangeTypep->right;
+        up = reverse ? !rangeTypep->ascending : rangeTypep->ascending;
+    } else if (!stmt.hi && stmt.lo && stmt.lo->kind == Expr::NAME) {
+        // `for i in <subtype> generate` iterates the subtype's own bounds
+        // (IEEE 1076-2008 11.8), as a loop over a discrete subtype does
+        const auto subtypeIt = m_types.find(stmt.lo->text);
+        if (subtypeIt == m_types.end() || subtypeIt->second.kind != VType::INT) {
+            unsupportedError(stmt.flp, "generate over a name that is not a subtype");
+            return;
+        }
+        left = subtypeIt->second.intLow;
+        right = subtypeIt->second.intHigh;
+        up = left <= right;
+    } else if (!staticInt(stmt.lo, left) || !staticInt(stmt.hi, right)) {
+        unsupportedError(stmt.flp, "generate range that is not static");
+        return;
+    }
+    if (up ? right < left : right > left) return;  // Empty range
+    if (std::llabs(right - left) > MAX_FOLD_ITERATIONS) {
+        unsupportedError(stmt.flp, "generate range with more than "
+                                       + std::to_string(MAX_FOLD_ITERATIONS) + " iterations");
+        return;
+    }
+    const auto saved = m_consts.find(stmt.loopVar);
+    const bool hadConst = saved != m_consts.end();
+    const int64_t savedValue = hadConst ? saved->second : 0;
+    for (int64_t value = left;; value += up ? 1 : -1) {
+        const ScopeSave saved = saveScope();
+        const std::string savedSuffix = m_genSuffix;
+        m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
+        m_consts[stmt.loopVar] = value;
+        emitLocalDecls(stmt.decls, stmt.types, "__Vgen_");
+        registerComponents(stmt.components);
+        registerSubprograms(stmt.subprograms, -1);
+        for (const auto& bodyConcp : stmt.body) {
+            if (bodyConcp) emitConcurrent(*bodyConcp);
+        }
+        m_genSuffix = savedSuffix;
+        restoreScope(saved);
+        m_consts[stmt.loopVar] = value;
+        if (value == right) break;
+    }
+    if (hadConst) {
+        m_consts[stmt.loopVar] = savedValue;
+    } else {
+        m_consts.erase(stmt.loopVar);
+    }
 }
 
 //! One concurrent assignment, with the statements an inlined call's locals produced
@@ -2211,45 +2307,7 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
         return;
     }
     if (stmt.kind == Concurrent::COND_ASSIGN && concHasEdge(stmt)) {
-        // Register clocked by the edge the condition names
-        m_edges.clear();
-        m_initial = false;
-        // Names tested before the clocked branch, e.g. an asynchronous reset
-        std::set<std::string> levelNames;
-        for (const auto& alt : stmt.alternatives) {
-            if (alt.second && containsEdgeCall(*alt.second)) break;
-            if (alt.second) collectExprNames(*alt.second, levelNames);
-        }
-        AstNodeStmt* const bodyp = lowerClockedAlternatives(stmt, ltype, lhsp);
-        const std::vector<Edge> edges = m_edges;
-        m_edges.clear();
-        AstSenItem* itemsp = nullptr;
-        for (const Edge& edge : edges) {
-            AstSenItem* const itemp = new AstSenItem{
-                stmt.flp, edge.type, new AstVarRef{stmt.flp, edge.varp, VAccess::READ}};
-            itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
-        }
-        for (const std::string& name : levelNames) {
-            const auto it = m_scope.find(name);
-            if (it == m_scope.end()) continue;
-            if (std::any_of(edges.begin(), edges.end(),
-                            [&](const Edge& edge) { return edge.varp == it->second.varp; })) {
-                continue;
-            }
-            AstSenItem* const itemp
-                = new AstSenItem{stmt.flp, VEdgeType::ET_CHANGED,
-                                 new AstVarRef{stmt.flp, it->second.varp, VAccess::READ}};
-            itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
-        }
-        if (!bodyp || !itemsp) {
-            if (bodyp) bodyp->deleteTree();
-            if (itemsp) itemsp->deleteTree();
-            lhsp->deleteTree();
-            return;
-        }
-        m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS,
-                                        new AstSenTree{stmt.flp, itemsp}, takePendingFor(bodyp)});
-        lhsp->deleteTree();
+        emitClockedConcurrentAssign(stmt, ltype, lhsp);
         return;
     }
     const bool holds = !stmt.alternatives.empty()
@@ -2283,39 +2341,7 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
         return;
     }
     if (!stmt.waveform.empty()) {
-        // A waveform list repeats: each element after the first waits its own delay, and
-        // the last element's delay closes the period (IEEE 1800-2023 10.6)
-        AstNodeStmt* bodyp = new AstAssign{stmt.flp, lhsp, rhsp};
-        const Expr* lastDelayp = stmt.delay.get();
-        for (const auto& element : stmt.waveform) {
-            if (element.second) {
-                AstNodeStmt* const delayp = lowerDelay(*element.second, stmt.flp);
-                if (!delayp) {
-                    bodyp->deleteTree();
-                    return;
-                }
-                bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp);
-                lastDelayp = element.second.get();
-            }
-            AstNodeExpr* const elementp = lowerExpr(*element.first, &ltype);
-            if (!elementp) {
-                bodyp->deleteTree();
-                return;
-            }
-            bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(
-                bodyp, new AstAssign{stmt.flp, lhsp->cloneTree(false),
-                                     resizeExpr(elementp, ltype, stmt.flp)});
-        }
-        if (lastDelayp) {
-            AstNodeStmt* const delayp = lowerDelay(*lastDelayp, stmt.flp);
-            if (!delayp) {
-                bodyp->deleteTree();
-                return;
-            }
-            bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp);
-        }
-        m_modp->addStmtsp(
-            new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, takePendingFor(bodyp)});
+        emitConcurrentWaveform(stmt, ltype, lhsp, rhsp);
         return;
     }
     if (stmt.delay && !staticZeroDelay(stmt.delay)) {
@@ -2333,6 +2359,85 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
     }
     m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
                                     takePendingFor(new AstAssignW{stmt.flp, lhsp, rhsp})});
+}
+
+void Lowering::emitClockedConcurrentAssign(const Concurrent& stmt, const VType& ltype,
+                                           AstNodeExpr* lhsp) {
+    // Register clocked by the edge the condition names
+    m_edges.clear();
+    m_initial = false;
+    // Names tested before the clocked branch, e.g. an asynchronous reset
+    std::set<std::string> levelNames;
+    for (const auto& alt : stmt.alternatives) {
+        if (alt.second && containsEdgeCall(*alt.second)) break;
+        if (alt.second) collectExprNames(*alt.second, levelNames);
+    }
+    AstNodeStmt* const bodyp = lowerClockedAlternatives(stmt, ltype, lhsp);
+    const std::vector<Edge> edges = m_edges;
+    m_edges.clear();
+    AstSenItem* itemsp = nullptr;
+    for (const Edge& edge : edges) {
+        AstSenItem* const itemp = new AstSenItem{
+            stmt.flp, edge.type, new AstVarRef{stmt.flp, edge.varp, VAccess::READ}};
+        itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+    }
+    for (const std::string& name : levelNames) {
+        const auto it = m_scope.find(name);
+        if (it == m_scope.end()) continue;
+        if (std::any_of(edges.begin(), edges.end(),
+                        [&](const Edge& edge) { return edge.varp == it->second.varp; })) {
+            continue;
+        }
+        AstSenItem* const itemp
+            = new AstSenItem{stmt.flp, VEdgeType::ET_CHANGED,
+                             new AstVarRef{stmt.flp, it->second.varp, VAccess::READ}};
+        itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+    }
+    if (!bodyp || !itemsp) {
+        if (bodyp) bodyp->deleteTree();
+        if (itemsp) itemsp->deleteTree();
+        lhsp->deleteTree();
+        return;
+    }
+    m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, new AstSenTree{stmt.flp, itemsp},
+                                    takePendingFor(bodyp)});
+    lhsp->deleteTree();
+}
+
+void Lowering::emitConcurrentWaveform(const Concurrent& stmt, const VType& ltype,
+                                      AstNodeExpr* lhsp, AstNodeExpr* rhsp) {
+    // A waveform list repeats: each element after the first waits its own delay, and
+    // the last element's delay closes the period (IEEE 1076-2008 10.5)
+    AstNodeStmt* bodyp = new AstAssign{stmt.flp, lhsp, rhsp};
+    const Expr* lastDelayp = stmt.delay.get();
+    for (const auto& element : stmt.waveform) {
+        if (element.second) {
+            AstNodeStmt* const delayp = lowerDelay(*element.second, stmt.flp);
+            if (!delayp) {
+                bodyp->deleteTree();
+                return;
+            }
+            bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp);
+            lastDelayp = element.second.get();
+        }
+        AstNodeExpr* const elementp = lowerExpr(*element.first, &ltype);
+        if (!elementp) {
+            bodyp->deleteTree();
+            return;
+        }
+        bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(
+            bodyp, new AstAssign{stmt.flp, lhsp->cloneTree(false),
+                                 resizeExpr(elementp, ltype, stmt.flp)});
+    }
+    if (lastDelayp) {
+        AstNodeStmt* const delayp = lowerDelay(*lastDelayp, stmt.flp);
+        if (!delayp) {
+            bodyp->deleteTree();
+            return;
+        }
+        bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delayp);
+    }
+    m_modp->addStmtsp(new AstAlways{stmt.flp, VAlwaysKwd::ALWAYS, nullptr, takePendingFor(bodyp)});
 }
 
 //######################################################################

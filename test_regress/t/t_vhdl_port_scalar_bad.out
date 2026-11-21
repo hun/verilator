@@ -1,5 +1,5 @@
-%Error: t/t_vhdl_port_scalar_bad.vhdl:53:1: VHDL: port actual of type 'integer' does not have the target's base type 'std_ulogic'
+%Error: t/t_vhdl_port_scalar_bad.vhdl:53:1: VHDL: port actual of type 'integer' does not have the target's base type 'std_ulogic'.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_port_scalar_bad.vhdl:54:1: VHDL: port actual of type 'integer' does not have the target's base type 'std_ulogic'
-%Error: t/t_vhdl_port_scalar_bad.vhdl:31:1: VHDL: port default of type 'integer' does not have the target's base type 'std_ulogic'
+%Error: t/t_vhdl_port_scalar_bad.vhdl:54:1: VHDL: port actual of type 'integer' does not have the target's base type 'std_ulogic'.
+%Error: t/t_vhdl_port_scalar_bad.vhdl:31:1: VHDL: port default of type 'integer' does not have the target's base type 'std_ulogic'.
 %Error: Exiting due to

@@ -14,7 +14,7 @@
 //
 //*************************************************************************
 //
-// Lowers one analyzed entity/architecture pair into the committed (post-width)
+// Lowers one analyzed entity/architecture pair into the committed pre-width
 // Verilator AST: the node shapes, dtype canonicalization and re-entry contract
 // match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
 // is emitted under its folded (lowercase) form -- the spelling as written stays
@@ -170,7 +170,7 @@ bool physicalValue(const Design& design, const Expr& expr, int64_t& out) {
         if (it != design.unitFactors.end()) {
             factor = it->second;
         } else if (!predefinedUnit(expr.text, factor)) {
-            expr.flp->v3error("Unknown VHDL physical unit: '" + expr.spelling + "'");
+            expr.flp->v3error("Unknown VHDL physical unit: '" + expr.spelling + "'.");
             return false;
         }
     }
@@ -230,7 +230,7 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
         if (!names.insert(pkg.name).second) {
             pkg.flp->v3error(
                 (pkg.isBody ? "Duplicate VHDL package body: '" : "Duplicate VHDL package: '")
-                + pkg.spelling + "'");
+                + pkg.spelling + "'.");
             continue;
         }
         if (isTemplate(pkg)) continue;
@@ -238,7 +238,7 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
     }
     for (const PackageInstance& inst : library.packageInstances) {
         if (!specNames.insert(inst.name).second) {
-            inst.flp->v3error("Duplicate VHDL package: '" + inst.spelling + "'");
+            inst.flp->v3error("Duplicate VHDL package: '" + inst.spelling + "'.");
             continue;
         }
         lowering.instantiatePackage(library.packages, inst, table.impl());
@@ -247,7 +247,7 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
     for (const PackageUnit& pkg : library.packages) {
         if (pkg.isBody && !specNames.count(pkg.name)) {
             pkg.flp->v3error("VHDL: package body '" + pkg.spelling
-                             + "' has no package specification");
+                             + "' has no package specification.");
         }
     }
     // A specification constant whose call had no body when the specification was emitted
@@ -286,7 +286,7 @@ void collectUnconstrainedRecordMembers(const DesignLibrary& library, Unconstrain
     const auto scan = [&](const std::vector<TypeDecl>& types) {
         for (const TypeDecl& decl : types) {
             if (decl.kind != TypeDecl::RECORD) continue;
-            std::set<std::string> members;
+            std::unordered_set<std::string> members;
             for (const TypeDecl::Member& member : decl.members) {
                 if (!memberTypeUnconstrained(member.type)) continue;
                 for (const auto& name : member.names) members.insert(name.first);

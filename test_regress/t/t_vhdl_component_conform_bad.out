@@ -1,7 +1,7 @@
-%Error: t/t_vhdl_component_conform_bad.vhdl:49:1: VHDL: component 'leaf_rename' declares port 'x', which entity 'leaf_rename' does not have
+%Error: t/t_vhdl_component_conform_bad.vhdl:49:1: VHDL: component 'leaf_rename' declares port 'x', which entity 'leaf_rename' does not have.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_component_conform_bad.vhdl:50:1: VHDL: component 'leaf_rename' declares port 'y', which entity 'leaf_rename' does not have
-%Error: t/t_vhdl_component_conform_bad.vhdl:17:1: VHDL: entity 'leaf_rename' has port 'a', which component 'leaf_rename' does not declare
-%Error: t/t_vhdl_component_conform_bad.vhdl:18:1: VHDL: entity 'leaf_rename' has port 'b', which component 'leaf_rename' does not declare
-%Error: t/t_vhdl_component_conform_bad.vhdl:55:1: VHDL: port 'a' of component 'leaf_type' has a different type from entity 'leaf_type'
+%Error: t/t_vhdl_component_conform_bad.vhdl:50:1: VHDL: component 'leaf_rename' declares port 'y', which entity 'leaf_rename' does not have.
+%Error: t/t_vhdl_component_conform_bad.vhdl:17:1: VHDL: entity 'leaf_rename' has port 'a', which component 'leaf_rename' does not declare.
+%Error: t/t_vhdl_component_conform_bad.vhdl:18:1: VHDL: entity 'leaf_rename' has port 'b', which component 'leaf_rename' does not declare.
+%Error: t/t_vhdl_component_conform_bad.vhdl:55:1: VHDL: port 'a' of component 'leaf_type' has a different type from entity 'leaf_type'.
 %Error: Exiting due to

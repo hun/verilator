@@ -1,3 +1,3 @@
-%Error: t/t_vhdl_cfg_spec_unsup.vhdl:29:1: Unsupported: VHDL configuration specification
+%Error: t/t_vhdl_cfg_spec_unsup.vhdl:29:1: Unsupported: VHDL configuration specification.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

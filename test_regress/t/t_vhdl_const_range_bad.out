@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_const_range_bad.vhdl:20:1: VHDL: constant value is out of the range of subtype 'small' (IEEE 1076-2008 5.4)
+%Error: t/t_vhdl_const_range_bad.vhdl:20:1: VHDL: constant value is out of the range of subtype 'small' (IEEE 1076-2008 5.2.1).
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_const_range_bad.vhdl:22:1: VHDL: unknown identifier 'k'
+%Error: t/t_vhdl_const_range_bad.vhdl:22:1: VHDL: unknown identifier 'k'.
 %Error: Exiting due to

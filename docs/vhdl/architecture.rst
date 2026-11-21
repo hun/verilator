@@ -2,9 +2,9 @@
    SPDX-FileCopyrightText: 2026-2026 Wilson Snyder
    SPDX-License-Identifier: CC0-1.0
 
-##################################
+==================================
 Native VHDL frontend architecture
-##################################
+==================================
 
 The native frontend translates SystemVerilog's cousin, VHDL, directly into the
 V3 AST that the rest of Verilator consumes. It is the only VHDL frontend and
@@ -20,9 +20,9 @@ The driver is ``V3VhdlParseImp::finish()``, which calls
    files --> parse --> DesignLibrary --> lowerPackages --> createModules
          --> per-entity lower --> V3 AST --> (unchanged V3 passes)
 
-_______________
+---------------
 Source layout
-_______________
+---------------
 
 ======================================================  ============================================
 File                                                    Role
@@ -32,7 +32,10 @@ File                                                    Role
 ``src/V3VhdlNativeAst.h``                               The frontend's own syntax tree
 ``src/V3VhdlNativeLexer.cpp``                           Lexer: tokens, including VHDL literals
 ``src/V3VhdlNativeParse.cpp``                           Parser: design units to ``DesignLibrary``
-``src/V3VhdlNativeLower.h``, ``.cpp``                   Elaboration: the frontend AST to the V3 AST
+``src/V3VhdlNativeLower.h``, ``.cpp``                   Public lowering entry point
+``src/V3VhdlNativeLower*.cpp``                          Seven per-construct lowering units
+``src/V3VhdlNativeLowerImpl.h``                         Shared declarations of the ``Lowering`` pass
+``src/V3VhdlNativeTypes.h``                             Value types shared by the lowering units
 ======================================================  ============================================
 
 The frontend is deliberately two trees rather than one. The parser builds a tree
@@ -42,9 +45,9 @@ is what lets a construct be refused with a diagnostic that names the source
 before any V3 node exists, and what keeps the parser free of Verilator's
 infrastructure.
 
-__________________
+------------------
 The frontend's AST
-__________________
+------------------
 
 ``V3VhdlNativeAst.h`` declares the design units and the trees inside them.
 
@@ -68,9 +71,9 @@ One detail matters throughout the lowering: a name with arguments parses as an
 known to name a subprogram. Code that looks for a call must therefore consult
 the prefix as well as a folded ``CALL`` name.
 
-__________________
+------------------
 Parse
-__________________
+------------------
 
 ``parseFile(file, library)`` runs the lexer and the parser over one file and
 appends its design units to the library. Context clauses (``library``, ``use``)
@@ -101,9 +104,9 @@ lowered value:
   name); the element designator is its own sensitivity item, so the process
   runs on that element's events and not on another element's (11.3).
 
-___________
+-----------
 Elaboration
-___________
+-----------
 
 ``V3VhdlNative::emit`` is the ordered part. Order is the design:
 
@@ -127,9 +130,9 @@ The pass is one ``Lowering`` object per module, sharing a ``Design`` context:
 the entity and architecture maps, the specialization cache, and the counters
 that name specialized modules.
 
-_________
+---------
 Lowering
-_________
+---------
 
 ``Lowering::emit`` lowers an entity and its architecture into an ``AstModule``.
 Its state is what makes VHDL's declarative parts work:
@@ -185,9 +188,10 @@ refused, since a sensitized process cannot contain one. A ``for`` loop whose
 range folds is unrolled with the index as a compile-time constant; a range that
 does not fold becomes a runtime loop over a fresh integer variable that the body
 reads and writes through the scope, with the bound captured into a temporary at
-entry so the trip count cannot change. A ``wait for`` or an ``after`` delay
-becomes an ``AstDelay`` scaled to the module's time unit, defaulting to one
-picosecond when the design has no timescale.
+entry so the trip count cannot change. A ``wait for`` becomes an ``AstDelay``
+scaled to the module's time unit, defaulting to one picosecond when the design
+has no timescale; a zero ``after`` in a process body is a delta, and a longer
+one there is refused.
 
 **Choice lists.** Every case and selected-assignment choice list is validated as
 it lowers: a value covered twice (an overlapping range is one), a second
@@ -214,18 +218,19 @@ writes do not collide; a static element index is folded for the comparison,
 while a dynamic one conservatively covers the whole signal. `std_logic` and the
 arrays built from it are resolved and exempt.
 
-**Reports and termination.** ``report`` lowers to a display; ``std.env.finish``
-lowers to ``$finish``. A report whose message is not a literal is dropped, since
-only a literal is modelled, but a literal message is a string whatever its
-characters are -- the parser keeps a message whole instead of retyping it as a
-bit string. A report or assertion of ``severity failure`` ends the run at the
-statement: the statements after it are not lowered, and after a failing
+**Reports and termination.** ``report`` and ``assert`` lower to a display;
+``std.env.finish`` lowers to ``$finish``. A literal message is kept whole as a
+string, whatever its characters are -- the parser does not retype it as a bit
+string. A non-literal message is not modelled, but the statement still runs: its
+text falls back to ``report`` (or to ``Assertion failed`` for an assertion). A
+report or assertion of ``severity failure`` appends an ``AstFinish`` at the
+statement, so the statements after it are not lowered, and after a failing
 assertion they run only when it did not fail. A process whose only stopper is
 such a failure runs once, at time zero.
 
-_______________
+---------------
 What it may not do
-_______________
+---------------
 
 The frontend may not add a V3 AST node, a V3 pass or a runtime primitive. Every
 construct is expressed with nodes the middle end already has: ``AstAlways``,
@@ -242,12 +247,11 @@ Two consequences follow, and both have caused bugs worth knowing about:
 - ``AstNode::addNext`` requires its first node, so an empty statement list is a
   head, not a gap to be linked into.
 
-_______________
+---------------
 Testing
-_______________
+---------------
 
 Every construct the frontend supports is pinned by a test in ``test_regress/t``
 that fails without it. The suite checks generated C++ values directly; no
-external simulator is invoked. GHDL and nvc are used only for external corpus
-sweeps that are not reproducible from this repository. The current coverage
-and remaining correctness risks are assessed in :doc:`review`.
+external simulator is invoked. The supported subset and its known divergences
+are documented in :doc:`limitations`.

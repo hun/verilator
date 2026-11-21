@@ -35,21 +35,21 @@ class V3VhdlParseImp;
 //! emits Verilator AST nodes. finish() must run after all files and before V3LinkCells.
 class V3VhdlParse final {
     V3VhdlParseImp* m_impp;  // Implementation
-    std::set<const AstNodeModule*> m_modules;  // Modules finish() emitted
+    std::set<AstNodeModule*> m_modules;  // Modules finish() emitted
     VL_UNCOPYABLE(V3VhdlParse);
 
 public:
     explicit V3VhdlParse(AstNetlist* rootp) VL_MT_DISABLED;
     ~V3VhdlParse() VL_MT_DISABLED;
 
-    //! Parse one file into the design library; does not touch the Verilator netlist
+    //! Parse one file into the design library; may add an AstNotFoundModule for a missing file
     void parseFile(FileLine* fileline, const std::string& filename, bool inLibrary, bool inLibMap,
                    const std::string& libname, const std::string& errmsg,
                    const std::string& notFoundName = "") VL_MT_DISABLED;
     //! Analyze and elaborate all design units, then emit AstModules
     void finish() VL_MT_DISABLED;
-    //! Modules and packages finish() emitted, for checks that must not see other languages
-    const std::set<const AstNodeModule*>& modules() const { return m_modules; }
+    //! Modules finish() emitted, for checks that must not see Verilog modules
+    const std::set<AstNodeModule*>& modules() const { return m_modules; }
 };
 
 #endif  // Guard

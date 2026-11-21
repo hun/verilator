@@ -14,7 +14,7 @@ test.top_filename = 't/t_vhdl_wait_sens_bad.vhdl'
 
 # IEEE 1076-2008 10.2: a sensitized process has no wait statement
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

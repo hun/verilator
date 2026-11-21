@@ -28,6 +28,8 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class AstModule;
@@ -68,7 +70,7 @@ struct SpecKeyLess final {
 };
 
 //! Record type mark -> the names of its unconstrained array elements
-using UnconstrainedRecordMap = std::map<std::string, std::set<std::string>>;
+using UnconstrainedRecordMap = std::unordered_map<std::string, std::unordered_set<std::string>>;
 
 //! Elaborated package declarations, shared by every unit that uses them
 class PackageTable final {
@@ -84,7 +86,7 @@ public:
     const Impl& impl() const { return *m_implp; }
 
 private:
-    std::unique_ptr<Impl> m_implp;
+    std::unique_ptr<Impl> m_implp;  // Elaborated package declarations
 };
 
 struct Design;
@@ -100,21 +102,21 @@ void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
 //! Design context shared by every lowering of one run. Entities whose generics lack
 //! a default get a module per generic binding; the specializations are cached by key.
 struct Design final {
-    std::map<std::string, const EntityUnit*> entities;  // Folded entity name -> entity
+    std::unordered_map<std::string, const EntityUnit*> entities;  // Folded entity name -> entity
     // Folded entity name -> default architecture
-    std::map<std::string, const Architecture*> archs;
+    std::unordered_map<std::string, const Architecture*> archs;
     // Folded entity name -> folded architecture name -> architecture
-    std::map<std::string, std::map<std::string, const Architecture*>> archsByName;
+    std::unordered_map<std::string, std::map<std::string, const Architecture*>> archsByName;
     // (entity, architecture) selected by an instance -> the module lowered with it
     std::map<std::pair<std::string, std::string>, AstModule*> archModules;
     std::map<SpecKey, AstModule*, SpecKeyLess> specializations;  // Binding key -> module
-    std::set<std::string> instantiated;  // Entities named by at least one instance
-    std::set<std::string> baseUsed;  // Entities whose base module an instance binds to
+    std::unordered_set<std::string> instantiated;  // Entities named by at least one instance
+    std::unordered_set<std::string> baseUsed;  // Entities whose base module an instance binds to
     UnconstrainedRecordMap unconstrainedRecordMembers;  // Unconstrained record elements
     // Physical unit name -> multiple of its type's step unit, and the names two physical
     // types give different multiples to, which no literal can name without its type
-    std::map<std::string, int64_t> unitFactors;
-    std::set<std::string> ambiguousUnits;
+    std::unordered_map<std::string, int64_t> unitFactors;
+    std::unordered_set<std::string> ambiguousUnits;
     int specSeq = 0;  // Disambiguates the specialized module names
     int specDepth = 0;  // Generic specialization recursion depth
 };

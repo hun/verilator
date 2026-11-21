@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_const_wide_unsup.vhdl:24:1: Unsupported: VHDL constant value that is too wide to fold
+%Error: t/t_vhdl_const_wide_unsup.vhdl:24:1: Unsupported: VHDL constant value that is too wide to fold.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_const_wide_unsup.vhdl:26:1: VHDL: unknown identifier 'image'
+%Error: t/t_vhdl_const_wide_unsup.vhdl:26:1: VHDL: unknown identifier 'image'.
 %Error: Exiting due to

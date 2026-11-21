@@ -59,14 +59,14 @@ public:
     ~V3VhdlParseImp() = default;
 
     //! Parse, elaborate and lower the collected files in-tree, recording the modules it adds
-    void finish(std::set<const AstNodeModule*>& emitted);
+    void finish(std::set<AstNodeModule*>& emitted);
 };
 
-void V3VhdlParseImp::finish(std::set<const AstNodeModule*>& emitted) {
+void V3VhdlParseImp::finish(std::set<AstNodeModule*>& emitted) {
     if (m_files.empty()) return;
     // A mixed design parses SystemVerilog sources into the same netlist, so remember which
     // modules this frontend adds for the checks that only apply to its own AST
-    std::set<const AstNodeModule*> before;
+    std::set<AstNodeModule*> before;
     for (AstNodeModule* modp = m_rootp->modulesp(); modp;
          modp = VN_AS(modp->nextp(), NodeModule)) {
         before.insert(modp);
@@ -77,8 +77,8 @@ void V3VhdlParseImp::finish(std::set<const AstNodeModule*>& emitted) {
         files.push_back(V3VhdlNativeFile{vfile.filename, vfile.libname, vfile.inLibrary});
     }
     V3VhdlNative::emit(m_rootp, files);
-    // The report counts the modules the sources produced, which the Verilog path counts
-    // while it links; VHDL mode skips that link, so count what the frontend emitted
+    // Count modules here: V3LinkParse, which adds the same stat later in the pipeline,
+    // has not run yet at finish() time
     uint64_t modules = 0;
     for (AstNodeModule* modp = m_rootp->modulesp(); modp;
          modp = VN_AS(modp->nextp(), NodeModule)) {
@@ -106,7 +106,7 @@ void V3VhdlParse::parseFile(FileLine* fileline, const std::string& filename, boo
     if (v3Global.opt.preprocOnly()) return;  // VHDL has no preprocessor
     if (inLibMap) {
         fileline->v3error(
-            "Library map files are not supported for VHDL sources");  // LCOV_EXCL_LINE
+            "Library map files are not supported for VHDL sources.");  // LCOV_EXCL_LINE
         return;
     }
 

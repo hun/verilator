@@ -14,7 +14,7 @@ test.top_filename = 't/t_vhdl_recursive_bad.vhdl'
 
 
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't_recursive'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't_recursive'],
              fails=True,
              expect_filename=test.golden_filename)
 

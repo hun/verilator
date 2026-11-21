@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_type_conf_bad.vhdl'
 # IEEE 1076-2008 10.5.1, 10.5.2, 12.5 and 9.3.6: assignment, return, call and
 # conversion values must belong to the target's base type or be closely related
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

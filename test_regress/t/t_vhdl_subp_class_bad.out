@@ -1,5 +1,5 @@
-%Error: t/t_vhdl_subp_class_bad.vhdl:31:1: VHDL: 'f' designates a function, not a procedure
+%Error: t/t_vhdl_subp_class_bad.vhdl:31:1: VHDL: 'f' designates a function, not a procedure.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_subp_class_bad.vhdl:32:1: VHDL: procedure 'p' used in an expression
-%Error: t/t_vhdl_subp_class_bad.vhdl:37:1: VHDL: 'f' designates a function, not a procedure
+%Error: t/t_vhdl_subp_class_bad.vhdl:32:1: VHDL: procedure 'p' used in an expression.
+%Error: t/t_vhdl_subp_class_bad.vhdl:37:1: VHDL: 'f' designates a function, not a procedure.
 %Error: Exiting due to

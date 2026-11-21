@@ -14,11 +14,7 @@
 //
 //*************************************************************************
 //
-// Lowers one analyzed entity/architecture pair into the committed pre-width
-// Verilator AST: the node shapes, dtype canonicalization and re-entry contract
-// match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
-// is emitted under its folded (lowercase) form -- the spelling as written stays
-// available for diagnostics only.
+// Registers VHDL types and folds elaboration-time type and constant expressions
 //
 //*************************************************************************
 
@@ -111,142 +107,14 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
     case Expr::INT_LIT: value = expr.intValue; return true;
     case Expr::PHYS_LIT: return physicalValue(*m_designp, expr, value);
     case Expr::REAL_LIT:
-        // A universal_real in an integer context, IEEE 1800-2023 7.3.5
+        // An integral real literal folded to an integer value
         if (std::isfinite(expr.realValue) && expr.realValue == std::floor(expr.realValue)) {
             value = static_cast<int64_t>(expr.realValue);
             return true;
         }
         return false;
-    case Expr::NAME: {
-        if (!m_pureCalls.empty()) {
-            const auto argIt = m_pureCalls.back().args.find(expr.text);
-            if (argIt != m_pureCalls.back().args.end()) return evalInt(*argIt->second, value);
-        }
-        const auto bindIt = activeEnv().find(expr.text);
-        if (bindIt != activeEnv().end() && VN_IS(bindIt->second.exprp, Const)
-            && !isAggregateType(bindIt->second.type)) {
-            // A fold is speculative and reports nothing, so a value that does not fit an
-            // integer is simply not folded (a string, or more than 64 bits)
-            const AstConst* const boundp = VN_AS(bindIt->second.exprp, Const);
-            if (boundp->num().isFourState() || boundp->width() > 64) return false;
-            value = boundp->num().isSigned() ? boundp->num().toSQuad()
-                                             : static_cast<int64_t>(boundp->num().toUQuad());
-            return true;
-        }
-        const auto it = m_consts.find(expr.text);
-        if (it != m_consts.end()) {
-            value = it->second;
-            return true;
-        }
-        const auto preIt = m_preConsts.find(expr.text);
-        if (preIt != m_preConsts.end()) {
-            value = preIt->second;
-            return true;
-        }
-        if (m_ambiguousLiterals.count(expr.text)) return false;
-        const auto enumIt = m_enumConsts.find(expr.text);
-        if (enumIt != m_enumConsts.end()) {
-            value = static_cast<int64_t>(enumIt->second->num().toUInt());
-            return true;
-        }
-        const auto valueIt = m_constValues.find(expr.text);
-        if (valueIt != m_constValues.end()) {
-            const auto constTypeIt = m_constTypes.find(expr.text);
-            if (constTypeIt != m_constTypes.end()
-                && (constTypeIt->second.kind == VType::INT
-                    || constTypeIt->second.kind == VType::ENUM)) {
-                value = static_cast<int64_t>(valueIt->second->num().toUInt());
-                return true;
-            }
-        }
-        // A function without a formal may be named without parentheses
-        const Expr* returnp = nullptr;
-        if (pushPureCall(expr, returnp)) {
-            const bool folded = evalInt(*returnp, value);
-            popPureCall();
-            return folded;
-        }
-        return false;
-    }
-    case Expr::ATTR: {
-        // Attributes of a type mark or name whose value is known statically
-        if (!expr.a || expr.a->kind != Expr::NAME) return false;
-        const VType* typep = typeOfName(*expr.a);
-        VType predefined;
-        if (!typep) {
-            const auto typeIt = m_types.find(expr.a->text);
-            if (typeIt != m_types.end()) {
-                typep = &typeIt->second;
-            } else if (predefinedIntegerType(expr.flp, expr.a->text, predefined)) {
-                typep = &predefined;
-            } else {
-                return false;
-            }
-        }
-        const std::string& attribute = expr.text;
-        // Fold to the index range the attribute names, which a bracketed index selects
-        typep = indexRangeLevel(expr, *typep);
-        if (!typep) return false;
-        if (attribute == "length") {
-            value = typep->length();
-            return true;
-        }
-        if (attribute == "left") {
-            value = typep->left;
-            return true;
-        }
-        if (attribute == "right") {
-            value = typep->right;
-            return true;
-        }
-        if (attribute == "low") {
-            value = typep->kind == VType::ENUM ? 0 : std::min(typep->left, typep->right);
-            return true;
-        }
-        if (attribute == "high") {
-            value = typep->kind == VType::ENUM ? static_cast<int64_t>(typep->literals.size()) - 1
-                                               : std::max(typep->left, typep->right);
-            return true;
-        }
-        if (expr.args.size() != 1) return false;
-        int64_t position = 0;
-        if (!evalInt(*expr.args[0], position)) return false;
-        if (attribute == "pos") {
-            value = position;
-            return true;
-        }
-        if (attribute == "val") {
-            // IEEE 1076-2008 16.2.2: 'val outside the type's range is an error
-            if (typep->kind == VType::ENUM) {
-                const int64_t count = static_cast<int64_t>(typep->literals.size());
-                if (position < 0 || position >= count) {
-                    expr.flp->v3error("VHDL: 'val outside the range of the type");
-                    return false;
-                }
-            }
-            value = position;
-            return true;
-        }
-        if (typep->kind != VType::ENUM) return false;
-        const int64_t count = static_cast<int64_t>(typep->literals.size());
-        if (attribute == "succ" || attribute == "pred") {
-            const int64_t next = attribute == "succ" ? position + 1 : position - 1;
-            if (position < 0 || position >= count) {
-                expr.flp->v3error("VHDL: '" + std::string{attribute}
-                                  + "' value is outside the enumeration type");
-                return false;
-            }
-            if (next < 0 || next >= count) {
-                expr.flp->v3error("VHDL: '" + std::string{attribute} + "' of the "
-                                  + (attribute == "succ" ? "last" : "first")
-                                  + " enumeration literal is outside the type");
-                return false;
-            }
-            value = next;
-            return true;
-        }
-        return false;
-    }
+    case Expr::NAME: return evalIntName(expr, value);
+    case Expr::ATTR: return evalIntAttribute(expr, value);
     case Expr::PAREN: return evalInt(*expr.a, value);
     case Expr::UNARY: {
         int64_t operand = 0;
@@ -265,99 +133,238 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
         }
         return false;
     }
-    case Expr::BINARY: {
-        // An expression with a real operand is a real expression: dividing two integers
-        // here would truncate each step instead of the result
-        if (hasRealLiteral(expr)) {
-            double realValue = 0.0;
-            if (!evalReal(expr, realValue)) return false;
-            // The value is consumed as an integer, so it rounds like a conversion
-            value = static_cast<int64_t>(std::llround(realValue));
-            return true;
-        }
-        int64_t lhs = 0;
-        int64_t rhs = 0;
-        if (!evalInt(*expr.a, lhs) || !evalInt(*expr.b, rhs)) return false;
-        const std::string& op = expr.text;
-        if (op == "+") {
-            value = lhs + rhs;
-        } else if (op == "-") {
-            value = lhs - rhs;
-        } else if (op == "*") {
-            value = lhs * rhs;
-        } else if (op == "/") {
-            if (rhs == 0) return false;
-            value = lhs / rhs;
-        } else if (op == "rem") {
-            if (rhs == 0) return false;
-            value = lhs - (lhs / rhs) * rhs;
-        } else if (op == "mod") {
-            if (rhs == 0) return false;
-            value = lhs - (lhs / rhs) * rhs;
-            if (value != 0 && ((value < 0) != (rhs < 0))) value += rhs;
-        } else if (op == "**") {
-            // Integer exponentiation with a non-negative exponent
-            if (rhs < 0) return false;
-            int64_t result = 1;
-            int64_t base = lhs;
-            int64_t exponent = rhs;
-            while (exponent > 0) {
-                if (exponent & 1) {
-                    if (__builtin_mul_overflow(result, base, &result)) return false;
-                }
-                exponent >>= 1;
-                if (exponent && __builtin_mul_overflow(base, base, &base)) return false;
-            }
-            value = result;
-        } else {
-            return false;
-        }
-        return true;
-    }
-    case Expr::INDEX: {
-        // The callee may be qualified (`ieee.math_real.round(...)`), whose selected name
-        // is the function itself
-        if (!expr.a || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::SELECTED))
-            return false;
-        const Expr* returnp = nullptr;
-        if (pushPureCall(expr, returnp)) {
-            const bool folded = evalInt(*returnp, value);
-            popPureCall();
-            if (folded) return true;
-        }
-        const std::string& fn = expr.a->text;
-        if (expr.args.size() == 2) {
-            int64_t lhs = 0;
-            int64_t rhs = 0;
-            if ((fn != "min" && fn != "max") || !evalInt(*expr.args[0], lhs)
-                || !evalInt(*expr.args[1], rhs))
-                return false;
-            value = fn == "min" ? std::min(lhs, rhs) : std::max(lhs, rhs);
-            return true;
-        }
-        if (expr.args.size() != 1) return false;
-        // real(integer) is integral, so it folds as an integer and the real expression
-        // around it stays inside the constant folders
-        if (fn == "real") return evalInt(*expr.args[0], value);
-        double real = 0.0;
-        if (!evalReal(*expr.args[0], real)) return false;
-        if (fn == "ceil") {
-            value = static_cast<int64_t>(std::ceil(real));
-        } else if (fn == "floor") {
-            value = static_cast<int64_t>(std::floor(real));
-        } else if (fn == "trunc") {
-            value = static_cast<int64_t>(std::trunc(real));
-        } else if (fn == "round" || fn == "natural" || fn == "positive" || fn == "integer") {
-            // A conversion to an integer type rounds to nearest, as IEEE 1076-2008 9.3.6
-            // says; only trunc() truncates
-            value = static_cast<int64_t>(std::llround(real));
-        } else {
-            return false;
-        }
-        return true;
-    }
+    case Expr::BINARY: return evalIntBinary(expr, value);
+    case Expr::INDEX: return evalIntIndex(expr, value);
     default: return false;
     }
+}
+
+//! Integer value of a name: a bound pure-call formal, a constant, or a foldable call
+bool Lowering::evalIntName(const Expr& expr, int64_t& value) const {
+    if (!m_pureCalls.empty()) {
+        const auto argIt = m_pureCalls.back().args.find(expr.text);
+        if (argIt != m_pureCalls.back().args.end()) return evalInt(*argIt->second, value);
+    }
+    const auto bindIt = activeEnv().find(expr.text);
+    if (bindIt != activeEnv().end() && !isAggregateType(bindIt->second.type)) {
+        // A fold is speculative and reports nothing, so a value that does not fit an
+        // integer is simply not folded (a string, or more than 64 bits)
+        if (const AstConst* const boundp = VN_CAST(bindIt->second.exprp, Const)) {
+            if (boundp->num().isFourState() || boundp->width() > 64) return false;
+            value = boundp->num().isSigned() ? boundp->num().toSQuad()
+                                             : static_cast<int64_t>(boundp->num().toUQuad());
+            return true;
+        }
+    }
+    const auto it = m_consts.find(expr.text);
+    if (it != m_consts.end()) {
+        value = it->second;
+        return true;
+    }
+    const auto preIt = m_preConsts.find(expr.text);
+    if (preIt != m_preConsts.end()) {
+        value = preIt->second;
+        return true;
+    }
+    if (m_ambiguousLiterals.count(expr.text)) return false;
+    const auto enumIt = m_enumConsts.find(expr.text);
+    if (enumIt != m_enumConsts.end()) {
+        value = static_cast<int64_t>(enumIt->second->num().toUInt());
+        return true;
+    }
+    const auto valueIt = m_constValues.find(expr.text);
+    if (valueIt != m_constValues.end()) {
+        const auto constTypeIt = m_constTypes.find(expr.text);
+        if (constTypeIt != m_constTypes.end()
+            && (constTypeIt->second.kind == VType::INT
+                || constTypeIt->second.kind == VType::ENUM)) {
+            value = static_cast<int64_t>(valueIt->second->num().toUInt());
+            return true;
+        }
+    }
+    // A function without a formal may be named without parentheses
+    const Expr* returnp = nullptr;
+    if (pushPureCall(expr, returnp)) {
+        const bool folded = evalInt(*returnp, value);
+        popPureCall();
+        return folded;
+    }
+    return false;
+}
+
+//! Integer value of an attribute of a type mark, including its position attributes
+bool Lowering::evalIntAttribute(const Expr& expr, int64_t& value) const {
+    // Attributes of a type mark or name whose value is known statically
+    if (!expr.a || expr.a->kind != Expr::NAME) return false;
+    const VType* typep = typeOfName(*expr.a);
+    VType predefined;
+    if (!typep) {
+        const auto typeIt = m_types.find(expr.a->text);
+        if (typeIt != m_types.end()) {
+            typep = &typeIt->second;
+        } else if (predefinedIntegerType(expr.flp, expr.a->text, predefined)) {
+            typep = &predefined;
+        } else {
+            return false;
+        }
+    }
+    const std::string& attribute = expr.text;
+    // Fold to the index range the attribute names, which a bracketed index selects
+    typep = indexRangeLevel(expr, *typep);
+    if (!typep) return false;
+    if (attribute == "length") {
+        value = typep->length();
+        return true;
+    }
+    if (attribute == "left") {
+        value = typep->left;
+        return true;
+    }
+    if (attribute == "right") {
+        value = typep->right;
+        return true;
+    }
+    if (attribute == "low") {
+        value = typep->kind == VType::ENUM ? 0 : std::min(typep->left, typep->right);
+        return true;
+    }
+    if (attribute == "high") {
+        value = typep->kind == VType::ENUM ? static_cast<int64_t>(typep->literals.size()) - 1
+                                           : std::max(typep->left, typep->right);
+        return true;
+    }
+    if (expr.args.size() != 1) return false;
+    int64_t position = 0;
+    if (!evalInt(*expr.args[0], position)) return false;
+    if (attribute == "pos") {
+        value = position;
+        return true;
+    }
+    if (attribute == "val") {
+        // IEEE 1076-2008 16.2.2: 'val outside the type's range is an error
+        if (typep->kind == VType::ENUM) {
+            const int64_t count = static_cast<int64_t>(typep->literals.size());
+            if (position < 0 || position >= count) {
+                expr.flp->v3error("VHDL: 'val outside the range of the type.");
+                return false;
+            }
+        }
+        value = position;
+        return true;
+    }
+    if (typep->kind != VType::ENUM) return false;
+    const int64_t count = static_cast<int64_t>(typep->literals.size());
+    if (attribute == "succ" || attribute == "pred") {
+        const int64_t next = attribute == "succ" ? position + 1 : position - 1;
+        if (position < 0 || position >= count) {
+            expr.flp->v3error("VHDL: '" + std::string{attribute}
+                              + "' value is outside the enumeration type.");
+            return false;
+        }
+        if (next < 0 || next >= count) {
+            expr.flp->v3error("VHDL: '" + std::string{attribute} + "' of the "
+                              + (attribute == "succ" ? "last" : "first")
+                              + " enumeration literal is outside the type.");
+            return false;
+        }
+        value = next;
+        return true;
+    }
+    return false;
+}
+
+//! Integer value of a binary operation on two constant operands
+bool Lowering::evalIntBinary(const Expr& expr, int64_t& value) const {
+    // An expression with a real operand is a real expression: dividing two integers
+    // here would truncate each step instead of the result
+    if (hasRealLiteral(expr)) {
+        double realValue = 0.0;
+        if (!evalReal(expr, realValue)) return false;
+        // The value is consumed as an integer, so it rounds like a conversion
+        value = static_cast<int64_t>(std::llround(realValue));
+        return true;
+    }
+    int64_t lhs = 0;
+    int64_t rhs = 0;
+    if (!evalInt(*expr.a, lhs) || !evalInt(*expr.b, rhs)) return false;
+    const std::string& op = expr.text;
+    if (op == "+") {
+        value = lhs + rhs;
+    } else if (op == "-") {
+        value = lhs - rhs;
+    } else if (op == "*") {
+        value = lhs * rhs;
+    } else if (op == "/") {
+        if (rhs == 0) return false;
+        value = lhs / rhs;
+    } else if (op == "rem") {
+        if (rhs == 0) return false;
+        value = lhs - (lhs / rhs) * rhs;
+    } else if (op == "mod") {
+        if (rhs == 0) return false;
+        value = lhs - (lhs / rhs) * rhs;
+        if (value != 0 && ((value < 0) != (rhs < 0))) value += rhs;
+    } else if (op == "**") {
+        // Integer exponentiation with a non-negative exponent
+        if (rhs < 0) return false;
+        int64_t result = 1;
+        int64_t base = lhs;
+        int64_t exponent = rhs;
+        while (exponent > 0) {
+            if (exponent & 1) {
+                if (__builtin_mul_overflow(result, base, &result)) return false;
+            }
+            exponent >>= 1;
+            if (exponent && __builtin_mul_overflow(base, base, &base)) return false;
+        }
+        value = result;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+//! Integer value of an indexed call, either an inlined pure function or a builtin
+bool Lowering::evalIntIndex(const Expr& expr, int64_t& value) const {
+    // The callee may be qualified (`ieee.math_real.round(...)`), whose selected name
+    // is the function itself
+    if (!expr.a || (expr.a->kind != Expr::NAME && expr.a->kind != Expr::SELECTED)) return false;
+    const Expr* returnp = nullptr;
+    if (pushPureCall(expr, returnp)) {
+        const bool folded = evalInt(*returnp, value);
+        popPureCall();
+        if (folded) return true;
+    }
+    const std::string& fn = expr.a->text;
+    if (expr.args.size() == 2) {
+        int64_t lhs = 0;
+        int64_t rhs = 0;
+        if ((fn != "min" && fn != "max") || !evalInt(*expr.args[0], lhs)
+            || !evalInt(*expr.args[1], rhs))
+            return false;
+        value = fn == "min" ? std::min(lhs, rhs) : std::max(lhs, rhs);
+        return true;
+    }
+    if (expr.args.size() != 1) return false;
+    // real(integer) is integral, so it folds as an integer and the real expression
+    // around it stays inside the constant folders
+    if (fn == "real") return evalInt(*expr.args[0], value);
+    double real = 0.0;
+    if (!evalReal(*expr.args[0], real)) return false;
+    if (fn == "ceil") {
+        value = static_cast<int64_t>(std::ceil(real));
+    } else if (fn == "floor") {
+        value = static_cast<int64_t>(std::floor(real));
+    } else if (fn == "trunc") {
+        value = static_cast<int64_t>(std::trunc(real));
+    } else if (fn == "round" || fn == "natural" || fn == "positive" || fn == "integer") {
+        // A conversion to an integer type rounds to nearest, as IEEE 1076-2008 9.3.6
+        // says; only trunc() truncates
+        value = static_cast<int64_t>(std::llround(real));
+    } else {
+        return false;
+    }
+    return true;
 }
 
 bool Lowering::staticIntFold(const ExprP& exprp, int64_t& value) {
@@ -822,214 +829,13 @@ void Lowering::registerType(const TypeDecl& decl) {
         type = timeType(flp);
         addPhysicalUnits(decl, *m_designp);
         break;
-    case TypeDecl::ENUM: {
-        int width = 1;
-        while ((1 << width) < static_cast<int>(decl.literals.size())) ++width;
-        type.kind = VType::ENUM;
-        type.width = width;
-        type.dtp = enumDType(flp, decl, width);
-        for (const auto& literal : decl.literals) type.literals.push_back(literal.first);
-        for (size_t i = 0; i < decl.literals.size(); ++i) {
-            AstConst* const constp
-                = new AstConst{flp, V3Number{flp, width, static_cast<uint32_t>(i)}};
-            constp->dtypep(type.dtp);
-            const auto existing = m_enumConsts.find(decl.literals[i].first);
-            if (existing != m_enumConsts.end() && existing->second->dtypep() != type.dtp) {
-                m_ambiguousLiterals.insert(decl.literals[i].first);
-            }
-            m_enumConsts[decl.literals[i].first] = constp;
-        }
+    case TypeDecl::ENUM: registerEnumType(flp, decl, type); break;
+    case TypeDecl::ARRAY:
+        if (!registerArrayType(decl, type)) return;
         break;
-    }
-    case TypeDecl::ARRAY: {
-        VType elem;
-        const std::string& baseMark = decl.base.mark;
-        const bool unconstrainedVectorBase
-            = (baseMark == "std_logic_vector" || baseMark == "std_ulogic_vector"
-               || baseMark == "bit_vector" || baseMark == "unsigned" || baseMark == "signed"
-               || baseMark == "u_unsigned" || baseMark == "u_signed")
-              && !decl.base.hasRange && decl.base.constraintMark.empty();
-        if (unconstrainedVectorBase) {
-            // An array of an unconstrained vector; a use supplies the element's range
-            elem.kind = VType::VECTOR;
-            elem.kwd = baseMark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-            elem.signing = vectorSigning(baseMark);
-            elem.width = 0;
-            elem.elemWidth = 1;
-        } else if (baseMark == "integer_vector") {
-            // An IEEE unconstrained array of integer: the constraint gives the element's bounds
-            int64_t left = 0;
-            int64_t right = 0;
-            bool ascending = false;
-            if (!decl.base.hasRange || !constraintBounds(decl.base, left, right, ascending)) {
-                unsupportedError(flp, "non-static array range");
-                return;
-            }
-            const VType intElem = intType(flp);
-            elem.kind = VType::ARRAY;
-            elem.kwd = VBasicDTypeKwd::LOGIC;
-            elem.signing = VSigning::UNSIGNED;
-            elem.elemp = std::make_shared<VType>(intElem);
-            elem.elemWidth = intElem.width;
-            elem.left = static_cast<int>(left);
-            elem.right = static_cast<int>(right);
-            elem.ascending = ascending;
-            elem.width
-                = intElem.width * (std::abs(static_cast<int>(left) - static_cast<int>(right)) + 1);
-            elem.dtp = findVectorWidth(flp, elem.kwd, elem.signing, elem.width);
-        } else if (!resolveType(decl.base, elem)) {
-            return;
-        }
-        if (!decl.index.hasRange) {
-            // An index that is a type mark takes the mark's range: an enumeration's
-            // positions (IEEE 1800-2023 6.9), or a discrete subtype's own bounds
-            const auto indexIt = m_types.find(decl.index.mark);
-            const bool enumIndex = indexIt != m_types.end() && indexIt->second.kind == VType::ENUM
-                                   && !indexIt->second.literals.empty();
-            const bool intIndex = indexIt != m_types.end() && indexIt->second.kind == VType::INT;
-            if (!enumIndex && !intIndex) {
-                unsupportedError(flp, "array type without an index constraint");
-                return;
-            }
-        }
-        type.kind = VType::ARRAY;
-        type.signing = VSigning::NOSIGN;
-        // Fold the index constraints (outermost first) into a nested array of arrays, so a
-        // multi-dimensional array is a packed vector whose element is itself the inner array
-        std::vector<const TypeSpec*> specs;
-        specs.push_back(&decl.index);
-        for (const TypeSpec& extra : decl.indexes) specs.push_back(&extra);
-        std::vector<int64_t> lefts(specs.size());
-        std::vector<int64_t> rights(specs.size());
-        std::vector<char> ascends(specs.size());
-        // The bounds of the index subtype itself, per level: an unconstrained array's
-        // constant takes one element per aggregate element from the subtype's low bound
-        std::vector<int64_t> indexLows(specs.size(), 0);
-        for (size_t k = 0; k < specs.size(); ++k) {
-            VType indexType;
-            const auto markIt = m_types.find(specs[k]->mark);
-            if (markIt != m_types.end() && markIt->second.kind == VType::INT) {
-                indexLows[k] = markIt->second.intLow;
-            } else if (markIt != m_types.end() && markIt->second.kind == VType::ENUM
-                       && !markIt->second.literals.empty()) {
-                indexLows[k] = 0;
-            } else if (predefinedIntegerType(flp, specs[k]->mark, indexType)) {
-                indexLows[k] = indexType.left;
-            }
-        }
-        bool constrained = true;
-        for (size_t k = 0; k < specs.size(); ++k) {
-            if (!specs[k]->hasRange) {
-                const auto markIt = m_types.find(specs[k]->mark);
-                if (markIt != m_types.end() && markIt->second.kind == VType::INT) {
-                    // A discrete subtype as the index constraint: its own bounds
-                    lefts[k] = markIt->second.intLow;
-                    rights[k] = markIt->second.intHigh;
-                    ascends[k] = lefts[k] <= rights[k];
-                    continue;
-                }
-                // An enumeration index runs over the positions of its literals
-                lefts[k] = 0;
-                rights[k]
-                    = static_cast<int64_t>(m_types.find(specs[k]->mark)->second.literals.size())
-                      - 1;
-                ascends[k] = true;
-                continue;
-            }
-            bool asc = false;
-            if (!constraintBounds(*specs[k], lefts[k], rights[k], asc)) {
-                constrained = false;  // Unconstrained: every use supplies the index constraint
-                break;
-            }
-            ascends[k] = asc;
-        }
-        if (!constrained) {
-            // Every level survives, so a use supplies one index constraint per level.
-            // The index subtype's low bound is kept: an array constant that states no
-            // constraint takes one element per aggregate element from it
-            VType inner = elem;
-            for (size_t k = specs.size(); k-- > 0;) {
-                VType arr;
-                arr.kind = VType::ARRAY;
-                arr.elemp = std::make_shared<VType>(inner);
-                arr.elemWidth = inner.width;
-                arr.kwd = inner.kwd;
-                arr.signing = VSigning::NOSIGN;
-                arr.width = 0;
-                arr.intLow = static_cast<int>(indexLows[k]);
-                inner = arr;
-            }
-            type = inner;
-            break;
-        }
-        VType cur = elem;
-        for (size_t k = specs.size(); k-- > 0;) {
-            VType arr;
-            arr.kind = VType::ARRAY;
-            arr.elemp = std::make_shared<VType>(cur);
-            arr.elemWidth = cur.width;
-            arr.kwd = cur.kwd;
-            arr.signing = VSigning::NOSIGN;
-            arr.left = static_cast<int>(lefts[k]);
-            arr.right = static_cast<int>(rights[k]);
-            arr.ascending = ascends[k];
-            arr.width = cur.width * arr.length();
-            arr.dtp = findVectorWidth(flp, arr.kwd, VSigning::NOSIGN, arr.width);
-            cur = arr;
-        }
-        type = cur;  // The outermost array type
+    case TypeDecl::RECORD:
+        if (!registerRecordType(decl, type)) return;
         break;
-    }
-    case TypeDecl::RECORD: {
-        int total = 0;
-        VBasicDTypeKwd kwd = VBasicDTypeKwd::BIT;
-        std::vector<VField> fields;
-        for (const TypeDecl::Member& member : decl.members) {
-            VType memberType;
-            const std::string& mark = member.type.mark;
-            const bool unconstrainedMember
-                = (mark == "std_logic_vector" || mark == "std_ulogic_vector"
-                   || mark == "bit_vector" || mark == "unsigned" || mark == "signed"
-                   || mark == "u_unsigned" || mark == "u_signed")
-                  && !member.type.hasRange && member.type.constraintMark.empty();
-            if (unconstrainedMember) {
-                // An unconstrained element: its width comes from a subtype or port binding
-                memberType.kind = VType::VECTOR;
-                memberType.kwd
-                    = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-                memberType.signing = vectorSigning(mark);
-                memberType.width = 0;
-            } else if (!resolveType(member.type, memberType)) {
-                return;
-            }
-            if (memberType.kwd == VBasicDTypeKwd::LOGIC) kwd = VBasicDTypeKwd::LOGIC;
-            // `a, b : t` declares one record element per name, in order
-            for (const auto& name : member.names) {
-                VField field;
-                field.name = name.first;
-                field.width = memberType.width;
-                field.type = std::make_shared<VType>(memberType);
-                fields.push_back(std::move(field));
-                total += memberType.width;
-            }
-        }
-        // Declaration order is most significant first
-        int offset = total;
-        for (VField& field : fields) {
-            offset -= field.width;
-            field.offset = offset;
-        }
-        type.kind = VType::RECORD;
-        type.width = total;
-        type.kwd = kwd;
-        type.signing = VSigning::NOSIGN;
-        type.fields = std::move(fields);
-        // An unconstrained record (no fixed width) has no packed dtype until constrained
-        type.dtp = total > 0 ? findVectorWidth(flp, kwd, VSigning::NOSIGN, total)
-                             : findBasic(flp, kwd == VBasicDTypeKwd::BIT ? VBasicDTypeKwd::BIT
-                                                                         : VBasicDTypeKwd::LOGIC);
-        break;
-    }
     }
     if (decl.kind == TypeDecl::PHYSICAL) {
         type.typeName = m_unitName.empty() ? decl.name : m_unitName + "." + decl.name;
@@ -1038,6 +844,225 @@ void Lowering::registerType(const TypeDecl& decl) {
     }
     m_types[decl.name] = type;
     m_ambiguousTypes.erase(decl.name);
+}
+
+//! Register an enumeration's dtype and its literal positions
+void Lowering::registerEnumType(FileLine* flp, const TypeDecl& decl, VType& type) {
+    int width = 1;
+    while ((1 << width) < static_cast<int>(decl.literals.size())) ++width;
+    type.kind = VType::ENUM;
+    type.width = width;
+    type.dtp = enumDType(flp, decl, width);
+    for (const auto& literal : decl.literals) type.literals.push_back(literal.first);
+    for (size_t i = 0; i < decl.literals.size(); ++i) {
+        AstConst* const constp = new AstConst{flp, V3Number{flp, width, static_cast<uint32_t>(i)}};
+        constp->dtypep(type.dtp);
+        const auto existing = m_enumConsts.find(decl.literals[i].first);
+        if (existing != m_enumConsts.end() && existing->second->dtypep() != type.dtp) {
+            m_ambiguousLiterals.insert(decl.literals[i].first);
+        }
+        m_enumConsts[decl.literals[i].first] = constp;
+    }
+}
+
+//! Element type of an array declaration, including a vector or integer_vector base
+bool Lowering::resolveArrayElement(const TypeDecl& decl, VType& elem) {
+    FileLine* const flp = decl.flp;
+    const std::string& baseMark = decl.base.mark;
+    const bool unconstrainedVectorBase
+        = (baseMark == "std_logic_vector" || baseMark == "std_ulogic_vector"
+           || baseMark == "bit_vector" || baseMark == "unsigned" || baseMark == "signed"
+           || baseMark == "u_unsigned" || baseMark == "u_signed")
+          && !decl.base.hasRange && decl.base.constraintMark.empty();
+    if (unconstrainedVectorBase) {
+        // An array of an unconstrained vector; a use supplies the element's range
+        elem.kind = VType::VECTOR;
+        elem.kwd = baseMark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+        elem.signing = vectorSigning(baseMark);
+        elem.width = 0;
+        elem.elemWidth = 1;
+    } else if (baseMark == "integer_vector") {
+        // An IEEE unconstrained array of integer: the constraint gives the element's bounds
+        int64_t left = 0;
+        int64_t right = 0;
+        bool ascending = false;
+        if (!decl.base.hasRange || !constraintBounds(decl.base, left, right, ascending)) {
+            unsupportedError(flp, "non-static array range");
+            return false;
+        }
+        const VType intElem = intType(flp);
+        elem.kind = VType::ARRAY;
+        elem.kwd = VBasicDTypeKwd::LOGIC;
+        elem.signing = VSigning::UNSIGNED;
+        elem.elemp = std::make_shared<VType>(intElem);
+        elem.elemWidth = intElem.width;
+        elem.left = static_cast<int>(left);
+        elem.right = static_cast<int>(right);
+        elem.ascending = ascending;
+        elem.width
+            = intElem.width * (std::abs(static_cast<int>(left) - static_cast<int>(right)) + 1);
+        elem.dtp = findVectorWidth(flp, elem.kwd, elem.signing, elem.width);
+    } else if (!resolveType(decl.base, elem)) {
+        return false;
+    }
+    return true;
+}
+
+//! Register an array as a nested array of arrays, one level per index constraint
+bool Lowering::registerArrayType(const TypeDecl& decl, VType& type) {
+    FileLine* const flp = decl.flp;
+    VType elem;
+    if (!resolveArrayElement(decl, elem)) return false;
+    if (!decl.index.hasRange) {
+        // An index that is a type mark takes the mark's range: an enumeration's
+        // positions (IEEE 1076-2008 5.2.2.1), or a discrete subtype's own bounds
+        const auto indexIt = m_types.find(decl.index.mark);
+        const bool enumIndex = indexIt != m_types.end() && indexIt->second.kind == VType::ENUM
+                               && !indexIt->second.literals.empty();
+        const bool intIndex = indexIt != m_types.end() && indexIt->second.kind == VType::INT;
+        if (!enumIndex && !intIndex) {
+            unsupportedError(flp, "array type without an index constraint");
+            return false;
+        }
+    }
+    type.kind = VType::ARRAY;
+    type.signing = VSigning::NOSIGN;
+    // Fold the index constraints (outermost first) into a nested array of arrays, so a
+    // multi-dimensional array is a packed vector whose element is itself the inner array
+    std::vector<const TypeSpec*> specs;
+    specs.push_back(&decl.index);
+    for (const TypeSpec& extra : decl.indexes) specs.push_back(&extra);
+    std::vector<int64_t> lefts(specs.size());
+    std::vector<int64_t> rights(specs.size());
+    std::vector<char> ascends(specs.size());
+    // The bounds of the index subtype itself, per level: an unconstrained array's
+    // constant takes one element per aggregate element from the subtype's low bound
+    std::vector<int64_t> indexLows(specs.size(), 0);
+    for (size_t k = 0; k < specs.size(); ++k) {
+        VType indexType;
+        const auto markIt = m_types.find(specs[k]->mark);
+        if (markIt != m_types.end() && markIt->second.kind == VType::INT) {
+            indexLows[k] = markIt->second.intLow;
+        } else if (markIt != m_types.end() && markIt->second.kind == VType::ENUM
+                   && !markIt->second.literals.empty()) {
+            indexLows[k] = 0;
+        } else if (predefinedIntegerType(flp, specs[k]->mark, indexType)) {
+            indexLows[k] = indexType.left;
+        }
+    }
+    bool constrained = true;
+    for (size_t k = 0; k < specs.size(); ++k) {
+        if (!specs[k]->hasRange) {
+            const auto markIt = m_types.find(specs[k]->mark);
+            if (markIt != m_types.end() && markIt->second.kind == VType::INT) {
+                // A discrete subtype as the index constraint: its own bounds
+                lefts[k] = markIt->second.intLow;
+                rights[k] = markIt->second.intHigh;
+                ascends[k] = lefts[k] <= rights[k];
+                continue;
+            }
+            // An enumeration index runs over the positions of its literals
+            lefts[k] = 0;
+            rights[k]
+                = static_cast<int64_t>(m_types.find(specs[k]->mark)->second.literals.size()) - 1;
+            ascends[k] = true;
+            continue;
+        }
+        bool asc = false;
+        if (!constraintBounds(*specs[k], lefts[k], rights[k], asc)) {
+            constrained = false;  // Unconstrained: every use supplies the index constraint
+            break;
+        }
+        ascends[k] = asc;
+    }
+    if (!constrained) {
+        // Every level survives, so a use supplies one index constraint per level.
+        // The index subtype's low bound is kept: an array constant that states no
+        // constraint takes one element per aggregate element from it
+        VType inner = elem;
+        for (size_t k = specs.size(); k-- > 0;) {
+            VType arr;
+            arr.kind = VType::ARRAY;
+            arr.elemp = std::make_shared<VType>(inner);
+            arr.elemWidth = inner.width;
+            arr.kwd = inner.kwd;
+            arr.signing = VSigning::NOSIGN;
+            arr.width = 0;
+            arr.intLow = static_cast<int>(indexLows[k]);
+            inner = arr;
+        }
+        type = inner;
+        return true;
+    }
+    VType cur = elem;
+    for (size_t k = specs.size(); k-- > 0;) {
+        VType arr;
+        arr.kind = VType::ARRAY;
+        arr.elemp = std::make_shared<VType>(cur);
+        arr.elemWidth = cur.width;
+        arr.kwd = cur.kwd;
+        arr.signing = VSigning::NOSIGN;
+        arr.left = static_cast<int>(lefts[k]);
+        arr.right = static_cast<int>(rights[k]);
+        arr.ascending = ascends[k];
+        arr.width = cur.width * arr.length();
+        arr.dtp = findVectorWidth(flp, arr.kwd, VSigning::NOSIGN, arr.width);
+        cur = arr;
+    }
+    type = cur;  // The outermost array type
+    return true;
+}
+
+//! Register a record as MSB-first fields in a packed vector
+bool Lowering::registerRecordType(const TypeDecl& decl, VType& type) {
+    FileLine* const flp = decl.flp;
+    int total = 0;
+    VBasicDTypeKwd kwd = VBasicDTypeKwd::BIT;
+    std::vector<VField> fields;
+    for (const TypeDecl::Member& member : decl.members) {
+        VType memberType;
+        const std::string& mark = member.type.mark;
+        const bool unconstrainedMember
+            = (mark == "std_logic_vector" || mark == "std_ulogic_vector" || mark == "bit_vector"
+               || mark == "unsigned" || mark == "signed" || mark == "u_unsigned"
+               || mark == "u_signed")
+              && !member.type.hasRange && member.type.constraintMark.empty();
+        if (unconstrainedMember) {
+            // An unconstrained element: its width comes from a subtype or port binding
+            memberType.kind = VType::VECTOR;
+            memberType.kwd = mark == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+            memberType.signing = vectorSigning(mark);
+            memberType.width = 0;
+        } else if (!resolveType(member.type, memberType)) {
+            return false;
+        }
+        if (memberType.kwd == VBasicDTypeKwd::LOGIC) kwd = VBasicDTypeKwd::LOGIC;
+        // `a, b : t` declares one record element per name, in order
+        for (const auto& name : member.names) {
+            VField field;
+            field.name = name.first;
+            field.width = memberType.width;
+            field.type = std::make_shared<VType>(memberType);
+            fields.push_back(std::move(field));
+            total += memberType.width;
+        }
+    }
+    // Declaration order is most significant first
+    int offset = total;
+    for (VField& field : fields) {
+        offset -= field.width;
+        field.offset = offset;
+    }
+    type.kind = VType::RECORD;
+    type.width = total;
+    type.kwd = kwd;
+    type.signing = VSigning::NOSIGN;
+    type.fields = std::move(fields);
+    // An unconstrained record (no fixed width) has no packed dtype until constrained
+    type.dtp = total > 0 ? findVectorWidth(flp, kwd, VSigning::NOSIGN, total)
+                         : findBasic(flp, kwd == VBasicDTypeKwd::BIT ? VBasicDTypeKwd::BIT
+                                                                     : VBasicDTypeKwd::LOGIC);
+    return true;
 }
 
 //! Whether an aggregate fills the rest of its elements with an `others` association
@@ -1312,7 +1337,7 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
         if (spec.constraintMark == "open") return true;
         const auto it = m_types.find(spec.constraintMark);
         if (it == m_types.end()) {
-            flp->v3error("VHDL: unknown subtype '" + spec.constraintMark + "'");
+            flp->v3error("VHDL: unknown subtype '" + spec.constraintMark + "'.");
             return false;
         }
         // The subtype's range constrains this type whatever the subtype itself is: an
@@ -1472,7 +1497,7 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
             if (f.name == member.name) fieldp = &f;
         }
         if (!fieldp) {
-            flp->v3error("VHDL: record '" + spec.mark + "' has no element '" + member.name + "'");
+            flp->v3error("VHDL: record '" + spec.mark + "' has no element '" + member.name + "'.");
             return false;
         }
         if (fieldp->type && fieldp->type->kind == VType::RECORD) {
@@ -1552,7 +1577,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         }
     }
     if (m_ambiguousTypes.count(mark)) {
-        flp->v3error("VHDL: type name '" + mark + "' is ambiguous between imported packages");
+        flp->v3error("VHDL: type name '" + mark + "' is ambiguous between imported packages.");
         return false;
     }
     auto declared = m_types.find(mark);
@@ -1580,6 +1605,11 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         if (!spec.indexConstraints.empty()) return applyIndexConstraints(spec, out);
         return applyRange(spec, out);
     }
+    return resolveTypePredefined(spec, mark, out);
+}
+
+bool Lowering::resolveTypePredefined(const TypeSpec& spec, const std::string& mark, VType& out) {
+    FileLine* const flp = spec.flp;
     if (mark == "u_unsigned" || mark == "u_signed") {
         // An unconstrained numeric_std vector type; the use site supplies the index range
         if (!spec.hasRange && spec.constraintMark.empty()) {
@@ -1615,7 +1645,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     }
     if (mark == "std_logic" || mark == "std_ulogic" || mark == "bit" || mark == "boolean") {
         if (spec.hasRange) {
-            flp->v3error("VHDL: range constraint on scalar type '" + mark + "'");
+            flp->v3error("VHDL: range constraint on scalar type '" + mark + "'.");
             return false;
         }
         out.kind = mark == "bit" ? VType::BIT : VType::LOGIC;

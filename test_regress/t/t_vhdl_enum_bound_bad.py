@@ -14,7 +14,7 @@ test.top_filename = 't/t_vhdl_enum_bound_bad.vhdl'
 
 # `'succ` of the last literal is a bound check failure (IEEE 1076-2008 9.2.3)
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

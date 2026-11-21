@@ -1,6 +1,6 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //*************************************************************************
-// DESCRIPTION: Verilator: VHDL-specific binding after V3LinkCells
+// DESCRIPTION: Verilator: VHDL-specific checks after V3LinkCells
 //
 // Code available from: https://verilator.org
 //
@@ -26,13 +26,13 @@ class AstNodeModule;
 
 //! VHDL-specific check of the AST the frontend emitted.
 //!
-//! The control-file directives are applied by V3LinkParse, which now runs on VHDL modules
+//! The control-file directives are applied by V3LinkParse, which runs on VHDL modules
 //! too. What remains is the pre-width contract of the emitted AST, checked in every debug
 //! build without needing --debug-check, and only on the modules this frontend produced,
 //! since a mixed design also holds SystemVerilog modules still in parse shape.
 class V3VhdlLink final {
 public:
-    static void link(const std::set<const AstNodeModule*>& vhdlModules) VL_MT_DISABLED;
+    static void link(const std::set<AstNodeModule*>& vhdlModules) VL_MT_DISABLED;
 };
 
 #endif  // Guard

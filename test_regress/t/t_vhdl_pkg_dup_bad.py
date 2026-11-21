@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_pkg_dup_bad.vhdl'
 # Libraries are not a namespace, so a second package of one name would silently
 # replace the first; report it like a duplicate entity.
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

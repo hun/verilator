@@ -189,7 +189,7 @@ class Parser final {
     bool m_inLibrary = false;  // Current file came from a library
     std::vector<EntityUnit> m_entities;  // Parsed design units
     std::vector<ConfigurationUnit> m_configurations;  // Parsed configurations
-    std::vector<Architecture> m_archs;
+    std::vector<Architecture> m_archs;  // Parsed architectures
     std::vector<PackageUnit> m_packages;  // Parsed package specs and bodies
     std::vector<PackageInstance> m_packageInstances;  // Parsed generic-package instances
     std::vector<ContextUnit> m_contexts;  // Parsed context declarations
@@ -197,7 +197,7 @@ class Parser final {
     std::vector<UseClause> m_uses;  // Use clauses seen since the last library unit
     // The context clause of the library unit a secondary unit belongs to: a design file
     // attaches its context clause to one library unit and the secondaries that follow it
-    // in the same file (IEEE 1076-2008 3.2)
+    // in the same file (IEEE 1076-2008 13.4)
     std::vector<UseClause> m_libUses;
     // Context declarations named by the context clauses seen so far
     std::vector<std::string> m_contextNames;
@@ -219,13 +219,13 @@ class Parser final {
     }
     void error(FileLine* flp, const std::string& message) {
         if (m_failed) return;
-        flp->v3error("VHDL: " + message);
+        flp->v3error("VHDL: " + message + ".");
         m_failed = true;
     }
     void error(const std::string& message) { error(m_cur.flp, message); }
     //! Labels of one declarative region, from the architecture down to nested statements
     class LabelScope final {
-        Parser& m_parser;
+        Parser& m_parser;  // Parser whose label stack this scope extends
 
     public:
         explicit LabelScope(Parser& parser)
@@ -323,7 +323,7 @@ class Parser final {
             context.flp = contextTok.flp;
             context.name = parts.back();
             advance();  // `is`
-            for (;;) {
+            while (true) {
                 if (m_failed) return;
                 if (m_cur.kind == Token::END) {
                     unsupported("context declaration that reaches the end of the file");
@@ -495,6 +495,14 @@ class Parser final {
     void parseArchitecture(FileLine* flp);
     void parseConfiguration(FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
+    //! Consume PSL/label/instantiation/process prefixes; return true if the statement is done
+    bool parseConcurrentPreamble(Architecture& arch, FileLine* flp);
+    void parseConcurrentSelectedAssign(FileLine* flp, Architecture& arch);
+    void parseConcurrentForGenerate(FileLine* flp, Architecture& arch);
+    void parseConcurrentIfGenerate(FileLine* flp, Architecture& arch);
+    void parseConcurrentBlock(FileLine* flp, Architecture& arch);
+    void parseConcurrentAssert(FileLine* flp, Architecture& arch);
+    void parseConcurrentAssignOrCall(FileLine* flp, Architecture& arch);
     ExprP parseChoice();
     bool parseChoices(std::vector<ExprP>& choices);
     void parseInstance(Architecture& arch, FileLine* flp, const std::string& label, bool direct);
@@ -515,6 +523,9 @@ class Parser final {
     void parseProcess(Architecture& arch, FileLine* flp);
     std::vector<StmtP> parseStmtList(bool stopAtElse);
     StmtP parseSequentialStatement();
+    StmtP parseSequentialLoopOrJump(FileLine* flp, const std::string& label);
+    StmtP parseSequentialReportAssertReturn(FileLine* flp);
+    StmtP parseSequentialAssignOrCall(FileLine* flp);
     ExprP parseWaveformValue();
     bool parseConditionalTail(Stmt& stmt, bool allowUnaffected);
     StmtP parseIf(FileLine* flp);
@@ -695,7 +706,7 @@ ExprP Parser::parseUnary() {
 }
 
 ExprP Parser::parsePrimary() {
-    if (m_cur.kind == Token::SYM && m_cur.text == "<<") {  // IEEE 1800-2023 ch.13 external name
+    if (m_cur.kind == Token::SYM && m_cur.text == "<<") {  // IEEE 1076-2008 8.7 external name
         unsupported("external name");
         return nullptr;
     }
@@ -719,7 +730,7 @@ ExprP Parser::parsePrimary() {
         advance();
         if ((node->kind == Expr::INT_LIT || node->kind == Expr::REAL_LIT)
             && m_cur.kind == Token::ID && !isReservedWord(m_cur.text)) {
-            // A VHDL physical literal: <abstract literal> <unit_name>, IEEE 1076-2008 9.4.
+            // A VHDL physical literal: <abstract literal> <unit_name>, IEEE 1076-2008 5.2.4.1.
             // Which physical type the unit belongs to is not known until the literal reaches
             // its use, so the abstract literal is kept unscaled and takes the unit's factor
             // during lowering.
@@ -729,7 +740,7 @@ ExprP Parser::parsePrimary() {
             node->kind = Expr::PHYS_LIT;
             advance();  // The unit name
         }
-        // IEEE 1076-2008 15.5: an integer literal is inside the integer type's range.
+        // IEEE 1076-2008 5.2.3: the INTEGER subtype bounds used for this 32-bit check.
         // The minimum is written as a literal 2**31 under a unary minus, so the bound
         // allows that one value; above it the 32-bit model would wrap silently.
         if (node->kind == Expr::INT_LIT && node->intValue > 2147483648LL) {
@@ -771,7 +782,7 @@ ExprP Parser::parsePrimary() {
             call->text = node->text;
             call->spelling = node->spelling;
             advance();
-            for (;;) {
+            while (true) {
                 ExprP arg = parseExpr();
                 if (!arg) return nullptr;
                 call->args.push_back(std::move(arg));
@@ -797,7 +808,7 @@ ExprP Parser::parsePrimary() {
         FileLine* const aggFlp = m_cur.flp;
         ExprP agg = std::make_unique<Expr>(Expr::AGG_POSITIONAL);
         agg->flp = aggFlp;
-        for (;;) {
+        while (true) {
             ExprP item = parseChoice();
             if (!item) return nullptr;
             if (agg->kind == Expr::AGG_NAMED || isSym("=>") || isSym("|")) {
@@ -851,7 +862,7 @@ ExprP Parser::parseDesignator() {
     node->flp = nameTok.flp;
     node->text = nameTok.text;
     node->spelling = nameTok.spelling;
-    for (;;) {
+    while (true) {
         if (isSym("'")) {
             advance();
             if (isSym("(")) {
@@ -874,7 +885,7 @@ ExprP Parser::parseDesignator() {
             attr->text = attrTok.text;
             attr->a = std::move(node);
             if (acceptSym("(")) {  // Attribute parameter, e.g. t'pos(x)
-                for (;;) {
+                while (true) {
                     ExprP arg = parseExpr();
                     if (!arg) return nullptr;
                     attr->args.push_back(std::move(arg));
@@ -928,7 +939,7 @@ ExprP Parser::parseDesignator() {
             std::vector<ExprP> actuals;
             std::vector<std::string> formalNames;
             bool named = false;
-            for (;;) {
+            while (true) {
                 if (acceptSym("=>")) {
                     if (first->kind != Expr::NAME) {
                         unsupported("actual name in a subprogram call");
@@ -1017,7 +1028,7 @@ bool Parser::parseRange(TypeSpec& type) {
 //! A member's range is either written out or named by a range attribute.
 bool Parser::parseMemberConstraints(TypeSpec& type) {
     if (!type.flp) type.flp = m_cur.flp;
-    for (;;) {
+    while (true) {
         if (m_failed) return false;
         TypeSpec::MemberConstraint member;
         Token memberTok;
@@ -1107,7 +1118,7 @@ void Parser::parseTypeSpec(TypeSpec& type) {
             if (!markOnly && ahead.kind == Token::SYM && ahead.text == "(") {
                 bool sawTopRange = false;
                 int depth = 1;  // Inside the outer '('; m_cur is the first item's name
-                for (;;) {
+                while (true) {
                     const Token t = m_lexer.next();
                     if (t.kind == Token::END) break;
                     if (t.kind == Token::SYM && t.text == "(") {
@@ -1191,7 +1202,7 @@ void Parser::parseTypeSpec(TypeSpec& type) {
 }
 
 void Parser::parseNameList(std::vector<std::pair<std::string, std::string>>& names) {
-    for (;;) {
+    while (true) {
         Token nameTok;
         if (!takeName(nameTok)) return;
         addName(names, nameTok);
@@ -1205,14 +1216,14 @@ void Parser::parsePortClause(std::vector<PortDecl>& ports) {
         error("expected '(' after 'port'");
         return;
     }
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         PortDecl port;
         port.flp = m_cur.flp;
-        (void)acceptId("signal");  // IEEE 1800-2023 17.2 interface-object keyword
+        (void)acceptId("signal");  // Optional interface-object class (IEEE 1076-2008 6.5.2)
         parseNameList(port.names);
         if (m_failed) return;
-        // IEEE 1800-2023 17.2: an omitted port mode means `in`
+        // IEEE 1076-2008 6.5.2: an omitted port mode means `in`
         if (acceptId("in")) {
             port.dir = PortMode::IN;
         } else if (acceptId("out")) {
@@ -1248,7 +1259,7 @@ void Parser::parseGenericClauseInto(std::vector<GenericDecl>& generics) {
         error("expected '(' after 'generic'");
         return;
     }
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (isId("type")) {
             advance();
@@ -1280,10 +1291,10 @@ void Parser::parseGenericClauseInto(std::vector<GenericDecl>& generics) {
         }
         GenericDecl generic;
         generic.flp = m_cur.flp;
-        (void)acceptId("constant");  // IEEE 1800-2023 17.2 interface-object keyword
+        (void)acceptId("constant");  // Optional interface-object class (IEEE 1076-2008 6.5.2)
         parseNameList(generic.names);
         if (m_failed) return;
-        // IEEE 1800-2023 17.2: a generic's mode is omitted or `in`
+        // IEEE 1076-2008 6.5.6.2: a generic's mode is omitted or `in`
         if (acceptId("in")) {
         } else if (isId("out") || isId("inout") || isId("buffer") || isId("linkage")) {
             unsupported("generic mode '" + m_cur.text + "'");
@@ -1316,7 +1327,7 @@ void Parser::parseEntity(FileLine* flp) {
     entity.uses = m_uses;
     entity.contextNames = m_contextNames;
     if (!expectId("is")) return;
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (isId("port")) {
             advance();
@@ -1387,7 +1398,7 @@ void Parser::parseEntity(FileLine* flp) {
             parseContextClause(entity.contextNames, false);
             continue;
         }
-        if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
+        if (isId("view")) {  // VHDL-2019 interface view; unsupported
             unsupported("interface view");
             return;
         }
@@ -1483,7 +1494,7 @@ void Parser::parseDeclInto(std::vector<Decl>& decls, Decl::Kind kind) {
 //! Parse `( name_list [mode] : subtype_indication [:= default] ; ... )` of a subprogram
 void Parser::parseInterfaceList(std::vector<FormalDecl>& formals) {
     if (!acceptSym("(")) return;
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (acceptSym(")")) break;
         FormalDecl formal;
@@ -1497,7 +1508,7 @@ void Parser::parseInterfaceList(std::vector<FormalDecl>& formals) {
         }
         parseNameList(formal.names);
         if (m_failed) return;
-        // IEEE 1800-2023 4.3.3: an omitted mode means `in`, `buffer` is a readable `out`
+        // IEEE 1076-2008 6.5.2: an omitted mode means `in`, `buffer` is a readable `out`
         if (acceptId("in")) {
             formal.mode = PortMode::IN;
         } else if (acceptId("out")) {
@@ -1682,7 +1693,7 @@ void Parser::parseIndexConstraint(TypeSpec& type) {
 }
 
 void Parser::parseRecordBody(TypeDecl& decl) {
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (isId("end")) break;
         TypeDecl::Member member;
@@ -1715,7 +1726,7 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
     if (isSym("(")) {  // Enumeration
         decl.kind = TypeDecl::ENUM;
         advance();
-        for (;;) {
+        while (true) {
             if (m_cur.kind == Token::CHAR) {
                 // A character enumeration literal such as 'z'; store a name that the
                 // lowering reproduces from the character value.
@@ -1766,7 +1777,7 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
         } else {
             decl.kind = TypeDecl::PHYSICAL;
             advance();
-            for (;;) {
+            while (true) {
                 if (m_failed) return;
                 if (isId("end")) break;
                 TypeDecl::Unit unit;
@@ -1858,7 +1869,7 @@ void Parser::parseComponentDecl(std::vector<ComponentDecl>& components) {
     component.flp = nameTok.flp;
     component.name = nameTok.text;
     component.spelling = nameTok.spelling;
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (isId("end")) break;
         if (isId("generic")) {
@@ -1908,7 +1919,7 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
         expectSym(")");
     }
     inst->entityInstantiation = direct;
-    for (;;) {
+    while (true) {
         if (isId("generic")) {
             advance();
             if (!expectId("map")) return;
@@ -1974,7 +1985,7 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
         return;
     }
     int mixMode = 0;  // 1: the list is positional; 2: it is named
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         PortAssoc assoc;
         assoc.flp = m_cur.flp;
@@ -2003,10 +2014,10 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             m_lexer.restore(savedState);
         }
         if (named) {
-            // IEEE 1076-2008 6.5.7.2: the associations are all positional or all named
+            // IEEE 1076-2008 6.5.7.1: the associations are all positional or all named
             if (mixMode == 1) {
                 error(std::string{"named association after a positional one in a "} + what
-                      + " map (IEEE 1076-2008 6.5.7.2)");
+                      + " map (IEEE 1076-2008 6.5.7.1)");
                 return;
             }
             mixMode = 2;
@@ -2053,7 +2064,7 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             // 6.5.7.1), which the lowering resolves to the formal's default
             if (mixMode == 2) {
                 error(std::string{"positional association after a named one in a "} + what
-                      + " map (IEEE 1076-2008 6.5.7.2)");
+                      + " map (IEEE 1076-2008 6.5.7.1)");
                 return;
             }
             mixMode = 1;
@@ -2062,7 +2073,7 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             // Positional association: the actual maps to the next item in order
             if (mixMode == 2) {
                 error(std::string{"positional association after a named one in a "} + what
-                      + " map (IEEE 1076-2008 6.5.7.2)");
+                      + " map (IEEE 1076-2008 6.5.7.1)");
                 return;
             }
             mixMode = 1;
@@ -2095,7 +2106,7 @@ void Parser::parseArchitecture(FileLine* flp) {
         arch.entityName = entityTok.text;
     }
     if (!expectId("is")) return;
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (isId("begin")) break;
         if (isId("use")) {
@@ -2106,7 +2117,7 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseContextClause(arch.contextNames, false);
             continue;
         }
-        if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
+        if (isId("view")) {  // VHDL-2019 interface view; unsupported
             unsupported("interface view");
             return;
         }
@@ -2229,7 +2240,7 @@ bool Parser::parseChoices(std::vector<ExprP>& choices) {
         advance();
         return true;
     }
-    for (;;) {
+    while (true) {
         ExprP choice = parseChoice();
         if (!choice) return false;
         choices.push_back(std::move(choice));
@@ -2240,13 +2251,38 @@ bool Parser::parseChoices(std::vector<ExprP>& choices) {
 void Parser::parseConcurrentStatement(Architecture& arch) {
     if (m_failed) return;
     FileLine* const flp = m_cur.flp;
+    if (parseConcurrentPreamble(arch, flp)) return;
+    if (isId("with")) {
+        parseConcurrentSelectedAssign(flp, arch);
+        return;
+    }
+    if (isId("for")) {
+        parseConcurrentForGenerate(flp, arch);
+        return;
+    }
+    if (isId("if")) {
+        parseConcurrentIfGenerate(flp, arch);
+        return;
+    }
+    if (isId("block")) {
+        parseConcurrentBlock(flp, arch);
+        return;
+    }
+    if (isId("assert")) {
+        parseConcurrentAssert(flp, arch);
+        return;
+    }
+    parseConcurrentAssignOrCall(flp, arch);
+}
+
+bool Parser::parseConcurrentPreamble(Architecture& arch, FileLine* flp) {
     if (isId("default")) {  // A PSL directive has no synthesis meaning
         skipContextClause();
-        return;
+        return true;
     }
     if (isSym("{")) {  // A PSL directive block
         skipToBraceBlock();
-        return;
+        return true;
     }
     // Optional statement label: `label : statement`
     std::string label;
@@ -2260,16 +2296,16 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             advance();
         }
     }
-    if (!addLabel(label, flp)) return;
+    if (!addLabel(label, flp)) return true;
     if (isId("cover") || isId("restrict") || isId("assume") || isId("fair")
-        || isId("fairness")) {  // A PSL verification directive (IEEE 1800.1 ch.5)
+        || isId("fairness")) {  // A PSL verification directive (IEEE 1850)
         const auto pslSaved = m_lexer.state();
         const Token pslAhead = m_lexer.next();
         m_lexer.restore(pslSaved);
         if (pslAhead.kind == Token::SYM && pslAhead.text == "{") {
             advance();  // The directive keyword
             skipToStatementEnd();  // The property through its terminating ';'
-            return;
+            return true;
         }
     }
     if (isId("entity") || isId("component")) {
@@ -2277,7 +2313,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         // entity to instantiate
         advance();
         parseInstance(arch, flp, label, true);
-        return;
+        return true;
     }
     if (m_cur.kind == Token::ID) {
         // `label : child [generic map] port map (...)`: a component or entity instantiation.
@@ -2292,7 +2328,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         }
         // An `entity` head names an instantiation even with no map at all
         // A labelled bare designator is a component instantiation with no maps; an
-        // unlabelled one stays a procedure call (`u : comp;`, IEEE 1076-2008 11.6)
+        // unlabelled one stays a concurrent procedure call (IEEE 1076-2008 11.4)
         const bool mapped = nameTok.text == "entity"
                             || ((isId("port") || isId("generic")) && m_cur.text != "process")
                             || (!label.empty() && isSym(";"));
@@ -2300,7 +2336,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         m_lexer.restore(saved);
         if (mapped) {
             parseInstance(arch, flp, label, false);
-            return;
+            return true;
         }
     }
     if (!label.empty()
@@ -2310,204 +2346,207 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
     if (isId("process")) {
         advance();
         parseProcess(arch, flp);
+        return true;
+    }
+    return false;
+}
+
+void Parser::parseConcurrentSelectedAssign(FileLine* flp, Architecture& arch) {
+    advance();
+    auto conc = std::make_unique<Concurrent>(Concurrent::SEL_ASSIGN);
+    conc->flp = flp;
+    conc->selector = parseExpr();
+    if (!conc->selector) return;
+    if (!expectId("select")) return;
+    conc->target = parseDesignator();
+    if (!conc->target) return;
+    if (!acceptSym("<=")) {
+        error("expected '<=' in a selected signal assignment");
         return;
     }
-    if (isId("with")) {
+    while (true) {
+        ExprP value = parseExpr();
+        if (!value) return;
+        if (!expectId("when")) return;
+        std::vector<ExprP> choices;
+        if (!parseChoices(choices)) return;
+        conc->choices.emplace_back(std::move(choices), std::move(value));
+        if (!acceptSym(",")) break;
+    }
+    expectSym(";");
+    arch.stmts.push_back(std::move(conc));
+}
+
+void Parser::parseConcurrentForGenerate(FileLine* flp, Architecture& arch) {
+    advance();
+    Token varTok;
+    if (!takeName(varTok)) return;
+    auto gen = std::make_unique<Concurrent>(Concurrent::GEN_FOR);
+    gen->flp = flp;
+    gen->loopVar = varTok.text;
+    if (!expectId("in")) return;
+    gen->lo = parseExpr();
+    if (!gen->lo) return;
+    if (isId("to") || isId("downto")) {
+        gen->rangeAscending = isId("to");
         advance();
-        auto conc = std::make_unique<Concurrent>(Concurrent::SEL_ASSIGN);
-        conc->flp = flp;
-        conc->selector = parseExpr();
-        if (!conc->selector) return;
-        if (!expectId("select")) return;
-        conc->target = parseDesignator();
-        if (!conc->target) return;
-        if (!acceptSym("<=")) {
-            error("expected '<=' in a selected signal assignment");
-            return;
-        }
-        for (;;) {
-            ExprP value = parseExpr();
-            if (!value) return;
-            if (!expectId("when")) return;
-            std::vector<ExprP> choices;
-            if (!parseChoices(choices)) return;
-            conc->choices.emplace_back(std::move(choices), std::move(value));
-            if (!acceptSym(",")) break;
-        }
-        expectSym(";");
-        arch.stmts.push_back(std::move(conc));
+        gen->hi = parseExpr();
+        if (!gen->hi) return;
+    } else if (!isId("generate")) {
+        error("expected 'to' or 'downto' in a generate range");
         return;
     }
-    if (isId("for")) {
-        advance();
-        Token varTok;
-        if (!takeName(varTok)) return;
-        auto gen = std::make_unique<Concurrent>(Concurrent::GEN_FOR);
-        gen->flp = flp;
-        gen->loopVar = varTok.text;
-        if (!expectId("in")) return;
-        gen->lo = parseExpr();
-        if (!gen->lo) return;
-        if (isId("to") || isId("downto")) {
-            gen->rangeAscending = isId("to");
+    if (!expectId("generate")) return;
+    parseConcurrentList(gen->body, &gen->decls, &gen->types, &gen->subprograms, &gen->components);
+    if (m_failed) return;
+    if (!parseGenerateEnd()) return;
+    arch.stmts.push_back(std::move(gen));
+}
+
+void Parser::parseConcurrentIfGenerate(FileLine* flp, Architecture& arch) {
+    advance();
+    auto gen = std::make_unique<Concurrent>(Concurrent::GEN_IF);
+    gen->flp = flp;
+    while (true) {
+        GenBranch branch;
+        // A condition may carry a label, `if name: condition generate`. The label is a
+        // name and nothing else, and GHDL and nvc both take the expression after it as
+        // the condition, so the label itself is dropped
+        if (m_cur.kind == Token::ID) {
+            const auto saved = m_lexer.state();
+            const Token nameTok = m_cur;
             advance();
-            gen->hi = parseExpr();
-            if (!gen->hi) return;
-        } else if (!isId("generate")) {
-            error("expected 'to' or 'downto' in a generate range");
-            return;
+            const bool labelled = isSym(":");
+            m_cur = nameTok;
+            m_lexer.restore(saved);
+            if (labelled) {
+                advance();  // The label's name
+                advance();  // The colon
+            }
         }
+        branch.cond = parseExpr();
+        if (!branch.cond) return;
         if (!expectId("generate")) return;
-        parseConcurrentList(gen->body, &gen->decls, &gen->types, &gen->subprograms,
-                            &gen->components);
+        parseConcurrentList(branch.stmts, &branch.decls, &branch.types, &branch.subprograms,
+                            &branch.components);
         if (m_failed) return;
-        if (!parseGenerateEnd()) return;
-        arch.stmts.push_back(std::move(gen));
-        return;
-    }
-    if (isId("if")) {
-        advance();
-        auto gen = std::make_unique<Concurrent>(Concurrent::GEN_IF);
-        gen->flp = flp;
-        for (;;) {
-            GenBranch branch;
-            // A condition may carry a label, `if name: condition generate`. The label is a
-            // name and nothing else, and GHDL and nvc both take the expression after it as
-            // the condition, so the label itself is dropped
-            if (m_cur.kind == Token::ID) {
-                const auto saved = m_lexer.state();
-                const Token nameTok = m_cur;
-                advance();
-                const bool labelled = isSym(":");
-                m_cur = nameTok;
-                m_lexer.restore(saved);
-                if (labelled) {
-                    advance();  // The label's name
-                    advance();  // The colon
-                }
-            }
-            branch.cond = parseExpr();
-            if (!branch.cond) return;
+        gen->branches.push_back(std::move(branch));
+        if (acceptId("elsif")) continue;
+        if (acceptId("else")) {
+            GenBranch elseBranch;  // The else part carries no condition
             if (!expectId("generate")) return;
-            parseConcurrentList(branch.stmts, &branch.decls, &branch.types, &branch.subprograms,
-                                &branch.components);
+            parseConcurrentList(elseBranch.stmts, &elseBranch.decls, &elseBranch.types,
+                                &elseBranch.subprograms, &elseBranch.components);
             if (m_failed) return;
-            gen->branches.push_back(std::move(branch));
-            if (acceptId("elsif")) continue;
-            if (acceptId("else")) {
-                GenBranch elseBranch;  // The else part carries no condition
-                if (!expectId("generate")) return;
-                parseConcurrentList(elseBranch.stmts, &elseBranch.decls, &elseBranch.types,
-                                    &elseBranch.subprograms, &elseBranch.components);
-                if (m_failed) return;
-                gen->branches.push_back(std::move(elseBranch));
-            }
-            break;
+            gen->branches.push_back(std::move(elseBranch));
         }
-        if (!parseGenerateEnd()) return;
-        arch.stmts.push_back(std::move(gen));
+        break;
+    }
+    if (!parseGenerateEnd()) return;
+    arch.stmts.push_back(std::move(gen));
+}
+
+void Parser::parseConcurrentBlock(FileLine* flp, Architecture& arch) {
+    advance();
+    auto block = std::make_unique<Concurrent>(Concurrent::BLOCK);
+    block->flp = flp;
+    if (isSym("(")) {  // Guarded block: the guard only names a condition
+        unsupported("guarded block statement");
         return;
     }
-    if (isId("block")) {
-        advance();
-        auto block = std::make_unique<Concurrent>(Concurrent::BLOCK);
-        block->flp = flp;
-        if (isSym("(")) {  // Guarded block: the guard only names a condition
-            unsupported("guarded block statement");
-            return;
-        }
-        (void)acceptId("is");
-        while (!m_failed && !isId("begin") && !isId("end")) {
-            if (isId("signal")) {
-                advance();
-                parseDeclInto(block->decls, Decl::SIGNAL);
-                continue;
-            }
-            if (isId("shared")) {
-                advance();
-                if (!expectId("variable")) return;
-                parseDeclInto(block->decls, Decl::VARIABLE);
-                continue;
-            }
-            if (isId("variable")) {
-                advance();
-                parseDeclInto(block->decls, Decl::VARIABLE);
-                continue;
-            }
-            if (isId("constant")) {
-                advance();
-                parseDeclInto(block->decls, Decl::CONSTANT);
-                continue;
-            }
-            if (isId("type")) {
-                advance();
-                parseTypeDeclInto(block->types);
-                continue;
-            }
-            if (isId("subtype")) {
-                advance();
-                parseSubtypeInto(block->types);
-                continue;
-            }
-            if (isId("use")) {
-                skipContextClause();
-                continue;
-            }
-            if (isId("attribute")) {
-                // Attribute specifications have no synthesis meaning
-                skipContextClause();
-                continue;
-            }
-            if (isId("disconnect")) {
-                unsupported("disconnection specification");
-                return;
-            }
-            if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
-                parseSubprogramInto(block->subprograms);
-                continue;
-            }
-            if (isId("component")) {
-                advance();
-                parseComponentDecl(block->components);
-                continue;
-            }
-            if (skipFileDecl()) continue;
-            unsupported("block declarative item '" + m_cur.text + "'");
-            return;
-        }
-        if (acceptId("begin")) {
-            parseConcurrentList(block->body);
-            if (m_failed) return;
-        }
-        if (!expectId("end")) return;
-        (void)acceptId("block");
-        if (m_cur.kind == Token::ID) advance();  // Optional end label
-        if (!acceptSym(";")) error("expected ';' after 'end block'");
-        arch.stmts.push_back(std::move(block));
-        return;
-    }
-    if (isId("assert")) {
-        if (looksLikePslAssertion()) {  // A PSL assertion has no synthesis meaning
+    (void)acceptId("is");
+    while (!m_failed && !isId("begin") && !isId("end")) {
+        if (isId("signal")) {
             advance();
-            skipToStatementEnd();
+            parseDeclInto(block->decls, Decl::SIGNAL);
+            continue;
+        }
+        if (isId("shared")) {
+            advance();
+            if (!expectId("variable")) return;
+            parseDeclInto(block->decls, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("variable")) {
+            advance();
+            parseDeclInto(block->decls, Decl::VARIABLE);
+            continue;
+        }
+        if (isId("constant")) {
+            advance();
+            parseDeclInto(block->decls, Decl::CONSTANT);
+            continue;
+        }
+        if (isId("type")) {
+            advance();
+            parseTypeDeclInto(block->types);
+            continue;
+        }
+        if (isId("subtype")) {
+            advance();
+            parseSubtypeInto(block->types);
+            continue;
+        }
+        if (isId("use")) {
+            skipContextClause();
+            continue;
+        }
+        if (isId("attribute")) {
+            // Attribute specifications have no synthesis meaning
+            skipContextClause();
+            continue;
+        }
+        if (isId("disconnect")) {
+            unsupported("disconnection specification");
             return;
         }
-        advance();
-        auto conc = std::make_unique<Concurrent>(Concurrent::ASSERT);
-        conc->flp = flp;
-        conc->target = parseExpr();  // The condition
-        if (!conc->target) return;
-        if (acceptId("report")) {
-            ++m_stringContext;
-            conc->value = parseExpr();
-            --m_stringContext;
-            if (!conc->value) return;
+        if (isId("function") || isId("procedure") || isId("pure") || isId("impure")) {
+            parseSubprogramInto(block->subprograms);
+            continue;
         }
-        conc->severity = parseSeverityValue();
-        if (!acceptSym(";")) error("expected ';' after 'assert'");
-        arch.stmts.push_back(std::move(conc));
+        if (isId("component")) {
+            advance();
+            parseComponentDecl(block->components);
+            continue;
+        }
+        if (skipFileDecl()) continue;
+        unsupported("block declarative item '" + m_cur.text + "'");
         return;
     }
+    if (acceptId("begin")) {
+        parseConcurrentList(block->body);
+        if (m_failed) return;
+    }
+    if (!expectId("end")) return;
+    (void)acceptId("block");
+    if (m_cur.kind == Token::ID) advance();  // Optional end label
+    if (!acceptSym(";")) error("expected ';' after 'end block'");
+    arch.stmts.push_back(std::move(block));
+}
+
+void Parser::parseConcurrentAssert(FileLine* flp, Architecture& arch) {
+    if (looksLikePslAssertion()) {  // A PSL assertion has no synthesis meaning
+        advance();
+        skipToStatementEnd();
+        return;
+    }
+    advance();
+    auto conc = std::make_unique<Concurrent>(Concurrent::ASSERT);
+    conc->flp = flp;
+    conc->target = parseExpr();  // The condition
+    if (!conc->target) return;
+    if (acceptId("report")) {
+        ++m_stringContext;
+        conc->value = parseExpr();
+        --m_stringContext;
+        if (!conc->value) return;
+    }
+    conc->severity = parseSeverityValue();
+    if (!acceptSym(";")) error("expected ';' after 'assert'");
+    arch.stmts.push_back(std::move(conc));
+}
+
+void Parser::parseConcurrentAssignOrCall(FileLine* flp, Architecture& arch) {
     if (isId("entity") || isId("component") || isId("case")) {
         unsupported("concurrent statement '" + m_cur.text + "'");
         return;
@@ -2552,7 +2591,7 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
             conc->delay = parseExpr();
             if (!conc->delay) return;
         }
-        // A waveform list: further elements, each with its own delay (IEEE 1800-2023 10.6)
+        // A waveform list: further elements, each with its own delay (IEEE 1076-2008 10.5)
         if (conc->kind == Concurrent::ASSIGN) {
             while (acceptSym(",")) {
                 ExprP value = parseExpr();
@@ -2681,7 +2720,7 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
             process.sensitivityAll = true;
             expectSym(")");
         } else {
-            for (;;) {
+            while (true) {
                 if (m_failed) return;
                 // A bare name is a sensitivity signal; a selected, indexed or sliced name
                 // denotes one of its subelement signals (IEEE 1076-2008 11.3)
@@ -2780,7 +2819,7 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
 
 std::vector<StmtP> Parser::parseStmtList(bool stopAtElse) {
     std::vector<StmtP> body;
-    for (;;) {
+    while (true) {
         if (m_failed) break;
         if (m_cur.kind == Token::END) break;
         if (isId("end")) break;
@@ -2826,6 +2865,16 @@ StmtP Parser::parseSequentialStatement() {
         if (stmt) stmt->loopLabel = label;
         return stmt;
     }
+    if (isId("while") || isId("loop") || isId("exit") || isId("next") || isId("wait")) {
+        return parseSequentialLoopOrJump(flp, label);
+    }
+    if (isId("report") || isId("assert") || isId("return") || isId("null")) {
+        return parseSequentialReportAssertReturn(flp);
+    }
+    return parseSequentialAssignOrCall(flp);
+}
+
+StmtP Parser::parseSequentialLoopOrJump(FileLine* flp, const std::string& label) {
     if (isId("while")) {
         advance();
         auto stmt = std::make_unique<Stmt>(Stmt::WHILE);
@@ -2874,7 +2923,7 @@ StmtP Parser::parseSequentialStatement() {
             stmt->value = parseExpr();
             if (!stmt->value) return nullptr;
         } else if (acceptId("on")) {
-            for (;;) {
+            while (true) {
                 Token nameTok;
                 if (!takeId(nameTok)) return nullptr;
                 stmt->waitNames.push_back(nameTok.text);
@@ -2890,6 +2939,10 @@ StmtP Parser::parseSequentialStatement() {
         expectSym(";");
         return stmt;
     }
+    v3fatalSrc("unexpected statement in parseSequentialLoopOrJump");
+}
+
+StmtP Parser::parseSequentialReportAssertReturn(FileLine* flp) {
     if (isId("report")) {
         advance();
         auto stmt = std::make_unique<Stmt>(Stmt::REPORT);
@@ -2932,8 +2985,11 @@ StmtP Parser::parseSequentialStatement() {
     if (isId("null")) {
         advance();
         expectSym(";");
-        return nullptr;
     }
+    return nullptr;
+}
+
+StmtP Parser::parseSequentialAssignOrCall(FileLine* flp) {
     ExprP target;
     if (m_cur.kind == Token::ID) {
         target = parseDesignator();
@@ -3025,7 +3081,7 @@ bool Parser::parseConditionalTail(Stmt& stmt, bool allowUnaffected) {
 StmtP Parser::parseIf(FileLine* flp) {
     auto stmt = std::make_unique<Stmt>(Stmt::IF);
     stmt->flp = flp;
-    for (;;) {
+    while (true) {
         ExprP cond = parseExpr();
         if (!cond) return nullptr;
         if (!expectId("then")) return nullptr;
@@ -3056,9 +3112,9 @@ void Parser::parseUseClause() { parseUseClauseInto(m_uses); }
 
 void Parser::parseUseClauseInto(std::vector<UseClause>& uses) {
     advance();  // 'use'
-    for (;;) {  // `use clause, clause;` -- IEEE 1076-2008 12.4
+    while (true) {  // `use clause, clause;` -- IEEE 1076-2008 12.4
         std::vector<std::string> parts;
-        for (;;) {
+        while (true) {
             // The final item may be an operator symbol, `use work.pkg."+";`
             if (m_cur.kind != Token::ID && m_cur.kind != Token::STRING) break;
             parts.push_back(m_cur.text);
@@ -3103,7 +3159,7 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
         parsePackageInstanceTail(flp, pkg.name, pkg.spelling);
         return;
     }
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (isId("end")) break;
         if (isId("use")) {
@@ -3150,7 +3206,7 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             }
             continue;
         }
-        if (isId("view")) {  // IEEE 1800-2023 ch.17 interface view
+        if (isId("view")) {  // VHDL-2019 interface view; unsupported
             unsupported("interface view");
             return;
         }
@@ -3294,7 +3350,7 @@ void Parser::parseConfiguration(FileLine* flp) {
     Token archTok;
     if (!takeId(archTok)) return;
     unit.archName = archTok.text;
-    for (;;) {
+    while (true) {
         if (m_failed) return;
         if (isId("end")) break;
         if (!isId("for")) {
@@ -3305,7 +3361,7 @@ void Parser::parseConfiguration(FileLine* flp) {
         advance();
         ConfigBinding binding;
         binding.flp = flp;
-        for (;;) {  // The instantiation list, comma separated
+        while (true) {  // The instantiation list, comma separated
             Token instTok;
             if (!takeId(instTok)) return;
             if (!binding.instances.empty()) binding.instances += ",";
@@ -3400,7 +3456,7 @@ void Parser::parseDesignFile() {
             skipToBraceBlock();
             continue;
         }
-        if (isId("configuration")) {  // IEEE 1800-2023 11.3 configuration design unit
+        if (isId("configuration")) {  // IEEE 1076-2008 3.4 configuration design unit
             FileLine* const flp = m_cur.flp;
             advance();
             parseConfiguration(flp);
@@ -3419,7 +3475,7 @@ void Parser::parseDesignFile() {
 void parseFile(const V3VhdlNativeFile& file, DesignLibrary& library) {
     const std::unique_ptr<std::ifstream> ifsp{V3File::new_ifstream(file.filename)};
     if (!*ifsp) {
-        v3Global.rootp()->fileline()->v3error("Cannot read VHDL file '" + file.filename + "'");
+        v3Global.rootp()->fileline()->v3error("Cannot read VHDL file '" + file.filename + "'.");
         return;
     }
     const std::string text{std::istreambuf_iterator<char>{*ifsp},

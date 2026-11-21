@@ -92,7 +92,7 @@ bool Lexer::decimalValue(const std::string& digits, int64_t& out) {
 }
 
 void Lexer::skipSpace() {
-    for (;;) {
+    while (true) {
         if (m_pos >= m_text.size()) return;
         const char c = m_text[m_pos];
         if (c == '\n') {
@@ -127,7 +127,7 @@ void Lexer::skipSpace() {
 int Lexer::pragmaDirection(size_t start, size_t end) const {
     size_t at = start;
     std::string lastWord;
-    for (;;) {
+    while (true) {
         while (at < end && std::isspace(static_cast<unsigned char>(m_text[at]))) ++at;
         if (at >= end) break;
         std::string word;
@@ -196,7 +196,7 @@ Token Lexer::lexBits(FileLine* flp, const std::string& baseText, int length) {
     if (m_pos < m_text.size() && m_text[m_pos] == '"') {
         ++m_pos;
     } else {
-        flp->v3error("VHDL bit-string literal is missing its closing '\"'");
+        flp->v3error("VHDL bit-string literal is missing its closing '\"'.");
         tok.kind = Token::END;
         return tok;
     }
@@ -206,7 +206,7 @@ Token Lexer::lexBits(FileLine* flp, const std::string& baseText, int length) {
         return tok;
     }
     if (!bitsFromDigits(digits, base, tok.bits)) {
-        flp->v3error("Malformed VHDL bit-string literal");
+        flp->v3error("Malformed VHDL bit-string literal.");
         tok.kind = Token::END;
         return tok;
     }
@@ -217,7 +217,7 @@ Token Lexer::lexBits(FileLine* flp, const std::string& baseText, int length) {
         if (excess > 0) {
             for (int i = 0; i < excess; ++i) {
                 if (tok.bits[i] != '0') {
-                    flp->v3error("VHDL bit-string literal does not fit its length");
+                    flp->v3error("VHDL bit-string literal does not fit its length.");
                     break;
                 }
             }
@@ -237,6 +237,276 @@ Token Lexer::nextRaw() {
     return tok;
 }
 
+void Lexer::skipDigits() {
+    while (m_pos < m_text.size()
+           && (std::isdigit(static_cast<unsigned char>(m_text[m_pos])) || m_text[m_pos] == '_')) {
+        ++m_pos;
+    }
+}
+
+bool Lexer::consumeExponent() {
+    if (peek(0) != 'e' && peek(0) != 'E') return false;
+    const bool sign = peek(1) == '+' || peek(1) == '-';
+    const char after = sign ? peek(2) : peek(1);
+    if (!std::isdigit(static_cast<unsigned char>(after))) return false;
+    m_pos += 1 + (sign ? 1 : 0);
+    skipDigits();
+    return true;
+}
+
+Token Lexer::makeRealToken(FileLine* flp, size_t start) {
+    std::string clean;
+    for (size_t i = start; i < m_pos; ++i) {
+        if (m_text[i] != '_') clean.push_back(m_text[i]);
+    }
+    Token tok;
+    tok.kind = Token::REAL;
+    tok.flp = flp;
+    tok.realValue = std::stod(clean);
+    tok.text = clean;
+    return tok;
+}
+
+Token Lexer::lexIdentifier(FileLine* flp) {
+    Token tok;
+    tok.flp = flp;
+    const size_t start = m_pos;
+    while (m_pos < m_text.size() && isIdChar(m_text[m_pos])) ++m_pos;
+    tok.kind = Token::ID;
+    tok.spelling = m_text.substr(start, m_pos - start);
+    tok.text = tok.spelling;
+    // IEEE 1076-2008 15.4.2: a basic identifier starts with a letter, never has
+    // two underscores in a row and never ends with one
+    if (tok.spelling.front() == '_') {
+        tok.flp->v3error("VHDL identifier cannot begin with an underscore: '" + tok.spelling
+                         + "'.");
+    } else if (tok.spelling.back() == '_') {
+        tok.flp->v3error("VHDL identifier cannot end with an underscore: '" + tok.spelling + "'.");
+    } else if (tok.spelling.find("__") != std::string::npos) {
+        tok.flp->v3error("VHDL identifier cannot contain two underscores in a row: '"
+                         + tok.spelling + "'.");
+    }
+    // VHDL identifiers are case-insensitive; lookup uses the folded form
+    std::transform(tok.text.begin(), tok.text.end(), tok.text.begin(), [](char ch) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    });
+    // A one-letter base prefix directly followed by '"' is a bit-string literal
+    if (tok.text.size() == 1
+        && (tok.text == "b" || tok.text == "o" || tok.text == "x" || tok.text == "d")
+        && peek(0) == '"') {
+        return lexBits(tok.flp, tok.text);
+    }
+    return tok;
+}
+
+Token Lexer::lexExtendedIdentifier(FileLine* flp) {
+    Token tok;
+    tok.flp = flp;
+    // Extended identifier: \name\ is case-sensitive and a backslash inside it is
+    // doubled. Keep the raw \...\ spelling as the identity so an extended
+    // identifier cannot collide with a simple name made of the same letters.
+    const size_t start = m_pos;
+    ++m_pos;  // The opening backslash
+    bool closed = false;
+    while (m_pos < m_text.size()) {
+        const char ch = m_text[m_pos];
+        if (ch == '\n') break;
+        if (ch == '\\') {
+            if (m_pos + 1 < m_text.size() && m_text[m_pos + 1] == '\\') {
+                m_pos += 2;  // An escaped backslash stays inside the identifier
+                continue;
+            }
+            ++m_pos;  // The closing backslash
+            closed = true;
+            break;
+        }
+        ++m_pos;
+    }
+    if (!closed) {
+        tok.flp->v3error("VHDL extended identifier is missing its closing '\\'.");
+        tok.kind = Token::END;
+        return tok;
+    }
+    tok.kind = Token::ID;
+    tok.spelling = m_text.substr(start, m_pos - start);
+    tok.text = tok.spelling;
+    return tok;
+}
+
+Token Lexer::lexIntegerLiteral(FileLine* flp, const std::string& first) {
+    Token tok;
+    tok.flp = flp;
+    if (peek(0) == '#') return lexBasedLiteral(flp, first);
+    int64_t value = 0;
+    if (!decimalValue(first, value)) {
+        tok.flp->v3error("Malformed VHDL integer literal.");
+        tok.kind = Token::END;
+        return tok;
+    }
+    tok.kind = Token::INT;
+    tok.intValue = value;
+    tok.text = first;
+    return tok;
+}
+
+Token Lexer::lexBasedLiteral(FileLine* flp, const std::string& first) {
+    Token tok;
+    tok.flp = flp;
+    int64_t base = 0;
+    if (!decimalValue(first, base) || base < 2 || base > 16) {
+        tok.flp->v3error("Malformed VHDL based literal.");
+        tok.kind = Token::END;
+        return tok;
+    }
+    ++m_pos;  // '#'
+    const size_t dstart = m_pos;
+    while (m_pos < m_text.size() && m_text[m_pos] != '#' && m_text[m_pos] != '\n') { ++m_pos; }
+    if (m_pos >= m_text.size() || m_text[m_pos] != '#') {
+        tok.flp->v3error("VHDL based literal is missing its closing '#'.");
+        tok.kind = Token::END;
+        return tok;
+    }
+    const std::string digits = m_text.substr(dstart, m_pos - dstart);
+    ++m_pos;  // '#'
+    int64_t result = 0;
+    for (const char d : digits) {
+        if (d == '_') continue;
+        int digit = -1;
+        if (d >= '0' && d <= '9')
+            digit = d - '0';
+        else if (d >= 'a' && d <= 'f')
+            digit = d - 'a' + 10;
+        else if (d >= 'A' && d <= 'F')
+            digit = d - 'A' + 10;
+        if (digit < 0 || digit >= base) {
+            tok.flp->v3error("Malformed digit in VHDL based literal.");
+            tok.kind = Token::END;
+            return tok;
+        }
+        result = result * base + digit;
+    }
+    int64_t value = result;
+    // A based literal may carry an exponent (IEEE 1076-2008 15.5):
+    // 16#FF#E2 is 255 * 16**2
+    if (peek(0) == 'e' || peek(0) == 'E') {
+        const bool negExp = peek(1) == '-';
+        const bool sign = negExp || peek(1) == '+';
+        const char after = sign ? peek(2) : peek(1);
+        if (std::isdigit(static_cast<unsigned char>(after))) {
+            if (negExp) {
+                tok.flp->v3error("VHDL based literal with a negative exponent.");
+                tok.kind = Token::END;
+                return tok;
+            }
+            m_pos += 1 + (sign ? 1 : 0);
+            int64_t exp = 0;
+            while (m_pos < m_text.size()
+                   && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
+                       || m_text[m_pos] == '_')) {
+                if (m_text[m_pos] != '_') exp = exp * 10 + (m_text[m_pos] - '0');
+                ++m_pos;
+            }
+            for (int64_t i = 0; i < exp; ++i) {
+                if (value > INT64_MAX / base) {
+                    tok.flp->v3error("VHDL based literal that overflows.");
+                    tok.kind = Token::END;
+                    return tok;
+                }
+                value *= base;
+            }
+        }
+    }
+    tok.kind = Token::INT;
+    tok.intValue = value;
+    tok.text = first;
+    return tok;
+}
+
+Token Lexer::lexNumber(FileLine* flp) {
+    Token tok;
+    tok.flp = flp;
+    const size_t start = m_pos;
+    skipDigits();
+    const std::string first = m_text.substr(start, m_pos - start);
+    // A real literal with an exponent but no decimal point, e.g. 25e6
+    if (peek(0) == 'e' || peek(0) == 'E') {
+        if (consumeExponent()) return makeRealToken(flp, start);
+    }
+    // A bit-string literal may state its length before the base, e.g. 6x"3f"
+    const char baseChar = static_cast<char>(std::tolower(static_cast<unsigned char>(peek(0))));
+    if ((baseChar == 'b' || baseChar == 'o' || baseChar == 'x' || baseChar == 'd')
+        && peek(1) == '"') {
+        ++m_pos;  // The base letter
+        int64_t bitLength = 0;
+        if (!decimalValue(first, bitLength)) {
+            tok.flp->v3error("Malformed VHDL bit-string length.");
+            tok.kind = Token::END;
+            return tok;
+        }
+        return lexBits(tok.flp, std::string(1, baseChar), static_cast<int>(bitLength));
+    }
+    if (peek(0) == '.' && std::isdigit(static_cast<unsigned char>(peek(1)))) {
+        ++m_pos;  // The '.'
+        skipDigits();
+        if (peek(0) == 'e' || peek(0) == 'E') consumeExponent();
+        return makeRealToken(flp, start);
+    }
+    return lexIntegerLiteral(flp, first);
+}
+
+Token Lexer::lexCharOrMark(FileLine* flp) {
+    Token tok;
+    tok.flp = flp;
+    // Character literal ('0'); anything else is an attribute or qualification
+    // mark. A mark immediately followed by '(' after a name, e.g. the `'('` in
+    // std_logic'('1'), is a qualified expression, not the character literal '('.
+    // A reserved word cannot name a mark (IEEE 1076-2008 15.10), so `'('` after
+    // one is the character literal, as a case choice writes it (15.6)
+    const bool qualifiedExpr
+        = peek(1) == '(' && m_prevEndsDesignator && (!m_prevId || !isReservedWord(m_prevText));
+    if (peek(1) != '\n' && peek(2) == '\'' && !qualifiedExpr) {
+        tok.kind = Token::CHAR;
+        tok.charValue = peek(1);
+        m_pos += 3;
+        return tok;
+    }
+    tok.kind = Token::SYM;
+    tok.sym = '\'';
+    tok.text = "'";
+    ++m_pos;
+    return tok;
+}
+
+Token Lexer::lexStringLiteral(FileLine* flp) {
+    Token tok;
+    tok.flp = flp;
+    ++m_pos;
+    std::string text;
+    while (true) {
+        if (m_pos >= m_text.size() || m_text[m_pos] == '\n') {
+            tok.flp->v3error("VHDL string literal is missing its closing '\"'.");
+            tok.kind = Token::END;
+            return tok;
+        }
+        if (m_text[m_pos] != '"') {
+            text.push_back(m_text[m_pos++]);
+            continue;
+        }
+        // A doubled quote inside a literal is one quote character, and only a lone
+        // quote closes it (IEEE 1076-2008 15.7)
+        if (m_pos + 1 < m_text.size() && m_text[m_pos + 1] == '"') {
+            text.push_back('"');
+            m_pos += 2;
+            continue;
+        }
+        ++m_pos;  // The closing quote
+        break;
+    }
+    tok.kind = Token::STRING;
+    tok.text = std::move(text);
+    return tok;
+}
+
 Token Lexer::scanToken() {
     skipSpace();
     Token tok;
@@ -247,262 +517,11 @@ Token Lexer::scanToken() {
     }
 
     const char c = m_text[m_pos];
-    if (isIdStart(c)) {
-        const size_t start = m_pos;
-        while (m_pos < m_text.size() && isIdChar(m_text[m_pos])) ++m_pos;
-        tok.kind = Token::ID;
-        tok.spelling = m_text.substr(start, m_pos - start);
-        tok.text = tok.spelling;
-        // IEEE 1076-2008 15.4.2: a basic identifier starts with a letter, never has
-        // two underscores in a row and never ends with one
-        if (tok.spelling.front() == '_') {
-            tok.flp->v3error("VHDL identifier cannot begin with an underscore: '" + tok.spelling
-                             + "'");
-        } else if (tok.spelling.back() == '_') {
-            tok.flp->v3error("VHDL identifier cannot end with an underscore: '" + tok.spelling
-                             + "'");
-        } else if (tok.spelling.find("__") != std::string::npos) {
-            tok.flp->v3error("VHDL identifier cannot contain two underscores in a row: '"
-                             + tok.spelling + "'");
-        }
-        // VHDL identifiers are case-insensitive; lookup uses the folded form
-        std::transform(tok.text.begin(), tok.text.end(), tok.text.begin(), [](char ch) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        });
-        // A one-letter base prefix directly followed by '"' is a bit-string literal
-        if (tok.text.size() == 1
-            && (tok.text == "b" || tok.text == "o" || tok.text == "x" || tok.text == "d")
-            && peek(0) == '"') {
-            return lexBits(tok.flp, tok.text);
-        }
-        return tok;
-    }
-    if (c == '\\') {
-        // Extended identifier: \name\ is case-sensitive and a backslash inside it is
-        // doubled. Keep the raw \...\ spelling as the identity so an extended
-        // identifier cannot collide with a simple name made of the same letters.
-        const size_t start = m_pos;
-        ++m_pos;  // The opening backslash
-        bool closed = false;
-        while (m_pos < m_text.size()) {
-            const char ch = m_text[m_pos];
-            if (ch == '\n') break;
-            if (ch == '\\') {
-                if (m_pos + 1 < m_text.size() && m_text[m_pos + 1] == '\\') {
-                    m_pos += 2;  // An escaped backslash stays inside the identifier
-                    continue;
-                }
-                ++m_pos;  // The closing backslash
-                closed = true;
-                break;
-            }
-            ++m_pos;
-        }
-        if (!closed) {
-            tok.flp->v3error("VHDL extended identifier is missing its closing '\\'");
-            tok.kind = Token::END;
-            return tok;
-        }
-        tok.kind = Token::ID;
-        tok.spelling = m_text.substr(start, m_pos - start);
-        tok.text = tok.spelling;
-        return tok;
-    }
-    if (std::isdigit(static_cast<unsigned char>(c))) {
-        const size_t start = m_pos;
-        while (
-            m_pos < m_text.size()
-            && (std::isdigit(static_cast<unsigned char>(m_text[m_pos])) || m_text[m_pos] == '_')) {
-            ++m_pos;
-        }
-        const std::string first = m_text.substr(start, m_pos - start);
-        // A real literal with an exponent but no decimal point, e.g. 25e6
-        if (peek(0) == 'e' || peek(0) == 'E') {
-            const bool sign = peek(1) == '+' || peek(1) == '-';
-            const char after = sign ? peek(2) : peek(1);
-            if (std::isdigit(static_cast<unsigned char>(after))) {
-                m_pos += 1 + (sign ? 1 : 0);
-                while (m_pos < m_text.size()
-                       && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
-                           || m_text[m_pos] == '_')) {
-                    ++m_pos;
-                }
-                std::string clean;
-                for (size_t i = start; i < m_pos; ++i) {
-                    if (m_text[i] != '_') clean.push_back(m_text[i]);
-                }
-                tok.kind = Token::REAL;
-                tok.realValue = std::stod(clean);
-                tok.text = clean;
-                return tok;
-            }
-        }
-        // A bit-string literal may state its length before the base, e.g. 6x"3f"
-        const char baseChar = static_cast<char>(std::tolower(static_cast<unsigned char>(peek(0))));
-        if ((baseChar == 'b' || baseChar == 'o' || baseChar == 'x' || baseChar == 'd')
-            && peek(1) == '"') {
-            ++m_pos;  // The base letter
-            int64_t bitLength = 0;
-            if (!decimalValue(first, bitLength)) {
-                tok.flp->v3error("Malformed VHDL bit-string length");
-                tok.kind = Token::END;
-                return tok;
-            }
-            return lexBits(tok.flp, std::string(1, baseChar), static_cast<int>(bitLength));
-        }
-        if (peek(0) == '.' && std::isdigit(static_cast<unsigned char>(peek(1)))) {
-            ++m_pos;  // The '.'
-            while (m_pos < m_text.size()
-                   && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
-                       || m_text[m_pos] == '_')) {
-                ++m_pos;
-            }
-            if (peek(0) == 'e' || peek(0) == 'E') {
-                const bool sign = peek(1) == '+' || peek(1) == '-';
-                const char after = sign ? peek(2) : peek(1);
-                if (std::isdigit(static_cast<unsigned char>(after))) {
-                    m_pos += 1 + (sign ? 1 : 0);
-                    while (m_pos < m_text.size()
-                           && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
-                               || m_text[m_pos] == '_')) {
-                        ++m_pos;
-                    }
-                }
-            }
-            std::string clean;
-            for (size_t i = start; i < m_pos; ++i) {
-                if (m_text[i] != '_') clean.push_back(m_text[i]);
-            }
-            tok.kind = Token::REAL;
-            tok.realValue = std::stod(clean);
-            tok.text = clean;
-            return tok;
-        }
-        int64_t value = 0;
-        if (peek(0) == '#') {
-            int64_t base = 0;
-            if (!decimalValue(first, base) || base < 2 || base > 16) {
-                tok.flp->v3error("Malformed VHDL based literal");
-                tok.kind = Token::END;
-                return tok;
-            }
-            ++m_pos;  // '#'
-            const size_t dstart = m_pos;
-            while (m_pos < m_text.size() && m_text[m_pos] != '#' && m_text[m_pos] != '\n') {
-                ++m_pos;
-            }
-            if (m_pos >= m_text.size() || m_text[m_pos] != '#') {
-                tok.flp->v3error("VHDL based literal is missing its closing '#'");
-                tok.kind = Token::END;
-                return tok;
-            }
-            const std::string digits = m_text.substr(dstart, m_pos - dstart);
-            ++m_pos;  // '#'
-            int64_t result = 0;
-            for (const char d : digits) {
-                if (d == '_') continue;
-                int digit = -1;
-                if (d >= '0' && d <= '9')
-                    digit = d - '0';
-                else if (d >= 'a' && d <= 'f')
-                    digit = d - 'a' + 10;
-                else if (d >= 'A' && d <= 'F')
-                    digit = d - 'A' + 10;
-                if (digit < 0 || digit >= base) {
-                    tok.flp->v3error("Malformed digit in VHDL based literal");
-                    tok.kind = Token::END;
-                    return tok;
-                }
-                result = result * base + digit;
-            }
-            value = result;
-            // A based literal may carry an exponent (IEEE 1076-2008 15.5):
-            // 16#FF#E2 is 255 * 16**2
-            if (peek(0) == 'e' || peek(0) == 'E') {
-                const bool negExp = peek(1) == '-';
-                const bool sign = negExp || peek(1) == '+';
-                const char after = sign ? peek(2) : peek(1);
-                if (std::isdigit(static_cast<unsigned char>(after))) {
-                    if (negExp) {
-                        tok.flp->v3error("VHDL based literal with a negative exponent");
-                        tok.kind = Token::END;
-                        return tok;
-                    }
-                    m_pos += 1 + (sign ? 1 : 0);
-                    int64_t exp = 0;
-                    while (m_pos < m_text.size()
-                           && (std::isdigit(static_cast<unsigned char>(m_text[m_pos]))
-                               || m_text[m_pos] == '_')) {
-                        if (m_text[m_pos] != '_') exp = exp * 10 + (m_text[m_pos] - '0');
-                        ++m_pos;
-                    }
-                    for (int64_t i = 0; i < exp; ++i) {
-                        if (value > INT64_MAX / base) {
-                            tok.flp->v3error("VHDL based literal that overflows");
-                            tok.kind = Token::END;
-                            return tok;
-                        }
-                        value *= base;
-                    }
-                }
-            }
-        } else if (!decimalValue(first, value)) {
-            tok.flp->v3error("Malformed VHDL integer literal");
-            tok.kind = Token::END;
-            return tok;
-        }
-        tok.kind = Token::INT;
-        tok.intValue = value;
-        tok.text = first;
-        return tok;
-    }
-    if (c == '\'') {
-        // Character literal ('0'); anything else is an attribute or qualification
-        // mark. A mark immediately followed by '(' after a name, e.g. the `'('` in
-        // std_logic'('1'), is a qualified expression, not the character literal '('.
-        // A reserved word cannot name a mark (IEEE 1076-2008 15.10), so `'('` after
-        // one is the character literal, as a case choice writes it (15.6)
-        const bool qualifiedExpr
-            = peek(1) == '(' && m_prevEndsDesignator && (!m_prevId || !isReservedWord(m_prevText));
-        if (peek(1) != '\n' && peek(2) == '\'' && !qualifiedExpr) {
-            tok.kind = Token::CHAR;
-            tok.charValue = peek(1);
-            m_pos += 3;
-            return tok;
-        }
-        tok.kind = Token::SYM;
-        tok.sym = '\'';
-        tok.text = "'";
-        ++m_pos;
-        return tok;
-    }
-    if (c == '"') {
-        ++m_pos;
-        std::string text;
-        for (;;) {
-            if (m_pos >= m_text.size() || m_text[m_pos] == '\n') {
-                tok.flp->v3error("VHDL string literal is missing its closing '\"'");
-                tok.kind = Token::END;
-                return tok;
-            }
-            if (m_text[m_pos] != '"') {
-                text.push_back(m_text[m_pos++]);
-                continue;
-            }
-            // A doubled quote inside a literal is one quote character, and only a lone
-            // quote closes it (IEEE 1076-2008 15.7)
-            if (m_pos + 1 < m_text.size() && m_text[m_pos + 1] == '"') {
-                text.push_back('"');
-                m_pos += 2;
-                continue;
-            }
-            ++m_pos;  // The closing quote
-            break;
-        }
-        tok.kind = Token::STRING;
-        tok.text = std::move(text);
-        return tok;
-    }
+    if (isIdStart(c)) return lexIdentifier(tok.flp);
+    if (c == '\\') return lexExtendedIdentifier(tok.flp);
+    if (std::isdigit(static_cast<unsigned char>(c))) return lexNumber(tok.flp);
+    if (c == '\'') return lexCharOrMark(tok.flp);
+    if (c == '"') return lexStringLiteral(tok.flp);
     if (c == '(' || c == ')' || c == ';' || c == ':' || c == ',' || c == '.' || c == '='
         || c == '<' || c == '>' || c == '+' || c == '-' || c == '*' || c == '/' || c == '&'
         || c == '|' || c == '#' || c == '?' || c == '{' || c == '}' || c == '[' || c == ']') {

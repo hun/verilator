@@ -1,4 +1,4 @@
-%Error: t/t_vhdl_case_metavalue_unsup.vhdl:29:1: Unsupported: VHDL metavalue in a case or selected choice
+%Error: t/t_vhdl_case_metavalue_unsup.vhdl:29:1: Unsupported: VHDL metavalue in a case or selected choice.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_case_metavalue_unsup.vhdl:37:1: Unsupported: VHDL metavalue in a case or selected choice
+%Error: t/t_vhdl_case_metavalue_unsup.vhdl:37:1: Unsupported: VHDL metavalue in a case or selected choice.
 %Error: Exiting due to

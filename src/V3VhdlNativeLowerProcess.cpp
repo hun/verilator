@@ -14,11 +14,7 @@
 //
 //*************************************************************************
 //
-// Lowers one analyzed entity/architecture pair into the committed pre-width
-// Verilator AST: the node shapes, dtype canonicalization and re-entry contract
-// match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
-// is emitted under its folded (lowercase) form -- the spelling as written stays
-// available for diagnostics only.
+// Lowers VHDL processes, sensitivity lists and clocked idioms
 //
 //*************************************************************************
 
@@ -66,39 +62,11 @@ void Lowering::lowerProcess(const Process& process) {
         return;
     }
     // The process declarative part declares variables that hide module-level names
-    const ScopeSave saved = saveScope();
+    const ScopeGuard scopeGuard{*this};
     std::set<std::string> varNames;
     emitProcessDecls(process, varNames);
     std::vector<AstVar*> sensVars;
-    std::vector<std::string> sensNames = process.sensitivity;
-    if (process.sensitivityAll) {
-        // process(all) is sensitive to every signal it reads, including any clock, so
-        // a clock edge in the body cannot become an edge-triggered always block
-        if (stmtsContainEdge(process.body)) {
-            unsupportedError(process.flp, "clock edge in a process(all)");
-            return;
-        }
-        std::set<std::string> readNames;
-        collectReadNames(process.body, readNames);
-        sensNames.assign(readNames.begin(), readNames.end());
-    }
-    for (const std::string& name : sensNames) {
-        // A variable is not a signal, so it never becomes a sensitivity item
-        if (varNames.count(name) || m_variables.count(name)) continue;
-        Expr nameExpr{Expr::NAME};
-        nameExpr.flp = process.flp;
-        nameExpr.text = name;
-        nameExpr.spelling = name;
-        AstVar* const varp = lookupVar(nameExpr);
-        if (!varp) {
-            // process(all) collects read names including subprogram and type marks; only
-            // names that are actual signals sensitize the process
-            if (process.sensitivityAll) continue;
-            process.flp->v3error("VHDL: unknown signal '" + name + "' in a sensitivity list");
-            return;
-        }
-        sensVars.push_back(varp);
-    }
+    if (!resolveProcessSensitivity(process, varNames, sensVars)) return;
     // A process runs on every event of its sensitivity list, so an edge call must not
     // become a constant. A whole-signal edge is the signal's level when it is the only
     // sensitivity; a signal-element event and multi-sensitivity edges compare with the
@@ -107,10 +75,7 @@ void Lowering::lowerProcess(const Process& process) {
     const std::size_t sensCount = sensVars.size() + process.sensitivityElems.size();
     m_edgeAsLevel = hasEdges && sensCount == 1;
     m_edgeAsPrev = hasEdges && sensCount > 1;
-    if (lowerFlopIdiom(process)) {
-        restoreScope(saved);
-        return;
-    }
+    if (lowerFlopIdiom(process)) { return; }
 
     m_edges.clear();
     m_initial = false;
@@ -153,6 +118,62 @@ void Lowering::lowerProcess(const Process& process) {
         return;
     }
 
+    AstSenItem* const itemsp = buildProcessSensitivity(process, sensVars, edges, varNames);
+    if (!itemsp) {
+        if (bodyp) bodyp->deleteTree();
+        if (initp) initp->deleteTree();
+        return;
+    }
+    if (bodyp) {
+        m_modp->addStmtsp(new AstAlways{process.flp, VAlwaysKwd::ALWAYS,
+                                        new AstSenTree{process.flp, itemsp}, bodyp});
+    } else if (itemsp) {
+        itemsp->deleteTree();
+    }
+    // VHDL executes a process once at time zero, before any sensitivity event, and the
+    // initial combination is visible to the testbench after the first eval
+    if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
+}
+
+bool Lowering::resolveProcessSensitivity(const Process& process,
+                                         const std::set<std::string>& varNames,
+                                         std::vector<AstVar*>& sensVars) {
+    std::vector<std::string> sensNames = process.sensitivity;
+    if (process.sensitivityAll) {
+        // process(all) is sensitive to every signal it reads, including any clock, so
+        // a clock edge in the body cannot become an edge-triggered always block
+        if (stmtsContainEdge(process.body)) {
+            unsupportedError(process.flp, "clock edge in a process(all)");
+            return false;
+        }
+        std::set<std::string> readNames;
+        collectReadNames(process.body, readNames);
+        sensNames.assign(readNames.begin(), readNames.end());
+    }
+    for (const std::string& name : sensNames) {
+        // A variable is not a signal, so it never becomes a sensitivity item
+        if (varNames.count(name) || m_variables.count(name)) continue;
+        Expr nameExpr{Expr::NAME};
+        nameExpr.flp = process.flp;
+        nameExpr.text = name;
+        nameExpr.spelling = name;
+        AstVar* const varp = lookupVar(nameExpr);
+        if (!varp) {
+            // process(all) collects read names including subprogram and type marks; only
+            // names that are actual signals sensitize the process
+            if (process.sensitivityAll) continue;
+            process.flp->v3error("VHDL: unknown signal '" + name + "' in a sensitivity list.");
+            return false;
+        }
+        sensVars.push_back(varp);
+    }
+    return true;
+}
+
+AstSenItem* Lowering::buildProcessSensitivity(const Process& process,
+                                              const std::vector<AstVar*>& sensVars,
+                                              const std::vector<Edge>& edges,
+                                              const std::set<std::string>& varNames) {
     AstSenItem* itemsp = nullptr;
     for (AstVar* const varp : sensVars) {
         VEdgeType type = VEdgeType::ET_CHANGED;
@@ -173,7 +194,7 @@ void Lowering::lowerProcess(const Process& process) {
         while (namep && namep->kind != Expr::NAME) namep = namep->a.get();
         if (namep && (varNames.count(namep->text) || m_variables.count(namep->text))) {
             process.flp->v3error("VHDL: sensitivity element '" + elemp->spelling
-                                 + "' is not a signal");
+                                 + "' is not a signal.");
             sensBad = true;
             break;
         }
@@ -187,28 +208,15 @@ void Lowering::lowerProcess(const Process& process) {
     }
     if (sensBad) {
         if (itemsp) itemsp->deleteTree();
-        if (bodyp) bodyp->deleteTree();
-        if (initp) initp->deleteTree();
-        restoreScope(saved);
-        return;
+        return nullptr;
     }
-    if (bodyp) {
-        m_modp->addStmtsp(new AstAlways{process.flp, VAlwaysKwd::ALWAYS,
-                                        new AstSenTree{process.flp, itemsp}, bodyp});
-    } else if (itemsp) {
-        itemsp->deleteTree();
-    }
-    // VHDL executes a process once at time zero, before any sensitivity event, and the
-    // initial combination is visible to the testbench after the first eval
-    if (initp) m_modp->addStmtsp(new AstInitialStatic{process.flp, initp});
-    restoreScope(saved);
+    return itemsp;
 }
 
 //! The asynchronous-reset flip-flop idiom a process writes:
 //! `if rst = <active> then <reset values> elsif rising_edge(clk) then <clocked> end if`.
 //! Emitting it as an edge-triggered always puts the clock in the block's sensitivity,
-//! where the scheduler keeps it; the level test inside the body used to be the only place
-//! the clock appeared, and a split of the body could drop it.
+//! where the scheduler keeps it, and the level test inside the body cannot be folded away.
 bool Lowering::lowerFlopIdiom(const Process& process) {
     if (process.body.size() != 1 || !process.body[0]) return false;
     const Stmt& ifStmt = *process.body[0];
@@ -356,8 +364,7 @@ void Lowering::emitProcessDecls(const Process& process, std::set<std::string>& v
         for (const auto& name : decl.names) {
             if (!reserveName(name.first, name.second, decl.flp)) continue;
             // Mangle so the same variable name in two processes stays distinct
-            const std::string mangled
-                = "vhdlvar_" + std::to_string(++m_varSeq) + "__" + name.first;
+            const std::string mangled = "__Vvar_" + std::to_string(++m_varSeq) + "__" + name.first;
             AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, mangled, type.dtp};
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
@@ -396,7 +403,7 @@ bool Lowering::reserveName(const std::string& folded, const std::string& spellin
     }
     if (m_scope.count(folded) || m_consts.count(folded) || m_constValues.count(folded)
         || m_enumConsts.count(folded) || m_realConsts.count(folded) || m_types.count(folded)) {
-        flp->v3error("VHDL: duplicate declaration of '" + spelling + "'");
+        flp->v3error("VHDL: duplicate declaration of '" + spelling + "'.");
         return false;
     }
     return true;

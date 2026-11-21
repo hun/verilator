@@ -14,7 +14,7 @@ test.top_filename = 't/t_vhdl_slv_arith_bad.vhdl'
 
 # IEEE 1076-2008 9.1: std_logic_vector arithmetic needs a declaring package
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

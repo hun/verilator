@@ -32,11 +32,10 @@ struct V3VhdlNativeFile final {
     bool inLibrary = false;  // File came from a -v/--library file
 };
 
-//! In-tree VHDL frontend: parses VHDL directly and lowers it to the committed
-//! (post-width) Verilator AST that V3VhdlLink expects. It does not invoke an
-//! external analyzer. The accepted language subset is documented in
-//! vhdl_synth_subset.md; everything outside the implemented part of it is
-//! rejected with a source-located `Unsupported:` diagnostic.
+//! In-tree VHDL frontend: parses VHDL directly and lowers it to an AST with
+//! committed dtypes before V3Width runs. It does not invoke an external analyzer.
+//! The accepted subset is documented in docs/vhdl/limitations.rst; everything
+//! outside it is refused with a source-located `Unsupported:` diagnostic.
 class V3VhdlNative final {
 public:
     //! Parse all files, elaborate, and append AstModules to the netlist

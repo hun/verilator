@@ -14,11 +14,7 @@
 //
 //*************************************************************************
 //
-// Lowers one analyzed entity/architecture pair into the committed pre-width
-// Verilator AST: the node shapes, dtype canonicalization and re-entry contract
-// match what V3VhdlLink expects. VHDL identifiers are case-insensitive, so a name
-// is emitted under its folded (lowercase) form -- the spelling as written stays
-// available for diagnostics only.
+// Lowers VHDL expressions into the V3 AST
 //
 //*************************************************************************
 
@@ -62,6 +58,340 @@ bool Lowering::containsEdgeCall(const Expr& expr) const {
     return false;
 }
 
+AstNodeExpr* Lowering::lowerCharLiteral(FileLine* flp, const Expr& expr, const VType* context) {
+    // A character can itself be an enumeration literal ('z'); resolve it to the
+    // enum value before treating it as a logic value or 8-bit character code.
+    if (context && context->kind == VType::ENUM) {
+        const std::string key = std::string{"'"} + expr.charValue + "'";
+        for (size_t i = 0; i < context->literals.size(); ++i) {
+            if (context->literals[i] != key) continue;
+            AstConst* const constp
+                = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
+            constp->dtypep(context->dtp);
+            return constp;
+        }
+    }
+    // A character in an 8-bit character context is its code; otherwise a logic value
+    if (context && context->isVector() && context->width == 8) {
+        return makeVectorConst(flp, *context, static_cast<unsigned char>(expr.charValue));
+    }
+    const char bit = vhdlLogicBit(expr.charValue);
+    if (bit == 0) {
+        unsupportedError(flp, std::string{"character literal '"} + expr.charValue
+                                  + "' outside a logic context");
+        return nullptr;
+    }
+    return bitConst(flp, bit);
+}
+
+AstNodeExpr* Lowering::lowerBitStringLiteral(FileLine* flp, const Expr& expr,
+                                             const VType* context) {
+    // A string literal whose characters are all logic characters is a bit vector in a
+    // logic context, but a string in a character-array context: `"ZU"` is a legal
+    // std_logic_vector and a legal `string` (IEEE 1076-2008 9.3.2, 15.5)
+    if (context && !expr.spelling.empty()
+        && ((context->kind == VType::ARRAY && context->elemp
+             && context->elemp->typeName == "character")
+            || context->typeName == "string")) {
+        return makeStringConst(flp, expr.spelling);
+    }
+    const int width = static_cast<int>(expr.bits.size());
+    AstNodeDType* dtp = nullptr;
+    if (context && context->isVector() && context->width == width) {
+        dtp = context->dtp;
+    } else {
+        dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, width);
+    }
+    return makeBitsConst(flp, dtp, expr.bits);
+}
+
+AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* context) {
+    if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, false);
+    // An expected enumeration type picks its own literal, even when another visible
+    // enumeration declares the same name (IEEE 1076-2008 12.5)
+    if (context && context->kind == VType::ENUM) {
+        for (size_t i = 0; i < context->literals.size(); ++i) {
+            if (VString::downcase(context->literals[i]) != VString::downcase(expr.text)) {
+                continue;
+            }
+            AstConst* const constp
+                = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
+            constp->dtypep(context->dtp);
+            return constp;
+        }
+    }
+    if (m_ambiguousLiterals.count(expr.text)) {
+        flp->v3error("VHDL: enumeration literal '" + expr.spelling + "' is ambiguous.");
+        return nullptr;
+    }
+    const auto constIt = m_consts.find(expr.text);
+    if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
+    const auto preIt = m_preConsts.find(expr.text);
+    if (preIt != m_preConsts.end()) return makeIntConst(flp, preIt->second);
+    const auto valueIt = m_constValues.find(expr.text);
+    if (valueIt != m_constValues.end()) return valueIt->second->cloneTree(false);
+    const auto enumIt = m_enumConsts.find(expr.text);
+    if (enumIt != m_enumConsts.end()) return enumIt->second->cloneTree(false);
+    const auto it = m_scope.find(expr.text);
+    if (it == m_scope.end()) {
+        if (AstNodeExpr* const aliasp = lowerAlias(expr, false)) return aliasp;
+        if (m_subprograms.count(expr.text)) {
+            // A function whose formals all have defaults may be called without
+            // parentheses; a procedure name alone is not a value
+            const std::vector<const SubprogramDecl*> visible = visibleSubprograms(expr.text);
+            const bool anyFunction = std::any_of(visible.begin(), visible.end(),
+                                                 [](const SubprogramDecl* const subp) {
+                                                     return subp->kind == SubprogramDecl::FUNCTION;
+                                                 });
+            if (!anyFunction) {
+                flp->v3error("VHDL: procedure '" + expr.spelling + "' used in an expression.");
+                return nullptr;
+            }
+            Expr call{Expr::CALL};
+            call.flp = flp;
+            call.text = expr.text;
+            call.spelling = expr.spelling;
+            return lowerFunctionCall(call, context);
+        }
+        flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'.");
+        return nullptr;
+    }
+    return new AstVarRef{flp, it->second.varp, VAccess::READ};
+}
+
+AstNodeExpr* Lowering::lowerQualification(FileLine* flp, const Expr& expr, const VType* context) {
+    // A type qualification fixes the operand's type and keeps its width. A
+    // vector mark without a constraint takes an aggregate operand's bounds
+    // from the choices it covers.
+    const auto declared = m_types.find(expr.text);
+    const bool builtinVector = expr.text == "std_logic_vector" || expr.text == "std_ulogic_vector"
+                               || expr.text == "bit_vector" || expr.text == "unsigned"
+                               || expr.text == "signed";
+    const bool aggregateOperand
+        = expr.a->kind == Expr::AGG_POSITIONAL || expr.a->kind == Expr::AGG_NAMED;
+    AstNodeExpr* valuep = nullptr;
+    if (aggregateOperand && declared != m_types.end()) {
+        valuep = lowerExpr(*expr.a, &declared->second);
+    } else if (aggregateOperand && builtinVector) {
+        VType aggregateType;
+        aggregateType.kind = VType::VECTOR;
+        aggregateType.kwd
+            = expr.text == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
+        aggregateType.signing = vectorSigning(expr.text);
+        int64_t low = 0;
+        int64_t high = 0;
+        if (!aggregateBounds(*expr.a, low, high)) {
+            unsupportedError(flp, "qualified aggregate with a non-static choice");
+            return nullptr;
+        }
+        aggregateType.left = static_cast<int>(low);
+        aggregateType.right = static_cast<int>(high);
+        aggregateType.ascending = true;
+        aggregateType.width = static_cast<int>(high - low + 1);
+        aggregateType.dtp
+            = findVector(flp, aggregateType.kwd, aggregateType.signing, aggregateType.left,
+                         aggregateType.right, aggregateType.ascending);
+        valuep = lowerExpr(*expr.a, &aggregateType);
+    } else {
+        valuep = lowerExpr(*expr.a, context);
+    }
+    if (!valuep) return nullptr;
+    const VType valueType = typeOfDType(valuep->dtypep());
+    if (declared != m_types.end()) return resizeExpr(valuep, declared->second, flp);
+    // A predefined scalar mark keeps its scalar type (IEEE 1076-2008 9.3.6),
+    // so `integer'(x)` stays an integer instead of becoming a vector
+    TypeSpec markSpec;
+    markSpec.flp = flp;
+    markSpec.mark = expr.text;
+    VType scalar;
+    if (formalType(markSpec, scalar) && !scalar.isVector()) {
+        return resizeExpr(valuep, scalar, flp);
+    }
+    VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
+    VSigning signing = VSigning::NOSIGN;
+    if (expr.text == "bit_vector" || expr.text == "bit") kwd = VBasicDTypeKwd::BIT;
+    if (expr.text == "signed" || expr.text == "unsigned") signing = vectorSigning(expr.text);
+    const VType target = vectorType(flp, kwd, signing, valueType.width);
+    return resizeExpr(valuep, target, flp);
+}
+
+AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* context) {
+    bool userFound = false;
+    if (AstNodeExpr* const userp = lowerUserUnary(expr, context, userFound)) return userp;
+    if (userFound) return nullptr;
+    AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
+    if (!operandp) return nullptr;
+    const VType type = typeOfDType(operandp->dtypep());
+    const bool reduction = expr.text == "and" || expr.text == "or" || expr.text == "xor"
+                           || expr.text == "nand" || expr.text == "nor" || expr.text == "xnor";
+    if (reduction) return makeReduction(flp, operandp, expr.text);
+    if (expr.text == "abs") {
+        // numeric_std defines "abs" for a signed operand (IEEE 1076-2008
+        // Annex C), which compares and negates in place
+        const bool signedVec = type.isVector() && type.isSigned();
+        if (!type.isInt() && !signedVec) {
+            unsupportedError(flp, "abs of a non-integer value");
+            operandp->deleteTree();
+            return nullptr;
+        }
+        // |x| is x when x is not negative, and -x otherwise
+        AstNodeExpr* const zerop = type.isInt() ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
+                                                : makeVectorConst(flp, type, 0);
+        AstNodeExpr* const ltZeroP = new AstLtS{flp, operandp->cloneTree(false), zerop};
+        ltZeroP->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        AstNegate* const negp = new AstNegate{flp, operandp->cloneTree(false)};
+        negp->dtypep(operandp->dtypep());
+        AstCond* const resultp = new AstCond{flp, ltZeroP, negp, operandp};
+        resultp->dtypep(operandp->dtypep());
+        return resultp;
+    }
+    if (expr.text == "??") {
+        // Implicit condition: false for metavalues, which the 2-state model has none of
+        AstNodeExpr* const oneConstp = operandp->dtypep()->width() == 1
+                                           ? bitConst(flp, '1')
+                                           : resizeExpr(bitConst(flp, '1'), type, flp);
+        AstEqCase* const eqp = new AstEqCase{flp, operandp, oneConstp};
+        eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        return eqp;
+    }
+    if (expr.text == "not") {
+        VType operandType;
+        if (!actualType(*expr.a, operandType)) operandType = type;
+        // `not` is predefined for bit, boolean and arrays of them; an integer,
+        // enumeration or character array has no such operator (IEEE 1076-2008 9.2.2)
+        const bool logicArray = operandType.kind != VType::ARRAY || !operandType.elemp
+                                || (operandType.elemWidth == 1
+                                    && (operandType.elemp->typeName.empty()
+                                        || operandType.elemp->typeName == "std_ulogic"
+                                        || operandType.elemp->typeName == "bit"
+                                        || operandType.elemp->typeName == "boolean"));
+        if (operandType.kind == VType::INT || operandType.kind == VType::REAL
+            || operandType.kind == VType::ENUM || operandType.kind == VType::FILE
+            || operandType.kind == VType::LINE || !logicArray) {
+            flp->v3error("VHDL: 'not' operand is not a logic or bit value.");
+            operandp->deleteTree();
+            return nullptr;
+        }
+        AstNot* const notp = new AstNot{flp, operandp};
+        notp->dtypep(type.dtp);
+        return notp;
+    }
+    if (expr.text == "+") return operandp;
+    if (expr.text == "-") {
+        // numeric_std defines unary minus for signed vectors and integers
+        if (!type.isInt() && !(type.isVector() && type.isSigned())) {
+            unsupportedError(flp, "unary '-' on a non-signed value");
+            operandp->deleteTree();
+            return nullptr;
+        }
+        AstNegate* const negp = new AstNegate{flp, operandp};
+        negp->dtypep(type.dtp);
+        return negp;
+    }
+    unsupportedError(flp, "unary operator '" + expr.text + "'");
+    operandp->deleteTree();
+    return nullptr;
+}
+
+AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* context) {
+    // An expression that converts a real back to an integer folds whole at
+    // elaboration time: the real itself has no form in the model, but the integer
+    // result does. math_pkg's `floor_log2` is `natural(log2(real(value)))`
+    if (expr.a && expr.a->kind == Expr::NAME
+        && (expr.a->text == "natural" || expr.a->text == "positive" || expr.a->text == "integer")
+        && mentionsRealConversion(expr)) {
+        int64_t foldedValue = 0;
+        if (evalInt(expr, foldedValue)) return makeIntConst(flp, foldedValue);
+    }
+    // A qualified call `package.name(...)`: a selected callee whose prefix names a
+    // package, rather than an element of a record field
+    std::string packageName;
+    if (expr.a && expr.a->kind == Expr::SELECTED && expr.a->a
+        && packageNameOf(*expr.a->a, packageName)) {
+        return lowerFunctionCall(expr, context);
+    }
+    if (expr.a && expr.a->kind == Expr::NAME) {
+        if (expr.a->text == "rising_edge" || expr.a->text == "falling_edge") {
+            return lowerEdgeCall(expr);
+        }
+        // A user subprogram shadows a standard-package function of the same name
+        if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, context);
+        if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
+        if (isConversion(expr.a->text)) return lowerConversion(expr, context);
+        // A real has no synthesizable form, so a conversion to one is refused by name
+        if (expr.a->text == "real") {
+            unsupportedError(flp, "conversion to a real value");
+            return nullptr;
+        }
+        // A predefined scalar type mark applied to a value is the identity conversion
+        if (expr.a->text == "boolean" || expr.a->text == "bit" || expr.a->text == "std_logic"
+            || expr.a->text == "std_ulogic") {
+            if (expr.args.size() != 1) {
+                unsupportedError(flp, "type conversion with " + std::to_string(expr.args.size())
+                                          + " arguments");
+                return nullptr;
+            }
+            return lowerExpr(*expr.args[0], nullptr);
+        }
+        // A declared type mark applied to a value is a type conversion
+        const auto typeIt = m_types.find(expr.a->text);
+        if (typeIt != m_types.end()) {
+            if (expr.args.size() != 1) {
+                unsupportedError(flp, "type conversion with " + std::to_string(expr.args.size())
+                                          + " arguments");
+                return nullptr;
+            }
+            const VType& target = typeIt->second;
+            AstNodeExpr* valuep = lowerExpr(*expr.args[0], target.dtp ? &target : nullptr);
+            if (!valuep) return nullptr;
+            if (!target.dtp) {
+                // A conversion to an unconstrained array takes its bounds from the
+                // operand. Closely related arrays have the same packed form, so the
+                // operand is the result; anything else has no representable size.
+                const VType valueType = typeOfDType(valuep->dtypep());
+                const VType targetElem = elementType(target, flp);
+                const VType valueElem = elementType(valueType, flp);
+                const bool sameType
+                    = !target.typeName.empty() && target.typeName == valueType.typeName;
+                const bool sameElement = target.isVector() && valueType.isVector()
+                                         && target.elemWidth == valueType.elemWidth
+                                         && targetElem.kind == valueElem.kind;
+                if (sameType || sameElement) return valuep;
+                unsupportedError(flp, "conversion to unconstrained type '" + expr.a->text + "'");
+                valuep->deleteTree();
+                return nullptr;
+            }
+            return resizeExpr(valuep, target, flp);
+        }
+    }
+    return lowerDesignator(expr, false);
+}
+
+AstNodeExpr* Lowering::lowerOthersAssociation(FileLine* flp, const Expr& expr,
+                                              const VType* context) {
+    if (!context) {
+        unsupportedError(flp, "aggregate without a known target type");
+        return nullptr;
+    }
+    char bit = 0;
+    if (expr.a->kind == Expr::CHAR_LIT) {
+        bit = vhdlLogicBit(expr.a->charValue);
+    } else if (expr.a->kind == Expr::BITS_LIT && expr.a->bits.size() == 1) {
+        bit = expr.a->bits[0];
+    }
+    if (bit != 0) return makeRepeatedConst(flp, *context, bit);
+    // An arbitrary value is replicated across every element
+    if (!context->isVector()) {
+        unsupportedError(flp, "aggregate value for a non-array type");
+        return nullptr;
+    }
+    VType elemType = elementType(*context, flp);
+    AstNodeExpr* valuep = lowerExpr(*expr.a, &elemType);
+    if (!valuep) return nullptr;
+    valuep = resizeExpr(valuep, elemType, flp);
+    return repeatValue(flp, valuep, context->length(), context->dtp);
+}
+
 AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     switch (expr.kind) {
@@ -77,103 +407,9 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return nullptr;
     case Expr::TRUE_LIT: return bitConst(flp, '1');
     case Expr::FALSE_LIT: return bitConst(flp, '0');
-    case Expr::CHAR_LIT: {
-        // A character can itself be an enumeration literal ('z'); resolve it to the
-        // enum value before treating it as a logic value or 8-bit character code.
-        if (context && context->kind == VType::ENUM) {
-            const std::string key = std::string{"'"} + expr.charValue + "'";
-            for (size_t i = 0; i < context->literals.size(); ++i) {
-                if (context->literals[i] != key) continue;
-                AstConst* const constp
-                    = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
-                constp->dtypep(context->dtp);
-                return constp;
-            }
-        }
-        // A character in an 8-bit character context is its code; otherwise a logic value
-        if (context && context->isVector() && context->width == 8) {
-            return makeVectorConst(flp, *context, static_cast<unsigned char>(expr.charValue));
-        }
-        const char bit = vhdlLogicBit(expr.charValue);
-        if (bit == 0) {
-            unsupportedError(flp, std::string{"character literal '"} + expr.charValue
-                                      + "' outside a logic context");
-            return nullptr;
-        }
-        return bitConst(flp, bit);
-    }
-    case Expr::BITS_LIT: {
-        // A string literal whose characters are all logic characters is a bit vector in a
-        // logic context, but a string in a character-array context: `"ZU"` is a legal
-        // std_logic_vector and a legal `string` (IEEE 1076-2008 9.3.2, 15.5)
-        if (context && !expr.spelling.empty()
-            && ((context->kind == VType::ARRAY && context->elemp
-                 && context->elemp->typeName == "character")
-                || context->typeName == "string")) {
-            return makeStringConst(flp, expr.spelling);
-        }
-        const int width = static_cast<int>(expr.bits.size());
-        AstNodeDType* dtp = nullptr;
-        if (context && context->isVector() && context->width == width) {
-            dtp = context->dtp;
-        } else {
-            dtp = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::NOSIGN, width);
-        }
-        return makeBitsConst(flp, dtp, expr.bits);
-    }
-    case Expr::NAME: {
-        if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, false);
-        // An expected enumeration type picks its own literal, even when another visible
-        // enumeration declares the same name (IEEE 1076-2008 12.5)
-        if (context && context->kind == VType::ENUM) {
-            for (size_t i = 0; i < context->literals.size(); ++i) {
-                if (VString::downcase(context->literals[i]) != VString::downcase(expr.text)) {
-                    continue;
-                }
-                AstConst* const constp
-                    = new AstConst{flp, V3Number{flp, context->width, static_cast<uint32_t>(i)}};
-                constp->dtypep(context->dtp);
-                return constp;
-            }
-        }
-        if (m_ambiguousLiterals.count(expr.text)) {
-            flp->v3error("VHDL: enumeration literal '" + expr.spelling + "' is ambiguous");
-            return nullptr;
-        }
-        const auto constIt = m_consts.find(expr.text);
-        if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
-        const auto preIt = m_preConsts.find(expr.text);
-        if (preIt != m_preConsts.end()) return makeIntConst(flp, preIt->second);
-        const auto valueIt = m_constValues.find(expr.text);
-        if (valueIt != m_constValues.end()) return valueIt->second->cloneTree(false);
-        const auto enumIt = m_enumConsts.find(expr.text);
-        if (enumIt != m_enumConsts.end()) return enumIt->second->cloneTree(false);
-        const auto it = m_scope.find(expr.text);
-        if (it == m_scope.end()) {
-            if (AstNodeExpr* const aliasp = lowerAlias(expr, false)) return aliasp;
-            if (m_subprograms.count(expr.text)) {
-                // A function whose formals all have defaults may be called without
-                // parentheses; a procedure name alone is not a value
-                const std::vector<const SubprogramDecl*> visible = visibleSubprograms(expr.text);
-                const bool anyFunction = std::any_of(
-                    visible.begin(), visible.end(), [](const SubprogramDecl* const subp) {
-                        return subp->kind == SubprogramDecl::FUNCTION;
-                    });
-                if (!anyFunction) {
-                    flp->v3error("VHDL: procedure '" + expr.spelling + "' used in an expression");
-                    return nullptr;
-                }
-                Expr call{Expr::CALL};
-                call.flp = flp;
-                call.text = expr.text;
-                call.spelling = expr.spelling;
-                return lowerFunctionCall(call, context);
-            }
-            flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'");
-            return nullptr;
-        }
-        return new AstVarRef{flp, it->second.varp, VAccess::READ};
-    }
+    case Expr::CHAR_LIT: return lowerCharLiteral(flp, expr, context);
+    case Expr::BITS_LIT: return lowerBitStringLiteral(flp, expr, context);
+    case Expr::NAME: return lowerName(flp, expr, context);
     case Expr::AGG_POSITIONAL:
     case Expr::AGG_NAMED: {
         if (!context) {
@@ -187,142 +423,11 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         constrainAggregateType(expr, aggType);
         return lowerAggregate(expr, aggType);
     }
-    case Expr::QUAL: {
-        // A type qualification fixes the operand's type and keeps its width. A
-        // vector mark without a constraint takes an aggregate operand's bounds
-        // from the choices it covers.
-        const auto declared = m_types.find(expr.text);
-        const bool builtinVector = expr.text == "std_logic_vector"
-                                   || expr.text == "std_ulogic_vector" || expr.text == "bit_vector"
-                                   || expr.text == "unsigned" || expr.text == "signed";
-        const bool aggregateOperand
-            = expr.a->kind == Expr::AGG_POSITIONAL || expr.a->kind == Expr::AGG_NAMED;
-        AstNodeExpr* valuep = nullptr;
-        if (aggregateOperand && declared != m_types.end()) {
-            valuep = lowerExpr(*expr.a, &declared->second);
-        } else if (aggregateOperand && builtinVector) {
-            VType aggregateType;
-            aggregateType.kind = VType::VECTOR;
-            aggregateType.kwd
-                = expr.text == "bit_vector" ? VBasicDTypeKwd::BIT : VBasicDTypeKwd::LOGIC;
-            aggregateType.signing = vectorSigning(expr.text);
-            int64_t low = 0;
-            int64_t high = 0;
-            if (!aggregateBounds(*expr.a, low, high)) {
-                unsupportedError(flp, "qualified aggregate with a non-static choice");
-                return nullptr;
-            }
-            aggregateType.left = static_cast<int>(low);
-            aggregateType.right = static_cast<int>(high);
-            aggregateType.ascending = true;
-            aggregateType.width = static_cast<int>(high - low + 1);
-            aggregateType.dtp
-                = findVector(flp, aggregateType.kwd, aggregateType.signing, aggregateType.left,
-                             aggregateType.right, aggregateType.ascending);
-            valuep = lowerExpr(*expr.a, &aggregateType);
-        } else {
-            valuep = lowerExpr(*expr.a, context);
-        }
-        if (!valuep) return nullptr;
-        const VType valueType = typeOfDType(valuep->dtypep());
-        if (declared != m_types.end()) return resizeExpr(valuep, declared->second, flp);
-        // A predefined scalar mark keeps its scalar type (IEEE 1076-2008 9.3.6),
-        // so `integer'(x)` stays an integer instead of becoming a vector
-        TypeSpec markSpec;
-        markSpec.flp = flp;
-        markSpec.mark = expr.text;
-        VType scalar;
-        if (formalType(markSpec, scalar) && !scalar.isVector()) {
-            return resizeExpr(valuep, scalar, flp);
-        }
-        VBasicDTypeKwd kwd = VBasicDTypeKwd::LOGIC;
-        VSigning signing = VSigning::NOSIGN;
-        if (expr.text == "bit_vector" || expr.text == "bit") kwd = VBasicDTypeKwd::BIT;
-        if (expr.text == "signed" || expr.text == "unsigned") signing = vectorSigning(expr.text);
-        const VType target = vectorType(flp, kwd, signing, valueType.width);
-        return resizeExpr(valuep, target, flp);
-    }
+    case Expr::QUAL: return lowerQualification(flp, expr, context);
     case Expr::ATTR: return lowerAttr(expr);
     case Expr::SELECTED: return lowerSelectedExpr(expr);
     case Expr::PAREN: return lowerExpr(*expr.a, context);
-    case Expr::UNARY: {
-        bool userFound = false;
-        if (AstNodeExpr* const userp = lowerUserUnary(expr, context, userFound)) return userp;
-        if (userFound) return nullptr;
-        AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
-        if (!operandp) return nullptr;
-        const VType type = typeOfDType(operandp->dtypep());
-        const bool reduction = expr.text == "and" || expr.text == "or" || expr.text == "xor"
-                               || expr.text == "nand" || expr.text == "nor" || expr.text == "xnor";
-        if (reduction) return makeReduction(flp, operandp, expr.text);
-        if (expr.text == "abs") {
-            // numeric_std defines "abs" for a signed operand (IEEE 1076-2008
-            // Annex C), which compares and negates in place
-            const bool signedVec = type.isVector() && type.isSigned();
-            if (!type.isInt() && !signedVec) {
-                unsupportedError(flp, "abs of a non-integer value");
-                operandp->deleteTree();
-                return nullptr;
-            }
-            // |x| is x when x is not negative, and -x otherwise
-            AstNodeExpr* const zerop = type.isInt()
-                                           ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
-                                           : makeVectorConst(flp, type, 0);
-            AstNodeExpr* const ltZeroP = new AstLtS{flp, operandp->cloneTree(false), zerop};
-            ltZeroP->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-            AstNegate* const negp = new AstNegate{flp, operandp->cloneTree(false)};
-            negp->dtypep(operandp->dtypep());
-            AstCond* const resultp = new AstCond{flp, ltZeroP, negp, operandp};
-            resultp->dtypep(operandp->dtypep());
-            return resultp;
-        }
-        if (expr.text == "??") {
-            // Implicit condition: false for metavalues, which the 2-state model has none of
-            AstNodeExpr* const oneConstp = operandp->dtypep()->width() == 1
-                                               ? bitConst(flp, '1')
-                                               : resizeExpr(bitConst(flp, '1'), type, flp);
-            AstEqCase* const eqp = new AstEqCase{flp, operandp, oneConstp};
-            eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-            return eqp;
-        }
-        if (expr.text == "not") {
-            VType operandType;
-            if (!actualType(*expr.a, operandType)) operandType = type;
-            // `not` is predefined for bit, boolean and arrays of them; an integer,
-            // enumeration or character array has no such operator (IEEE 1076-2008 9.2.2)
-            const bool logicArray = operandType.kind != VType::ARRAY || !operandType.elemp
-                                    || (operandType.elemWidth == 1
-                                        && (operandType.elemp->typeName.empty()
-                                            || operandType.elemp->typeName == "std_ulogic"
-                                            || operandType.elemp->typeName == "bit"
-                                            || operandType.elemp->typeName == "boolean"));
-            if (operandType.kind == VType::INT || operandType.kind == VType::REAL
-                || operandType.kind == VType::ENUM || operandType.kind == VType::FILE
-                || operandType.kind == VType::LINE || !logicArray) {
-                flp->v3error("VHDL: 'not' operand is not a logic or bit value");
-                operandp->deleteTree();
-                return nullptr;
-            }
-            AstNot* const notp = new AstNot{flp, operandp};
-            notp->dtypep(type.dtp);
-            return notp;
-        }
-        if (expr.text == "+") return operandp;
-        if (expr.text == "-") {
-            // numeric_std defines unary minus for signed vectors and integers
-            if (!type.isInt() && !(type.isVector() && type.isSigned())) {
-                unsupportedError(flp, "unary '-' on a non-signed value");
-                operandp->deleteTree();
-                return nullptr;
-            }
-            AstNegate* const negp = new AstNegate{flp, operandp};
-            negp->dtypep(type.dtp);
-            return negp;
-        }
-        unsupportedError(flp, "unary operator '" + expr.text + "'");
-        operandp->deleteTree();
-        return nullptr;
-    }
+    case Expr::UNARY: return lowerUnary(flp, expr, context);
     case Expr::STRING_LIT: {
         // A string literal is an array of character; pack it as an unsigned vector
         // of 8-bit codes, first character most significant, matching a string
@@ -334,81 +439,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return makeStringConst(flp, expr.spelling);
     }
     case Expr::BINARY: return lowerBinary(expr, context);
-    case Expr::INDEX: {
-        // An expression that converts a real back to an integer folds whole at
-        // elaboration time: the real itself has no form in the model, but the integer
-        // result does. math_pkg's `floor_log2` is `natural(log2(real(value)))`
-        if (expr.a && expr.a->kind == Expr::NAME
-            && (expr.a->text == "natural" || expr.a->text == "positive"
-                || expr.a->text == "integer")
-            && mentionsRealConversion(expr)) {
-            int64_t foldedValue = 0;
-            if (evalInt(expr, foldedValue)) return makeIntConst(flp, foldedValue);
-        }
-        // A qualified call `package.name(...)`: a selected callee whose prefix names a
-        // package, rather than an element of a record field
-        std::string packageName;
-        if (expr.a && expr.a->kind == Expr::SELECTED && expr.a->a
-            && packageNameOf(*expr.a->a, packageName)) {
-            return lowerFunctionCall(expr, context);
-        }
-        if (expr.a && expr.a->kind == Expr::NAME) {
-            if (expr.a->text == "rising_edge" || expr.a->text == "falling_edge") {
-                return lowerEdgeCall(expr);
-            }
-            // A user subprogram shadows a standard-package function of the same name
-            if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, context);
-            if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
-            if (isConversion(expr.a->text)) return lowerConversion(expr, context);
-            // A real has no synthesizable form, so a conversion to one is refused by name
-            if (expr.a->text == "real") {
-                unsupportedError(flp, "conversion to a real value");
-                return nullptr;
-            }
-            // A predefined scalar type mark applied to a value is the identity conversion
-            if (expr.a->text == "boolean" || expr.a->text == "bit" || expr.a->text == "std_logic"
-                || expr.a->text == "std_ulogic") {
-                if (expr.args.size() != 1) {
-                    unsupportedError(flp, "type conversion with "
-                                              + std::to_string(expr.args.size()) + " arguments");
-                    return nullptr;
-                }
-                return lowerExpr(*expr.args[0], nullptr);
-            }
-            // A declared type mark applied to a value is a type conversion
-            const auto typeIt = m_types.find(expr.a->text);
-            if (typeIt != m_types.end()) {
-                if (expr.args.size() != 1) {
-                    unsupportedError(flp, "type conversion with "
-                                              + std::to_string(expr.args.size()) + " arguments");
-                    return nullptr;
-                }
-                const VType& target = typeIt->second;
-                AstNodeExpr* valuep = lowerExpr(*expr.args[0], target.dtp ? &target : nullptr);
-                if (!valuep) return nullptr;
-                if (!target.dtp) {
-                    // A conversion to an unconstrained array takes its bounds from the
-                    // operand. Closely related arrays have the same packed form, so the
-                    // operand is the result; anything else has no representable size.
-                    const VType valueType = typeOfDType(valuep->dtypep());
-                    const VType targetElem = elementType(target, flp);
-                    const VType valueElem = elementType(valueType, flp);
-                    const bool sameType
-                        = !target.typeName.empty() && target.typeName == valueType.typeName;
-                    const bool sameElement = target.isVector() && valueType.isVector()
-                                             && target.elemWidth == valueType.elemWidth
-                                             && targetElem.kind == valueElem.kind;
-                    if (sameType || sameElement) return valuep;
-                    unsupportedError(flp,
-                                     "conversion to unconstrained type '" + expr.a->text + "'");
-                    valuep->deleteTree();
-                    return nullptr;
-                }
-                return resizeExpr(valuep, target, flp);
-            }
-        }
-        return lowerDesignator(expr, false);
-    }
+    case Expr::INDEX: return lowerIndexedCall(flp, expr, context);
     case Expr::CALL: {
         // An operator-symbol call to a unary reduction, e.g. `"or"(a)`
         const std::string& name = expr.text;
@@ -422,29 +453,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* context) {
         return lowerFunctionCall(expr, context);
     }
     case Expr::SLICE: return lowerDesignator(expr, false);
-    case Expr::AGG_OTHERS: {
-        if (!context) {
-            unsupportedError(flp, "aggregate without a known target type");
-            return nullptr;
-        }
-        char bit = 0;
-        if (expr.a->kind == Expr::CHAR_LIT) {
-            bit = vhdlLogicBit(expr.a->charValue);
-        } else if (expr.a->kind == Expr::BITS_LIT && expr.a->bits.size() == 1) {
-            bit = expr.a->bits[0];
-        }
-        if (bit != 0) return makeRepeatedConst(flp, *context, bit);
-        // An arbitrary value is replicated across every element
-        if (!context->isVector()) {
-            unsupportedError(flp, "aggregate value for a non-array type");
-            return nullptr;
-        }
-        VType elemType = elementType(*context, flp);
-        AstNodeExpr* valuep = lowerExpr(*expr.a, &elemType);
-        if (!valuep) return nullptr;
-        valuep = resizeExpr(valuep, elemType, flp);
-        return repeatValue(flp, valuep, context->length(), context->dtp);
-    }
+    case Expr::AGG_OTHERS: return lowerOthersAssociation(flp, expr, context);
     }
     return nullptr;
 }
@@ -464,7 +473,7 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
     VType elem;
     if (structp) {
         if (lt.kind != VType::ARRAY || rt.kind != VType::ARRAY || !lt.elemp || !rt.elemp) {
-            flp->v3error("VHDL: comparison of unrelated array types");
+            flp->v3error("VHDL: comparison of unrelated array types.");
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
@@ -474,7 +483,7 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
         elemSigned = elem.kind == VType::INT;
         if (elem.kind != VType::INT && elem.kind != VType::ENUM && elem.kind != VType::BOOLEAN
             && elem.kind != VType::LOGIC && elem.kind != VType::BIT) {
-            flp->v3error("VHDL: array ordering requires a discrete element type");
+            flp->v3error("VHDL: array ordering requires a discrete element type.");
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
@@ -482,7 +491,7 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
     } else {
         elem = elementType(lt, flp);
         if (elem.kind != VType::LOGIC && elem.kind != VType::BIT) {
-            flp->v3error("VHDL: array ordering requires a discrete element type");
+            flp->v3error("VHDL: array ordering requires a discrete element type.");
             lp->deleteTree();
             rp->deleteTree();
             return nullptr;
@@ -503,7 +512,7 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
         return bitConst(flp, result ? '1' : '0');
     }
     if (lLen * elemWidth != lt.width || rLen * elemWidth != rt.width) {
-        flp->v3error("VHDL: comparison of arrays with different element widths");
+        flp->v3error("VHDL: comparison of arrays with different element widths.");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -565,8 +574,8 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
     return resultp;
 }
 
-AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
-    FileLine* const flp = expr.flp;
+//! Whether a static integer arithmetic result fits the 32-bit integer type
+bool Lowering::binaryStaticFits(FileLine* flp, const Expr& expr) {
     const std::string& op = expr.text;
     // A static integer expression must fit the 32-bit integer type (IEEE 1076-2008 9.1);
     // the unrolled multiply or the middle end would otherwise wrap it silently
@@ -579,95 +588,89 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             && bType.isInt() && aType.width <= 32 && bType.width <= 32) {
             int64_t value = 0;
             if (evalInt(expr, value) && (value < -0x80000000LL || value > 0x7fffffffLL)) {
-                flp->v3error("VHDL: integer overflow in a static expression");
-                return nullptr;
+                flp->v3error("VHDL: integer overflow in a static expression.");
+                return false;
             }
         }
     }
-    // An explicitly declared operator with matching parameter types takes precedence over
-    // the built-in operator of the same symbol
-    if (expr.a && expr.b) {
-        bool userFound = false;
-        if (AstNodeExpr* const userp = lowerUserOperator(expr, context, userFound)) {
-            return userp;
-        }
-        if (userFound) return nullptr;
-    }
+    return true;
+}
+
+AstNodeExpr* Lowering::foldRealRelation(FileLine* flp, const Expr& expr, const std::string& op) {
     // A relational operator whose static operands are reals folds to a bit before
     // either operand is lowered, so a real generic/constant compared to a literal (as in
     // a `when` condition, a generate, or `integer(x) = 8`) becomes a constant. It fires
     // only when at least one operand transitively mentions a real, so ordinary integer
     // or signal comparisons keep their existing path.
-    if (expr.a && expr.b) {
-        const std::string& rop = op[0] == '?' ? op.substr(1) : op;
-        if ((rop == "=" || rop == "/=" || rop == "<" || rop == "<=" || rop == ">" || rop == ">=")
-            && (mentionsReal(*expr.a) || mentionsReal(*expr.b))) {
-            double lhs = 0.0;
-            double rhs = 0.0;
-            if (evalReal(*expr.a, lhs) && evalReal(*expr.b, rhs)) {
-                bool result = false;
-                if (rop == "=") {
-                    result = lhs == rhs;
-                } else if (rop == "/=") {
-                    result = lhs != rhs;
-                } else if (rop == "<") {
-                    result = lhs < rhs;
-                } else if (rop == "<=") {
-                    result = lhs <= rhs;
-                } else if (rop == ">") {
-                    result = lhs > rhs;
-                } else {
-                    result = lhs >= rhs;
-                }
-                AstConst* const bitp
-                    = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(result)}};
-                bitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-                return bitp;
+    const std::string& rop = op[0] == '?' ? op.substr(1) : op;
+    if ((rop == "=" || rop == "/=" || rop == "<" || rop == "<=" || rop == ">" || rop == ">=")
+        && (mentionsReal(*expr.a) || mentionsReal(*expr.b))) {
+        double lhs = 0.0;
+        double rhs = 0.0;
+        if (evalReal(*expr.a, lhs) && evalReal(*expr.b, rhs)) {
+            bool result = false;
+            if (rop == "=") {
+                result = lhs == rhs;
+            } else if (rop == "/=") {
+                result = lhs != rhs;
+            } else if (rop == "<") {
+                result = lhs < rhs;
+            } else if (rop == "<=") {
+                result = lhs <= rhs;
+            } else if (rop == ">") {
+                result = lhs > rhs;
+            } else {
+                result = lhs >= rhs;
             }
+            AstConst* const bitp
+                = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(result)}};
+            bitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            return bitp;
         }
     }
+    return nullptr;
+}
+
+bool Lowering::isCharacterArrayOperand(const Expr& other) {
+    // A character literal is one character of a concatenated character array, but one
+    // logic element of a concatenated logic or bit vector, even an eight-bit one
+    if (other.kind == Expr::STRING_LIT || other.kind == Expr::CHAR_LIT) return true;
+    VType otherType;
+    if (!actualType(other, otherType)) return false;
+    // A character is an element of a character array, so concatenating one with a
+    // character literal is a string rather than two logic elements
+    return otherType.kind == VType::ARRAY || otherType.typeName == "character";
+}
+
+bool Lowering::lowerBinaryOperands(const Expr& expr, const std::string& op, bool logicalOp,
+                                   BinaryOperands& ops) {
     // Lower the side that is not a bare character literal first; a bare character
     // literal in the other slot then adopts that operand's type, so `inp >= 'a'`
     // compares character codes instead of mistaking `'a'` for a logic value.
-    AstNodeExpr* lp = nullptr;
-    AstNodeExpr* rp = nullptr;
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
     const bool aChar = expr.a && expr.a->kind == Expr::CHAR_LIT;
     const bool bChar = expr.b && expr.b->kind == Expr::CHAR_LIT;
     const bool aEnumLit = expr.a && expr.a->kind == Expr::NAME && m_enumConsts.count(expr.a->text);
     const bool bEnumLit = expr.b && expr.b->kind == Expr::NAME && m_enumConsts.count(expr.b->text);
-    // A logical operator combines a scalar character literal element-wise with the
-    // other operand (IEEE 1076-2008 9.2.2), so the literal stays a logic value and
-    // never takes the character-code path an 8-bit operand context would give it.
-    const bool logicalOp
-        = op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor" || op == "xnor";
-    // A character literal is one character of a concatenated character array, but one
-    // logic element of a concatenated logic or bit vector, even an eight-bit one
-    const auto characterArray = [&](const Expr& other) {
-        if (other.kind == Expr::STRING_LIT || other.kind == Expr::CHAR_LIT) return true;
-        VType otherType;
-        if (!actualType(other, otherType)) return false;
-        // A character is an element of a character array, so concatenating one with a
-        // character literal is a string rather than two logic elements
-        return otherType.kind == VType::ARRAY || otherType.typeName == "character";
-    };
     if (bChar && !aChar) {
         lp = lowerExpr(*expr.a, nullptr);
-        if (!lp) return nullptr;
+        if (!lp) return false;
         const VType lctx = typeOfDType(lp->dtypep());
-        const bool charCode = op != "&" || characterArray(*expr.a);
+        const bool charCode = op != "&" || isCharacterArrayOperand(*expr.a);
         rp = lowerExpr(*expr.b, logicalOp || !charCode ? nullptr : &lctx);
     } else if (aChar && !bChar) {
         rp = lowerExpr(*expr.b, nullptr);
-        if (!rp) return nullptr;
+        if (!rp) return false;
         const VType rctx = typeOfDType(rp->dtypep());
-        const bool charCode = op != "&" || characterArray(*expr.b);
+        const bool charCode = op != "&" || isCharacterArrayOperand(*expr.b);
         lp = lowerExpr(*expr.a, logicalOp || !charCode ? nullptr : &rctx);
     } else if (aEnumLit != bEnumLit) {
         // Resolve a bare enumeration literal from the type of the other operand, which is
         // how two visible enumeration types can share a literal name
         const Expr& typed = aEnumLit ? *expr.b : *expr.a;
         AstNodeExpr* typedp = lowerExpr(typed, nullptr);
-        if (!typedp) return nullptr;
+        if (!typedp) return false;
         VType enumType;
         bool haveEnum = typeOfDesignator(typed, enumType) && enumType.kind == VType::ENUM;
         if (!haveEnum) haveEnum = enumTypeOfDType(typedp->dtypep(), enumType);
@@ -675,7 +678,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             AstNodeExpr* const litp = lowerExpr(aEnumLit ? *expr.a : *expr.b, &enumType);
             if (!litp) {
                 typedp->deleteTree();
-                return nullptr;
+                return false;
             }
             if (aEnumLit) {
                 lp = litp;
@@ -687,7 +690,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         } else {
             typedp->deleteTree();
             lp = lowerExpr(*expr.a, nullptr);
-            if (!lp) return nullptr;
+            if (!lp) return false;
             rp = lowerExpr(*expr.b, nullptr);
         }
     } else {
@@ -705,7 +708,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
         if (aKnown != bKnown) {
             const bool lowerLeftFirst = aKnown;
             AstNodeExpr* const knownp = lowerExpr(lowerLeftFirst ? *expr.a : *expr.b, nullptr);
-            if (!knownp) return nullptr;
+            if (!knownp) return false;
             const VType known = typeOfLowered(lowerLeftFirst ? *expr.a : *expr.b, knownp);
             // numeric_std's arithmetic operators take unconstrained array formals, so an
             // aggregate operand keeps the bounds its own choices give it
@@ -730,38 +733,67 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             }
         } else {
             lp = lowerExpr(*expr.a, nullptr);
-            if (!lp) return nullptr;
+            if (!lp) return false;
             rp = lowerExpr(*expr.b, nullptr);
         }
     }
-    if (!rp) {
-        if (lp) lp->deleteTree();
-        return nullptr;
-    }
-    if (!lp) return nullptr;
-    VType lt = typeOfLowered(*expr.a, lp);
-    VType rt = typeOfLowered(*expr.b, rp);
-    if (logicalOp && !logicalOperandsConform(*expr.a, *expr.b, lt, rt)) {
-        lp->deleteTree();
-        rp->deleteTree();
-        return nullptr;
-    }
-    const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
-                              || op == ">=" || op == "?=" || op == "?/=" || op == "?<"
-                              || op == "?<=" || op == "?>" || op == "?>=";
-    if (relationalOp && !relationalOperandsConform(*expr.a, *expr.b)) {
-        lp->deleteTree();
-        rp->deleteTree();
-        return nullptr;
-    }
-    AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+    return true;
+}
 
-    if (op == "?=" || op == "?/=") {
-        if (lt.isInt() != rt.isInt()) {
-            // As with the plain relational operator, an integer matches a vector of the
-            // same value by taking on the vector's type.
-            const bool lhsInt = lt.isInt();
-            const VType& vectorT = lhsInt ? rt : lt;
+AstNodeExpr* Lowering::lowerMatchingRelation(FileLine* flp, const Expr& expr,
+                                             const std::string& op, BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    VType& rt = ops.rt;
+    if (lt.isInt() != rt.isInt()) {
+        // As with the plain relational operator, an integer matches a vector of the
+        // same value by taking on the vector's type.
+        const bool lhsInt = lt.isInt();
+        const VType& vectorT = lhsInt ? rt : lt;
+        AstNodeExpr*& intOperand = lhsInt ? lp : rp;
+        int64_t value = 0;
+        if (evalInt(lhsInt ? *expr.a : *expr.b, value)) {
+            intOperand->deleteTree();
+            intOperand = makeVectorConst(flp, vectorT, value);
+        } else {
+            intOperand = resizeExpr(intOperand, vectorT, flp);
+        }
+        (lhsInt ? lt : rt) = vectorT;
+    }
+    if (lt.width != rt.width) rp = resizeExpr(rp, lt, flp);
+    AstNodeExpr* matchp = lowerMatching(expr, lp, rp);
+    if (!matchp) return nullptr;
+    if (op == "?/=") {
+        AstNot* const notp = new AstNot{flp, matchp};
+        notp->dtypep(matchp->dtypep());
+        return notp;
+    }
+    return matchp;
+}
+
+void Lowering::reconcileRelationOperands(FileLine* flp, const Expr& expr, BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    VType& rt = ops.rt;
+    if (lt.isInt() != rt.isInt()) {
+        // numeric_std/std_logic_arith compare a vector with an integer of the same
+        // value by converting the integer to the vector's type: fold a static integer
+        // to a constant, or resize a dynamic one exactly as the arithmetic path does
+        const bool lhsInt = lt.isInt();
+        const VType& vectorT = lhsInt ? rt : lt;
+        // std_logic_arith compares an unsigned operand as a signed value one bit
+        // wider, so a negative integer is less than every unsigned value instead of
+        // matching its two's-complement bit pattern
+        if (m_stdLogicArith && vectorT.isVector() && vectorT.signing == VSigning::UNSIGNED) {
+            const VType arithType
+                = vectorType(flp, vectorT.kwd, VSigning::SIGNED, vectorT.width + 1);
+            lp = resizeExpr(lp, arithType, flp);
+            rp = resizeExpr(rp, arithType, flp);
+            lt = arithType;
+            rt = arithType;
+        } else {
             AstNodeExpr*& intOperand = lhsInt ? lp : rp;
             int64_t value = 0;
             if (evalInt(lhsInt ? *expr.a : *expr.b, value)) {
@@ -772,449 +804,420 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
             }
             (lhsInt ? lt : rt) = vectorT;
         }
-        if (lt.width != rt.width) rp = resizeExpr(rp, lt, flp);
-        AstNodeExpr* matchp = lowerMatching(expr, lp, rp);
-        if (!matchp) return nullptr;
-        if (op == "?/=") {
-            AstNot* const notp = new AstNot{flp, matchp};
-            notp->dtypep(matchp->dtypep());
-            return notp;
-        }
-        return matchp;
+    } else if (m_stdLogicArith && lt.isVector() && rt.isVector() && lt.signing != VSigning::NOSIGN
+               && rt.signing != VSigning::NOSIGN && lt.isSigned() != rt.isSigned()) {
+        // std_logic_arith's mixed comparison widens the unsigned operand by one bit
+        // before comparing as signed, so the unsigned value never aliases a negative
+        // signed value
+        const int unsignedWidth = lt.isSigned() ? rt.width : lt.width;
+        const int signedWidth = lt.isSigned() ? lt.width : rt.width;
+        const VType arithType
+            = vectorType(flp, lt.kwd, VSigning::SIGNED, std::max(unsignedWidth + 1, signedWidth));
+        lp = resizeExpr(lp, arithType, flp);
+        rp = resizeExpr(rp, arithType, flp);
+        lt = arithType;
+        rt = arithType;
     }
-    // A matching relational operator compares like the plain operator, but a '-' in an
-    // operand would need don't-care semantics that the 2-state model cannot express
-    if (op == "?<" || op == "?<=" || op == "?>" || op == "?>=") {
-        for (const Expr* const sidep : {expr.a.get(), expr.b.get()}) {
-            if (!sidep || sidep->kind != Expr::BITS_LIT) continue;
-            if (sidep->bits.find('-') != std::string::npos) {
-                unsupportedError(flp, "matching relational operator with a don't-care operand");
-                lp->deleteTree();
-                rp->deleteTree();
-                return nullptr;
-            }
-        }
-    }
-    const std::string cmpOp = op[0] == '?' ? op.substr(1) : op;
+}
 
-    const bool relational = cmpOp == "=" || cmpOp == "/=" || cmpOp == "<" || cmpOp == "<="
-                            || cmpOp == ">" || cmpOp == ">=";
-    if (relational) {
-        if (lt.isInt() && rt.isInt()) {
-            AstNodeExpr* ip = nullptr;
-            if (cmpOp == "=") {
-                ip = new AstEq{flp, lp, rp};
-            } else if (cmpOp == "/=") {
-                ip = new AstNeq{flp, lp, rp};
-            } else if (cmpOp == "<") {
-                ip = new AstLtS{flp, lp, rp};
-            } else if (cmpOp == "<=") {
-                ip = new AstLteS{flp, lp, rp};
-            } else if (cmpOp == ">") {
-                ip = new AstGtS{flp, lp, rp};
-            } else {
-                ip = new AstGteS{flp, lp, rp};
-            }
-            // Tag the result like every other comparison so an integer test mixed with a
-            // vector test in a logical expression sees matching operand types
-            ip->dtypep(bitDtp);
-            return ip;
-        }
-        if (lt.isInt() != rt.isInt()) {
-            // numeric_std/std_logic_arith compare a vector with an integer of the same
-            // value by converting the integer to the vector's type: fold a static integer
-            // to a constant, or resize a dynamic one exactly as the arithmetic path does
-            const bool lhsInt = lt.isInt();
-            const VType& vectorT = lhsInt ? rt : lt;
-            // std_logic_arith compares an unsigned operand as a signed value one bit
-            // wider, so a negative integer is less than every unsigned value instead of
-            // matching its two's-complement bit pattern
-            if (m_stdLogicArith && vectorT.isVector() && vectorT.signing == VSigning::UNSIGNED) {
-                const VType arithType
-                    = vectorType(flp, vectorT.kwd, VSigning::SIGNED, vectorT.width + 1);
-                lp = resizeExpr(lp, arithType, flp);
-                rp = resizeExpr(rp, arithType, flp);
-                lt = arithType;
-                rt = arithType;
-            } else {
-                AstNodeExpr*& intOperand = lhsInt ? lp : rp;
-                int64_t value = 0;
-                if (evalInt(lhsInt ? *expr.a : *expr.b, value)) {
-                    intOperand->deleteTree();
-                    intOperand = makeVectorConst(flp, vectorT, value);
-                } else {
-                    intOperand = resizeExpr(intOperand, vectorT, flp);
-                }
-                (lhsInt ? lt : rt) = vectorT;
-            }
-        } else if (m_stdLogicArith && lt.isVector() && rt.isVector()
-                   && lt.signing != VSigning::NOSIGN && rt.signing != VSigning::NOSIGN
-                   && lt.isSigned() != rt.isSigned()) {
-            // std_logic_arith's mixed comparison widens the unsigned operand by one bit
-            // before comparing as signed, so the unsigned value never aliases a negative
-            // signed value
-            const int unsignedWidth = lt.isSigned() ? rt.width : lt.width;
-            const int signedWidth = lt.isSigned() ? lt.width : rt.width;
-            const VType arithType = vectorType(flp, lt.kwd, VSigning::SIGNED,
-                                               std::max(unsignedWidth + 1, signedWidth));
-            lp = resizeExpr(lp, arithType, flp);
-            rp = resizeExpr(rp, arithType, flp);
-            lt = arithType;
-            rt = arithType;
-        }
-        // A bare bit-string literal is typeless: a comparison like `-vs >= "110"`
-        // resolves it to the signedness of the real operand so a signed/unsigned
-        // mismatch between the literal and that operand does not arise.
-        auto reSignLiteral = [&](const Expr& side, AstNodeExpr*& operandp, VType& opType,
-                                 const VType& modelType) {
-            if (side.kind != Expr::BITS_LIT || !opType.isVector() || !modelType.isVector()) return;
-            if (opType.isSigned() == modelType.isSigned()) return;
-            operandp->deleteTree();
-            const VType fixedType
-                = vectorType(flp, modelType.kwd, modelType.signing, opType.width);
-            operandp = makeBitsConst(flp, fixedType.dtp, side.bits);
-            opType = fixedType;
-        };
-        reSignLiteral(*expr.a, lp, lt, rt);
-        reSignLiteral(*expr.b, rp, rt, lt);
-        if (m_stdLogicSigned
-            && ((lt.kind == VType::VECTOR && lt.kwd == VBasicDTypeKwd::LOGIC)
-                || (rt.kind == VType::VECTOR && rt.kwd == VBasicDTypeKwd::LOGIC))) {
-            unsupportedError(flp, "std_logic_signed comparison");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        // VHDL array equality: different lengths are unequal, equal lengths compare
-        // element by element. A packed bitwise identity comparison is the same test.
-        if ((cmpOp == "=" || cmpOp == "/=") && lt.isVhdlArray() && rt.isVhdlArray()) {
-            if (lt.width != rt.width) {
-                lp->deleteTree();
-                rp->deleteTree();
-                AstConst* const resultp
-                    = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
-                resultp->dtypep(bitDtp);
-                return resultp;
-            }
-            if (lt.width == 0) {
-                lp->deleteTree();
-                rp->deleteTree();
-                AstConst* const resultp
-                    = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
-                resultp->dtypep(bitDtp);
-                return resultp;
-            }
-            AstNodeExpr* cmpp = cmpOp == "="
-                                    ? static_cast<AstNodeExpr*>(new AstEqCase{flp, lp, rp})
-                                    : static_cast<AstNodeExpr*>(new AstNeqCase{flp, lp, rp});
-            cmpp->dtypep(bitDtp);
-            return cmpp;
-        }
-        // IEEE 1164 defines `=` on std_logic as identity, so 'X' = 'X' is true; a 4-state
-        // equality would report false. The same applies element-wise to a logic vector.
-        const bool logicCompare
-            = (lt.kind == VType::LOGIC && rt.kind == VType::LOGIC)
-              || (lt.kind == VType::VECTOR && rt.kind == VType::VECTOR
-                  && lt.kwd == VBasicDTypeKwd::LOGIC && rt.kwd == VBasicDTypeKwd::LOGIC);
-        if ((cmpOp == "=" || cmpOp == "/=") && logicCompare && lt.width == rt.width) {
-            AstNodeExpr* cmpp = nullptr;
-            if (cmpOp == "=") {
-                cmpp = new AstEqCase{flp, lp, rp};
-            } else {
-                cmpp = new AstNeqCase{flp, lp, rp};
-            }
-            cmpp->dtypep(bitDtp);
-            return cmpp;
-        }
-        // VHDL array ordering is lexicographic over the elements; a shorter array is
-        // smaller when the common prefix is equal (IEEE 1076-2008 9.2.3).
-        if ((cmpOp == "<" || cmpOp == "<=" || cmpOp == ">" || cmpOp == ">=") && lt.isVhdlArray()
-            && rt.isVhdlArray()) {
-            return lowerArrayRelation(flp, cmpOp, lt, rt, lp, rp, bitDtp);
-        }
-        if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
-            unsupportedError(flp, "comparison between signed and unsigned operands");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        if (lt.isVector()) {
-            const int width = std::max(lt.width, rt.width);
-            const VType widenType = vectorType(flp, lt.kwd, lt.signing, width);
-            lp = resizeExpr(lp, widenType, flp);
-            rp = resizeExpr(rp, widenType, flp);
-        }
-        AstNodeExpr* cmpp = nullptr;
-        const bool sign = lt.isSigned();
+void Lowering::reSignBitStringLiteral(FileLine* flp, const Expr& side, AstNodeExpr*& operandp,
+                                      VType& opType, const VType& modelType) {
+    // A bare bit-string literal is typeless: a comparison like `-vs >= "110"`
+    // resolves it to the signedness of the real operand so a signed/unsigned
+    // mismatch between the literal and that operand does not arise.
+    if (side.kind != Expr::BITS_LIT || !opType.isVector() || !modelType.isVector()) return;
+    if (opType.isSigned() == modelType.isSigned()) return;
+    operandp->deleteTree();
+    const VType fixedType = vectorType(flp, modelType.kwd, modelType.signing, opType.width);
+    operandp = makeBitsConst(flp, fixedType.dtp, side.bits);
+    opType = fixedType;
+}
+
+AstNodeExpr* Lowering::lowerRelation(FileLine* flp, const Expr& expr, const std::string& cmpOp,
+                                     BinaryOperands& ops, AstNodeDType* bitDtp) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    VType& rt = ops.rt;
+    if (lt.isInt() && rt.isInt()) {
+        AstNodeExpr* ip = nullptr;
         if (cmpOp == "=") {
-            cmpp = new AstEq{flp, lp, rp};
+            ip = new AstEq{flp, lp, rp};
         } else if (cmpOp == "/=") {
-            cmpp = new AstNeq{flp, lp, rp};
+            ip = new AstNeq{flp, lp, rp};
         } else if (cmpOp == "<") {
-            cmpp = sign ? static_cast<AstNodeExpr*>(new AstLtS{flp, lp, rp})
-                        : static_cast<AstNodeExpr*>(new AstLt{flp, lp, rp});
+            ip = new AstLtS{flp, lp, rp};
         } else if (cmpOp == "<=") {
-            cmpp = sign ? static_cast<AstNodeExpr*>(new AstLteS{flp, lp, rp})
-                        : static_cast<AstNodeExpr*>(new AstLte{flp, lp, rp});
+            ip = new AstLteS{flp, lp, rp};
         } else if (cmpOp == ">") {
-            cmpp = sign ? static_cast<AstNodeExpr*>(new AstGtS{flp, lp, rp})
-                        : static_cast<AstNodeExpr*>(new AstGt{flp, lp, rp});
+            ip = new AstGtS{flp, lp, rp};
         } else {
-            cmpp = sign ? static_cast<AstNodeExpr*>(new AstGteS{flp, lp, rp})
-                        : static_cast<AstNodeExpr*>(new AstGte{flp, lp, rp});
+            ip = new AstGteS{flp, lp, rp};
         }
-        cmpp->dtypep(bitDtp);
-        return cmpp;
+        // Tag the result like every other comparison so an integer test mixed with a
+        // vector test in a logical expression sees matching operand types
+        ip->dtypep(bitDtp);
+        return ip;
     }
-
-    if (op == "&") {
-        if (!lt.isVector() && !rt.isVector()) {
-            if (lt.kind != rt.kind) {
-                unsupportedError(flp, "concatenation of mismatched element types");
-                lp->deleteTree();
-                rp->deleteTree();
-                return nullptr;
-            }
-        } else if (lt.isVector() && rt.isVector() && lt.kwd != rt.kwd) {
-            unsupportedError(flp, "concatenation of mismatched element types");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        } else if (lt.isVector() && rt.isVector() && !lt.typeName.empty() && !rt.typeName.empty()
-                   && (expr.a->kind == Expr::NAME || expr.a->kind == Expr::SELECTED
-                       || expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)
-                   && (expr.b->kind == Expr::NAME || expr.b->kind == Expr::SELECTED
-                       || expr.b->kind == Expr::INDEX || expr.b->kind == Expr::SLICE)
-                   && !arrayBaseTypesRelated(lt.typeName, rt.typeName)) {
-            flp->v3error("VHDL: concatenation of operands of unrelated array types");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        if (lt.isInt() || rt.isInt()) {
-            unsupportedError(flp, "concatenation with an integer operand");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        // A bit-string literal beside a numeric_std vector takes that vector's type, so
-        // `"0" & unsigned(x)` stays unsigned and can be added (IEEE 1076-2008 9.3.6)
-        const VType& named = !lt.isVector()                   ? rt
-                             : !rt.isVector()                 ? lt
-                             : lt.signing == VSigning::NOSIGN ? rt
-                                                              : lt;
-        const VType resultType = vectorType(flp, named.kwd, named.signing, lt.width + rt.width);
-        AstConcat* const concatp = new AstConcat{flp, lp, rp};
-        concatp->dtypep(resultType.dtp);
-        return concatp;
-    }
-
-    const bool logical
-        = op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor" || op == "xnor";
-    if (logical) {
-        // IEEE 1164 and the predefined operators define and/or/xor/... between a vector and
-        // a single scalar bit, applying the scalar to every element: replicate it to width.
-        if (lt.isVector() != rt.isVector()) {
-            const bool lhsVector = lt.isVector();
-            AstNodeExpr*& scalarp = lhsVector ? rp : lp;
-            VType& scalarType = lhsVector ? rt : lt;
-            const VType& vecT = lhsVector ? lt : rt;
-            const bool scalarBit = scalarType.kind == VType::BIT;
-            const bool vectorBit = vecT.kwd == VBasicDTypeKwd::BIT;
-            if (scalarType.width == 1 && scalarBit == vectorBit) {
-                AstNodeExpr* const replp
-                    = new AstReplicate{flp, scalarp, static_cast<uint32_t>(vecT.width)};
-                replp->dtypep(vecT.dtp);
-                scalarp = replp;
-                scalarType = vecT;
-            }
-        }
-        if (lt.width != rt.width || lt.kind != rt.kind) {
-            unsupportedError(flp, "logical operation on operands of different types");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        AstNodeExpr* resultp = nullptr;
-        if (op == "and" || op == "nand") {
-            resultp = new AstAnd{flp, lp, rp};
-        } else if (op == "or" || op == "nor") {
-            resultp = new AstOr{flp, lp, rp};
-        } else {
-            resultp = new AstXor{flp, lp, rp};
-        }
-        resultp->dtypep(lt.dtp);
-        if (op == "nand" || op == "nor" || op == "xnor") {
-            AstNot* const notp = new AstNot{flp, resultp};
-            notp->dtypep(lt.dtp);
-            return notp;
-        }
-        return resultp;
-    }
-
-    if (op == "sll" || op == "srl" || op == "sla" || op == "sra" || op == "rol" || op == "ror") {
-        if (!lt.isVector()) {
-            unsupportedError(flp, "shift or rotate of a non-vector value");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        if (!rt.isInt()) {
-            flp->v3error("VHDL: shift count is not an integer");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        if (op == "rol" || op == "ror") return makeRotate(flp, lp, rp, op == "rol");
-        // IEEE 1076-2008 9.2.3 gives the predefined shift operators bit and boolean
-        // elements; std_logic_1164 (2008) declares the std_logic_vector ones, so a
-        // std_logic_vector shifts without a numeric package
-        // A negative count is the opposite shift (IEEE 1076-2008 9.2.4)
-        const std::string oppositeOp = op == "sll"   ? "srl"
-                                       : op == "srl" ? "sll"
-                                       : op == "sla" ? "sra"
-                                                     : "sla";
-        int64_t count = 0;
-        if (staticIntFold(expr.b, count)) {
-            if (count < 0) {
-                rp->deleteTree();
-                rp = makeIntConst(flp, -count);
-                return makeShift(flp, lp, rp, oppositeOp, lt);
-            }
-            return makeShift(flp, lp, rp, op, lt);
-        }
-        // A dynamic count selects its direction: the count itself when it is
-        // non-negative, and `0 - count`, which is non-negative, the other way
-        AstNodeExpr* const testp = new AstGteS{flp, rp, makeIntConst(flp, 0)};
-        testp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-        AstNodeExpr* const negp = new AstSub{flp, makeIntConst(flp, 0), rp->cloneTree(false)};
-        negp->dtypep(intType(flp).dtp);
-        AstNodeExpr* const forwardp
-            = makeShift(flp, lp->cloneTree(false), rp->cloneTree(false), op, lt);
-        AstNodeExpr* const backwardp = makeShift(flp, lp, negp, oppositeOp, lt);
-        AstCond* const resultp = new AstCond{flp, testp, forwardp, backwardp};
-        resultp->dtypep(forwardp->dtypep());
-        return resultp;
-    }
-    if (op == "**") {
-        // A static exponent unrolls into a chain of multiplications
-        int64_t exponent = 0;
-        if (!staticIntFold(expr.b, exponent)) {
-            // A power of two with a run-time exponent is a shift, which is how a
-            // generic-derived width turns into a decoder size
-            int64_t base = 0;
-            if (staticIntFold(expr.a, base) && base == 2 && lt.isInt()) {
-                AstNodeExpr* const shiftp = new AstShiftL{flp, makeIntConst(flp, 1), rp, lt.width};
-                shiftp->dtypep(lt.dtp);
-                lp->deleteTree();
-                return shiftp;
-            }
-            unsupportedError(flp, "non-static exponent");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        if (exponent < 0 || exponent > 64) {
-            unsupportedError(flp, "exponent out of range");
-            lp->deleteTree();
-            rp->deleteTree();
-            return nullptr;
-        }
-        rp->deleteTree();
-        if (!lt.isInt()) {
-            unsupportedError(flp, "exponentiation of a non-integer value");
-            lp->deleteTree();
-            return nullptr;
-        }
-        if (exponent == 0) {
-            lp->deleteTree();
-            return makeIntConst(flp, 1);
-        }
-        AstNodeExpr* resultp = lp->cloneTree(false);
-        for (int64_t i = 1; i < exponent; ++i) {
-            AstNodeExpr* const mulp = new AstMul{flp, resultp, lp->cloneTree(false)};
-            mulp->dtypep(lt.dtp);
-            resultp = mulp;
-        }
-        lp->deleteTree();
-        return resultp;
-    }
-
-    const bool arithmetic
-        = op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem";
-    if (!arithmetic) {
-        unsupportedError(flp, "operator '" + op + "'");
+    reconcileRelationOperands(flp, expr, ops);
+    reSignBitStringLiteral(flp, *expr.a, lp, lt, rt);
+    reSignBitStringLiteral(flp, *expr.b, rp, rt, lt);
+    if (m_stdLogicSigned
+        && ((lt.kind == VType::VECTOR && lt.kwd == VBasicDTypeKwd::LOGIC)
+            || (rt.kind == VType::VECTOR && rt.kwd == VBasicDTypeKwd::LOGIC))) {
+        unsupportedError(flp, "std_logic_signed comparison");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
     }
-    if (lt.isInt() && rt.isInt()) {
-        // IEEE 1076-2008 9.1: dividing by zero is an error (subset row 4.5)
-        if (op == "/" || op == "mod" || op == "rem") {
-            int64_t divisor = 0;
-            if (evalInt(*expr.b, divisor) && divisor == 0) {
-                flp->v3error("VHDL: division by zero");
-                lp->deleteTree();
-                rp->deleteTree();
-                return nullptr;
-            }
-            if (m_modp) {
-                // A dynamic divisor can reach zero at run time, where the standard
-                // requires an error rather than a silent zero. Test the whole value with a
-                // reduction so the operand's width and signedness need no constant.
-                AstRedOr* const anyBitp = new AstRedOr{flp, rp->cloneTree(false)};
-                anyBitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-                AstNodeExpr* const zeroTestp = new AstNot{flp, anyBitp};
-                zeroTestp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-                addRuntimeError(flp, zeroTestp, "VHDL: division by zero");
-            }
-        }
-        AstNodeExpr* resultp = nullptr;
-        // The operands are both integers but need not have the same width (time is 64 bits,
-        // integer 32), and the width pass requires equal widths, so extend the narrower one
+    // VHDL array equality: different lengths are unequal, equal lengths compare
+    // element by element. A packed bitwise identity comparison is the same test.
+    if ((cmpOp == "=" || cmpOp == "/=") && lt.isVhdlArray() && rt.isVhdlArray()) {
         if (lt.width != rt.width) {
-            const int wideWidth = std::max(lt.width, rt.width);
-            if (lt.width < wideWidth) {
-                AstNodeExpr* const extendedp
-                    = lt.dtp->isSigned() || rt.dtp->isSigned()
-                          ? static_cast<AstNodeExpr*>(new AstExtendS{flp, lp, wideWidth})
-                          : static_cast<AstNodeExpr*>(new AstExtend{flp, lp, wideWidth});
-                extendedp->dtypep(rt.dtp);
-                lp = extendedp;
-            } else {
-                AstNodeExpr* const extendedp
-                    = lt.dtp->isSigned() || rt.dtp->isSigned()
-                          ? static_cast<AstNodeExpr*>(new AstExtendS{flp, rp, wideWidth})
-                          : static_cast<AstNodeExpr*>(new AstExtend{flp, rp, wideWidth});
-                extendedp->dtypep(lt.dtp);
-                rp = extendedp;
-            }
+            lp->deleteTree();
+            rp->deleteTree();
+            AstConst* const resultp
+                = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
+            resultp->dtypep(bitDtp);
+            return resultp;
         }
-        if (op == "+") {
-            resultp = new AstAdd{flp, lp, rp};
-        } else if (op == "-") {
-            resultp = new AstSub{flp, lp, rp};
-        } else if (op == "*") {
-            resultp = new AstMul{flp, lp, rp};
-        } else if (op == "rem") {
-            // rem takes the dividend's sign, which is what the remainder gives
-            resultp = makeRem(flp, lp, rp, lt.dtp, true);
-        } else if (op == "mod") {
-            resultp = makeMod(flp, lp, rp, lt.dtp, true);
-        } else {
-            resultp = new AstDivS{flp, lp, rp};
+        if (lt.width == 0) {
+            lp->deleteTree();
+            rp->deleteTree();
+            AstConst* const resultp
+                = new AstConst{flp, V3Number{flp, 1, static_cast<uint32_t>(cmpOp == "/=")}};
+            resultp->dtypep(bitDtp);
+            return resultp;
         }
-        resultp->dtypep(lt.dtp);
-        // A division's width follows its widest operand in the width pass, while VHDL's
-        // result is the dividend's type (dividing two physical values, or a physical value
-        // by an integer, gives integer), so narrow to it explicitly
-        if ((op == "/" || op == "mod" || op == "rem") && std::max(lt.width, rt.width) > lt.width) {
-            AstNodeExpr* const narrowp = new AstSel{flp, resultp, 0, lt.width};
-            narrowp->dtypep(lt.dtp);
-            return narrowp;
-        }
-        return resultp;
+        AstNodeExpr* cmpp = cmpOp == "=" ? static_cast<AstNodeExpr*>(new AstEqCase{flp, lp, rp})
+                                         : static_cast<AstNodeExpr*>(new AstNeqCase{flp, lp, rp});
+        cmpp->dtypep(bitDtp);
+        return cmpp;
     }
+    // IEEE 1164 defines `=` on std_logic as identity, so 'X' = 'X' is true; a 4-state
+    // equality would report false. The same applies element-wise to a logic vector.
+    const bool logicCompare
+        = (lt.kind == VType::LOGIC && rt.kind == VType::LOGIC)
+          || (lt.kind == VType::VECTOR && rt.kind == VType::VECTOR
+              && lt.kwd == VBasicDTypeKwd::LOGIC && rt.kwd == VBasicDTypeKwd::LOGIC);
+    if ((cmpOp == "=" || cmpOp == "/=") && logicCompare && lt.width == rt.width) {
+        AstNodeExpr* cmpp = nullptr;
+        if (cmpOp == "=") {
+            cmpp = new AstEqCase{flp, lp, rp};
+        } else {
+            cmpp = new AstNeqCase{flp, lp, rp};
+        }
+        cmpp->dtypep(bitDtp);
+        return cmpp;
+    }
+    // VHDL array ordering is lexicographic over the elements; a shorter array is
+    // smaller when the common prefix is equal (IEEE 1076-2008 9.2.3).
+    if ((cmpOp == "<" || cmpOp == "<=" || cmpOp == ">" || cmpOp == ">=") && lt.isVhdlArray()
+        && rt.isVhdlArray()) {
+        return lowerArrayRelation(flp, cmpOp, lt, rt, lp, rp, bitDtp);
+    }
+    if (lt.isVector() && lt.isSigned() != rt.isSigned()) {
+        unsupportedError(flp, "comparison between signed and unsigned operands");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    if (lt.isVector()) {
+        const int width = std::max(lt.width, rt.width);
+        const VType widenType = vectorType(flp, lt.kwd, lt.signing, width);
+        lp = resizeExpr(lp, widenType, flp);
+        rp = resizeExpr(rp, widenType, flp);
+    }
+    AstNodeExpr* cmpp = nullptr;
+    const bool sign = lt.isSigned();
+    if (cmpOp == "=") {
+        cmpp = new AstEq{flp, lp, rp};
+    } else if (cmpOp == "/=") {
+        cmpp = new AstNeq{flp, lp, rp};
+    } else if (cmpOp == "<") {
+        cmpp = sign ? static_cast<AstNodeExpr*>(new AstLtS{flp, lp, rp})
+                    : static_cast<AstNodeExpr*>(new AstLt{flp, lp, rp});
+    } else if (cmpOp == "<=") {
+        cmpp = sign ? static_cast<AstNodeExpr*>(new AstLteS{flp, lp, rp})
+                    : static_cast<AstNodeExpr*>(new AstLte{flp, lp, rp});
+    } else if (cmpOp == ">") {
+        cmpp = sign ? static_cast<AstNodeExpr*>(new AstGtS{flp, lp, rp})
+                    : static_cast<AstNodeExpr*>(new AstGt{flp, lp, rp});
+    } else {
+        cmpp = sign ? static_cast<AstNodeExpr*>(new AstGteS{flp, lp, rp})
+                    : static_cast<AstNodeExpr*>(new AstGte{flp, lp, rp});
+    }
+    cmpp->dtypep(bitDtp);
+    return cmpp;
+}
+
+AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    VType& rt = ops.rt;
+    if (!lt.isVector() && !rt.isVector()) {
+        if (lt.kind != rt.kind) {
+            unsupportedError(flp, "concatenation of mismatched element types");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+    } else if (lt.isVector() && rt.isVector() && lt.kwd != rt.kwd) {
+        unsupportedError(flp, "concatenation of mismatched element types");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    } else if (lt.isVector() && rt.isVector() && !lt.typeName.empty() && !rt.typeName.empty()
+               && (expr.a->kind == Expr::NAME || expr.a->kind == Expr::SELECTED
+                   || expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)
+               && (expr.b->kind == Expr::NAME || expr.b->kind == Expr::SELECTED
+                   || expr.b->kind == Expr::INDEX || expr.b->kind == Expr::SLICE)
+               && !arrayBaseTypesRelated(lt.typeName, rt.typeName)) {
+        flp->v3error("VHDL: concatenation of operands of unrelated array types.");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    if (lt.isInt() || rt.isInt()) {
+        unsupportedError(flp, "concatenation with an integer operand");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    // A bit-string literal beside a numeric_std vector takes that vector's type, so
+    // `"0" & unsigned(x)` stays unsigned and can be added (IEEE 1076-2008 9.3.6)
+    const VType& named = !lt.isVector()                   ? rt
+                         : !rt.isVector()                 ? lt
+                         : lt.signing == VSigning::NOSIGN ? rt
+                                                          : lt;
+    const VType resultType = vectorType(flp, named.kwd, named.signing, lt.width + rt.width);
+    AstConcat* const concatp = new AstConcat{flp, lp, rp};
+    concatp->dtypep(resultType.dtp);
+    return concatp;
+}
+
+AstNodeExpr* Lowering::lowerLogicalBinary(FileLine* flp, const std::string& op,
+                                          BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    VType& rt = ops.rt;
+    // IEEE 1164 and the predefined operators define and/or/xor/... between a vector and
+    // a single scalar bit, applying the scalar to every element: replicate it to width.
+    if (lt.isVector() != rt.isVector()) {
+        const bool lhsVector = lt.isVector();
+        AstNodeExpr*& scalarp = lhsVector ? rp : lp;
+        VType& scalarType = lhsVector ? rt : lt;
+        const VType& vecT = lhsVector ? lt : rt;
+        const bool scalarBit = scalarType.kind == VType::BIT;
+        const bool vectorBit = vecT.kwd == VBasicDTypeKwd::BIT;
+        if (scalarType.width == 1 && scalarBit == vectorBit) {
+            AstNodeExpr* const replp
+                = new AstReplicate{flp, scalarp, static_cast<uint32_t>(vecT.width)};
+            replp->dtypep(vecT.dtp);
+            scalarp = replp;
+            scalarType = vecT;
+        }
+    }
+    if (lt.width != rt.width || lt.kind != rt.kind) {
+        unsupportedError(flp, "logical operation on operands of different types");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    AstNodeExpr* resultp = nullptr;
+    if (op == "and" || op == "nand") {
+        resultp = new AstAnd{flp, lp, rp};
+    } else if (op == "or" || op == "nor") {
+        resultp = new AstOr{flp, lp, rp};
+    } else {
+        resultp = new AstXor{flp, lp, rp};
+    }
+    resultp->dtypep(lt.dtp);
+    if (op == "nand" || op == "nor" || op == "xnor") {
+        AstNot* const notp = new AstNot{flp, resultp};
+        notp->dtypep(lt.dtp);
+        return notp;
+    }
+    return resultp;
+}
+
+AstNodeExpr* Lowering::lowerShiftBinary(FileLine* flp, const Expr& expr, const std::string& op,
+                                        BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    const VType& lt = ops.lt;
+    if (!lt.isVector()) {
+        unsupportedError(flp, "shift or rotate of a non-vector value");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    if (!ops.rt.isInt()) {
+        flp->v3error("VHDL: shift count is not an integer.");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    if (op == "rol" || op == "ror") return makeRotate(flp, lp, rp, op == "rol");
+    // IEEE 1076-2008 9.2.3 gives the predefined shift operators bit and boolean
+    // elements; std_logic_1164 (2008) declares the std_logic_vector ones, so a
+    // std_logic_vector shifts without a numeric package
+    // A negative count is the opposite shift (IEEE 1076-2008 9.2.4)
+    const std::string oppositeOp = op == "sll"   ? "srl"
+                                   : op == "srl" ? "sll"
+                                   : op == "sla" ? "sra"
+                                                 : "sla";
+    int64_t count = 0;
+    if (staticIntFold(expr.b, count)) {
+        if (count < 0) {
+            rp->deleteTree();
+            rp = makeIntConst(flp, -count);
+            return makeShift(flp, lp, rp, oppositeOp, lt);
+        }
+        return makeShift(flp, lp, rp, op, lt);
+    }
+    // A dynamic count selects its direction: the count itself when it is
+    // non-negative, and `0 - count`, which is non-negative, the other way
+    AstNodeExpr* const testp = new AstGteS{flp, rp, makeIntConst(flp, 0)};
+    testp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    AstNodeExpr* const negp = new AstSub{flp, makeIntConst(flp, 0), rp->cloneTree(false)};
+    negp->dtypep(intType(flp).dtp);
+    AstNodeExpr* const forwardp
+        = makeShift(flp, lp->cloneTree(false), rp->cloneTree(false), op, lt);
+    AstNodeExpr* const backwardp = makeShift(flp, lp, negp, oppositeOp, lt);
+    AstCond* const resultp = new AstCond{flp, testp, forwardp, backwardp};
+    resultp->dtypep(forwardp->dtypep());
+    return resultp;
+}
+
+AstNodeExpr* Lowering::lowerPowerBinary(FileLine* flp, const Expr& expr, BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    const VType& lt = ops.lt;
+    // A static exponent unrolls into a chain of multiplications
+    int64_t exponent = 0;
+    if (!staticIntFold(expr.b, exponent)) {
+        // A power of two with a run-time exponent is a shift, which is how a
+        // generic-derived width turns into a decoder size
+        int64_t base = 0;
+        if (staticIntFold(expr.a, base) && base == 2 && lt.isInt()) {
+            AstNodeExpr* const shiftp = new AstShiftL{flp, makeIntConst(flp, 1), rp, lt.width};
+            shiftp->dtypep(lt.dtp);
+            lp->deleteTree();
+            return shiftp;
+        }
+        unsupportedError(flp, "non-static exponent");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    if (exponent < 0 || exponent > 64) {
+        unsupportedError(flp, "exponent out of range");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    rp->deleteTree();
+    if (!lt.isInt()) {
+        unsupportedError(flp, "exponentiation of a non-integer value");
+        lp->deleteTree();
+        return nullptr;
+    }
+    if (exponent == 0) {
+        lp->deleteTree();
+        return makeIntConst(flp, 1);
+    }
+    AstNodeExpr* resultp = lp->cloneTree(false);
+    for (int64_t i = 1; i < exponent; ++i) {
+        AstNodeExpr* const mulp = new AstMul{flp, resultp, lp->cloneTree(false)};
+        mulp->dtypep(lt.dtp);
+        resultp = mulp;
+    }
+    lp->deleteTree();
+    return resultp;
+}
+
+AstNodeExpr* Lowering::lowerIntArithmetic(FileLine* flp, const Expr& expr, const std::string& op,
+                                          BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    const VType& rt = ops.rt;
+    // IEEE 1076-2008 9.1: dividing by zero is an error
+    if (op == "/" || op == "mod" || op == "rem") {
+        int64_t divisor = 0;
+        if (evalInt(*expr.b, divisor) && divisor == 0) {
+            flp->v3error("VHDL: division by zero.");
+            lp->deleteTree();
+            rp->deleteTree();
+            return nullptr;
+        }
+        if (m_modp) {
+            // A dynamic divisor can reach zero at run time, where the standard
+            // requires an error rather than a silent zero. Test the whole value with a
+            // reduction so the operand's width and signedness need no constant.
+            AstRedOr* const anyBitp = new AstRedOr{flp, rp->cloneTree(false)};
+            anyBitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            AstNodeExpr* const zeroTestp = new AstNot{flp, anyBitp};
+            zeroTestp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            addRuntimeError(flp, zeroTestp, "VHDL: division by zero");
+        }
+    }
+    AstNodeExpr* resultp = nullptr;
+    // The operands are both integers but need not have the same width (time is 64 bits,
+    // integer 32), and the width pass requires equal widths, so extend the narrower one
+    if (lt.width != rt.width) {
+        const int wideWidth = std::max(lt.width, rt.width);
+        if (lt.width < wideWidth) {
+            AstNodeExpr* const extendedp
+                = lt.dtp->isSigned() || rt.dtp->isSigned()
+                      ? static_cast<AstNodeExpr*>(new AstExtendS{flp, lp, wideWidth})
+                      : static_cast<AstNodeExpr*>(new AstExtend{flp, lp, wideWidth});
+            extendedp->dtypep(rt.dtp);
+            lp = extendedp;
+        } else {
+            AstNodeExpr* const extendedp
+                = lt.dtp->isSigned() || rt.dtp->isSigned()
+                      ? static_cast<AstNodeExpr*>(new AstExtendS{flp, rp, wideWidth})
+                      : static_cast<AstNodeExpr*>(new AstExtend{flp, rp, wideWidth});
+            extendedp->dtypep(lt.dtp);
+            rp = extendedp;
+        }
+    }
+    if (op == "+") {
+        resultp = new AstAdd{flp, lp, rp};
+    } else if (op == "-") {
+        resultp = new AstSub{flp, lp, rp};
+    } else if (op == "*") {
+        resultp = new AstMul{flp, lp, rp};
+    } else if (op == "rem") {
+        // rem takes the dividend's sign, which is what the remainder gives
+        resultp = makeRem(flp, lp, rp, lt.dtp, true);
+    } else if (op == "mod") {
+        resultp = makeMod(flp, lp, rp, lt.dtp, true);
+    } else {
+        resultp = new AstDivS{flp, lp, rp};
+    }
+    resultp->dtypep(lt.dtp);
+    // A division's width follows its widest operand in the width pass, while VHDL's
+    // result is the dividend's type (dividing two physical values, or a physical value
+    // by an integer, gives integer), so narrow to it explicitly
+    if ((op == "/" || op == "mod" || op == "rem") && std::max(lt.width, rt.width) > lt.width) {
+        AstNodeExpr* const narrowp = new AstSel{flp, resultp, 0, lt.width};
+        narrowp->dtypep(lt.dtp);
+        return narrowp;
+    }
+    return resultp;
+}
+
+AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
+                                             const std::string& op, BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    VType& rt = ops.rt;
     // A static integer operand acts as a natural/signed literal of the vector operand's
     // type; a dynamic one is converted to that type, as numeric_std does
     if (lt.isInt() != rt.isInt()) {
@@ -1245,7 +1248,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     // std_logic_vector do not mix (IEEE 1076-2008 9.2.5)
     if (!lt.typeName.empty() && !rt.typeName.empty()
         && !arrayBaseTypesRelated(lt.typeName, rt.typeName)) {
-        flp->v3error("VHDL: arithmetic operands do not have the same base type");
+        flp->v3error("VHDL: arithmetic operands do not have the same base type.");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -1255,7 +1258,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     if (lt.kwd == VBasicDTypeKwd::LOGIC && lt.signing == VSigning::NOSIGN && !m_stdLogicArith
         && !m_stdLogicSigned && !m_stdLogicUnsigned) {
         flp->v3error("VHDL: arithmetic on std_logic_vector needs a package that defines it "
-                     "(IEEE 1076-2008 9.1)");
+                     "(IEEE 1076-2008 9.1).");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -1312,6 +1315,86 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
     return resultp;
 }
 
+AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* context) {
+    FileLine* const flp = expr.flp;
+    const std::string& op = expr.text;
+    if (!binaryStaticFits(flp, expr)) return nullptr;
+    // An explicitly declared operator with matching parameter types takes precedence over
+    // the built-in operator of the same symbol
+    if (expr.a && expr.b) {
+        bool userFound = false;
+        if (AstNodeExpr* const userp = lowerUserOperator(expr, context, userFound)) return userp;
+        if (userFound) return nullptr;
+        if (AstNodeExpr* const bitp = foldRealRelation(flp, expr, op)) return bitp;
+    }
+    // A logical operator combines a scalar character literal element-wise with the
+    // other operand (IEEE 1076-2008 9.2.2), so the literal stays a logic value and
+    // never takes the character-code path an 8-bit operand context would give it.
+    const bool logicalOp
+        = op == "and" || op == "or" || op == "xor" || op == "nand" || op == "nor" || op == "xnor";
+    BinaryOperands ops;
+    if (!lowerBinaryOperands(expr, op, logicalOp, ops)) return nullptr;
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    VType& lt = ops.lt;
+    VType& rt = ops.rt;
+    if (!rp) {
+        if (lp) lp->deleteTree();
+        return nullptr;
+    }
+    if (!lp) return nullptr;
+    lt = typeOfLowered(*expr.a, lp);
+    rt = typeOfLowered(*expr.b, rp);
+    if (logicalOp && !logicalOperandsConform(*expr.a, *expr.b, lt, rt)) {
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
+                              || op == ">=" || op == "?=" || op == "?/=" || op == "?<"
+                              || op == "?<=" || op == "?>" || op == "?>=";
+    if (relationalOp && !relationalOperandsConform(*expr.a, *expr.b)) {
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+    if (op == "?=" || op == "?/=") return lowerMatchingRelation(flp, expr, op, ops);
+    // A matching relational operator compares like the plain operator, but a '-' in an
+    // operand would need don't-care semantics that the 2-state model cannot express
+    if (op == "?<" || op == "?<=" || op == "?>" || op == "?>=") {
+        for (const Expr* const sidep : {expr.a.get(), expr.b.get()}) {
+            if (!sidep || sidep->kind != Expr::BITS_LIT) continue;
+            if (sidep->bits.find('-') != std::string::npos) {
+                unsupportedError(flp, "matching relational operator with a don't-care operand");
+                lp->deleteTree();
+                rp->deleteTree();
+                return nullptr;
+            }
+        }
+    }
+    const std::string cmpOp = op[0] == '?' ? op.substr(1) : op;
+    const bool relational = cmpOp == "=" || cmpOp == "/=" || cmpOp == "<" || cmpOp == "<="
+                            || cmpOp == ">" || cmpOp == ">=";
+    if (relational) return lowerRelation(flp, expr, cmpOp, ops, bitDtp);
+    if (op == "&") return lowerConcat(flp, expr, ops);
+    if (logicalOp) return lowerLogicalBinary(flp, op, ops);
+    if (op == "sll" || op == "srl" || op == "sla" || op == "sra" || op == "rol" || op == "ror") {
+        return lowerShiftBinary(flp, expr, op, ops);
+    }
+    if (op == "**") return lowerPowerBinary(flp, expr, ops);
+    const bool arithmetic
+        = op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem";
+    if (!arithmetic) {
+        unsupportedError(flp, "operator '" + op + "'");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    if (lt.isInt() && rt.isInt()) return lowerIntArithmetic(flp, expr, op, ops);
+    return lowerVectorArithmetic(flp, expr, op, ops);
+}
+
 //! rising_edge/falling_edge register a clock edge and are true only when it fires
 AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
     FileLine* const flp = expr.flp;
@@ -1321,7 +1404,7 @@ AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
     }
     AstVar* const varp = lookupVar(*expr.args[0]);
     if (!varp) {
-        flp->v3error("VHDL: unknown signal '" + expr.args[0]->spelling + "' in an edge function");
+        flp->v3error("VHDL: unknown signal '" + expr.args[0]->spelling + "' in an edge function.");
         return nullptr;
     }
     // The std_logic_1164 edge functions take a scalar std_ulogic (IEEE 1164 3.2.6);
@@ -1329,7 +1412,7 @@ AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
     VType argType;
     if (actualType(*expr.args[0], argType)
         && (argType.kind != VType::LOGIC || argType.isVector() || argType.typeName == "boolean")) {
-        flp->v3error("VHDL: " + expr.a->text + " operand is not std_ulogic");
+        flp->v3error("VHDL: " + expr.a->text + " operand is not std_ulogic.");
         return nullptr;
     }
     const bool rising = expr.a->text == "rising_edge";
@@ -1360,7 +1443,7 @@ AstNodeExpr* Lowering::edgeLevel(FileLine* flp, AstVar* varp, bool rising) {
 AstNodeExpr* Lowering::edgeChanged(FileLine* flp, AstVar* varp) {
     AstVar*& prevp = m_edgePrevVars[varp];
     if (!prevp) {
-        const std::string name = "vhdledge_" + std::to_string(++m_edgeSeq) + "__" + varp->name();
+        const std::string name = "__Vedge_" + std::to_string(++m_edgeSeq) + "__" + varp->name();
         prevp = new AstVar{flp, VVarType::VAR, name, varp->dtypep()};
         m_modp->addStmtsp(prevp);
     }
@@ -1519,52 +1602,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         }
         return lowerExpr(*argsp[0], nullptr);
     }
-    // `std_match(a, b)`: a '-' bit of either operand matches anything, so the operands
-    // are compared under a mask of the bits that are not wildcards. The model is
-    // 2-state, so a metavalue is a 0 on both sides and compares equal
-    if (fn == "std_match") {
-        if (argsp.size() != 2) {
-            unsupportedError(flp, "std_match without two arguments");
-            return nullptr;
-        }
-        AstNodeExpr* lp = lowerExpr(*argsp[0], nullptr);
-        if (!lp) return nullptr;
-        AstNodeExpr* rp = lowerExpr(*argsp[1], nullptr);
-        if (!rp) {
-            lp->deleteTree();
-            return nullptr;
-        }
-        const int width = std::max(lp->width(), rp->width());
-        std::string mask(static_cast<size_t>(width), '1');
-        for (const ExprP& argp : argsp) {
-            if (!argp || argp->kind != Expr::BITS_LIT) continue;
-            const size_t argWidth = argp->bits.size();
-            for (size_t i = 0; i < argWidth && i < static_cast<size_t>(width); ++i) {
-                if (argp->bits[i] == '-') mask[i + static_cast<size_t>(width) - argWidth] = '0';
-            }
-        }
-        // A don't-care can also arrive through a constant: its '-' bits are x bits in
-        // the lowered value, whatever name or expression carried them here
-        for (AstNodeExpr* const sidep : {lp, rp}) {
-            const AstConst* const constp = VN_CAST(sidep, Const);
-            if (!constp) continue;
-            for (int b = 0; b < constp->width() && b < width; ++b) {
-                if (!constp->num().bitIsX(b)) continue;
-                mask[static_cast<size_t>(width - 1 - b)] = '0';
-            }
-        }
-        const VType vec = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width);
-        AstNodeExpr* const maskp = makeBitsConst(flp, vec.dtp, mask);
-        lp = resizeExpr(lp, vec, flp);
-        rp = resizeExpr(rp, vec, flp);
-        AstNodeExpr* const leftp = new AstAnd{flp, lp, maskp->cloneTree(false)};
-        leftp->dtypep(vec.dtp);
-        AstNodeExpr* const rightp = new AstAnd{flp, rp, maskp};
-        rightp->dtypep(vec.dtp);
-        AstNodeExpr* const eqp = new AstEq{flp, leftp, rightp};
-        eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-        return eqp;
-    }
+    if (fn == "std_match") return lowerIntrinsicStdMatch(flp, argsp);
     if (argsp.empty()) {
         unsupportedError(flp, "function '" + fn + "' without an argument");
         return nullptr;
@@ -1582,27 +1620,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
     if ((fn == "resize" || fn == "conv_std_logic_vector" || fn == "conv_unsigned"
          || fn == "conv_signed")
         && argsp.size() == 2) {
-        AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
-        if (!valuep) return nullptr;
-        int64_t width = 0;
-        if (!staticInt(argsp[1], width) || width <= 0 || width > 4096) {
-            unsupportedError(flp, "non-static width in '" + fn + "'");
-            valuep->deleteTree();
-            return nullptr;
-        }
-        const VType valueType = typeOfDType(valuep->dtypep());
-        VBasicDTypeKwd kwd = valueType.kwd;
-        VSigning signing = valueType.signing;
-        if (fn != "resize") {
-            kwd = VBasicDTypeKwd::LOGIC;
-            if (fn == "conv_std_logic_vector") {
-                signing = VSigning::NOSIGN;
-            } else {
-                signing = fn == "conv_signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
-            }
-        }
-        const VType target = vectorType(flp, kwd, signing, static_cast<int>(width));
-        return resizeExpr(valuep, target, flp);
+        return lowerIntrinsicResize(flp, fn, argsp);
     }
     if (fn == "shift_left" || fn == "shift_right" || fn == "shl" || fn == "shr") {
         if (argsp.size() != 2) {
@@ -1644,35 +1662,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         }
         return makeRotate(flp, valuep, amountp, fn == "rotate_left");
     }
-    if (fn == "minimum" || fn == "maximum") {
-        if (argsp.size() != 2) {
-            unsupportedError(flp, "function '" + fn + "' without two arguments");
-            return nullptr;
-        }
-        AstNodeExpr* const lhsp = lowerExpr(*argsp[0], nullptr);
-        if (!lhsp) return nullptr;
-        const VType lhsType = typeOfDType(lhsp->dtypep());
-        AstNodeExpr* const rhsp = lowerExpr(*argsp[1], &lhsType);
-        if (!rhsp) {
-            lhsp->deleteTree();
-            return nullptr;
-        }
-        AstNodeDType* const dtp = lhsp->dtypep();
-        const bool sign = dtp->isSigned();
-        AstNodeExpr* cmpp = nullptr;
-        if (fn == "minimum") {
-            cmpp = sign ? static_cast<AstNodeExpr*>(new AstLtS{flp, lhsp, rhsp})
-                        : static_cast<AstNodeExpr*>(new AstLt{flp, lhsp, rhsp});
-        } else {
-            cmpp = sign ? static_cast<AstNodeExpr*>(new AstGtS{flp, lhsp, rhsp})
-                        : static_cast<AstNodeExpr*>(new AstGt{flp, lhsp, rhsp});
-        }
-        cmpp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-        AstCond* const resultp
-            = new AstCond{flp, cmpp, lhsp->cloneTree(false), rhsp->cloneTree(false)};
-        resultp->dtypep(dtp);
-        return resultp;
-    }
+    if (fn == "minimum" || fn == "maximum") return lowerIntrinsicMinMax(flp, fn, argsp);
     if (fn == "conv_integer" || fn == "to_stdulogic" || fn == "to_bit") {
         AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
         if (!valuep) return nullptr;
@@ -1697,6 +1687,109 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
     return nullptr;
 }
 
+AstNodeExpr* Lowering::lowerIntrinsicStdMatch(FileLine* flp, const std::vector<ExprP>& argsp) {
+    // `std_match(a, b)`: a '-' bit of either operand matches anything, so the operands
+    // are compared under a mask of the bits that are not wildcards. The model is
+    // 2-state, so a metavalue is a 0 on both sides and compares equal
+    if (argsp.size() != 2) {
+        unsupportedError(flp, "std_match without two arguments");
+        return nullptr;
+    }
+    AstNodeExpr* lp = lowerExpr(*argsp[0], nullptr);
+    if (!lp) return nullptr;
+    AstNodeExpr* rp = lowerExpr(*argsp[1], nullptr);
+    if (!rp) {
+        lp->deleteTree();
+        return nullptr;
+    }
+    const int width = std::max(lp->width(), rp->width());
+    std::string mask(static_cast<size_t>(width), '1');
+    for (const ExprP& argp : argsp) {
+        if (!argp || argp->kind != Expr::BITS_LIT) continue;
+        const size_t argWidth = argp->bits.size();
+        for (size_t i = 0; i < argWidth && i < static_cast<size_t>(width); ++i) {
+            if (argp->bits[i] == '-') mask[i + static_cast<size_t>(width) - argWidth] = '0';
+        }
+    }
+    // A don't-care can also arrive through a constant: its '-' bits are x bits in
+    // the lowered value, whatever name or expression carried them here
+    for (AstNodeExpr* const sidep : {lp, rp}) {
+        const AstConst* const constp = VN_CAST(sidep, Const);
+        if (!constp) continue;
+        for (int b = 0; b < constp->width() && b < width; ++b) {
+            if (!constp->num().bitIsX(b)) continue;
+            mask[static_cast<size_t>(width - 1 - b)] = '0';
+        }
+    }
+    const VType vec = vectorType(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width);
+    AstNodeExpr* const maskp = makeBitsConst(flp, vec.dtp, mask);
+    lp = resizeExpr(lp, vec, flp);
+    rp = resizeExpr(rp, vec, flp);
+    AstNodeExpr* const leftp = new AstAnd{flp, lp, maskp->cloneTree(false)};
+    leftp->dtypep(vec.dtp);
+    AstNodeExpr* const rightp = new AstAnd{flp, rp, maskp};
+    rightp->dtypep(vec.dtp);
+    AstNodeExpr* const eqp = new AstEq{flp, leftp, rightp};
+    eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    return eqp;
+}
+
+AstNodeExpr* Lowering::lowerIntrinsicResize(FileLine* flp, const std::string& fn,
+                                            const std::vector<ExprP>& argsp) {
+    AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
+    if (!valuep) return nullptr;
+    int64_t width = 0;
+    if (!staticInt(argsp[1], width) || width <= 0 || width > MAX_FOLD_WIDTH) {
+        unsupportedError(flp, "non-static width in '" + fn + "'");
+        valuep->deleteTree();
+        return nullptr;
+    }
+    const VType valueType = typeOfDType(valuep->dtypep());
+    VBasicDTypeKwd kwd = valueType.kwd;
+    VSigning signing = valueType.signing;
+    if (fn != "resize") {
+        kwd = VBasicDTypeKwd::LOGIC;
+        if (fn == "conv_std_logic_vector") {
+            signing = VSigning::NOSIGN;
+        } else {
+            signing = fn == "conv_signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+        }
+    }
+    const VType target = vectorType(flp, kwd, signing, static_cast<int>(width));
+    return resizeExpr(valuep, target, flp);
+}
+
+AstNodeExpr* Lowering::lowerIntrinsicMinMax(FileLine* flp, const std::string& fn,
+                                            const std::vector<ExprP>& argsp) {
+    if (argsp.size() != 2) {
+        unsupportedError(flp, "function '" + fn + "' without two arguments");
+        return nullptr;
+    }
+    AstNodeExpr* const lhsp = lowerExpr(*argsp[0], nullptr);
+    if (!lhsp) return nullptr;
+    const VType lhsType = typeOfDType(lhsp->dtypep());
+    AstNodeExpr* const rhsp = lowerExpr(*argsp[1], &lhsType);
+    if (!rhsp) {
+        lhsp->deleteTree();
+        return nullptr;
+    }
+    AstNodeDType* const dtp = lhsp->dtypep();
+    const bool sign = dtp->isSigned();
+    AstNodeExpr* cmpp = nullptr;
+    if (fn == "minimum") {
+        cmpp = sign ? static_cast<AstNodeExpr*>(new AstLtS{flp, lhsp, rhsp})
+                    : static_cast<AstNodeExpr*>(new AstLt{flp, lhsp, rhsp});
+    } else {
+        cmpp = sign ? static_cast<AstNodeExpr*>(new AstGtS{flp, lhsp, rhsp})
+                    : static_cast<AstNodeExpr*>(new AstGt{flp, lhsp, rhsp});
+    }
+    cmpp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    AstCond* const resultp
+        = new AstCond{flp, cmpp, lhsp->cloneTree(false), rhsp->cloneTree(false)};
+    resultp->dtypep(dtp);
+    return resultp;
+}
+
 AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
     FileLine* const flp = expr.flp;
     const std::string& name = expr.a->text;
@@ -1704,7 +1797,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
         if (name == "to_unsigned" || name == "to_signed") {
             int64_t width = 0;
             const bool staticWidth
-                = staticIntFold(expr.args[1], width) && width > 0 && width <= 4096;
+                = staticIntFold(expr.args[1], width) && width > 0 && width <= MAX_FOLD_WIDTH;
             // A width only the consumer knows takes that width: to_unsigned pads with
             // zeros, and the elements beyond the run-time width are never selected
             if (!staticWidth && name == "to_unsigned" && context && context->isVector()
@@ -1788,7 +1881,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
         VType actual;
         if (actualType(*expr.args[0], actual) && !actual.typeName.empty()) sourceType = actual;
         if (formalType(targetSpec, targetType) && !conversionRelated(targetType, sourceType)) {
-            flp->v3error("VHDL: type conversion '" + name + "' from an unrelated type");
+            flp->v3error("VHDL: type conversion '" + name + "' from an unrelated type.");
             valuep->deleteTree();
             return nullptr;
         }
@@ -1799,7 +1892,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* context) {
         if (!valueType.isVector()
             || (valueType.signing != VSigning::UNSIGNED
                 && valueType.signing != VSigning::SIGNED)) {
-            flp->v3error("VHDL: to_integer operand is not unsigned or signed");
+            flp->v3error("VHDL: to_integer operand is not unsigned or signed.");
             valuep->deleteTree();
             return nullptr;
         }
@@ -1850,7 +1943,7 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         const auto constIt = m_consts.find(expr.text);
         if (constIt != m_consts.end()) {
             if (write) {
-                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'");
+                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'.");
                 return nullptr;
             }
             return makeIntConst(flp, constIt->second);
@@ -1858,19 +1951,19 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         const auto preIt = m_preConsts.find(expr.text);
         if (preIt != m_preConsts.end()) {
             if (write) {
-                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'");
+                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'.");
                 return nullptr;
             }
             return makeIntConst(flp, preIt->second);
         }
         if (m_ambiguousLiterals.count(expr.text)) {
-            flp->v3error("VHDL: enumeration literal '" + expr.spelling + "' is ambiguous");
+            flp->v3error("VHDL: enumeration literal '" + expr.spelling + "' is ambiguous.");
             return nullptr;
         }
         const auto valueIt = m_constValues.find(expr.text);
         if (valueIt != m_constValues.end() || m_enumConsts.count(expr.text)) {
             if (write) {
-                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'");
+                flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'.");
                 return nullptr;
             }
             AstConst* const constp = valueIt != m_constValues.end()
@@ -1881,12 +1974,12 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         const auto it = m_scope.find(expr.text);
         if (it == m_scope.end()) {
             if (AstNodeExpr* const aliasp = lowerAlias(expr, write)) return aliasp;
-            flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'");
+            flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'.");
             return nullptr;
         }
         AstVar* const varp = it->second.varp;
         if (write && varp->isInput()) {
-            flp->v3error("VHDL: cannot assign to input port '" + expr.spelling + "'");
+            flp->v3error("VHDL: cannot assign to input port '" + expr.spelling + "'.");
             return nullptr;
         }
         return new AstVarRef{flp, varp, write ? VAccess::WRITE : VAccess::READ};
@@ -1912,7 +2005,7 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         VType baseType;
         if (!typeOfDesignator(*expr.a, baseType)) {
             // An array a function returns is typed by its declared return type, which the
-            // returned value's own data type no longer carries: `f(x)(0)` selects an
+            // returned value's own data type does not carry: `f(x)(0)` selects an
             // element, not a bit. A call with arguments reaches here as an index whose
             // prefix is the name
             const bool callPrefix
@@ -1946,7 +2039,7 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
             selp->dtypep(field.type->dtp);
             return selp;
         }
-        flp->v3error("VHDL: record has no element '" + expr.spelling + "'");
+        flp->v3error("VHDL: record has no element '" + expr.spelling + "'.");
         return nullptr;
     }
     unsupportedError(flp, "expression as an assignment target");
@@ -2031,7 +2124,7 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         // The bounds come from the prefix name's type, not from the sliced array
         const VType* const prefixTypep = typeOfName(*rangep->a);
         if (!prefixTypep) {
-            flp->v3error("VHDL: unknown name '" + rangep->a->spelling + "' in 'range");
+            flp->v3error("VHDL: unknown name '" + rangep->a->spelling + "' in 'range.");
             basep->deleteTree();
             return nullptr;
         }
@@ -2050,13 +2143,13 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
     if (expr.kind == Expr::INDEX) {
         // A single name argument that denotes a declared subtype is a discrete range
         // rather than a value: `v(some_range_t)` selects the elements those bounds denote
-        // (IEEE 1800-2023 9.5.4). An object name is not a discrete range, so `v(i)` still
+        // (IEEE 1076-2008 8.5). An object name is not a discrete range, so `v(i)` still
         // indexes; the subtype's direction decides whether the selected elements come out
         // reversed, which `sliceOf` already handles.
         if (expr.args.size() == 1) {
             if (const VType* const markp = discreteRangeType(*expr.args[0])) {
                 if (markp->ascending != baseType.ascending) {
-                    flp->v3error("VHDL: slice direction does not match the array");
+                    flp->v3error("VHDL: slice direction does not match the array.");
                     basep->deleteTree();
                     return nullptr;
                 }
@@ -2148,7 +2241,7 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
             hi = static_cast<int>(rightValue);
         }
         if (hi < lo) {
-            flp->v3error("VHDL: empty or reversed slice");
+            flp->v3error("VHDL: empty or reversed slice.");
             basep->deleteTree();
             return nullptr;
         }
@@ -2243,7 +2336,7 @@ AstNodeStmt* Lowering::lowerDynamicSliceAssign(const Stmt& stmt, bool variable) 
     AstNodeExpr* const countp = new AstAdd{flp, countDiffp, makeIntConst(flp, 1)};
     countp->dtypep(intT.dtp);
     AstVar* const countVarp
-        = new AstVar{flp, VVarType::VAR, "vhdlslice_" + std::to_string(++m_loopSeq), intT.dtp};
+        = new AstVar{flp, VVarType::VAR, "__Vslice_" + std::to_string(++m_loopSeq), intT.dtp};
     m_modp->addStmtsp(countVarp);
     AstNodeStmt* headp = new AstAssign{flp, new AstVarRef{flp, countVarp, VAccess::WRITE}, countp};
     // The right operand is the selection's least significant element
@@ -2321,7 +2414,7 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
             if (opChar == '/') level = level == '1' ? '0' : '1';  // x /= v with a static v
             AstVar* const varp = lookupVar(*attrExpr.a);
             if (!varp) {
-                flp->v3error("VHDL: unknown signal '" + attrExpr.a->spelling + "' in 'event");
+                flp->v3error("VHDL: unknown signal '" + attrExpr.a->spelling + "' in 'event.");
                 return nullptr;
             }
             Edge edge;
@@ -2343,7 +2436,7 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
         AstNodeExpr* const compoundp = lowerExpr(expr, &boolT);
         if (!compoundp) return nullptr;
         if (compoundp->width() != 1) {
-            flp->v3error("VHDL: condition is not a 1-bit value");
+            flp->v3error("VHDL: condition is not a 1-bit value.");
             compoundp->deleteTree();
             return nullptr;
         }
@@ -2352,14 +2445,13 @@ AstNodeExpr* Lowering::lowerCond(const Expr& expr) {
     AstNodeExpr* condp = lowerExpr(expr, &boolT);
     if (!condp) return nullptr;
     if (condp->width() != 1) {
-        flp->v3error("VHDL: condition is not a 1-bit value");
+        flp->v3error("VHDL: condition is not a 1-bit value.");
         condp->deleteTree();
         return nullptr;
     }
     return condp;
 }
 
-//! Type of a prefix name, or null when the name is not a signal or constant
 //! Type of a designator (name, selected name, index or slice) when it is known
 bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
     switch (expr.kind) {
@@ -2498,323 +2590,356 @@ const VType* Lowering::discreteRangeType(const Expr& expr) const {
     return &typeIt->second;
 }
 
-AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
-    FileLine* const flp = expr.flp;
-    const std::string& attribute = expr.text;
+bool Lowering::lowerIndexedEventAttr(FileLine* flp, const Expr& expr, AstNodeExpr*& resultp) {
     // `X(i)'event` is a transaction on one element of a signal. The whole-signal event
     // shortcut would miss a bit that did not change, so compare the element with its
     // previous value; sensitivity still comes from registering the base signal as an edge.
-    if (attribute == "event" && expr.a
-        && (expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)) {
-        const Expr* const basep = expr.a->a.get();
-        AstVar* const varp = basep && basep->kind == Expr::NAME ? lookupVar(*basep) : nullptr;
-        if (varp) {
-            m_edges.push_back({varp, VEdgeType::ET_CHANGED});
-            if (m_initial) return bitConst(flp, '0');
-            AstNodeExpr* const curp = lowerDesignator(*expr.a, false);
-            if (!curp) return nullptr;
-            AstVar*& prevp = m_edgePrevVars[varp];
-            if (!prevp) {
-                const std::string name
-                    = "vhdledge_" + std::to_string(++m_edgeSeq) + "__" + varp->name();
-                prevp = new AstVar{flp, VVarType::VAR, name, varp->dtypep()};
-                m_modp->addStmtsp(prevp);
-            }
-            AstNodeExpr* const prevExprp = curp->cloneTree(false);
-            prevExprp->foreach([&](AstVarRef* const refp) {  //
-                if (refp->varp() == varp) refp->varp(prevp);
-            });
-            AstNodeExpr* const changedp = new AstNeq{flp, curp, prevExprp};
-            changedp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-            return changedp;
+    const Expr* const basep = expr.a->a.get();
+    AstVar* const varp = basep && basep->kind == Expr::NAME ? lookupVar(*basep) : nullptr;
+    if (!varp) return false;
+    m_edges.push_back({varp, VEdgeType::ET_CHANGED});
+    if (m_initial) {
+        resultp = bitConst(flp, '0');
+        return true;
+    }
+    AstNodeExpr* const curp = lowerDesignator(*expr.a, false);
+    if (!curp) {
+        resultp = nullptr;
+        return true;
+    }
+    AstVar*& prevp = m_edgePrevVars[varp];
+    if (!prevp) {
+        const std::string name = "__Vedge_" + std::to_string(++m_edgeSeq) + "__" + varp->name();
+        prevp = new AstVar{flp, VVarType::VAR, name, varp->dtypep()};
+        m_modp->addStmtsp(prevp);
+    }
+    AstNodeExpr* const prevExprp = curp->cloneTree(false);
+    prevExprp->foreach([&](AstVarRef* const refp) {  //
+        if (refp->varp() == varp) refp->varp(prevp);
+    });
+    AstNodeExpr* const changedp = new AstNeq{flp, curp, prevExprp};
+    changedp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    resultp = changedp;
+    return true;
+}
+
+bool Lowering::resolveAttrDesignator(FileLine* flp, const Expr& prefix, AttrTypeInfo& info) {
+    // A designator prefix such as a record element has no name to look up, but its
+    // declared type fixes every static attribute, so resolve the type instead
+    if (!typeOfDesignator(prefix, info.resolved)) {
+        unsupportedError(flp, "attribute of a non-name prefix");
+        return false;
+    }
+    info.typep = &info.resolved;
+    return true;
+}
+
+void Lowering::resolveAttrNameType(FileLine* flp, const Expr& prefix, AttrTypeInfo& info) {
+    if (!info.typep) info.typep = typeOfName(prefix);
+    if (!info.typep) {
+        const auto typeIt = m_types.find(prefix.text);
+        if (typeIt != m_types.end()) {
+            info.typep = &typeIt->second;
+            info.typeMark = true;
         }
     }
-    const VType* typep = nullptr;
-    bool typeMark = false;
-    VType resolved;
+    if (!info.typep && predefinedIntegerType(flp, prefix.text, info.predefined)) {
+        info.typep = &info.predefined;
+        info.typeMark = true;
+    }
+    if (!info.typep
+        && (prefix.text == "character" || prefix.text == "boolean" || prefix.text == "bit"
+            || prefix.text == "std_logic" || prefix.text == "std_ulogic")) {
+        // These predefined types are modelled directly rather than as entries in m_types;
+        // resolve them so their attributes reach below
+        TypeSpec spec;
+        spec.flp = flp;
+        spec.mark = prefix.text;
+        if (resolveType(spec, info.resolved)) {
+            info.typep = &info.resolved;
+            info.typeMark = true;
+        }
+    }
+}
+
+AstNodeExpr* Lowering::lowerEventAttr(FileLine* flp, const Expr& expr) {
+    // `X'event` is true when X had a transaction this cycle, i.e. its value differs
+    // from the previous evaluation. Register X as a sensitivity edge so the enclosing
+    // process re-runs on it, then reduce like `lowerEdgeCall`: no event at time zero,
+    // the level under a single-sensitivity always, else compare with the previous value
+    AstVar* const varp = lookupVar(*expr.a);
+    if (!varp) {
+        unsupportedError(flp, "attribute 'event' on a non-signal prefix");
+        return nullptr;
+    }
+    m_edges.push_back({varp, VEdgeType::ET_CHANGED});
+    if (m_initial) return bitConst(flp, '0');
+    if (m_edgeAsLevel) return bitConst(flp, '1');
+    if (m_edgeAsPrev) return edgeChanged(flp, varp);
+    return bitConst(flp, '1');
+}
+
+AstNodeExpr* Lowering::lowerLogicMarkAttr(FileLine* flp, const Expr& expr,
+                                          const std::string& attribute, const VType& type) {
+    // IEEE 1076-2008 16.2.2 gives every scalar type the discrete attribute set; the
+    // predefined logic marks are one-bit scalars whose '0' is position 0
+    if (attribute == "left" || attribute == "low") return bitConst(flp, '0');
+    if (attribute == "right" || attribute == "high") return bitConst(flp, '1');
+    if (attribute == "length") return makeIntConst(flp, 1);
+    if (attribute == "ascending") return bitConst(flp, '1');
+    if (expr.args.size() != 1) {
+        unsupportedError(flp, "attribute '" + attribute + "' without one argument");
+        return nullptr;
+    }
+    AstNodeExpr* const argp = lowerExpr(*expr.args[0], &type);
+    if (!argp) return nullptr;
+    if (attribute == "pos") return resizeExpr(argp, intType(flp), flp);
+    if (attribute == "val") {
+        const AstConst* const argConstp = VN_CAST(argp, Const);
+        if (argConstp) {
+            const int64_t position = static_cast<int64_t>(argConstp->num().toUInt());
+            argp->deleteTree();
+            if (position != 0 && position != 1) {
+                flp->v3error("VHDL: 'val outside the range of the type.");
+                return nullptr;
+            }
+            return bitConst(flp, position == 0 ? '0' : '1');
+        }
+        return resizeExpr(argp, type, flp);
+    }
+    unsupportedError(flp, "attribute '" + attribute + "' of a logic mark");
+    return nullptr;
+}
+
+AstNodeExpr* Lowering::lowerCharacterAttr(FileLine* flp, const Expr& expr,
+                                          const std::string& attribute, const VType& type) {
+    // Discrete-type attributes of the predefined `character` type. It is an 8-bit
+    // unsigned code, so a value's position and code coincide; succ/pred step the
+    // code and wrap at 255 back to 0.
+    if (attribute == "pos" || attribute == "val" || attribute == "succ" || attribute == "pred") {
+        if (expr.args.size() != 1) {
+            unsupportedError(flp, "character attribute '" + attribute + "' without one argument");
+            return nullptr;
+        }
+        AstNodeExpr* const argp = lowerExpr(*expr.args[0], &type);
+        if (!argp) return nullptr;
+        if (attribute == "pos") return resizeExpr(argp, intType(flp), flp);
+        if (attribute == "val") return resizeExpr(argp, type, flp);
+        AstNodeExpr* const onep = makeVectorConst(flp, type, 1);
+        AstNodeExpr* const basep = resizeExpr(argp, type, flp);
+        AstNodeExpr* const resultp = attribute == "succ"
+                                         ? static_cast<AstNodeExpr*>(new AstAdd{flp, basep, onep})
+                                         : static_cast<AstNodeExpr*>(new AstSub{flp, basep, onep});
+        resultp->dtypep(type.dtp);
+        return resultp;
+    }
+    if (attribute == "left" || attribute == "low") return makeIntConst(flp, 0);
+    if (attribute == "right" || attribute == "high") return makeIntConst(flp, 255);
+    if (attribute == "length") return makeIntConst(flp, 256);
+    if (attribute == "ascending") return bitConst(flp, '1');
+    unsupportedError(flp, "character attribute '" + attribute + "'");
+    return nullptr;
+}
+
+AstNodeExpr* Lowering::lowerEnumAttr(FileLine* flp, const Expr& expr, const std::string& attribute,
+                                     const VType& type) {
+    const int count = static_cast<int>(type.literals.size());
+    AstNodeDType* const enumDtp = type.dtp;
+    auto enumConst = [&](int position) -> AstNodeExpr* {
+        AstConst* const constp
+            = new AstConst{flp, V3Number{flp, type.width, static_cast<uint32_t>(position)}};
+        constp->dtypep(enumDtp);
+        return constp;
+    };
+    if (attribute == "left" || attribute == "low") return enumConst(0);
+    if (attribute == "right" || attribute == "high") return enumConst(count - 1);
+    if (attribute == "length") return makeIntConst(flp, count);
+    // The remaining enumeration attributes are functions of one value
+    if (expr.args.size() != 1) {
+        unsupportedError(flp, "enumeration attribute '" + attribute + "' without one argument");
+        return nullptr;
+    }
+    AstNodeExpr* argp = lowerExpr(*expr.args[0], nullptr);
+    if (!argp) return nullptr;
+    // A static argument gives a constant result, which constants may use. The source
+    // is evaluated, since narrowing the lowered value to the type hides the constant.
+    int64_t staticPos = 0;
+    const bool isStatic = evalInt(*expr.args[0], staticPos);
+    argp = resizeExpr(argp, type, flp);
+    const bool constArg = isStatic;
+    const int position = isStatic ? static_cast<int>(staticPos) : 0;
+    if (attribute == "pos" || attribute == "to_integer") {
+        if (constArg) {
+            argp->deleteTree();
+            return makeIntConst(flp, position);
+        }
+        return resizeExpr(argp, intType(flp), flp);
+    }
+    if (attribute == "val") {
+        if (constArg) {
+            argp->deleteTree();
+            // IEEE 1076-2008 16.2.2: 'val outside the type's range is an error, not a
+            // value that matches no literal
+            if (position < 0 || position >= count) {
+                flp->v3error("VHDL: 'val outside the range of the type.");
+                return nullptr;
+            }
+            return enumConst(position);
+        }
+        return resizeExpr(argp, type, flp);
+    }
+    if ((attribute == "succ" || attribute == "pred") && constArg) {
+        argp->deleteTree();
+        if ((attribute == "succ" && position == count - 1)
+            || (attribute == "pred" && position == 0)) {
+            flp->v3error("VHDL: '" + attribute + "' of the "
+                         + (attribute == "succ" ? "last" : "first")
+                         + " enumeration literal is outside the type.");
+            return nullptr;
+        }
+        const int stepped = attribute == "succ" ? position + 1 : position - 1;
+        return enumConst(stepped);
+    }
+    if (attribute == "succ" || attribute == "pred") {
+        const bool succ = attribute == "succ";
+        AstNodeExpr* const atLimitp
+            = new AstEq{flp, argp->cloneTree(false), enumConst(succ ? count - 1 : 0)};
+        atLimitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        if (m_modp) {
+            // A dynamic argument can reach the end literal at run time, where VHDL
+            // requires a bound-check failure rather than a wrap
+            addRuntimeError(flp, atLimitp->cloneTree(false),
+                            "VHDL: '" + attribute + "' of the " + (succ ? "last" : "first")
+                                + " enumeration literal is outside the type");
+        }
+        // Arithmetic on an enumeration type is not something the width pass accepts, so
+        // step the position in the type's vector form and cast the result back
+        AstNodeDType* const bitsDtp
+            = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, type.width);
+        AstNodeExpr* const argBitsp = new AstCast{flp, argp, bitsDtp};
+        AstNodeExpr* const oneBitsp = new AstCast{flp, enumConst(1), bitsDtp};
+        AstNodeExpr* const steppedp
+            = succ ? static_cast<AstNodeExpr*>(new AstAdd{flp, argBitsp, oneBitsp})
+                   : static_cast<AstNodeExpr*>(new AstSub{flp, argBitsp, oneBitsp});
+        steppedp->dtypep(bitsDtp);
+        AstNodeExpr* const steppedEnump = new AstCast{flp, steppedp, enumDtp};
+        steppedEnump->dtypep(enumDtp);
+        AstCond* const resultp
+            = new AstCond{flp, atLimitp, enumConst(succ ? 0 : count - 1), steppedEnump};
+        resultp->dtypep(enumDtp);
+        return resultp;
+    }
+    unsupportedError(flp, "enumeration attribute '" + attribute + "'");
+    return nullptr;
+}
+
+AstNodeExpr* Lowering::lowerAttrWithArgs(FileLine* flp, const Expr& expr,
+                                         const std::string& attribute, const VType& type) {
+    // An attribute of a type mark with an argument folds statically, so a value path can
+    // use the same answer a constant gets
+    int64_t folded = 0;
+    if (evalInt(expr, folded)) return makeIntConst(flp, folded);
+    // The value as written: the decimal of an integer, the literal of a Boolean or
+    // enumeration value, IEEE 1076-2008 16.2.2
+    if (attribute == "image" && expr.args[0]) {
+        std::string text;
+        bool foldedAll = false;
+        if (expr.a->text == "boolean") {  // Resolves as a 1-bit logic type
+            bool condValue = false;
+            foldedAll = evalCond(*expr.args[0], condValue);
+            text = condValue ? "true" : "false";
+        } else if (evalInt(*expr.args[0], folded)) {
+            foldedAll = true;
+            if (type.kind == VType::ENUM && folded >= 0
+                && static_cast<size_t>(folded) < type.literals.size()) {
+                text = type.literals[static_cast<size_t>(folded)];
+            } else {
+                text = std::to_string(folded);
+            }
+        }
+        if (foldedAll) return makeStringConst(flp, text);
+    }
+    unsupportedError(flp, "attribute '" + attribute + "' with arguments");
+    return nullptr;
+}
+
+AstNodeExpr* Lowering::lowerRangeAttr(FileLine* flp, const std::string& attribute,
+                                      const VType& type) {
+    int64_t value = 0;
+    if (attribute == "low") {
+        value = std::min(type.left, type.right);
+    } else if (attribute == "high") {
+        value = std::max(type.left, type.right);
+    } else if (attribute == "left") {
+        value = type.left;
+    } else if (attribute == "right") {
+        value = type.right;
+    } else if (attribute == "length") {
+        if (!type.isVector()) {
+            flp->v3error("VHDL: 'length is only defined for an array type.");
+            return nullptr;
+        }
+        value = type.length();
+    } else if (attribute == "ascending") {
+        return bitConst(flp, type.ascending ? '1' : '0');
+    } else {
+        unsupportedError(flp, "attribute '" + attribute + "'");
+        return nullptr;
+    }
+    return makeIntConst(flp, value);
+}
+
+AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    const std::string& attribute = expr.text;
+    if (attribute == "event" && expr.a
+        && (expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)) {
+        AstNodeExpr* eventp = nullptr;
+        if (lowerIndexedEventAttr(flp, expr, eventp)) return eventp;
+    }
+    AttrTypeInfo info;
     if (!expr.a) {
         unsupportedError(flp, "attribute of a non-name prefix");
         return nullptr;
     }
-    if (expr.a->kind != Expr::NAME) {
-        // A designator prefix such as a record element has no name to look up, but its
-        // declared type fixes every static attribute, so resolve the type instead
-        if (!typeOfDesignator(*expr.a, resolved)) {
-            unsupportedError(flp, "attribute of a non-name prefix");
-            return nullptr;
-        }
-        typep = &resolved;
-    }
-    if (attribute == "event") {
-        // `X'event` is true when X had a transaction this cycle, i.e. its value differs
-        // from the previous evaluation. Register X as a sensitivity edge so the enclosing
-        // process re-runs on it, then reduce like `lowerEdgeCall`: no event at time zero,
-        // the level under a single-sensitivity always, else compare with the previous value
-        AstVar* const varp = lookupVar(*expr.a);
-        if (!varp) {
-            unsupportedError(flp, "attribute 'event' on a non-signal prefix");
-            return nullptr;
-        }
-        m_edges.push_back({varp, VEdgeType::ET_CHANGED});
-        if (m_initial) return bitConst(flp, '0');
-        if (m_edgeAsLevel) return bitConst(flp, '1');
-        if (m_edgeAsPrev) return edgeChanged(flp, varp);
-        return bitConst(flp, '1');
-    }
+    if (expr.a->kind != Expr::NAME && !resolveAttrDesignator(flp, *expr.a, info)) return nullptr;
+    if (attribute == "event") return lowerEventAttr(flp, expr);
     if (attribute == "stable" || attribute == "active" || attribute == "last_event"
         || attribute == "last_active") {
         unsupportedError(flp, "signal attribute '" + attribute + "'");
         return nullptr;
     }
     // Otherwise the prefix is either a declared name or a type mark
-    if (!typep) typep = typeOfName(*expr.a);
-    if (!typep) {
-        const auto typeIt = m_types.find(expr.a->text);
-        if (typeIt != m_types.end()) {
-            typep = &typeIt->second;
-            typeMark = true;
-        }
-    }
-    VType predefined;
-    if (!typep && predefinedIntegerType(flp, expr.a->text, predefined)) {
-        typep = &predefined;
-        typeMark = true;
-    }
-    if (!typep
-        && (expr.a->text == "character" || expr.a->text == "boolean" || expr.a->text == "bit"
-            || expr.a->text == "std_logic" || expr.a->text == "std_ulogic")) {
-        // These predefined types are modelled directly rather than as entries in m_types;
-        // resolve them so their attributes reach below
-        TypeSpec spec;
-        spec.flp = flp;
-        spec.mark = expr.a->text;
-        if (resolveType(spec, resolved)) {
-            typep = &resolved;
-            typeMark = true;
-        }
-    }
-    // IEEE 1076-2008 16.2.2 gives every scalar type the discrete attribute set; the
-    // predefined logic marks are one-bit scalars whose '0' is position 0
-    if (typeMark
+    resolveAttrNameType(flp, *expr.a, info);
+    if (info.typeMark
         && (expr.a->text == "bit" || expr.a->text == "std_logic"
             || expr.a->text == "std_ulogic")) {
-        if (attribute == "left" || attribute == "low") return bitConst(flp, '0');
-        if (attribute == "right" || attribute == "high") return bitConst(flp, '1');
-        if (attribute == "length") return makeIntConst(flp, 1);
-        if (attribute == "ascending") return bitConst(flp, '1');
-        if (expr.args.size() != 1) {
-            unsupportedError(flp, "attribute '" + attribute + "' without one argument");
-            return nullptr;
-        }
-        AstNodeExpr* const argp = lowerExpr(*expr.args[0], typep);
-        if (!argp) return nullptr;
-        if (attribute == "pos") return resizeExpr(argp, intType(flp), flp);
-        if (attribute == "val") {
-            const AstConst* const argConstp = VN_CAST(argp, Const);
-            if (argConstp) {
-                const int64_t position = static_cast<int64_t>(argConstp->num().toUInt());
-                argp->deleteTree();
-                if (position != 0 && position != 1) {
-                    flp->v3error("VHDL: 'val outside the range of the type");
-                    return nullptr;
-                }
-                return bitConst(flp, position == 0 ? '0' : '1');
-            }
-            return resizeExpr(argp, *typep, flp);
-        }
-        if (attribute == "succ" || attribute == "pred") {
-            unsupportedError(flp, "attribute '" + attribute + "' of a logic mark");
-            return nullptr;
-        }
-        unsupportedError(flp, "attribute '" + attribute + "' of a logic mark");
-        return nullptr;
+        return lowerLogicMarkAttr(flp, expr, attribute, *info.typep);
     }
-    if (!typep) {
+    if (!info.typep) {
         unsupportedError(flp, "attribute '" + attribute + "' of an unresolved name");
         return nullptr;
     }
-    // Discrete-type attributes of the predefined `character` type. It is an 8-bit
-    // unsigned code, so a value's position and code coincide; succ/pred step the
-    // code and wrap at 255 back to 0.
-    if (typeMark && expr.a->text == "character") {
-        if (attribute == "pos" || attribute == "val" || attribute == "succ"
-            || attribute == "pred") {
-            if (expr.args.size() != 1) {
-                unsupportedError(flp,
-                                 "character attribute '" + attribute + "' without one argument");
-                return nullptr;
-            }
-            AstNodeExpr* const argp = lowerExpr(*expr.args[0], typep);
-            if (!argp) return nullptr;
-            if (attribute == "pos") return resizeExpr(argp, intType(flp), flp);
-            if (attribute == "val") return resizeExpr(argp, *typep, flp);
-            AstNodeExpr* const onep = makeVectorConst(flp, *typep, 1);
-            AstNodeExpr* const basep = resizeExpr(argp, *typep, flp);
-            AstNodeExpr* const resultp
-                = attribute == "succ" ? static_cast<AstNodeExpr*>(new AstAdd{flp, basep, onep})
-                                      : static_cast<AstNodeExpr*>(new AstSub{flp, basep, onep});
-            resultp->dtypep(typep->dtp);
-            return resultp;
-        }
-        if (attribute == "left" || attribute == "low") return makeIntConst(flp, 0);
-        if (attribute == "right" || attribute == "high") return makeIntConst(flp, 255);
-        if (attribute == "length") return makeIntConst(flp, 256);
-        if (attribute == "ascending") return bitConst(flp, '1');
-        unsupportedError(flp, "character attribute '" + attribute + "'");
-        return nullptr;
+    if (info.typeMark && expr.a->text == "character") {
+        return lowerCharacterAttr(flp, expr, attribute, *info.typep);
     }
-    if (typep->kind == VType::ENUM) {
-        const int count = static_cast<int>(typep->literals.size());
-        AstNodeDType* const enumDtp = typep->dtp;
-        auto enumConst = [&](int position) -> AstNodeExpr* {
-            AstConst* const constp
-                = new AstConst{flp, V3Number{flp, typep->width, static_cast<uint32_t>(position)}};
-            constp->dtypep(enumDtp);
-            return constp;
-        };
-        if (attribute == "left" || attribute == "low") return enumConst(0);
-        if (attribute == "right" || attribute == "high") return enumConst(count - 1);
-        if (attribute == "length") return makeIntConst(flp, count);
-        // The remaining enumeration attributes are functions of one value
-        if (expr.args.size() != 1) {
-            unsupportedError(flp,
-                             "enumeration attribute '" + attribute + "' without one argument");
-            return nullptr;
-        }
-        AstNodeExpr* argp = lowerExpr(*expr.args[0], nullptr);
-        if (!argp) return nullptr;
-        // A static argument gives a constant result, which constants may use. The source
-        // is evaluated, since narrowing the lowered value to the type hides the constant.
-        int64_t staticPos = 0;
-        const bool isStatic = evalInt(*expr.args[0], staticPos);
-        argp = resizeExpr(argp, *typep, flp);
-        const bool constArg = isStatic;
-        const int position = isStatic ? static_cast<int>(staticPos) : 0;
-        if (attribute == "pos" || attribute == "to_integer") {
-            if (constArg) {
-                argp->deleteTree();
-                return makeIntConst(flp, position);
-            }
-            return resizeExpr(argp, intType(flp), flp);
-        }
-        if (attribute == "val") {
-            if (constArg) {
-                argp->deleteTree();
-                // IEEE 1076-2008 16.2.2: 'val outside the type's range is an error, not a
-                // value that matches no literal
-                if (position < 0 || position >= count) {
-                    flp->v3error("VHDL: 'val outside the range of the type");
-                    return nullptr;
-                }
-                return enumConst(position);
-            }
-            return resizeExpr(argp, *typep, flp);
-        }
-        if ((attribute == "succ" || attribute == "pred") && constArg) {
-            argp->deleteTree();
-            if ((attribute == "succ" && position == count - 1)
-                || (attribute == "pred" && position == 0)) {
-                flp->v3error("VHDL: '" + attribute + "' of the "
-                             + (attribute == "succ" ? "last" : "first")
-                             + " enumeration literal is outside the type");
-                return nullptr;
-            }
-            const int stepped = attribute == "succ" ? position + 1 : position - 1;
-            return enumConst(stepped);
-        }
-        if (attribute == "succ" || attribute == "pred") {
-            const bool succ = attribute == "succ";
-            AstNodeExpr* const atLimitp
-                = new AstEq{flp, argp->cloneTree(false), enumConst(succ ? count - 1 : 0)};
-            atLimitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-            if (m_modp) {
-                // A dynamic argument can reach the end literal at run time, where VHDL
-                // requires a bound-check failure rather than a wrap
-                addRuntimeError(flp, atLimitp->cloneTree(false),
-                                "VHDL: '" + attribute + "' of the " + (succ ? "last" : "first")
-                                    + " enumeration literal is outside the type");
-            }
-            // Arithmetic on an enumeration type is not something the width pass accepts, so
-            // step the position in the type's vector form and cast the result back
-            AstNodeDType* const bitsDtp
-                = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, typep->width);
-            AstNodeExpr* const argBitsp = new AstCast{flp, argp, bitsDtp};
-            AstNodeExpr* const oneBitsp = new AstCast{flp, enumConst(1), bitsDtp};
-            AstNodeExpr* const steppedp
-                = succ ? static_cast<AstNodeExpr*>(new AstAdd{flp, argBitsp, oneBitsp})
-                       : static_cast<AstNodeExpr*>(new AstSub{flp, argBitsp, oneBitsp});
-            steppedp->dtypep(bitsDtp);
-            AstNodeExpr* const steppedEnump = new AstCast{flp, steppedp, enumDtp};
-            steppedEnump->dtypep(enumDtp);
-            AstCond* const resultp
-                = new AstCond{flp, atLimitp, enumConst(succ ? 0 : count - 1), steppedEnump};
-            resultp->dtypep(enumDtp);
-            return resultp;
-        }
-        unsupportedError(flp, "enumeration attribute '" + attribute + "'");
-        return nullptr;
+    if (info.typep->kind == VType::ENUM) {
+        return lowerEnumAttr(flp, expr, attribute, *info.typep);
     }
     const bool indexRange = isIndexRangeAttribute(attribute);
     if (indexRange) {
         // The bracketed index selects one index range of the prefix, not a value argument
-        const VType* const levelp = indexRangeLevel(expr, *typep);
+        const VType* const levelp = indexRangeLevel(expr, *info.typep);
         if (!levelp) {
             unsupportedError(flp, "index of attribute '" + attribute + "'");
             return nullptr;
         }
-        typep = levelp;
+        info.typep = levelp;
     }
     if (!expr.args.empty() && !indexRange) {
-        // An attribute of a type mark with an argument folds statically, so a value path can
-        // use the same answer a constant gets
-        int64_t folded = 0;
-        if (evalInt(expr, folded)) return makeIntConst(flp, folded);
-        // The value as written: the decimal of an integer, the literal of a Boolean or
-        // enumeration value, IEEE 1076-2008 16.2.2
-        if (attribute == "image" && expr.args[0]) {
-            std::string text;
-            bool foldedAll = false;
-            if (expr.a->text == "boolean") {  // Resolves as a 1-bit logic type
-                bool condValue = false;
-                foldedAll = evalCond(*expr.args[0], condValue);
-                text = condValue ? "true" : "false";
-            } else if (evalInt(*expr.args[0], folded)) {
-                foldedAll = true;
-                if (typep->kind == VType::ENUM && folded >= 0
-                    && static_cast<size_t>(folded) < typep->literals.size()) {
-                    text = typep->literals[static_cast<size_t>(folded)];
-                } else {
-                    text = std::to_string(folded);
-                }
-            }
-            if (foldedAll) return makeStringConst(flp, text);
-        }
-        unsupportedError(flp, "attribute '" + attribute + "' with arguments");
-        return nullptr;
+        return lowerAttrWithArgs(flp, expr, attribute, *info.typep);
     }
-    int64_t value = 0;
-    if (attribute == "low") {
-        value = std::min(typep->left, typep->right);
-    } else if (attribute == "high") {
-        value = std::max(typep->left, typep->right);
-    } else if (attribute == "left") {
-        value = typep->left;
-    } else if (attribute == "right") {
-        value = typep->right;
-    } else if (attribute == "length") {
-        if (!typep->isVector()) {
-            flp->v3error("VHDL: 'length is only defined for an array type");
-            return nullptr;
-        }
-        value = typep->length();
-    } else if (attribute == "ascending") {
-        return bitConst(flp, typep->ascending ? '1' : '0');
-    } else {
-        (void)typeMark;
-        unsupportedError(flp, "attribute '" + attribute + "'");
-        return nullptr;
-    }
-    return makeIntConst(flp, value);
+    return lowerRangeAttr(flp, attribute, *info.typep);
 }
 
 //! Slice elements hi..lo (inclusive, hi >= lo) out of an array-typed value
@@ -2828,7 +2953,7 @@ AstNodeExpr* Lowering::sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& b
     const int count = hi - lo + 1;
     const int width = count * elemWidth;
     if (offset < 0 || offset + width > baseType.width) {
-        flp->v3error("VHDL: slice is out of range of the array");
+        flp->v3error("VHDL: slice is out of range of the array.");
         basep->deleteTree();
         return nullptr;
     }
@@ -2910,7 +3035,7 @@ AstNodeExpr* Lowering::lowerAlias(const Expr& nameExpr, bool write) {
     const auto it = m_aliases.find(nameExpr.text);
     if (it == m_aliases.end()) return nullptr;
     if (!m_aliasBusy.insert(nameExpr.text).second) {
-        nameExpr.flp->v3error("VHDL: alias '" + nameExpr.spelling + "' refers to itself");
+        nameExpr.flp->v3error("VHDL: alias '" + nameExpr.spelling + "' refers to itself.");
         return nullptr;
     }
     AstNodeExpr* resultp = lowerDesignator(*it->second.designatorp, write);
@@ -2951,7 +3076,7 @@ AstNodeExpr* Lowering::lowerPackageMember(const Expr& expr, const std::string& p
     if (valueIt != m_constValues.end()) return valueIt->second->cloneTree(false);
     const auto enumIt = m_enumConsts.find(expr.text);
     if (enumIt != m_enumConsts.end()) return enumIt->second->cloneTree(false);
-    flp->v3error("VHDL: package '" + pkgName + "' has no declaration '" + expr.spelling + "'");
+    flp->v3error("VHDL: package '" + pkgName + "' has no declaration '" + expr.spelling + "'.");
     return nullptr;
 }
 
@@ -2976,7 +3101,7 @@ AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
         selp->dtypep(field.type->dtp);
         return selp;
     }
-    flp->v3error("VHDL: record has no element '" + expr.spelling + "'");
+    flp->v3error("VHDL: record has no element '" + expr.spelling + "'.");
     return nullptr;
 }
 
@@ -3158,165 +3283,164 @@ AstNodeExpr* Lowering::repeatValue(FileLine* flp, AstNodeExpr* valuep, int count
     return parts.front();
 }
 
-AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
-    FileLine* const flp = expr.flp;
-    if (!type.isVector() && type.kind != VType::RECORD) {
-        unsupportedError(flp, "aggregate for a non-composite type");
-        return nullptr;
-    }
-    //! One run of elements covered by one associated value
-    struct Segment final {
-        int offset = 0;
-        int width = 1;
-        const Expr* exprp = nullptr;
-    };
-    // Positional associations may each span several elements, e.g. `("01", "10")`
-    if (expr.kind == Expr::AGG_POSITIONAL && type.isVector() && !expr.args.empty()) {
-        int total = 0;
-        bool allBits = true;
-        for (const ExprP& argp : expr.args) {
-            if (!argp || argp->kind != Expr::BITS_LIT) {
-                allBits = false;
-                break;
-            }
-            total += static_cast<int>(argp->bits.size());
+//! Whether positional associations can be concatenated as whole bit-string literals
+bool Lowering::packedBitAggregateApplies(const Expr& expr, const VType& type) {
+    if (expr.kind != Expr::AGG_POSITIONAL || !type.isVector() || expr.args.empty()) return false;
+    int total = 0;
+    bool allBits = true;
+    for (const ExprP& argp : expr.args) {
+        if (!argp || argp->kind != Expr::BITS_LIT) {
+            allBits = false;
+            break;
         }
-        if (allBits && total == type.width
-            && total != static_cast<int>(expr.args.size()) * type.elemWidth) {
-            AstNodeExpr* resultp = nullptr;
-            for (const ExprP& argp : expr.args) {
-                AstNodeExpr* const valuep = lowerExpr(*argp, nullptr);
-                if (!valuep) {
-                    if (resultp) resultp->deleteTree();
-                    return nullptr;
+        total += static_cast<int>(argp->bits.size());
+    }
+    return allBits && total == type.width
+           && total != static_cast<int>(expr.args.size()) * type.elemWidth;
+}
+
+AstNodeExpr* Lowering::lowerPackedBitAggregate(FileLine* flp, const Expr& expr,
+                                               const VType& type) {
+    AstNodeExpr* resultp = nullptr;
+    for (const ExprP& argp : expr.args) {
+        AstNodeExpr* const valuep = lowerExpr(*argp, nullptr);
+        if (!valuep) {
+            if (resultp) resultp->deleteTree();
+            return nullptr;
+        }
+        resultp
+            = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, resultp, valuep}) : valuep;
+    }
+    resultp->dtypep(type.dtp);
+    return resultp;
+}
+
+bool Lowering::collectRecordAggregateSegments(FileLine* flp, const Expr& expr, const VType& type,
+                                              std::vector<AggregateSegment>& segments,
+                                              const Expr*& othersValuep) {
+    if (expr.kind == Expr::AGG_POSITIONAL) {
+        // Positional association fills record elements in declaration order
+        if (expr.args.size() != type.fields.size()) {
+            unsupportedError(flp, "record aggregate that is not a full positional list");
+            return false;
+        }
+        for (size_t i = 0; i < expr.args.size(); ++i) {
+            AggregateSegment segment;
+            segment.offset = type.fields[i].offset;
+            segment.width = type.fields[i].width;
+            segment.exprp = expr.args[i].get();
+            segments.push_back(segment);
+        }
+    } else {
+        // Named association: each choice names one record element, or is `others`
+        for (size_t i = 0; i < expr.args.size(); ++i) {
+            for (const ExprP& choicep : expr.choices[i]) {
+                if (choicep->kind == Expr::NAME && choicep->text == "others") {
+                    othersValuep = expr.args[i].get();
+                    continue;
                 }
-                resultp = resultp ? static_cast<AstNodeExpr*>(new AstConcat{flp, resultp, valuep})
-                                  : valuep;
-            }
-            resultp->dtypep(type.dtp);
-            return resultp;
-        }
-    }
-    std::vector<Segment> segments;
-    const Expr* othersValuep = nullptr;  // Value of an `others` association
-    if (type.kind == VType::RECORD) {
-        if (expr.kind == Expr::AGG_POSITIONAL) {
-            // Positional association fills record elements in declaration order
-            if (expr.args.size() != type.fields.size()) {
-                unsupportedError(flp, "record aggregate that is not a full positional list");
-                return nullptr;
-            }
-            for (size_t i = 0; i < expr.args.size(); ++i) {
-                Segment segment;
-                segment.offset = type.fields[i].offset;
-                segment.width = type.fields[i].width;
+                if (choicep->kind != Expr::NAME) {
+                    unsupportedError(flp, "record aggregate choice that is not an element name");
+                    return false;
+                }
+                const auto fieldIt = std::find_if(
+                    type.fields.begin(), type.fields.end(),
+                    [&](const VField& field) { return field.name == choicep->text; });
+                if (fieldIt == type.fields.end()) {
+                    flp->v3error("VHDL: record has no element '" + choicep->spelling + "'.");
+                    return false;
+                }
+                AggregateSegment segment;
+                segment.offset = fieldIt->offset;
+                segment.width = fieldIt->width;
                 segment.exprp = expr.args[i].get();
                 segments.push_back(segment);
             }
-        } else {
-            // Named association: each choice names one record element, or is `others`
-            for (size_t i = 0; i < expr.args.size(); ++i) {
-                for (const ExprP& choicep : expr.choices[i]) {
-                    if (choicep->kind == Expr::NAME && choicep->text == "others") {
-                        othersValuep = expr.args[i].get();
-                        continue;
-                    }
-                    if (choicep->kind != Expr::NAME) {
-                        unsupportedError(flp,
-                                         "record aggregate choice that is not an element name");
-                        return nullptr;
-                    }
-                    const auto fieldIt = std::find_if(
-                        type.fields.begin(), type.fields.end(),
-                        [&](const VField& field) { return field.name == choicep->text; });
-                    if (fieldIt == type.fields.end()) {
-                        flp->v3error("VHDL: record has no element '" + choicep->spelling + "'");
-                        return nullptr;
-                    }
-                    Segment segment;
-                    segment.offset = fieldIt->offset;
-                    segment.width = fieldIt->width;
-                    segment.exprp = expr.args[i].get();
-                    segments.push_back(segment);
-                }
-            }
-        }
-    } else {
-        const int elemWidth = type.elemWidth;
-        for (size_t i = 0; i < expr.args.size(); ++i) {
-            const std::vector<ExprP>& choiceList = expr.choices[i];
-            if (choiceList.size() == 1 && choiceList.front()->kind == Expr::NAME
-                && choiceList.front()->text == "others") {
-                othersValuep = expr.args[i].get();
-                continue;
-            }
-            auto addIndex = [&](int64_t index, const Expr* valuep) {
-                Segment segment;
-                segment.offset = type.indexOffset(static_cast<int>(index)) * elemWidth;
-                segment.width = elemWidth;
-                segment.exprp = valuep;
-                segments.push_back(segment);
-            };
-            auto addRange = [&](int64_t left, int64_t right, const Expr* valuep) {
-                const int offsetLeft = type.indexOffset(static_cast<int>(left));
-                const int offsetRight = type.indexOffset(static_cast<int>(right));
-                Segment segment;
-                segment.offset = std::min(offsetLeft, offsetRight) * elemWidth;
-                segment.width = (std::abs(offsetLeft - offsetRight) + 1) * elemWidth;
-                segment.exprp = valuep;
-                segments.push_back(segment);
-            };
-            if (choiceList.empty()) {
-                // Positional: the next element in declaration order
-                const int64_t index = type.ascending ? type.left + static_cast<int64_t>(i)
-                                                     : type.left - static_cast<int64_t>(i);
-                addIndex(index, expr.args[i].get());
-                continue;
-            }
-            for (const ExprP& choicep : choiceList) {
-                if (choicep->kind == Expr::SLICE) {
-                    int64_t left = 0;
-                    int64_t right = 0;
-                    // A bound may be a folded call, e.g. `(log2(SIZE) - 1 downto 0 => '0')`
-                    if (!staticIntFold(choicep->b, left) || !staticIntFold(choicep->c, right)) {
-                        unsupportedError(flp, "non-static aggregate choice range");
-                        return nullptr;
-                    }
-                    addRange(left, right, expr.args[i].get());
-                    continue;
-                }
-                if (choicep->kind == Expr::ATTR
-                    && (choicep->text == "range" || choicep->text == "reverse_range")
-                    && choicep->a) {
-                    // The range of an object, e.g. `a'range`
-                    VType rangeType;
-                    if (!typeOfDesignator(*choicep->a, rangeType) || !rangeType.isVector()) {
-                        unsupportedError(flp, "non-static aggregate choice range");
-                        return nullptr;
-                    }
-                    addRange(rangeType.left, rangeType.right, expr.args[i].get());
-                    continue;
-                }
-                int64_t index = 0;
-                if (!staticInt(choicep, index)) {
-                    unsupportedError(flp, "non-static aggregate choice");
-                    return nullptr;
-                }
-                addIndex(index, expr.args[i].get());
-            }
         }
     }
+    return true;
+}
+
+bool Lowering::collectArrayAggregateSegments(FileLine* flp, const Expr& expr, const VType& type,
+                                             std::vector<AggregateSegment>& segments,
+                                             const Expr*& othersValuep) {
+    const int elemWidth = type.elemWidth;
+    for (size_t i = 0; i < expr.args.size(); ++i) {
+        const std::vector<ExprP>& choiceList = expr.choices[i];
+        if (choiceList.size() == 1 && choiceList.front()->kind == Expr::NAME
+            && choiceList.front()->text == "others") {
+            othersValuep = expr.args[i].get();
+            continue;
+        }
+        auto addIndex = [&](int64_t index, const Expr* valuep) {
+            AggregateSegment segment;
+            segment.offset = type.indexOffset(static_cast<int>(index)) * elemWidth;
+            segment.width = elemWidth;
+            segment.exprp = valuep;
+            segments.push_back(segment);
+        };
+        auto addRange = [&](int64_t left, int64_t right, const Expr* valuep) {
+            const int offsetLeft = type.indexOffset(static_cast<int>(left));
+            const int offsetRight = type.indexOffset(static_cast<int>(right));
+            AggregateSegment segment;
+            segment.offset = std::min(offsetLeft, offsetRight) * elemWidth;
+            segment.width = (std::abs(offsetLeft - offsetRight) + 1) * elemWidth;
+            segment.exprp = valuep;
+            segments.push_back(segment);
+        };
+        if (choiceList.empty()) {
+            // Positional: the next element in declaration order
+            const int64_t index = type.ascending ? type.left + static_cast<int64_t>(i)
+                                                 : type.left - static_cast<int64_t>(i);
+            addIndex(index, expr.args[i].get());
+            continue;
+        }
+        for (const ExprP& choicep : choiceList) {
+            if (choicep->kind == Expr::SLICE) {
+                int64_t left = 0;
+                int64_t right = 0;
+                // A bound may be a folded call, e.g. `(log2(SIZE) - 1 downto 0 => '0')`
+                if (!staticIntFold(choicep->b, left) || !staticIntFold(choicep->c, right)) {
+                    unsupportedError(flp, "non-static aggregate choice range");
+                    return false;
+                }
+                addRange(left, right, expr.args[i].get());
+                continue;
+            }
+            if (choicep->kind == Expr::ATTR
+                && (choicep->text == "range" || choicep->text == "reverse_range") && choicep->a) {
+                // The range of an object, e.g. `a'range`
+                VType rangeType;
+                if (!typeOfDesignator(*choicep->a, rangeType) || !rangeType.isVector()) {
+                    unsupportedError(flp, "non-static aggregate choice range");
+                    return false;
+                }
+                addRange(rangeType.left, rangeType.right, expr.args[i].get());
+                continue;
+            }
+            int64_t index = 0;
+            if (!staticInt(choicep, index)) {
+                unsupportedError(flp, "non-static aggregate choice");
+                return false;
+            }
+            addIndex(index, expr.args[i].get());
+        }
+    }
+    return true;
+}
+
+void Lowering::fillAggregateOthers(const VType& type, std::vector<AggregateSegment>& segments,
+                                   const Expr* othersValuep) {
     // Fill the elements no association names: a record fills whole fields, an array
     // element-sized pieces
     if (type.kind == VType::RECORD && othersValuep) {
         for (const VField& field : type.fields) {
             const bool covered
-                = std::any_of(segments.begin(), segments.end(), [&](const Segment& segment) {
-                      return field.offset >= segment.offset
-                             && field.offset < segment.offset + segment.width;
+                = std::any_of(segments.begin(), segments.end(), [&](const AggregateSegment& seg) {
+                      return field.offset >= seg.offset && field.offset < seg.offset + seg.width;
                   });
             if (covered) continue;
-            Segment segment;
+            AggregateSegment segment;
             segment.offset = field.offset;
             segment.width = field.width;
             segment.exprp = othersValuep;
@@ -3331,74 +3455,85 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
         for (int element = 0; element < elementCount; ++element) {
             const int offset = element * elemSpan;
             const bool covered
-                = std::any_of(segments.begin(), segments.end(), [&](const Segment& segment) {
-                      return offset >= segment.offset && offset < segment.offset + segment.width;
+                = std::any_of(segments.begin(), segments.end(), [&](const AggregateSegment& seg) {
+                      return offset >= seg.offset && offset < seg.offset + seg.width;
                   });
             if (covered) continue;
-            Segment segment;
+            AggregateSegment segment;
             segment.offset = offset;
             segment.width = elemSpan;
             segment.exprp = othersValuep;
             segments.push_back(segment);
         }
     }
+}
+
+bool Lowering::verifyAggregateCoverage(FileLine* flp, const VType& type,
+                                       std::vector<AggregateSegment>& segments) {
     // The association must cover the whole type exactly once
-    std::sort(segments.begin(), segments.end(),
-              [](const Segment& l, const Segment& r) { return l.offset < r.offset; });
+    std::sort(
+        segments.begin(), segments.end(),
+        [](const AggregateSegment& l, const AggregateSegment& r) { return l.offset < r.offset; });
     int covered = 0;
-    for (const Segment& segment : segments) {
+    for (const AggregateSegment& segment : segments) {
         if (segment.offset != covered) {
             unsupportedError(flp, "aggregate that does not cover every element");
-            return nullptr;
+            return false;
         }
         covered += segment.width;
     }
     if (covered != type.width) {
         unsupportedError(flp, "aggregate that does not cover every element");
-        return nullptr;
+        return false;
     }
+    return true;
+}
+
+AstNodeExpr* Lowering::lowerAggregateSegment(FileLine* flp, const VType& type,
+                                             const AggregateSegment& segment) {
     // Value of one segment, typed and widened to the segment
-    const auto lowerSegment = [&](const Segment& segment) -> AstNodeExpr* {
-        VType segType;
-        if (segment.width == type.elemWidth && type.kind == VType::ARRAY && type.elemp) {
-            segType = *type.elemp;
-        } else if (type.kind == VType::RECORD) {
-            const auto fieldIt
-                = std::find_if(type.fields.begin(), type.fields.end(), [&](const VField& field) {
-                      return field.offset == segment.offset;
-                  });
-            if (fieldIt != type.fields.end()) segType = *fieldIt->type;
-        }
-        if (segType.dtp == nullptr) {
-            segType = type.kind == VType::RECORD
-                          ? vectorType(flp, type.kwd, VSigning::UNSIGNED, segment.width)
-                          : vectorType(flp, type.kwd, type.signing, segment.width);
-        }
-        AstNodeExpr* valuep = nullptr;
-        if (type.isVector() && segment.width > type.elemWidth) {
-            // A range association's value is either one element, repeated over the
-            // whole range, or spans the range itself
-            const VType elemType = elementType(type, flp);
-            if (elemType.width <= 0) return nullptr;
-            valuep = lowerExpr(*segment.exprp, &elemType);
-            if (!valuep) return nullptr;
-            if (valuep->width() == elemType.width) {
-                AstNodeExpr* const elemp = valuep;
-                valuep = elemp->cloneTree(false);
-                for (int width = elemType.width; width < segment.width; width += elemType.width) {
-                    valuep = new AstConcat{flp, elemp->cloneTree(false), valuep};
-                }
-                elemp->deleteTree();
+    VType segType;
+    if (segment.width == type.elemWidth && type.kind == VType::ARRAY && type.elemp) {
+        segType = *type.elemp;
+    } else if (type.kind == VType::RECORD) {
+        const auto fieldIt
+            = std::find_if(type.fields.begin(), type.fields.end(),
+                           [&](const VField& field) { return field.offset == segment.offset; });
+        if (fieldIt != type.fields.end()) segType = *fieldIt->type;
+    }
+    if (segType.dtp == nullptr) {
+        segType = type.kind == VType::RECORD
+                      ? vectorType(flp, type.kwd, VSigning::UNSIGNED, segment.width)
+                      : vectorType(flp, type.kwd, type.signing, segment.width);
+    }
+    AstNodeExpr* valuep = nullptr;
+    if (type.isVector() && segment.width > type.elemWidth) {
+        // A range association's value is either one element, repeated over the
+        // whole range, or spans the range itself
+        const VType elemType = elementType(type, flp);
+        if (elemType.width <= 0) return nullptr;
+        valuep = lowerExpr(*segment.exprp, &elemType);
+        if (!valuep) return nullptr;
+        if (valuep->width() == elemType.width) {
+            AstNodeExpr* const elemp = valuep;
+            valuep = elemp->cloneTree(false);
+            for (int width = elemType.width; width < segment.width; width += elemType.width) {
+                valuep = new AstConcat{flp, elemp->cloneTree(false), valuep};
             }
-            if (valuep->width() != segment.width) valuep = resizeExpr(valuep, segType, flp);
+            elemp->deleteTree();
         }
-        if (!valuep) {
-            valuep = lowerExpr(*segment.exprp, &segType);
-            if (!valuep) return nullptr;
-            valuep = resizeExpr(valuep, segType, flp);
-        }
-        return valuep;
-    };
+        if (valuep->width() != segment.width) valuep = resizeExpr(valuep, segType, flp);
+    }
+    if (!valuep) {
+        valuep = lowerExpr(*segment.exprp, &segType);
+        if (!valuep) return nullptr;
+        valuep = resizeExpr(valuep, segType, flp);
+    }
+    return valuep;
+}
+
+AstNodeExpr* Lowering::assembleAggregate(FileLine* flp, const VType& type,
+                                         const std::vector<AggregateSegment>& segments) {
     // `(others => value)` gives every uncovered element the same value: lower it once
     // and replicate. Expanding it into one concatenation per element made a large
     // memory image quadratic in the array size.
@@ -3409,15 +3544,15 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
                   && segments[i].offset == static_cast<int>(i) * segments.front().width;
     }
     if (uniform && type.isVector()) {
-        AstNodeExpr* const valuep = lowerSegment(segments.front());
+        AstNodeExpr* const valuep = lowerAggregateSegment(flp, type, segments.front());
         if (!valuep) return nullptr;
         return repeatValue(flp, valuep, static_cast<int>(segments.size()), type.dtp);
     }
     // Assemble from the least significant segment up
     AstNodeExpr* resultp = nullptr;
     bool allConst = true;
-    for (const Segment& segment : segments) {
-        AstNodeExpr* valuep = lowerSegment(segment);
+    for (const AggregateSegment& segment : segments) {
+        AstNodeExpr* valuep = lowerAggregateSegment(flp, type, segment);
         if (!valuep) {
             if (resultp) resultp->deleteTree();
             return nullptr;
@@ -3436,6 +3571,27 @@ AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
     }
     resultp->dtypep(type.dtp);
     return resultp;
+}
+
+AstNodeExpr* Lowering::lowerAggregate(const Expr& expr, const VType& type) {
+    FileLine* const flp = expr.flp;
+    if (!type.isVector() && type.kind != VType::RECORD) {
+        unsupportedError(flp, "aggregate for a non-composite type");
+        return nullptr;
+    }
+    if (packedBitAggregateApplies(expr, type)) return lowerPackedBitAggregate(flp, expr, type);
+    std::vector<AggregateSegment> segments;
+    const Expr* othersValuep = nullptr;  // Value of an `others` association
+    if (type.kind == VType::RECORD) {
+        if (!collectRecordAggregateSegments(flp, expr, type, segments, othersValuep))
+            return nullptr;
+    } else {
+        if (!collectArrayAggregateSegments(flp, expr, type, segments, othersValuep))
+            return nullptr;
+    }
+    fillAggregateOthers(type, segments, othersValuep);
+    if (!verifyAggregateCoverage(flp, type, segments)) return nullptr;
+    return assembleAggregate(flp, type, segments);
 }
 
 AstNodeExpr* Lowering::lowerMatching(const Expr& expr, AstNodeExpr* lp, AstNodeExpr* rp) {

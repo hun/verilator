@@ -15,4 +15,3 @@ VHDL frontend: Verilator invokes no external analyzer.
    usage
    limitations
    architecture
-   review

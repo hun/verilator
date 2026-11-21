@@ -14,7 +14,7 @@ test.top_filename = 't/t_vhdl_ident_bad.vhdl'
 
 # IEEE 1076-2008 15.4.2 and 15.10: basic identifier spelling, reserved words
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 

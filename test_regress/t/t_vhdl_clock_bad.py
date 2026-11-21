@@ -14,7 +14,7 @@ test.top_filename = 't/t_vhdl_clock_bad.vhdl'
 
 
 
-test.compile(verilator_flags2=['--language', 'vhdl'],
+test.lint(verilator_flags2=['--language', 'vhdl'],
              fails=True,
              expect_filename=test.golden_filename)
 

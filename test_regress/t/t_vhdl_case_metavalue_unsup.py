@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_case_metavalue_unsup.vhdl'
 # A metavalue choice is legal VHDL but has no two-state ordinal; the frontend
 # must refuse it instead of asserting in V3Number::toUInt.
 
-test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
              fails=True,
              expect_filename=test.golden_filename)
 
