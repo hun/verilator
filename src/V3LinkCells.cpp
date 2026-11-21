@@ -39,11 +39,16 @@
 
 VL_DEFINE_DEBUG_FUNCTIONS;
 
-//! The requested top module as the frontend spells it. VHDL identifiers are case
-//! insensitive and the native frontend folds them to lowercase.
+//! The requested top module as the design spells it. VHDL identifiers are case insensitive
+//! and the VHDL frontend folds them to lowercase, so unless a module matches exactly, the
+//! folded name names the VHDL top.
 static std::string topModuleName() {
     const std::string& name = v3Global.opt.topModule();
-    return v3Global.opt.sourceLangVhdl() ? VString::downcase(name) : name;
+    if (!v3Global.vhdlMode()) return name;
+    for (const AstNode* nodep = v3Global.rootp()->modulesp(); nodep; nodep = nodep->nextp()) {
+        if (VN_AS(nodep, NodeModule)->name() == name) return name;
+    }
+    return VString::downcase(name);
 }
 
 //######################################################################
