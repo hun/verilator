@@ -48,7 +48,7 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 namespace vhdlnative {
 
 void unsupportedError(FileLine* flp, const std::string& what) {
-    flp->v3error("Unsupported: VHDL " + what + ".");
+    flp->v3warn(E_UNSUPPORTED, "Unsupported: VHDL " + what + ".");
 }
 
 }  // namespace vhdlnative
@@ -225,9 +225,9 @@ ArchByEntity resolveArchitectures(const vhdlnative::DesignLibrary& library) {
                                          + "' binds instance '" + label
                                          + "', which the architecture does not instantiate.");
                 } else if (!instp->entityInstantiation) {
-                    binding.flp->v3error("Unsupported: VHDL configuration '" + config.spelling
-                                         + "' binds component '" + binding.component
-                                         + "'; component instantiation.");
+                    vhdlnative::unsupportedError(binding.flp, "configuration '" + config.spelling
+                                                                  + "' binding component '"
+                                                                  + binding.component + "'");
                 } else if (instp->instanceName != binding.entity) {
                     binding.flp->v3error("VHDL configuration '" + config.spelling
                                          + "' rebinds instance '" + label + "' to entity '"

@@ -1,4 +1,5 @@
-%Error: t/t_vhdl_fold_nostatic_bad.vhdl:21:1: Unsupported: VHDL function while loop whose condition is not static.
-        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error-UNSUPPORTED: t/t_vhdl_fold_nostatic_bad.vhdl:21:1: Unsupported: VHDL function while loop whose condition is not static.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
 %Error: t/t_vhdl_fold_nostatic_bad.vhdl:46:1: VHDL: unknown identifier 'd_c'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

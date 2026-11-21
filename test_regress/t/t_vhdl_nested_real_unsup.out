@@ -1,11 +1,12 @@
-%Error: t/t_vhdl_nested_real_unsup.vhdl:25:1: Unsupported: VHDL real object element.
-        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_nested_real_unsup.vhdl:26:1: Unsupported: VHDL real object element.
-%Error: t/t_vhdl_nested_real_unsup.vhdl:27:1: Unsupported: VHDL real object element.
-%Error: t/t_vhdl_nested_real_unsup.vhdl:28:1: Unsupported: VHDL physical object at run time.
+%Error-UNSUPPORTED: t/t_vhdl_nested_real_unsup.vhdl:25:1: Unsupported: VHDL real object element.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_vhdl_nested_real_unsup.vhdl:26:1: Unsupported: VHDL real object element.
+%Error-UNSUPPORTED: t/t_vhdl_nested_real_unsup.vhdl:27:1: Unsupported: VHDL real object element.
+%Error-UNSUPPORTED: t/t_vhdl_nested_real_unsup.vhdl:28:1: Unsupported: VHDL physical object at run time.
 %Error: t/t_vhdl_nested_real_unsup.vhdl:31:1: VHDL: unknown identifier 'r'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: t/t_vhdl_nested_real_unsup.vhdl:32:1: VHDL: unknown identifier 'rn'.
-%Error: t/t_vhdl_nested_real_unsup.vhdl:33:1: Unsupported: VHDL selected name 'f'.
+%Error-UNSUPPORTED: t/t_vhdl_nested_real_unsup.vhdl:33:1: Unsupported: VHDL selected name 'f'.
 %Error: t/t_vhdl_nested_real_unsup.vhdl:34:1: VHDL: unknown identifier 'tv'.
 %Error: t/t_vhdl_nested_real_unsup.vhdl:35:1: VHDL: unknown identifier 'r'.
 %Error: Exiting due to
