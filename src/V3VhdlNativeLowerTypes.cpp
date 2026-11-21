@@ -142,11 +142,13 @@ bool Lowering::evalInt(const Expr& expr, int64_t& value) const {
 //! Integer value of a name: a bound pure-call formal, a constant, or a foldable call
 bool Lowering::evalIntName(const Expr& expr, int64_t& value) const {
     if (!m_pureCalls.empty()) {
-        const auto argIt = m_pureCalls.back().args.find(expr.text);
-        if (argIt != m_pureCalls.back().args.end()) return evalInt(*argIt->second, value);
+        const auto& args = m_pureCalls.back().args;
+        const auto argIt = args.find(expr.text);
+        if (argIt != args.end()) return evalInt(*argIt->second, value);
     }
-    const auto bindIt = activeEnv().find(expr.text);
-    if (bindIt != activeEnv().end() && !isAggregateType(bindIt->second.type)) {
+    auto& bindings = activeEnv();
+    const auto bindIt = bindings.find(expr.text);
+    if (bindIt != bindings.end() && !isAggregateType(bindIt->second.type)) {
         // A fold is speculative and reports nothing, so a value that does not fit an
         // integer is simply not folded (a string, or more than 64 bits)
         if (const AstConst* const boundp = VN_CAST(bindIt->second.exprp, Const)) {
@@ -492,8 +494,9 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
     case Expr::REAL_LIT: value = expr.realValue; return true;
     case Expr::NAME: {
         if (!m_pureCalls.empty()) {
-            const auto argIt = m_pureCalls.back().args.find(expr.text);
-            if (argIt != m_pureCalls.back().args.end()) return evalReal(*argIt->second, value);
+            const auto& args = m_pureCalls.back().args;
+            const auto argIt = args.find(expr.text);
+            if (argIt != args.end()) return evalReal(*argIt->second, value);
         }
         const auto realIt = m_realConsts.find(expr.text);
         if (realIt != m_realConsts.end()) {

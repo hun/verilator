@@ -1570,10 +1570,10 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
     // The loop variable is a static constant, so each iteration can be unrolled
     // An inline binding of the loop variable's name, e.g. a procedure formal, must not
     // shadow the iteration constant
-    const auto boundIt = activeEnv().find(stmt.loopVar);
+    auto& bindings = activeEnv();
+    const auto boundIt = bindings.find(stmt.loopVar);
     std::unique_ptr<InlineBinding> boundSavep
-        = boundIt != activeEnv().end() ? std::make_unique<InlineBinding>(boundIt->second)
-                                       : nullptr;
+        = boundIt != bindings.end() ? std::make_unique<InlineBinding>(boundIt->second) : nullptr;
     activeEnv().erase(stmt.loopVar);
     const auto savedConst = m_consts.find(stmt.loopVar);
     const bool hadConst = savedConst != m_consts.end();

@@ -1417,8 +1417,9 @@ void Lowering::deleteInlineEnv(InlineEnv& env) {
 }
 
 AstNodeExpr* Lowering::inlineBinding(FileLine* flp, const std::string& name, bool write) const {
-    const auto it = activeEnv().find(name);
-    if (it == activeEnv().end()) return nullptr;
+    auto& bindings = activeEnv();
+    const auto it = bindings.find(name);
+    if (it == bindings.end()) return nullptr;
     const InlineBinding& binding = it->second;
     if (write && !binding.lvalue) {
         flp->v3error("VHDL: cannot assign to formal argument '" + name + "'.");
@@ -2159,8 +2160,9 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
         if (stmt.kind == Stmt::VAR_ASSIGN) {
             const Expr& target = *stmt.target;
             if (target.kind == Expr::NAME) {
-                const auto it = activeEnv().find(target.text);
-                if (it == activeEnv().end()) {
+                auto& bindings = activeEnv();
+                const auto it = bindings.find(target.text);
+                if (it == bindings.end()) {
                     unsupportedError(flp, "assignment to a name that is not local to the "
                                           "inlined subprogram");
                     return nullptr;
@@ -2205,8 +2207,9 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 unsupportedError(flp, "assignment target form in an inlined function body");
                 return nullptr;
             }
-            const auto it = activeEnv().find(basep->text);
-            if (it == activeEnv().end()) {
+            auto& bindings = activeEnv();
+            const auto it = bindings.find(basep->text);
+            if (it == bindings.end()) {
                 unsupportedError(flp, "assignment to an element outside the inlined subprogram");
                 return nullptr;
             }

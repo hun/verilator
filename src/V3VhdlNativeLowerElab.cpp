@@ -1104,7 +1104,7 @@ AstModule* Lowering::specializeInstance(const Concurrent& conc, const EntityUnit
             // A real is an elaboration-time value with no constant node; the shortest
             // representation that round-trips keeps distinct values apart
             char text[40];
-            std::snprintf(text, sizeof(text), "%.17g", entry.second.realValue);
+            VL_SNPRINTF(text, sizeof(text), "%.17g", entry.second.realValue);
             key.genericPart += text;
         } else if (entry.second.subp) {
             // Unique per actual subprogram declaration within this run

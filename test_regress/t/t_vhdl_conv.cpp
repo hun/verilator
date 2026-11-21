@@ -12,6 +12,7 @@
 
 #include VM_PREFIX_INCLUDE
 
+#include <cinttypes>
 #include <cstdio>
 
 int main(int argc, char** argv) {
@@ -57,7 +58,7 @@ int main(int argc, char** argv) {
             const int conv1 = static_cast<int>(topp->conv1);
             const int conv2 = static_cast<int>(topp->conv2);
             if (topp->wide != 0x123456789aULL) {
-                std::printf("%%Error: wide=%llx\n", static_cast<unsigned long long>(topp->wide));
+                std::printf("%%Error: wide=%" PRIx64 "\n", static_cast<uint64_t>(topp->wide));
                 ++fails;
             }
             if (uo != ((~a) & 0xf)) {

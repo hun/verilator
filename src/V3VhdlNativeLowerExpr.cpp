@@ -2566,8 +2566,9 @@ VType Lowering::typeOfTarget(const Expr& target, AstNodeExpr* lhsp) const {
 
 const VType* Lowering::typeOfName(const Expr& expr) const {
     if (expr.kind != Expr::NAME) return nullptr;
-    const auto bindIt = activeEnv().find(expr.text);
-    if (bindIt != activeEnv().end()) {
+    auto& bindings = activeEnv();
+    const auto bindIt = bindings.find(expr.text);
+    if (bindIt != bindings.end()) {
         if (!bindIt->second.type.dtp) return nullptr;
         return &bindIt->second.type;
     }

@@ -117,7 +117,7 @@ public:
     ~Lexer() = default;
 
     //! Save/restore point for one-token lookahead
-    struct State {
+    struct State final {
         size_t pos;
         int line;
         bool prevEndsDesignator;
