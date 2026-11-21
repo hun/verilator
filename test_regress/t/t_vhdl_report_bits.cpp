@@ -16,6 +16,8 @@
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    // A failure stops the model without aborting, so the checks below still run
+    Verilated::fatalOnError(false);
     VM_PREFIX* const topp = new VM_PREFIX;
 
     int fails = 0;
@@ -26,8 +28,8 @@ int main(int argc, char** argv) {
         std::printf("%%Error: done_o=%d exp=0\n", topp->done_o);
         ++fails;
     }
-    if (!Verilated::gotFinish()) {
-        std::printf("%%Error: the report did not end the run\n");
+    if (!Verilated::gotError()) {
+        std::printf("%%Error: the report did not fail the run\n");
         ++fails;
     }
 

@@ -73,8 +73,9 @@ Assertions and reports
 evaluated during elaboration. A report always lowers to a display: a literal
 message is printed, while a non-literal one falls back to the text ``report``
 (an assertion falls back to ``Assertion failed``) without dropping the
-statement. A report or assertion of ``severity failure`` ends the run at that
-statement. General simulation-control semantics are not modeled.
+statement. A report or failing assertion of ``severity failure`` stops the run
+there like ``$fatal``, so the simulation exits with a non-zero status. General
+simulation-control semantics are not modeled.
 
 Timing
 ~~~~~~

@@ -76,7 +76,8 @@ silently ignored.
        type, so cost grows with packed width.
    * - Assert/report
      - Accepted. Static assertions may fold at elaboration; a literal report
-       message prints, ``severity failure`` ends the run, and a non-literal
+       message prints, ``severity failure`` stops the run with a non-zero exit
+       status like ``$fatal``, and a non-literal
        message is dropped.
    * - Timing
      - A process with one ``wait for`` and a nonzero ``after`` on a concurrent

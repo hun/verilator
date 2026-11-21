@@ -16,6 +16,8 @@
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    // A failure stops the model without aborting, so the checks below still run
+    Verilated::fatalOnError(false);
     VM_PREFIX* const topp = new VM_PREFIX;
 
     // One clock: the computed report fires and the run must end there
@@ -25,8 +27,8 @@ int main(int argc, char** argv) {
     topp->eval();
 
     int fails = 0;
-    if (!Verilated::gotFinish()) {
-        std::printf("%%Error: a computed failure-severity report did not end the run\n");
+    if (!Verilated::gotError()) {
+        std::printf("%%Error: a computed failure-severity report did not fail the run\n");
         ++fails;
     }
 

@@ -1690,16 +1690,18 @@ std::string reportText(const Expr* exprp, const char* fallback) {
 AstNodeStmt* Lowering::lowerReport(const Stmt& stmt) {
     // A computed message is not modelled, but the statement still executes: dropping it
     // would also drop a `severity failure` termination (IEEE 1076-2008 10.4)
-    AstNodeStmt* const displayp = new AstDisplay{stmt.flp,
-                                                 VDisplayType::DT_DISPLAY,
-                                                 reportText(stmt.value.get(), "report"),
-                                                 nullptr,
-                                                 nullptr,
-                                                 'd'};
-    // `report ... severity failure` ends the simulation (IEEE 1076-2008 10.4); the other
-    // severities only report
-    if (stmt.severity == Stmt::SEV_FAILURE) {
-        return AstNode::addNext<AstNodeStmt, AstNodeStmt>(displayp, new AstFinish{stmt.flp});
+    // `report ... severity failure` fails the run like `$fatal` (IEEE 1076-2008 10.4); the
+    // other severities only report
+    const bool failure = stmt.severity == Stmt::SEV_FAILURE;
+    AstNodeStmt* const displayp
+        = new AstDisplay{stmt.flp,
+                         failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY,
+                         reportText(stmt.value.get(), "report"),
+                         nullptr,
+                         nullptr,
+                         'd'};
+    if (failure) {
+        return AstNode::addNext<AstNodeStmt, AstNodeStmt>(displayp, new AstStop{stmt.flp, true});
     }
     return displayp;
 }
@@ -1714,15 +1716,19 @@ AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Ex
                                   Stmt::Severity severity) {
     AstNodeExpr* const condp = lowerCond(condition);
     if (!condp) return nullptr;
-    // A failing assertion reports, and `severity failure` ends the run (IEEE 1076-2008 10.3)
+    // A failing assertion reports, and `severity failure` fails the run like `$fatal`
+    // (IEEE 1076-2008 10.3)
     AstNodeExpr* const failp = new AstNot{flp, condp};
     failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-    AstNodeStmt* bodyp = new AstDisplay{
-        flp, VDisplayType::DT_DISPLAY, reportText(messagep, "Assertion failed"), nullptr, nullptr,
-        'd'};
-    if (severity == Stmt::SEV_FAILURE) {
-        bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstFinish{flp});
-    }
+    const bool failure = severity == Stmt::SEV_FAILURE;
+    AstNodeStmt* bodyp
+        = new AstDisplay{flp,
+                         failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY,
+                         reportText(messagep, "Assertion failed"),
+                         nullptr,
+                         nullptr,
+                         'd'};
+    if (failure) bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstStop{flp, true});
     return new AstIf{flp, failp, bodyp, nullptr};
 }
 

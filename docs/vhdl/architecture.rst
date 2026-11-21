@@ -223,8 +223,8 @@ arrays built from it are resolved and exempt.
 string, whatever its characters are -- the parser does not retype it as a bit
 string. A non-literal message is not modelled, but the statement still runs: its
 text falls back to ``report`` (or to ``Assertion failed`` for an assertion). A
-report or assertion of ``severity failure`` appends an ``AstFinish`` at the
-statement, so the statements after it are not lowered, and after a failing
+report or assertion of ``severity failure`` lowers like ``$fatal``: a
+``DT_FATAL`` display and a fatal ``AstStop`` at the statement, so the statements after it are not lowered, and after a failing
 assertion they run only when it did not fail. A process whose only stopper is
 such a failure runs once, at time zero.
 

@@ -16,12 +16,14 @@
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    // A failure stops the model without aborting, so the checks below still run
+    Verilated::fatalOnError(false);
     VM_PREFIX* const topp = new VM_PREFIX;
 
     topp->eval();
     int fails = 0;
-    if (!Verilated::gotFinish()) {
-        std::printf("%%Error: the run did not finish\n");
+    if (!Verilated::gotError()) {
+        std::printf("%%Error: the run did not fail\n");
         ++fails;
     }
 
