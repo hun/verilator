@@ -14,9 +14,8 @@
 //
 //*************************************************************************
 //
-// In-tree VHDL frontend. It is the only VHDL frontend: a hand-written
-// lexer/parser and a lowerer that emit an AST with committed dtypes before V3Width runs,
-// so no external analyzer is invoked.
+// VHDL frontend: a hand-written lexer/parser and a lowerer that emit an AST with
+// committed dtypes before V3Width runs.
 //
 // Structure: Lexer -> Parser (frontend syntax tree) -> Lowering (Verilator AST).
 // The parse of every file completes before any lowering, because VHDL design

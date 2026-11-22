@@ -8,7 +8,7 @@
 
 -- A metavalue choice is legal VHDL (GHDL and nvc accept both statements), but
 -- the two-state model has no value for 'X' to match. The frontend must report
--- it cleanly; it used to assert in V3Number::toUInt.
+-- it cleanly rather than assert.
 
 library ieee;
 use ieee.std_logic_1164.all;

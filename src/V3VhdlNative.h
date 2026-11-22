@@ -32,8 +32,8 @@ struct V3VhdlNativeFile final {
     bool inLibrary = false;  // File came from a -v/--library file
 };
 
-//! In-tree VHDL frontend: parses VHDL directly and lowers it to an AST with
-//! committed dtypes before V3Width runs. It does not invoke an external analyzer.
+//! VHDL frontend: parses VHDL and lowers it to an AST with committed dtypes
+//! before V3Width runs.
 //! The accepted subset is documented in docs/vhdl/limitations.rst; everything
 //! outside it is refused with a source-located `Unsupported:` diagnostic.
 class V3VhdlNative final {

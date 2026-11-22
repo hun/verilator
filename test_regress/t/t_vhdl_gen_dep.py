@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_gen_dep.vhdl'
 
-# The native frontend has no default for a generic that defaults from another generic
+# The VHDL frontend has no default for a generic that defaults from another generic
 
 # The child entity is instantiated, so --top-module keeps the wrapper as the only top
 test.compile(

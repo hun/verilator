@@ -20,7 +20,7 @@ package data_pkg is
   end units;
 end package;
 
--- GHDL and nvc resolve `k' to SPEED from the expected type here; the native frontend does
+-- GHDL and nvc resolve `k' to SPEED from the expected type here; the frontend does
 -- not know a literal's type, so it cannot tell the two packages' `k' names apart
 use work.speed_pkg.all;
 

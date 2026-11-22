@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
         }
     };
 
-    // The counter must advance; the second assert used to gate it low
+    // The counter must advance past the second assert
     check(1);
     check(2);
     check(3);

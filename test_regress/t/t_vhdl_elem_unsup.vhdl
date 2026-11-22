@@ -7,8 +7,8 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- `T_SLV` is an array whose element is itself unconstrained, so an element of a
--- returned T_SLV has no width to select. Indexing one used to reach the emitter with
--- a zero-width select and fault; it is reported now.
+-- returned T_SLV has no width to select. The frontend reports an index of one rather than
+-- emit a zero-width select.
 
 library ieee;
 use ieee.std_logic_1164.all;

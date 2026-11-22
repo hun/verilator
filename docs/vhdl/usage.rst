@@ -1,4 +1,4 @@
-.. DESCRIPTION: Verilator: guide to using the native VHDL frontend
+.. DESCRIPTION: Verilator: guide to using the VHDL frontend
    SPDX-FileCopyrightText: 2026-2026 Wilson Snyder
    SPDX-License-Identifier: CC0-1.0
 
@@ -9,10 +9,9 @@ Using VHDL
 ===========
 
 Verilator reads VHDL directly. A design file whose name ends in
-:file:`.vhd` or :file:`.vhdl` is analyzed by the frontend built into
-Verilator: there is no external analyzer to install, and the standard
-packages (:file:`std_logic_1164`, :file:`numeric_std`, and their common
-synthesis-era companions) are built in. Past analysis, a VHDL design is a
+:file:`.vhd` or :file:`.vhdl` is analyzed by Verilator's VHDL frontend, and
+the standard packages (:file:`std_logic_1164`, :file:`numeric_std`, and their
+common synthesis-era companions) are built in. Past analysis, a VHDL design is a
 Verilator design like any other: the same command line, the same generated
 C++, the same runtime library, and the same C++ testbench idiom as
 :ref:`Example C++ Execution`.

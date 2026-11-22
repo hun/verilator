@@ -12,8 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_physical_units_bad.vhdl'
 
-# The native frontend refuses a physical literal of a user-declared type, so only the
-# native message is pinned here
+# The golden pins Verilator's own message
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

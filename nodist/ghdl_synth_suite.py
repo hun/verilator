@@ -104,7 +104,7 @@ def entity_names(path):
         text = path.read_text(errors='replace')
     except OSError:
         return []
-    # GHDL lowercases identifiers in its XML, and so does the emitted module name
+    # VHDL names are case-insensitive, and the emitted module name is lowercase
     return [name.lower() for name in ENTITY_RE.findall(COMMENT_RE.sub('', text))]
 
 

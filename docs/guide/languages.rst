@@ -68,8 +68,7 @@ including triple-quoted strings, and \`ifdef expressions.
 VHDL Support
 ------------
 
-Verilator reads VHDL directly, through a frontend built into it; no
-external analyzer is needed. A file whose name ends in :file:`.vhd` or
+Verilator reads VHDL directly. A file whose name ends in :file:`.vhd` or
 :file:`.vhdl` is analyzed as VHDL, a file with another extension when
 :vlopt:`--language vhdl <--language>` or :vlopt:`--default-language` asks
 for it.

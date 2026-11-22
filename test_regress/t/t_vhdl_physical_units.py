@@ -12,9 +12,6 @@ import vltest_bootstrap
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_physical_units.vhdl'
 
-# The native frontend refuses a physical literal of a user-declared type, so only the
-# native frontend is checked here
-
 test.compile(make_top_shell=False,
              make_main=False,
              verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])

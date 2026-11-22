@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_subtype_attr.vhdl'
 
-# The native frontend refuses the type form: `type form 'subtype_attribute' is not
+# The VHDL frontend refuses the type form: `type form 'subtype_attribute' is not
 # supported yet`
 
 test.compile(make_top_shell=False,

@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_formal_vec.vhdl'
 
-# The native frontend indexes only vectors, so it refuses an element of an array formal, an
+# The VHDL frontend indexes only vectors, so it refuses an element of an array formal, an
 # element assignment in an inlined function, and a function whose body loops
 
 test.compile(make_top_shell=False,

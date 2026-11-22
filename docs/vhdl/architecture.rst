@@ -1,14 +1,13 @@
-.. DESCRIPTION: Verilator: native VHDL frontend architecture
+.. DESCRIPTION: Verilator: VHDL frontend architecture
    SPDX-FileCopyrightText: 2026-2026 Wilson Snyder
    SPDX-License-Identifier: CC0-1.0
 
-==================================
-Native VHDL frontend architecture
-==================================
+==========================
+VHDL frontend architecture
+==========================
 
-The native frontend translates VHDL directly into the
-V3 AST that the rest of Verilator consumes. It is the only VHDL frontend and
-runs in one process, with no intermediate files. Everything below is inside the
+The VHDL frontend translates VHDL directly into the
+V3 AST that the rest of Verilator consumes. Everything below is inside the
 frontend; the middle end and the runtime library are unchanged by it, and no V3
 AST node, pass or runtime primitive exists only for VHDL.
 

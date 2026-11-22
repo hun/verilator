@@ -14,7 +14,7 @@
 //
 //*************************************************************************
 //
-// VHDL frontend driver: collects design files, then runs the in-tree frontend
+// VHDL frontend driver: collects design files, then runs the frontend
 // (V3VhdlNative). VHDL design units are order independent, so files are only
 // collected while the sources are read; the frontend parses and elaborates the
 // whole library when finish() runs.
@@ -56,7 +56,7 @@ public:
         : m_rootp{rootp} {}
     ~V3VhdlParseImp() = default;
 
-    //! Parse, elaborate and lower the collected files in-tree, recording the modules it adds
+    //! Parse, elaborate and lower the collected files, recording the modules it adds
     void finish(std::set<AstNodeModule*>& emitted);
 };
 
