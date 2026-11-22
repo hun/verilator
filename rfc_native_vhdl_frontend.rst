@@ -261,7 +261,7 @@ entity's emitted tree.
 7. Evidence
 ===========
 
-- 352 regression drivers, 97 diagnostic/tree goldens, 354 ``.vhdl``
+- 352 regression drivers, 97 diagnostic/tree goldens, 352 ``.vhdl``
   fixtures, 227 value-checked C++ harnesses.
 - Full VHDL suite (``t_vhdl*``, ``--vlt``): 352 passed / 0 failed in ~15 s
   on 16 cores locally. Both distribution tests (``t_dist_test_style``,
