@@ -13,10 +13,12 @@ effort is spent on the working branch of about 400 commits.
 
 AI assistance: nearly all of the frontend, its tests and its documentation
 were written with heavy assistance from an AI coding agent, under the
-author's direction. Reviewers should read the code as such. The checks on
-it are the regression suite, the open-source corpus and the comparisons
-against GHDL described in section 7. The provenance of generated code is
-also a licensing question (see "Licensing of the corpus").
+author's direction. As the project's AI policy requires, the author is
+responsible for the contribution and is reviewing the branch before any
+pull request. The regression suite, the open-source corpus and the
+comparisons against GHDL described in section 7 are further checks, not a
+substitute for that review. The provenance of generated code is also a
+licensing question (see "Licensing of the corpus").
 
 In short: the frontend parses a synthesizable VHDL-2008 subset and lowers
 it straight into the existing pre-width V3 AST, adding no AST node, pass or
