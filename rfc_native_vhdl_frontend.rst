@@ -283,6 +283,36 @@ upstream design unmodified, drives it from a self-checking C++ testbench,
 and many also compare a cycle-by-cycle trace against GHDL. Upstream sources
 are fetched, not copied, so each keeps its own license.
 
+Licensing of the corpus
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Nothing from these projects is part of Verilator, and Verilator links none
+of them. The licenses differ and have not had a legal review:
+
+- Permissive: PoC and RPU (Apache-2.0); neorv32, neo430, neoTRNG, fpga_puf,
+  hdl-modules, potato, f32c and patmos (BSD-2-Clause or BSD-3-Clause);
+  spi-master, spi-fpga, VHDL_Lib and bit-serial (MIT). T65 and T80 carry a
+  BSD-style notice in their file headers and have no license file.
+- open-logic uses the PSI HDL Library License 1.0: the GNU Library General
+  Public License version 2 or later, with an exception that lets works in
+  binary form or hardware containing binaries be distributed on the user's
+  own terms. A Verilator model generated from its sources is a work based
+  on the library, so distributing it, or a simulation binary built from it,
+  needs the source offer and notices that license asks for.
+- microwatt uses CC-BY-4.0, which requires attribution. Its notice also
+  says the rights to implement the Power ISA are not granted by that
+  license, so the same caution applies to a generated model.
+
+The corpus repository commits only its own wrappers, shims, C++ testbenches
+and generated program images, and fetches the upstreams at pinned
+revisions. Some wrappers repeat a few lines of an upstream configuration
+file, and the repository has no license of its own yet. A few regression
+fixtures in ``test_regress/t`` reproduce short upstream declarations, such
+as function signatures and type declarations from hdl-modules, PoC and
+microwatt, and name their origin in a comment. Whether that is acceptable,
+and which license the published corpus carries, should be settled before it
+is published.
+
 Results on this branch (lint and simulation with Verilator, trace
 comparison against GHDL 7.0.0-dev):
 
@@ -348,8 +378,8 @@ maintenance plan; until then the numbers are reported for information.
 - PSL directives are skipped. Library namespace handling is simplified.
 - Use clauses are scoped per design unit, and the types of the IEEE
   packages must be made visible by one. The subprograms of those packages
-  and the ``library`` clause itself are not checked: a unit that calls
-  them nearly always has a signal or port of the matching type, which is
+  and the ``library`` clause itself are not checked: a unit that calls them
+  nearly always has a signal or port of the matching type, which is
   checked, and the frontend resolves the subprograms by name, so a precise
   check is hard.
 - Zero-width objects outside a whole-array assignment are not modelled;
