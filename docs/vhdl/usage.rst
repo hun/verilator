@@ -141,9 +141,17 @@ What the C++ side sees:
   and the class name follows.
 
 - Ports become class members: a ``std_logic`` port is one byte, an
-  ``integer`` port 32 bits, and an ``unsigned(W-1 downto 0)`` port the
-  smallest of 8/16/32/64 bits that holds it. Evaluate with ``eval()``
-  after every input change, exactly as for a SystemVerilog design.
+  ``integer`` port 32 bits, and an ``unsigned(W-1 downto 0)`` or
+  ``signed(W-1 downto 0)`` port the smallest of 8/16/32/64 bits that holds
+  it. Evaluate with ``eval()`` after every input change, exactly as for a
+  SystemVerilog design.
+
+- A ``signed`` port is stored as an unsigned field holding the two's
+  complement bits, as for a SystemVerilog signed port. The design treats
+  the value as signed, but the C++ type does not: a testbench that reads a
+  ``signed(8 downto 0)`` port must sign-extend the 9 bits itself, and when
+  it drives one it writes the low W bits of the two's complement value. An
+  ``integer`` port behaves the same way, as an unsigned 32-bit field.
 
 - The model is two-state: a signal that VHDL would leave at ``'U'`` starts
   at 0 in the model. See the known divergences in :doc:`limitations` for
