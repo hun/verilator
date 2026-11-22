@@ -27,15 +27,65 @@ AST, one set of diagnostics, no external process.
 
 Alternatives considered:
 
-* **External translator** (for example GHDL synthesis to Verilog): the current
-  workflow. It adds a tool dependency, loses source locations, and its
-  diagnostics are not Verilator's.
+* **External translator** (GHDL synthesis through Yosys to Verilog): the
+  current workflow; see "Why not the GHDL/Yosys flow" below.
 * **Out-of-process analyzer via GHDL's XML export:** this branch first took that
   route and abandoned it as too fragile; see "History of this branch" below.
 * **Linking GHDL or nvc as a library:** brings a large dependency and, for GHDL,
   GPL licensing into an LGPL/Artistic project.
 * **Native frontend (this RFC):** costs maintainable code in the tree, which is
   why the scope is a bounded subset and the delivery is staged.
+
+Why not the GHDL/Yosys flow
+---------------------------
+
+Today a VHDL design reaches Verilator by running ``ghdl --synth`` (usually via
+``ghdl-yosys-plugin``), writing Verilog with Yosys ``write_verilog``, and
+verilating that. It works, and for full VHDL-2008 coverage it is the stronger
+tool (see the last paragraph). The native frontend offers the following that
+the translated flow does not:
+
+* **One tool, no version matrix.** The flow needs GHDL (synthesis is on by
+  default since 0.37, with a GNAT 8 or newer build toolchain), Yosys, and the
+  ``ghdl.so`` plugin built against that GHDL. Its README calls the plugin
+  "experimental and work in progress" and has no feature table of supported
+  VHDL constructs. The native frontend needs only Verilator, and its behaviour
+  is pinned by the tree and its tests rather than by whichever GHDL/Yosys the
+  user installed.
+* **Diagnostics point at the VHDL.** Verilator lint, width and ``MULTIDRIVEN``
+  style warnings on translated output name lines of generated Verilog, not the
+  user's ``.vhd`` file. The native frontend reports at the VHDL source location,
+  so ``-Wall``, ``/* verilator lint_off */``-style control and ``.vlt`` waivers
+  apply to code the user actually wrote.
+* **The model keeps the design's structure.** Synthesis flattens, bit-blasts
+  and renames: records, arrays, enumerations and generate hierarchy become
+  anonymous vectors and netlist names. The native flow keeps one Verilator
+  module per entity instance, so waveforms, coverage, ``--public`` access,
+  ``--hierarchical`` verilation and ``--prof`` map to VHDL names and units.
+* **Testbench-style code in the model.** A Yosys netlist is a synthesized
+  design, so constructs with no hardware meaning (``assert``/``report`` with
+  ``severity failure``, ``wait for``) are, to the best of my knowledge, not
+  carried into the Verilog; I have not verified this against the plugin, whose
+  README does not say. The native flow lowers them, so a self-checking VHDL
+  bench can run on Verilator.
+* **Simulation speed and compile time of the result are Verilator's concern.**
+  A Yosys netlist is gate-level-like (many small cells and assigns) and gives the
+  optimizer less to work with than word-level lowered RTL. This is a hypothesis
+  to measure on the corpus, not a result yet; the RFC should not be accepted on
+  it alone.
+* **Mixed-language in one invocation.** An SV top instantiates a VHDL entity in
+  the same run, with one set of options, and with ``--lib-create`` for a library
+  flow, rather than a pre-step that produces a Verilog file per VHDL top.
+* **No GPL tool in the loop and no process boundary.** Verilation does not
+  shell out, which matters for hermetic build systems (Bazel, Nix) and CI.
+
+Where the translated flow is better, and will remain so: GHDL implements the
+full language, including 9-state ``std_logic`` resolution, user resolution
+functions, and access, protected and file types, whereas this frontend is a
+bounded two-state subset (sections 3, 4 and 8). A design outside the subset
+should keep using the Yosys path. The case for the native frontend is
+therefore diagnostics, structure, tooling integration and dependency
+reduction for the synthesizable subset, not wider language coverage.
 
 History of this branch
 ----------------------
