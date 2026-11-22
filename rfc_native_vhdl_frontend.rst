@@ -191,9 +191,11 @@ silently ignored.
        ``after`` inside a process, ``transport``, ``inertial`` and
        ``reject`` are refused.
 
-An object initialized with no value or reset starts at 0, including
-``integer`` (VHDL would give ``T'left``). This is a deliberate divergence
-for C++/SV users. The full divergence table is in
+An object with no initializer starts at 0, where VHDL would give ``'U'`` or
+``T'left``. This is a deliberate divergence for C++/SV users. Reset
+randomization (``+verilator+rand+reset+N``) works as for SystemVerilog on
+vectors and ``std_logic``; ``integer`` objects always start at 0, as an SV
+``int`` does. The full divergence table is in
 ``docs/vhdl/limitations.rst``.
 
 5. Architecture

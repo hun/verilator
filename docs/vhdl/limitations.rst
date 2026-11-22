@@ -43,8 +43,16 @@ Value model
 ``'-'`` become X in constants but 0 or 1 at run time. A ``'Z'`` constant is
 preserved for a tristate driver and resolves to 0 elsewhere. There is no
 nine-state resolution: two enabled drivers with different values resolve to 1,
-where VHDL produces ``'X'``. Objects with no initializer or reset start at 0,
-including ``integer`` (VHDL would give ``T'left``).
+where VHDL produces ``'X'``. VHDL starts an object with no initializer at
+``'U'`` or ``T'left``; the model starts it at 0 by default.
+
+Verilator's reset randomization applies as for SystemVerilog. With
+:vlopt:`--x-initial` ``unique``, its default, running the model with
+``+verilator+rand+reset+2`` starts vectors and ``std_logic`` signals that have
+no initializer at random values, chosen by ``+verilator+seed+<value>``, which
+exposes a missing reset. An object with an explicit initializer keeps it.
+``integer`` objects are not randomized and always start at 0, as a
+SystemVerilog ``int`` does.
 
 Signals, variables and scheduling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
