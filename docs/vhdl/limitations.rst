@@ -82,6 +82,17 @@ are packed into one wide vector: indexing becomes a bit select and a dynamic
 index becomes a variable part-select, so model and compile cost grow with total
 packed width. There is no independent V3 variable or type per element.
 
+Waveform tracing
+~~~~~~~~~~~~~~~~
+
+Tracing with :vlopt:`--trace-vcd`, :vlopt:`--trace-fst` and the other trace
+formats keeps the design hierarchy and the VHDL signal names, but the types
+are those of the packed model. An enumeration signal appears as its integer
+encoding, in declaration order, without the literal names, in FST as well as
+VCD. A record signal appears as one vector with the fields concatenated, the
+first declared field in the high bits, and :vlopt:`--trace-structs` does not
+split it into fields. An array is one vector in the same way.
+
 Assertions and reports
 ~~~~~~~~~~~~~~~~~~~~~~
 

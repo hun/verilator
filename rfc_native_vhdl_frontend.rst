@@ -385,6 +385,9 @@ maintenance plan; until then the numbers are reported for information.
   matching ``case``, enumeration range subtypes, resolution indications and
   some type attributes are not implemented.
 - PSL directives are skipped. Library namespace handling is simplified.
+- Waveforms keep the hierarchy and signal names, but an enumeration shows
+  as its integer encoding and a record or array as one vector, in VCD and
+  FST alike, because they are lowered to packed vectors.
 - Use clauses are scoped per design unit, and the types of the IEEE
   packages must be made visible by one. The subprograms of those packages
   and the ``library`` clause itself are not checked: a unit that calls them
