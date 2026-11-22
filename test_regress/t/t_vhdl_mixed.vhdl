@@ -34,6 +34,9 @@ begin
   q <= std_logic_vector(s);
 end;
 
+library ieee;
+use ieee.std_logic_1164.all;
+
 entity mixed_dut is
   port (
     clk : in std_logic;

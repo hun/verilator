@@ -1618,8 +1618,34 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     return resolveTypePredefined(spec, mark, out);
 }
 
+bool Lowering::checkStdTypeVisible(const TypeSpec& spec, const std::string& mark) {
+    // The packages that declare each type of the IEEE libraries; the types of package
+    // STANDARD are always visible
+    static const std::map<std::string, std::vector<std::string>> declaredBy
+        = {{"std_logic", {"std_logic_1164"}},
+           {"std_ulogic", {"std_logic_1164"}},
+           {"std_logic_vector", {"std_logic_1164"}},
+           {"std_ulogic_vector", {"std_logic_1164"}},
+           {"unsigned", {"numeric_std", "numeric_bit", "std_logic_arith"}},
+           {"signed", {"numeric_std", "numeric_bit", "std_logic_arith"}},
+           {"u_unsigned", {"numeric_std", "numeric_bit", "std_logic_arith"}},
+           {"u_signed", {"numeric_std", "numeric_bit", "std_logic_arith"}}};
+    const auto declared = declaredBy.find(mark);
+    if (declared == declaredBy.end()) return true;
+    for (const std::string& pkg : declared->second) {
+        if (spec.pkg == pkg || m_stdUses.count(pkg) || m_stdUses.count(pkg + "." + mark)) {
+            return true;
+        }
+    }
+    spec.flp->v3error("VHDL: type '" + mark + "' is not visible; a use clause for package '"
+                      + declared->second.front() + "' is required in this design unit"
+                      + " (IEEE 1076-2008 12.4).");
+    return false;
+}
+
 bool Lowering::resolveTypePredefined(const TypeSpec& spec, const std::string& mark, VType& out) {
     FileLine* const flp = spec.flp;
+    if (!checkStdTypeVisible(spec, mark)) return false;
     if (mark == "u_unsigned" || mark == "u_signed") {
         // An unconstrained numeric_std vector type; the use site supplies the index range
         if (!spec.hasRange && spec.constraintMark.empty()) {

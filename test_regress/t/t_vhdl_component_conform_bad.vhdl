@@ -24,6 +24,9 @@ begin
   b <= 1;
 end;
 
+library ieee;
+use ieee.std_logic_1164.all;
+
 entity leaf_type is
   port (
     a : in  std_logic;
@@ -35,6 +38,9 @@ architecture rtl of leaf_type is
 begin
   b <= 1;
 end;
+
+library ieee;
+use ieee.std_logic_1164.all;
 
 entity t is
   port (

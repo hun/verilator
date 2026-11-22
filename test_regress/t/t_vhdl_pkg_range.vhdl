@@ -9,6 +9,9 @@
 -- A record element range names a package integer constant; the package must
 -- prescan its integer constants before registering types so the range folds.
 
+library ieee;
+use ieee.std_logic_1164.all;
+
 package t_vhdl_pkg_range_pkg is
   constant W : integer := 4;
   type rec_t is record

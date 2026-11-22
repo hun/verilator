@@ -22,6 +22,9 @@ begin
   o <= 1;
 end;
 
+library ieee;
+use ieee.std_logic_1164.all;
+
 entity leaf_bad_actual is
   generic (g : std_logic_vector(3 downto 0) := "1111");
   port (o : out integer);
@@ -31,6 +34,9 @@ architecture rtl of leaf_bad_actual is
 begin
   o <= 1;
 end;
+
+library ieee;
+use ieee.std_logic_1164.all;
 
 entity t is
   port (o : out integer);

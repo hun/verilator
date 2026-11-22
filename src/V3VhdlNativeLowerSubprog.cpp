@@ -54,6 +54,7 @@ void Lowering::setScope(const ScopeSave& saved) {
     m_enumConsts = saved.enumConsts;
     m_subprograms = saved.subprograms;
     m_components = saved.components;
+    m_stdUses = saved.stdUses;
 }
 
 //! Whether two declarations are one profile: a declaration of the same name and formal

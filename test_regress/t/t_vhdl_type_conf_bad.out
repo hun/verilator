@@ -1,26 +1,26 @@
-%Error: t/t_vhdl_type_conf_bad.vhdl:54:37: VHDL: constant value of type 'integer' does not have the target's base type 'std_logic'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:58:37: VHDL: constant value of type 'integer' does not have the target's base type 'std_logic'.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_type_conf_bad.vhdl:55:31: VHDL: type conversion 'time' from an unrelated type.
-%Error: t/t_vhdl_type_conf_bad.vhdl:56:34: VHDL: initial value of type 'integer' does not have the target's base type 'std_logic'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:71:12: VHDL: assignment value of type 'std_logic_vector' does not have the target's length.
-%Error: t/t_vhdl_type_conf_bad.vhdl:72:12: VHDL: assignment value uses an enumeration literal of another type.
-%Error: t/t_vhdl_type_conf_bad.vhdl:74:12: VHDL: assignment value of type 'integer' does not have the target's base type 'std_logic'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:75:12: VHDL: assignment value of type 'std_logic_vector' does not have the target's base type 'integer'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:76:12: VHDL: assignment value of type 'std_logic_vector' does not have the target's base type 'unsigned'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:77:13: VHDL: assignment value of type 'boolean' does not have the target's base type 'std_logic'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:78:13: VHDL: logical operator operands do not have the same element type.
-%Error: t/t_vhdl_type_conf_bad.vhdl:79:13: VHDL: 'not' operand is not a logic or bit value.
-%Error: t/t_vhdl_type_conf_bad.vhdl:80:13: VHDL: 'not' operand is not a logic or bit value.
-%Error: t/t_vhdl_type_conf_bad.vhdl:81:13: VHDL: relational operator operands do not have the same base type.
-%Error: t/t_vhdl_type_conf_bad.vhdl:82:13: VHDL: relational operator operands do not have the same base type.
-%Error: t/t_vhdl_type_conf_bad.vhdl:83:13: VHDL: relational operator compares an array with a scalar.
-%Error: t/t_vhdl_type_conf_bad.vhdl:84:13: VHDL: relational operator compares an array with a scalar.
-%Error: t/t_vhdl_type_conf_bad.vhdl:60:12: VHDL: return value of type 'integer' does not have the target's base type 'std_logic'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:89:13: VHDL: arguments to 'ident' do not conform to its formal parameters.
-%Error: t/t_vhdl_type_conf_bad.vhdl:92:13: VHDL: type conversion 'std_logic_vector' from an unrelated type.
-%Error: t/t_vhdl_type_conf_bad.vhdl:93:12: VHDL: type conversion 'integer' from an unrelated type.
-%Error: t/t_vhdl_type_conf_bad.vhdl:98:10: VHDL: assignment value of type 'integer' does not have the target's base type 'std_logic'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:102:54: VHDL: assignment value of type 'integer' does not have the target's base type 'std_logic_vector'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:103:42: VHDL: selected assignment value of type 'integer' does not have the target's base type 'std_logic'.
-%Error: t/t_vhdl_type_conf_bad.vhdl:105:49: VHDL: generic actual does not have the target's type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:59:31: VHDL: type conversion 'time' from an unrelated type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:60:34: VHDL: initial value of type 'integer' does not have the target's base type 'std_logic'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:75:12: VHDL: assignment value of type 'std_logic_vector' does not have the target's length.
+%Error: t/t_vhdl_type_conf_bad.vhdl:76:12: VHDL: assignment value uses an enumeration literal of another type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:78:12: VHDL: assignment value of type 'integer' does not have the target's base type 'std_logic'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:79:12: VHDL: assignment value of type 'std_logic_vector' does not have the target's base type 'integer'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:80:12: VHDL: assignment value of type 'std_logic_vector' does not have the target's base type 'unsigned'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:81:13: VHDL: assignment value of type 'boolean' does not have the target's base type 'std_logic'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:82:13: VHDL: logical operator operands do not have the same element type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:83:13: VHDL: 'not' operand is not a logic or bit value.
+%Error: t/t_vhdl_type_conf_bad.vhdl:84:13: VHDL: 'not' operand is not a logic or bit value.
+%Error: t/t_vhdl_type_conf_bad.vhdl:85:13: VHDL: relational operator operands do not have the same base type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:86:13: VHDL: relational operator operands do not have the same base type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:87:13: VHDL: relational operator compares an array with a scalar.
+%Error: t/t_vhdl_type_conf_bad.vhdl:88:13: VHDL: relational operator compares an array with a scalar.
+%Error: t/t_vhdl_type_conf_bad.vhdl:64:12: VHDL: return value of type 'integer' does not have the target's base type 'std_logic'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:93:13: VHDL: arguments to 'ident' do not conform to its formal parameters.
+%Error: t/t_vhdl_type_conf_bad.vhdl:96:13: VHDL: type conversion 'std_logic_vector' from an unrelated type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:97:12: VHDL: type conversion 'integer' from an unrelated type.
+%Error: t/t_vhdl_type_conf_bad.vhdl:102:10: VHDL: assignment value of type 'integer' does not have the target's base type 'std_logic'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:106:54: VHDL: assignment value of type 'integer' does not have the target's base type 'std_logic_vector'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:107:42: VHDL: selected assignment value of type 'integer' does not have the target's base type 'std_logic'.
+%Error: t/t_vhdl_type_conf_bad.vhdl:109:49: VHDL: generic actual does not have the target's type.
 %Error: Exiting due to

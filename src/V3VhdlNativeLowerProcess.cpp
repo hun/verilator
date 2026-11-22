@@ -325,6 +325,7 @@ Lowering::ScopeSave Lowering::saveScope() const {
     saved.enumConsts = m_enumConsts;
     saved.subprograms = m_subprograms;
     saved.components = m_components;
+    saved.stdUses = m_stdUses;
     return saved;
 }
 
@@ -340,6 +341,7 @@ void Lowering::restoreScope(const ScopeSave& saved) {
     m_enumConsts = saved.enumConsts;
     m_subprograms = saved.subprograms;
     m_components = saved.components;
+    m_stdUses = saved.stdUses;
 }
 
 //! Declare the types, constants and variables of a process declarative part

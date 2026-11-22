@@ -187,6 +187,7 @@ bool Lowering::registerGenerics(const std::vector<GenericDecl>& generics,
 }
 
 void Lowering::importPackage(const std::string& name, const std::string& only) {
+    m_stdUses.insert(only.empty() ? name : name + "." + only);
     if (only.empty()) {
         if (name == "std_logic_signed") m_stdLogicSigned = true;
         if (name == "std_logic_unsigned") m_stdLogicUnsigned = true;
@@ -461,6 +462,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_stdLogicSigned = false;
     m_stdLogicUnsigned = false;
     m_stdLogicArith = false;
+    m_stdUses.clear();
     m_scope.clear();
     m_aliases.clear();
     m_subprograms.clear();

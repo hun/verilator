@@ -1,4 +1,4 @@
 %Error: t/t_vhdl_generic_shape_bad.vhdl:16:12: VHDL: constant value does not have the type's length.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_vhdl_generic_shape_bad.vhdl:42:49: VHDL: generic actual does not have the generic's length.
+%Error: t/t_vhdl_generic_shape_bad.vhdl:48:49: VHDL: generic actual does not have the generic's length.
 %Error: Exiting due to

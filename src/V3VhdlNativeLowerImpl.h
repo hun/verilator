@@ -177,6 +177,7 @@ class Lowering final {
         std::map<std::string, std::vector<SubprogramRef>> subprograms;
         // Visible component declarations by folded name
         std::map<std::string, const ComponentDecl*> components;
+        std::set<std::string> stdUses;  // Standard packages the context clause names
     };
     //! One name bound during subprogram inlining: an expression value, or an lvalue
     struct InlineBinding final {
@@ -373,6 +374,8 @@ class Lowering final {
     bool m_stdLogicArith = false;  // `use ieee.std_logic_arith.all` is in effect
     bool m_numericStdUnsigned = false;  // `use ieee.numeric_std_unsigned.all`
     bool m_numericStdSigned = false;  // `use ieee.numeric_std_signed.all`
+    //! Standard packages the unit's `use` clauses name, as `pkg` for `.all` or `pkg.decl`
+    std::set<std::string> m_stdUses;
     //! Element structure of an array dtype, including a function result's return type
     std::map<AstNodeDType*, VType> m_arrayDtypes;
     //! The array structure of one lowering of an expression, which its packed dtype loses
@@ -636,6 +639,8 @@ class Lowering final {
 
     bool resolveType(const TypeSpec& spec, VType& out);
     bool resolveTypePredefined(const TypeSpec& spec, const std::string& mark, VType& out);
+    //! Whether a use clause or a qualified name makes a type of a standard package visible
+    bool checkStdTypeVisible(const TypeSpec& spec, const std::string& mark);
     void registerType(const TypeDecl& decl);
     void registerEnumType(FileLine* flp, const TypeDecl& decl, VType& type);
     bool resolveArrayElement(const TypeDecl& decl, VType& elem);

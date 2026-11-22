@@ -11,6 +11,9 @@
 -- subtype's low bound (IEEE 1076-2008 9.3.3.2). The element type is a record whose members
 -- are constrained subtypes, and an element is selected through the array index.
 
+library ieee;
+use ieee.std_logic_1164.all;
+
 package pkg is
   subtype s8 is string(1 to 8);
   type t_rec is record

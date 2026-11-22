@@ -26,6 +26,14 @@ Library clauses, ``work`` as the default library, case-insensitive name lookup,
 source locations in diagnostics, and ``.vhd``/``.vhdl`` extension detection are
 supported. ``--top-module`` selects the top entity.
 
+A context clause applies to one design unit and to that entity's architectures,
+as in a VHDL analyzer. The types of the IEEE packages ``std_logic_1164``,
+``numeric_std``, ``numeric_bit`` and ``std_logic_arith`` are visible only where
+a use clause, a use clause naming that one type, or a selected name such as
+``ieee.std_logic_1164.std_logic`` makes them so; otherwise the type is refused
+as not visible. A second entity in a file therefore needs its own context
+clause.
+
 Mixed-language designs are partially supported: a SystemVerilog top may
 instantiate a VHDL entity in one invocation, and a VHDL hierarchy can be built
 as a ``--lib-create`` library and instantiated from SystemVerilog. A VHDL design
@@ -128,6 +136,10 @@ Known limitations
   diagnostics are still imprecise.
 - ``std_logic_signed`` arithmetic and comparison are not modeled.
 - PSL directives are skipped rather than checked.
+- Visibility is enforced for the types of the IEEE packages only. The
+  subprograms of those packages are not checked, so ``to_integer`` is
+  accepted without ``use ieee.numeric_std.all``, and a missing
+  ``library ieee;`` clause is not reported, where a VHDL analyzer rejects both.
 - ``case generate``, matching ``case``, enumeration range subtypes and
   resolution indications are not implemented, and neither are type attributes
   such as ``'image`` on an enumeration.

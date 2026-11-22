@@ -1,0 +1,6 @@
+%Error: t/t_vhdl_use_scope_bad.vhdl:26:16: VHDL: type 'std_logic' is not visible; a use clause for package 'std_logic_1164' is required in this design unit (IEEE 1076-2008 12.4).
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_use_scope_bad.vhdl:26:35: VHDL: type 'std_logic' is not visible; a use clause for package 'std_logic_1164' is required in this design unit (IEEE 1076-2008 12.4).
+%Error: t/t_vhdl_use_scope_bad.vhdl:31:3: VHDL: unknown identifier 'y'.
+%Error: t/t_vhdl_use_scope_bad.vhdl:43:14: VHDL: type 'unsigned' is not visible; a use clause for package 'numeric_std' is required in this design unit (IEEE 1076-2008 12.4).
+%Error: Exiting due to

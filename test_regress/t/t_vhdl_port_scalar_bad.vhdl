@@ -26,6 +26,9 @@ begin
   o <= n;
 end;
 
+library ieee;
+use ieee.std_logic_1164.all;
+
 entity leaf_bad_default is
   port (
     a : in  std_logic := 5;
@@ -37,6 +40,9 @@ architecture rtl of leaf_bad_default is
 begin
   o <= 1;
 end;
+
+library ieee;
+use ieee.std_logic_1164.all;
 
 entity t is
   port (

@@ -263,9 +263,9 @@ entity's emitted tree.
 7. Evidence
 ===========
 
-- 353 regression drivers, 97 diagnostic/tree goldens, 353 ``.vhdl``
+- 355 regression drivers, 98 diagnostic/tree goldens, 355 ``.vhdl``
   fixtures, 228 value-checked C++ harnesses.
-- Full VHDL suite (``t_vhdl*``, ``--vlt``): 353 passed / 0 failed in ~15 s
+- Full VHDL suite (``t_vhdl*``, ``--vlt``): 355 passed / 0 failed in ~15 s
   on 16 cores locally. Both distribution tests (``t_dist_test_style``,
   ``t_dist_copyright``) pass. The suite needs only the built Verilator and
   a C++ compiler; no test invokes GHDL or nvc.
@@ -346,6 +346,9 @@ maintenance plan; until then the numbers are reported for information.
   matching ``case``, enumeration range subtypes, resolution indications and
   some type attributes are not implemented.
 - PSL directives are skipped. Library namespace handling is simplified.
+- Use clauses are scoped per design unit, and the types of the IEEE
+  packages must be made visible by one. The subprograms of those packages
+  and the ``library`` clause itself are not checked.
 - Zero-width objects outside a whole-array assignment are not modelled;
   some legal constructs are falsely rejected as ``BLKANDNBLK`` or
   ``ASSIGNIN``.
