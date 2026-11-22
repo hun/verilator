@@ -180,8 +180,9 @@ silently ignored.
    - - Assert/report
      - Accepted. Static assertions may fold at elaboration; a literal
        report message prints, ``severity failure`` stops the run with a
-       non-zero exit status like ``$fatal``, and a non-literal message is
-       dropped.
+       non-zero exit status like ``$fatal``, and a non-literal message
+       prints the fixed text ``report`` (``Assertion failed`` for an
+       assertion).
    - - Timing
      - A process with one ``wait for`` and a nonzero ``after`` on a
        concurrent assignment lower to timed blocks under ``--binary``, at

@@ -29,8 +29,8 @@ supported. ``--top-module`` selects the top entity.
 Mixed-language designs are partially supported: a SystemVerilog top may
 instantiate a VHDL entity in one invocation, and a VHDL hierarchy can be built
 as a ``--lib-create`` library and instantiated from SystemVerilog. A VHDL design
-cannot directly instantiate a SystemVerilog module; use the library boundary
-instead. No types, packages or hierarchical references cross that boundary.
+cannot directly instantiate a SystemVerilog module; instantiate the VHDL design
+from a SystemVerilog top instead. No types, packages or hierarchical references cross that boundary.
 
 Model divergences
 -----------------
@@ -83,9 +83,10 @@ Timing
 ``wait for`` is supported: a timed process lowers to an initial block that
 repeats after an ``AstDelay``. A nonzero ``after`` on a concurrent signal
 assignment is also supported and lowers to a timed always block. Both delays
-are scaled to the module's time unit. A zero ``after`` in a process body is a
-delta; a nonzero one there is refused, as are ``transport``, ``inertial`` and
-``reject``. Rather than silently dropping a delay that would change behavior,
+keep their absolute VHDL time whatever :vlopt:`--timescale` says. A zero
+``after`` in a process body is a delta; a nonzero one there is refused, as are
+``transport``, ``inertial`` and ``reject``. A process with more than one
+``wait`` is refused. Rather than silently dropping a delay that would change behavior,
 the frontend emits a diagnostic. Single top-level clock waits and simple timed
 testbench constructs are supported by the ``--binary`` timing model.
 
@@ -104,7 +105,8 @@ Not supported
 
 These constructs are refused with a diagnostic: access, protected, file and
 ``textio`` types; ``force``/``release``; runtime ``'value`` and string parsing;
-physical objects and ``now``; real objects and fixed/floating-point packages;
+physical objects and ``now``; real signals, variables and ports (real constants
+fold at elaboration) and fixed/floating-point packages;
 user-defined resolution functions; external names; allocators; multi-dimensional
 ports; ``linkage`` ports, ``disconnect`` and ``guarded`` signals; embedded
 other-language source; and general timing constructs. VHDL-2019 is outside the
@@ -118,7 +120,9 @@ Known limitations
   diagnostics are still imprecise.
 - ``std_logic_signed`` arithmetic and comparison are not modeled.
 - PSL directives are skipped rather than checked.
-- ``case generate`` and matching ``case`` are not implemented.
+- ``case generate``, matching ``case``, enumeration range subtypes and
+  resolution indications are not implemented, and neither are type attributes
+  such as ``'image`` on an enumeration.
 - Library namespace handling is simplified; library names can come from a
   libmap even for a VHDL ``work`` file in a mixed run.
 - Some legal constructs are rejected as ``BLKANDNBLK`` or ``ASSIGNIN``.

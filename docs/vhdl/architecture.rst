@@ -6,7 +6,7 @@
 Native VHDL frontend architecture
 ==================================
 
-The native frontend translates SystemVerilog's cousin, VHDL, directly into the
+The native frontend translates VHDL directly into the
 V3 AST that the rest of Verilator consumes. It is the only VHDL frontend and
 runs in one process, with no intermediate files. Everything below is inside the
 frontend; the middle end and the runtime library are unchanged by it, and no V3
@@ -36,6 +36,7 @@ File                                                    Role
 ``src/V3VhdlNativeLower*.cpp``                          Seven per-construct lowering units
 ``src/V3VhdlNativeLowerImpl.h``                         Shared declarations of the ``Lowering`` pass
 ``src/V3VhdlNativeTypes.h``                             Value types shared by the lowering units
+``src/V3VhdlLink.h``, ``.cpp``                          Checks the emitted AST shape (debug builds)
 ======================================================  ============================================
 
 The frontend is deliberately two trees rather than one. The parser builds a tree
@@ -224,19 +225,29 @@ string, whatever its characters are -- the parser does not retype it as a bit
 string. A non-literal message is not modelled, but the statement still runs: its
 text falls back to ``report`` (or to ``Assertion failed`` for an assertion). A
 report or assertion of ``severity failure`` lowers like ``$fatal``: a
-``DT_FATAL`` display and a fatal ``AstStop`` at the statement, so the statements after it are not lowered, and after a failing
-assertion they run only when it did not fail. A process whose only stopper is
-such a failure runs once, at time zero.
+``DT_FATAL`` display and a fatal ``AstStop`` at the statement. A process whose
+only stopper is such a failure runs once, at time zero.
 
----------------
+--------------------------
+The pre-width AST contract
+--------------------------
+
+The frontend emits the V3 AST already in the shape ``V3Width`` leaves alone:
+data types are canonical, no ``AstParseRef`` or ``childDTypep`` remains, and
+every expression and variable has a data type. ``V3VhdlLink`` asserts this
+after ``V3LinkCells`` and before ``V3Width``, on the VHDL modules only, since
+a mixed design also holds SystemVerilog modules still in parse shape. The
+check runs in every debug build and is compiled out of release builds.
+
+---------------------
 What it may not do
----------------
+---------------------
 
 The frontend may not add a V3 AST node, a V3 pass or a runtime primitive. Every
 construct is expressed with nodes the middle end already has: ``AstAlways``,
 ``AstAssign``, ``AstAssignDly``, ``AstIf``, ``AstCase``, ``AstLoop`` with
 ``AstLoopTest``, ``AstDelay``, ``AstInitial``, ``AstInitialStatic``,
-``AstDisplay`` and ``AstFinish``. Where a construct has no such expression, the
+``AstDisplay``, ``AstStop`` and ``AstFinish``. Where a construct has no such expression, the
 frontend refuses it with a diagnostic rather than extending the middle end, and
 the finding is recorded instead.
 

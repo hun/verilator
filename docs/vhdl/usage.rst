@@ -314,8 +314,8 @@ where :file:`dut.vhdl` declares ``entity mixed_dut``. The instance binds
 like any other module instance: the port names are the entity's, folded to
 lower case, with the widths the entity declares. Each language elaborates
 its own hierarchy, so a VHDL entity may instantiate further VHDL entities
-below the SystemVerilog top. A SystemVerilog testbench that generates its own
-clock needs :vlopt:`--timing`; the VHDL side contributes no delays of its own.
+below the SystemVerilog top. Delays on either side, a SystemVerilog testbench clock or a VHDL
+``wait for`` or ``after``, need :vlopt:`--timing`.
 Name every design file on the command line:
 an invocation that holds VHDL sources does not search :vlopt:`-y`/`-v`
 directories for SystemVerilog modules.
