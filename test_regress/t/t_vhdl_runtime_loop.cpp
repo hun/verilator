@@ -39,7 +39,8 @@ int main(int argc, char** argv) {
         const unsigned hi = v & 3u;
         const unsigned expectedSlice = 3u & ((1u << (hi + 1)) - 1u);
         if (static_cast<bool>(topp->found) != expectedFound
-            || (expectedFound && static_cast<unsigned>(topp->addr) != static_cast<unsigned>(expectedAddr))) {
+            || (expectedFound
+                && static_cast<unsigned>(topp->addr) != static_cast<unsigned>(expectedAddr))) {
             std::printf("%%Error: din=%02x found=%d addr=%u expected %d/%d\n", v,
                         static_cast<int>(topp->found), static_cast<unsigned>(topp->addr),
                         expectedFound ? 1 : 0, expectedAddr);

@@ -12,8 +12,6 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_mem_init.vhdl'
 
-test.lint(make_top_shell=False,
-          make_main=False,
-          verilator_flags2=['--language', 'vhdl'])
+test.lint(make_top_shell=False, make_main=False, verilator_flags2=['--language', 'vhdl'])
 
 test.passes()

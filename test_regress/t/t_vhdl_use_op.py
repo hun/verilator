@@ -12,9 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_use_op.vhdl'
 
-test.compile(verilator_flags2=[
-    '--language', 'vhdl', '--top-module', 'tb', '--binary'
-])
+test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 'tb', '--binary'])
 
 test.execute()
 

@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_lex_extid_bad.vhdl'
 
 # An extended identifier missing its closing backslash is rejected.
 
-test.lint(verilator_flags2=['--language', 'vhdl'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

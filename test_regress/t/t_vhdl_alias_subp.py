@@ -15,13 +15,9 @@ test.top_filename = 't/t_vhdl_alias_subp.vhdl'
 # The native frontend has no subprogram alias: every call through one is refused as
 # `function call 'add5' is not supported yet`
 
-
-
-
 test.compile(make_top_shell=False,
              make_main=False,
-             verilator_flags2=[
-                 '--language', 'vhdl', '--exe', test.pli_filename])
+             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
 
 test.execute()
 

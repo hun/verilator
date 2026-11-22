@@ -15,11 +15,10 @@ test.top_filename = 't/t_vhdl_logic_resolved.vhdl'
 # IEEE 1164: std_logic and the arrays and records built from it are resolved,
 # so two drivers are legal and must not be reported as unresolved.
 
-test.compile(make_top_shell=False,
-             make_main=False,
-             verilator_flags2=[
-                 '--language', 'vhdl', '-Wno-MULTIDRIVEN',
-                 '--exe', test.pli_filename])
+test.compile(
+    make_top_shell=False,
+    make_main=False,
+    verilator_flags2=['--language', 'vhdl', '-Wno-MULTIDRIVEN', '--exe', test.pli_filename])
 
 test.execute()
 

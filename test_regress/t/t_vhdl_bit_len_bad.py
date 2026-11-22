@@ -14,9 +14,8 @@ test.top_filename = 't/t_vhdl_bit_len_bad.vhdl'
 
 # GHDL reports the same rule in its own words; the golden pins the frontend message
 
-
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

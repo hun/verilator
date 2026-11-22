@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_attr_val_bad.vhdl'
 # IEEE 1076-2008 16.2.2: val outside the type range is an error
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

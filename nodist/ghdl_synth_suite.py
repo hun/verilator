@@ -46,8 +46,8 @@ COMMENT_RE = re.compile(r'--[^\n]*')
 TOP_RE = re.compile(r'\b(?:synth_tb|synth_only|synth_analyze)\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_TOP_RE = re.compile(r'\bsynth\b[^\n]*?\s-e\s+([A-Za-z][A-Za-z0-9_]*)')
 SYNTH_FAIL_RE = re.compile(r'\bsynth_failure\b([^\n]*)')
-PACKAGE_RE = re.compile(
-    r'^\s*package\s+(?!body\b)([A-Za-z][A-Za-z0-9_]*)\b', re.IGNORECASE | re.MULTILINE)
+PACKAGE_RE = re.compile(r'^\s*package\s+(?!body\b)([A-Za-z][A-Za-z0-9_]*)\b',
+                        re.IGNORECASE | re.MULTILINE)
 USE_WORK_RE = re.compile(r'\buse\s+work\.([A-Za-z][A-Za-z0-9_]*)', re.IGNORECASE)
 
 
@@ -113,6 +113,7 @@ def expand_packages(testdir, files):
     `files`, mirroring how the GHDL testsuite analyzes a design with the packages it
     `use`s. A depended-upon package is emitted before its dependents so the frontend
     can analyze the set in one run. Files that already appear in `files` are not added."""
+
     def text_of(path):
         try:
             return COMMENT_RE.sub('', path.read_text(errors='replace'))
@@ -295,8 +296,8 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
             # GHDL's testsuite analyzes each top's own file, not every file in the
             # directory; passing all of them would merge alternative implementations
             candidates = entity_files[top]
-            chosen = sorted(candidates,
-                            key=lambda f, top=top: (0 if f.stem.lower() == top else 1, f.name))[0]
+            chosen = min(candidates,
+                         key=lambda f, top=top: (0 if f.stem.lower() == top else 1, f.name))
             case_files = script_case_files(testdir, top)
             if case_files:
                 files = [Path(f) for f in case_files]

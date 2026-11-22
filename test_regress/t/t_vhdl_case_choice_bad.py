@@ -16,7 +16,7 @@ test.top_filename = 't/t_vhdl_case_choice_bad.vhdl'
 # and every choice must be distinct
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

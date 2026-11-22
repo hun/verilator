@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_nor_chain_bad.vhdl'
 # IEEE 1076-2008 9.1: nand and nor are non-associative
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

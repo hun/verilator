@@ -12,8 +12,6 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_top_case.vhdl'
 
-test.compile(verilator_flags2=[
-    '--language', 'vhdl', '--top-module', 'CaseTop', '--cc'
-])
+test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 'CaseTop', '--cc'])
 
 test.passes()

@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_type_ambig_bad.vhdl'
 # Two packages export the same type name; a qualified mark is required
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

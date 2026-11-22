@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_stmt_bad.vhdl'
 
 # Invalid choices, conditions, operands and sensitivity elements are reported.
 
-test.lint(verilator_flags2=['--language', 'vhdl'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

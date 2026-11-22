@@ -11,15 +11,14 @@ import vltest_bootstrap
 
 test.scenarios('vlt_all')
 
-
 test.top_filename = 't/t_vhdl_selected_inst.vhdl'
-
 
 test.compile(make_top_shell=False,
              make_main=False,
              verilator_flags2=[
-                 '--language', 'vhdl', '--top-module',
-                 't_vhdl_selected_inst', '--exe', test.pli_filename])
+                 '--language', 'vhdl', '--top-module', 't_vhdl_selected_inst', '--exe',
+                 test.pli_filename
+             ])
 
 test.execute()
 

@@ -21,8 +21,8 @@ int main(int argc, char** argv) {
 
     int fails = 0;
     if (static_cast<unsigned>(topp->o1) != 0x30u || topp->n1 != 63) {
-        std::printf("%%Error: o1=%02x n1=%d expected 30/63\n",
-                    static_cast<unsigned>(topp->o1), static_cast<int>(topp->n1));
+        std::printf("%%Error: o1=%02x n1=%d expected 30/63\n", static_cast<unsigned>(topp->o1),
+                    static_cast<int>(topp->n1));
         ++fails;
     }
     if (static_cast<unsigned>(topp->o2) != 0xau || topp->n2 != 3) {

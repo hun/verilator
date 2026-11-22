@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_driver_bad.vhdl'
 # IEEE 1076-2008 12.6.4: several sources on an unresolved signal are an error
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

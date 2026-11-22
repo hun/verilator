@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
     };
     check("o", topp->o, 0xb);  // row 1 of m, which the aggregate fills first
     check("p", topp->p, 0x9);  // s(1) & s(0) == "10" & "01"
-    check("n", topp->n, 2);    // s'length
+    check("n", topp->n, 2);  // s'length
 
     topp->final();
     delete topp;

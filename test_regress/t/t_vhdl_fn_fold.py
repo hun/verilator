@@ -15,13 +15,9 @@ test.top_filename = 't/t_vhdl_fn_fold.vhdl'
 # The native frontend refuses a return from inside a loop in a function body, so it reports
 # `function does not return a value on all paths` for first_length already
 
-
-
-
 test.compile(make_top_shell=False,
              make_main=False,
-             verilator_flags2=[
-                 '--language', 'vhdl', '--exe', test.pli_filename])
+             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
 
 test.execute()
 

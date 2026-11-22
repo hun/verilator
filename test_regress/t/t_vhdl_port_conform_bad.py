@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_port_conform_bad.vhdl'
 # IEEE 1076-2008 6.5.2.2: the actual must conform to the port's type
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

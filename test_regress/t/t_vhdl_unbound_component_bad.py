@@ -12,12 +12,10 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_unbound_component_bad.vhdl'
 
-
-
 # The SystemVerilog module of that name is in this invocation too: a VHDL instance still
 # binds only to entities analyzed with it, so the design is refused with the same message
 test.lint(verilator_flags2=['--language', 'vhdl', 't/t_vhdl_unbound_component_bad.v'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

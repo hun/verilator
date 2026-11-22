@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_lex_digit_bad.vhdl'
 
 # A digit outside the base of a based literal is rejected.
 
-test.lint(verilator_flags2=['--language', 'vhdl'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

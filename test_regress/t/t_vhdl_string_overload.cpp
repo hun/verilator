@@ -27,8 +27,7 @@ int main(int argc, char** argv) {
         ++fails;
     }
     if (topp->from_integer != 3) {
-        std::printf("%%Error: from_integer=%d expected 3\n",
-                    static_cast<int>(topp->from_integer));
+        std::printf("%%Error: from_integer=%d expected 3\n", static_cast<int>(topp->from_integer));
         ++fails;
     }
     // "hello" (5) + Width (3) through the string generic

@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
     };
     check("o", topp->o, 0xc);  // row(c, 0)(0)
     check("p", topp->p, 0x3);  // row(c, 0)(1)
-    check("n", topp->n, 2);    // c'length
+    check("n", topp->n, 2);  // c'length
 
     topp->final();
     delete topp;

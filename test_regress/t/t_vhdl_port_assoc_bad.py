@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_port_assoc_bad.vhdl'
 
 # Port associations with a missing element, extra positions, default and range errors are reported.
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

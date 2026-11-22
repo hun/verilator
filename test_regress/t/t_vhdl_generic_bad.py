@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_generic_bad.vhdl'
 
 # Missing, open and unmatched generic associations are reported.
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

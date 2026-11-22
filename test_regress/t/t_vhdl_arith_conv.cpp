@@ -32,8 +32,8 @@ int main(int argc, char** argv) {
             if ((static_cast<int>(topp->sl) & 0xff) != shl
                 || (static_cast<int>(topp->sr) & 0xff) != shr) {
                 std::printf("%%Error: v=%02x n=%d sl=%02x sr=%02x exp %02x %02x\n", v, n,
-                            static_cast<int>(topp->sl) & 0xff,
-                            static_cast<int>(topp->sr) & 0xff, shl, shr);
+                            static_cast<int>(topp->sl) & 0xff, static_cast<int>(topp->sr) & 0xff,
+                            shl, shr);
                 ++fails;
             }
         }

@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_array_order_bad.vhdl'
 # IEEE 1076-2008 9.2.3 defines array ordering only for a discrete element type
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

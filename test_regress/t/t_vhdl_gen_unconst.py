@@ -12,14 +12,11 @@ import vltest_bootstrap
 test.scenarios('vlt_all')
 test.top_filename = 't/t_vhdl_gen_unconst.vhdl'
 
-
-
 # The child entity is instantiated, so --top-module keeps the wrapper as the only top
-test.compile(make_top_shell=False,
-             make_main=False,
-             verilator_flags2=[
-                 '--language', 'vhdl', '--top-module', 't', '--exe',
-                 test.pli_filename])
+test.compile(
+    make_top_shell=False,
+    make_main=False,
+    verilator_flags2=['--language', 'vhdl', '--top-module', 't', '--exe', test.pli_filename])
 
 test.execute()
 

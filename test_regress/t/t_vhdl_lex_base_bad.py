@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_lex_base_bad.vhdl'
 
 # A based literal with a base outside 2 to 16 is rejected.
 
-test.lint(verilator_flags2=['--language', 'vhdl'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

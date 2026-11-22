@@ -15,12 +15,10 @@ test.top_filename = 't/t_vhdl_fold_scope.vhdl'
 # The native frontend refuses a return from inside a loop in a function body, so it reports
 # `function does not return a value on all paths` for first_over already
 
-
-test.compile(make_top_shell=False,
-             make_main=False,
-             verilator_flags2=[
-                 '--language', 'vhdl', '--top-module', 't', '--exe',
-                 test.pli_filename])
+test.compile(
+    make_top_shell=False,
+    make_main=False,
+    verilator_flags2=['--language', 'vhdl', '--top-module', 't', '--exe', test.pli_filename])
 
 test.execute()
 

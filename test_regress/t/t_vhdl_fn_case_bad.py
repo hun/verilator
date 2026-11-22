@@ -14,9 +14,8 @@ test.top_filename = 't/t_vhdl_fn_case_bad.vhdl'
 
 # GHDL accepts this source; the golden pins the frontend refusal
 
-
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

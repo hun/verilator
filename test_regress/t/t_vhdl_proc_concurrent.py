@@ -14,8 +14,7 @@ test.top_filename = 't/t_vhdl_proc_concurrent.vhdl'
 
 test.compile(make_top_shell=False,
              make_main=False,
-             verilator_flags2=[
-                 '--language', 'vhdl', '--exe', test.pli_filename])
+             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
 
 test.execute()
 

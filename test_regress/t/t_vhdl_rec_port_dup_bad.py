@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_rec_port_dup_bad.vhdl'
 
 # A record port element associated twice is reported.
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

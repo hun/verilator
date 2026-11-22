@@ -16,7 +16,7 @@ test.top_filename = 't/t_vhdl_pkg_dup_bad.vhdl'
 # replace the first; report it like a duplicate entity.
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

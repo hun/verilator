@@ -12,8 +12,8 @@
 
 #include VM_PREFIX_INCLUDE
 
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);

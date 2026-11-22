@@ -12,11 +12,7 @@ import vltest_bootstrap
 test.scenarios('simulator')
 test.top_filename = 't/t_vhdl_waveform.vhdl'
 
-
-
-test.compile(verilator_flags2=[
-    '--language', 'vhdl', '--binary'
-])
+test.compile(verilator_flags2=['--language', 'vhdl', '--binary'])
 
 test.execute()
 

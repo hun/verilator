@@ -16,7 +16,7 @@ test.top_filename = 't/t_vhdl_bit_inout_unsup.vhdl'
 # the frontend must report it instead of leaking into the net-type check.
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_lex_bitstr_bad.vhdl'
 
 # A bit-string digit outside its base is rejected by the lexer.
 
-test.lint(verilator_flags2=['--language', 'vhdl'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

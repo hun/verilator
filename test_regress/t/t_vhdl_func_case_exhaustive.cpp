@@ -26,13 +26,13 @@ int main(int argc, char** argv) {
         const unsigned wantParity = (bits ^ ((v >> 1) & 1) ^ ((v >> 2) & 1)) & 1;
         const unsigned wantEven = (bits == 0) || (((v >> 1) & 1) != 0) ? 1 : 0;
         if (topp->p != wantParity) {
-            std::printf("%%Error: v=%u parity=%u expected %u\n", v,
-                        static_cast<unsigned>(topp->p), wantParity);
+            std::printf("%%Error: v=%u parity=%u expected %u\n", v, static_cast<unsigned>(topp->p),
+                        wantParity);
             ++fails;
         }
         if (topp->e != wantEven) {
-            std::printf("%%Error: v=%u even=%u expected %u\n", v,
-                        static_cast<unsigned>(topp->e), wantEven);
+            std::printf("%%Error: v=%u even=%u expected %u\n", v, static_cast<unsigned>(topp->e),
+                        wantEven);
             ++fails;
         }
     }

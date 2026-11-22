@@ -28,7 +28,8 @@ test.run(logfile=lib_dir + "/make.log",
 
 # Second run: SystemVerilog top instantiating the generated wrapper module
 test.top_filename = 't/t_vhdl_lib_create.v'
-test.compile(verilator_flags2=["--binary", "-LDFLAGS", "sub/libvhdlsub.a", lib_dir + "/vhdlsub.sv"])
+test.compile(
+    verilator_flags2=["--binary", "-LDFLAGS", "sub/libvhdlsub.a", lib_dir + "/vhdlsub.sv"])
 
 test.execute()
 

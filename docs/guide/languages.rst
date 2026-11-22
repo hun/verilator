@@ -68,20 +68,20 @@ including triple-quoted strings, and \`ifdef expressions.
 VHDL Support
 ------------
 
-Verilator reads VHDL directly, through a frontend built into it; no external
-analyzer is needed. A file whose name ends in :file:`.vhd` or :file:`.vhdl`
-is analyzed as VHDL, a file with another extension when
+Verilator reads VHDL directly, through a frontend built into it; no
+external analyzer is needed. A file whose name ends in :file:`.vhd` or
+:file:`.vhdl` is analyzed as VHDL, a file with another extension when
 :vlopt:`--language vhdl <--language>` or :vlopt:`--default-language` asks
 for it.
 
 The two languages may be mixed in one invocation: both frontends feed one
 elaborated netlist, so a SystemVerilog module can instantiate a VHDL entity
-by name, and a VHDL entity can instantiate others below a SystemVerilog top.
-A VHDL design cannot instantiate a SystemVerilog module.
+by name, and a VHDL entity can instantiate others below a SystemVerilog
+top. A VHDL design cannot instantiate a SystemVerilog module.
 
 What the VHDL frontend accepts, and where its model diverges from a VHDL
-simulator, is documented in :doc:`../vhdl/limitations`; :doc:`../vhdl/usage`
-shows the flow.
+simulator, is documented in :doc:`../vhdl/limitations`;
+:doc:`../vhdl/usage` shows the flow.
 
 
 Verilog AMS Support
@@ -174,8 +174,8 @@ files. The :option:`/*verilator&32;timing_off*/` and
 :option:`/*verilator&32;timing_on*/` metacomments will make Verilator
 ignore the encompassed timing controls and forks, regardless of the chosen
 :vlopt:`--timing` or :vlopt:`--no-timing` option. This can also be achieved
-using the :option:`timing_off` and :option:`timing_on` options in
-Verilator Control Files.
+using the :option:`timing_off` and :option:`timing_on` options in Verilator
+Control Files.
 
 
 .. _language limitations:

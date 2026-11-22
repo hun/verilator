@@ -12,9 +12,7 @@ import vltest_bootstrap
 test.scenarios('simulator')
 test.top_filename = 't/t_vhdl_tb_conc.vhdl'
 
-test.compile(verilator_flags2=[
-    '--language', 'vhdl', '--top-module', 'tb', '--binary'
-])
+test.compile(verilator_flags2=['--language', 'vhdl', '--top-module', 'tb', '--binary'])
 
 test.execute()
 

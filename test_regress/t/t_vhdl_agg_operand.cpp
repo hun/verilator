@@ -25,8 +25,8 @@ int main(int argc, char** argv) {
         ++fails;
     }
     // The one-element aggregate adds the carry bit, not a zero-extended vector
-    const unsigned cases[][3] = {{0x00, 0x00, 0}, {0x0d, 0x07, 1}, {0xff, 0x01, 0},
-                                 {0x80, 0x80, 1}, {0x55, 0xaa, 0}};
+    const unsigned cases[][3]
+        = {{0x00, 0x00, 0}, {0x0d, 0x07, 1}, {0xff, 0x01, 0}, {0x80, 0x80, 1}, {0x55, 0xaa, 0}};
     for (const auto& vec : cases) {
         topp->a = vec[0];
         topp->b = vec[1];

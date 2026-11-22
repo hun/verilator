@@ -15,8 +15,7 @@ test.top_filename = 't/t_vhdl_context_use.vhdl'
 test.compile(make_top_shell=False,
              make_main=False,
              verilator_flags2=[
-                 '--language', 'vhdl', 't/t_vhdl_context_use_ctx.vhdl', '--exe',
-                 test.pli_filename
+                 '--language', 'vhdl', 't/t_vhdl_context_use_ctx.vhdl', '--exe', test.pli_filename
              ])
 
 test.execute()

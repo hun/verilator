@@ -15,7 +15,7 @@ test.top_filename = 't/t_vhdl_const_range_bad.vhdl'
 # IEEE 1076-2008 5.4: a constant is within its subtype bounds
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-             fails=True,
-             expect_filename=test.golden_filename)
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

@@ -14,6 +14,8 @@ test.top_filename = 't/t_vhdl_unit_bad.vhdl'
 
 # Duplicate design units and invalid declarations are reported with the offending name.
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'], fails=True, expect_filename=test.golden_filename)
+test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 'top'],
+          fails=True,
+          expect_filename=test.golden_filename)
 
 test.passes()

@@ -21,8 +21,7 @@ int check(VM_PREFIX* topp, unsigned a, unsigned wantSum) {
     const unsigned sum = static_cast<unsigned>(topp->o);
     const unsigned carry = topp->cy != 0 ? 1u : 0u;
     if (sum != (wantSum & 0x1ffu) || carry != (wantSum >> 8)) {
-        std::printf("%%Error: a = %02x: sum = %03x/%u, expected %03x\n", a, sum, carry,
-                    wantSum);
+        std::printf("%%Error: a = %02x: sum = %03x/%u, expected %03x\n", a, sum, carry, wantSum);
         return 1;
     }
     return 0;

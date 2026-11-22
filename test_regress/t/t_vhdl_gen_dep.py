@@ -14,13 +14,11 @@ test.top_filename = 't/t_vhdl_gen_dep.vhdl'
 
 # The native frontend has no default for a generic that defaults from another generic
 
-
 # The child entity is instantiated, so --top-module keeps the wrapper as the only top
-test.compile(make_top_shell=False,
-             make_main=False,
-             verilator_flags2=[
-                 '--language', 'vhdl', '--top-module', 't', '--exe',
-                 test.pli_filename])
+test.compile(
+    make_top_shell=False,
+    make_main=False,
+    verilator_flags2=['--language', 'vhdl', '--top-module', 't', '--exe', test.pli_filename])
 
 test.execute()
 
