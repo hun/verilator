@@ -8,27 +8,27 @@
 
 -- Every value here is the one GHDL and nvc report for the same expression
 package phys is
-  type FREQ is range 0 to integer'high units
+  type CLK_T is range 0 to integer'high units
     Hz;
     kHz = 1000 Hz;
     MHz = 1000 kHz;
   end units;
-  type BAUD is range 0 to integer'high units
+  type SYM_T is range 0 to integer'high units
     Bd;
     kBd = 1000 Bd;
     MBd = 1000 kBd;
   end units;
-  type MEMORY is range 0 to integer'high units
+  type STORE_T is range 0 to integer'high units
     Byte;
     KiB = 1024 Byte;
     MiB = 1024 KiB;
   end units;
-  constant C_1MHZ : FREQ := 1 MHz;
-  constant C_SUM : FREQ := 2 MHz + 500 kHz;
-  constant C_FRAC : FREQ := 1.5 kHz;
-  constant C_1MIB : MEMORY := 1 MiB;
-  constant C_3MIB : MEMORY := 3 MiB;
-  constant C_1MBD : BAUD := 1 MBd;
+  constant C_1MHZ : CLK_T := 1 MHz;
+  constant C_SUM : CLK_T := 2 MHz + 500 kHz;
+  constant C_FRAC : CLK_T := 1.5 kHz;
+  constant C_1MIB : STORE_T := 1 MiB;
+  constant C_3MIB : STORE_T := 3 MiB;
+  constant C_1MBD : SYM_T := 1 MBd;
 end package;
 
 library work;
@@ -36,8 +36,8 @@ use work.phys.all;
 
 entity t is
   generic (
-    CLOCK_FREQ : FREQ := 100 MHz;
-    SYMBOL_RATE : BAUD := 115200 kBd
+    CLOCK_FREQ : CLK_T := 100 MHz;
+    SYMBOL_RATE : SYM_T := 115200 kBd
   );
   port (
     q_step : out integer;  -- 1 MHz / 1 Hz, the unit that sets the step
@@ -48,7 +48,7 @@ entity t is
     q_div : out integer;  -- 1 MHz / 2 kHz
     q_frac : out integer;  -- 1.5 kHz / 1 Hz, a fractional abstract literal
     q_kib : out integer;  -- 1 MiB / 1 KiB
-    q_mib : out integer;  -- 1 MiB / 1 Byte, the step of the MEMORY type
+    q_mib : out integer;  -- 1 MiB / 1 Byte, the step of the STORE_T type
     q_mib3 : out integer;  -- 3 MiB / 1 Byte, two steps of 1024
     q_mbd : out integer  -- 1 MBd / 1 Bd, a chain of three units
   );
@@ -70,7 +70,7 @@ begin
   -- The divisor's unit is the same type's, only a different multiple of the step
   q_div <= C_1MHZ / 2 kHz;
   q_frac <= C_FRAC / 1 Hz;
-  -- The MEMORY type counts bytes, and its steps are 1024 rather than 1000
+  -- The STORE_T type counts bytes, and its steps are 1024 rather than 1000
   q_kib <= C_1MIB / 1 KiB;
   q_mib <= C_1MIB / 1 Byte;
   q_mib3 <= C_3MIB / 1 Byte;

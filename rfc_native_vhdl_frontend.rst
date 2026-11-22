@@ -11,6 +11,13 @@ Status: draft for maintainer discussion. This is a design proposal, not a
 pull request. Please decide the scope questions in section 11 before review
 effort is spent on the working branch of about 400 commits.
 
+AI assistance: nearly all of the frontend, its tests and its documentation
+were written with heavy assistance from an AI coding agent, under the
+author's direction. Reviewers should read the code as such. The checks on
+it are the regression suite, the open-source corpus and the comparisons
+against GHDL described in section 7. The provenance of generated code is
+also a licensing question (see "Licensing of the corpus").
+
 In short: the frontend parses a synthesizable VHDL-2008 subset and lowers
 it straight into the existing pre-width V3 AST, adding no AST node, pass or
 runtime primitive. The core diff is about 180 added lines in nine files;
@@ -306,12 +313,12 @@ of them. The licenses differ and have not had a legal review:
 The corpus repository commits only its own wrappers, shims, C++ testbenches
 and generated program images, and fetches the upstreams at pinned
 revisions. Some wrappers repeat a few lines of an upstream configuration
-file, and the repository has no license of its own yet. A few regression
-fixtures in ``test_regress/t`` reproduce short upstream declarations, such
-as function signatures and type declarations from hdl-modules, PoC and
-microwatt, and name their origin in a comment. Whether that is acceptable,
-and which license the published corpus carries, should be settled before it
-is published.
+file; those lines stay under the upstream license and keep its notice. The
+corpus will be published under the MIT license, which does not relicense
+the fetched upstream sources. The regression fixtures in ``test_regress/t``
+are independent reductions: a comment names the upstream construct that
+motivated one, and no fixture shares a line of 35 or more characters with
+the corpus sources. The legal review of the points above is still open.
 
 Results on this branch (lint and simulation with Verilator, trace
 comparison against GHDL 7.0.0-dev):

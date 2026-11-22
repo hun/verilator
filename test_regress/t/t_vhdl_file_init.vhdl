@@ -19,27 +19,27 @@ entity t is
 end entity t;
 
 architecture rtl of t is
-  type ram_t is array (0 to 1) of std_logic_vector(7 downto 0);
+  type image_t is array (0 to 1) of std_logic_vector(7 downto 0);
 
   -- hread fills as many hex digits as the target is wide, so the "01" of the
   -- second line is left unread
-  impure function init_ram(name : string) return ram_t is
-    file ram_file : text open read_mode is name;
-    variable ram_line : line;
-    variable temp_word : std_logic_vector(7 downto 0);
-    variable temp_ram : ram_t := (others => (others => '0'));
+  impure function load_image(path : string) return image_t is
+    file img_file : text open read_mode is path;
+    variable img_line : line;
+    variable word : std_logic_vector(7 downto 0);
+    variable image : image_t := (others => (others => '0'));
   begin
     for i in 0 to 1 loop
-      exit when endfile(ram_file);
-      readline(ram_file, ram_line);
-      hread(ram_line, temp_word);
-      temp_ram(i) := temp_word;
+      exit when endfile(img_file);
+      readline(img_file, img_line);
+      hread(img_line, word);
+      image(i) := word;
     end loop;
-    return temp_ram;
-  end function init_ram;
+    return image;
+  end function load_image;
 
   -- The image is read while the design is elaborated, not while it runs
-  signal mem : ram_t := init_ram("t/t_vhdl_file_init.dat");
+  signal mem : image_t := load_image("t/t_vhdl_file_init.dat");
 begin
   o0 <= mem(0);
   o1 <= mem(1);

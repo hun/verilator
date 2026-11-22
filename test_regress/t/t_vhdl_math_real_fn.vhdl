@@ -11,8 +11,8 @@ use ieee.std_logic_1164.all;
 use ieee.math_real.all;
 
 package size_pkg is
-  function ceil_log2(value : positive) return natural;
-  function bits_for(value : positive) return natural;
+  function clog2_real(n : positive) return natural;
+  function bits_for(n : positive) return natural;
 end package;
 
 library ieee;
@@ -20,15 +20,15 @@ use ieee.std_logic_1164.all;
 use ieee.math_real.all;
 
 package body size_pkg is
-  function ceil_log2(value : positive) return natural is
+  function clog2_real(n : positive) return natural is
   begin
     -- A real round trip: the result only exists at elaboration
-    return natural(ceil(log2(real(value))));
+    return natural(ceil(log2(real(n))));
   end function;
 
-  function bits_for(value : positive) return natural is
+  function bits_for(n : positive) return natural is
   begin
-    return ceil_log2(value + 1);
+    return clog2_real(n + 1);
   end function;
 end package body;
 
@@ -50,7 +50,7 @@ use ieee.std_logic_1164.all;
 use work.size_pkg.all;
 
 architecture rtl of t is
-  constant depth : natural := ceil_log2(8);
+  constant depth : natural := clog2_real(8);
   -- The subtype's range names a constant that only a folded call can value
   subtype level_t is natural range 0 to depth;
   constant extra : natural := bits_for(5);

@@ -7,7 +7,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- A user-defined "xor" over T_POLARITY (poc's utils.vhdl) must not be selected for
+-- A user-defined "xor" over edge_sense (poc's utils.vhdl) must not be selected for
 -- `std_logic_vector(z(...)) xor b`, whose operands are both std_logic_vector. The
 -- conversion carries its mark's type, so overload resolution sees a std_logic_vector
 -- and keeps the built-in elementwise operator.
@@ -16,27 +16,27 @@ library ieee;
 use ieee.std_logic_1164.all;
 
 package pol_pkg is
-  type t_polarity is (high_active, low_active);
-  function "xor"(left : t_polarity; right : std_logic_vector) return std_logic_vector;
-  function "xor"(left : std_logic_vector; right : t_polarity) return std_logic_vector;
+  type edge_sense is (sense_hi, sense_lo);
+  function "xor"(lhs : edge_sense; rhs : std_logic_vector) return std_logic_vector;
+  function "xor"(lhs : std_logic_vector; rhs : edge_sense) return std_logic_vector;
 end package pol_pkg;
 
 package body pol_pkg is
-  function "xor"(left : t_polarity; right : std_logic_vector) return std_logic_vector is
+  function "xor"(lhs : edge_sense; rhs : std_logic_vector) return std_logic_vector is
   begin
-    if left = high_active then
-      return right;
+    if lhs = sense_hi then
+      return rhs;
     else
-      return not right;
+      return not rhs;
     end if;
   end function "xor";
 
-  function "xor"(left : std_logic_vector; right : t_polarity) return std_logic_vector is
+  function "xor"(lhs : std_logic_vector; rhs : edge_sense) return std_logic_vector is
   begin
-    if right = high_active then
-      return left;
+    if rhs = sense_hi then
+      return lhs;
     else
-      return not left;
+      return not lhs;
     end if;
   end function "xor";
 end package body pol_pkg;
@@ -58,7 +58,7 @@ end entity t;
 
 architecture rtl of t is
   signal z : unsigned(5 downto 0);
-  constant pol : t_polarity := low_active;
+  constant pol : edge_sense := sense_lo;
 begin
   z <= unsigned(a & "00") + unsigned(b);
 

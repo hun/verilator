@@ -11,30 +11,30 @@ use ieee.std_logic_1164.all;
 
 package deferred_pkg is
   -- Completed in the package body by a function call
-  constant INTEGER_BITS : positive;
-  function get_integer_bits return positive;
-  function log2ceil(arg : positive) return natural;
+  constant WORD_BITS : positive;
+  function word_bits return positive;
+  function clog(n : positive) return natural;
 end package deferred_pkg;
 
 package body deferred_pkg is
-  function get_integer_bits return positive is
+  function word_bits return positive is
   begin
     return 32;
   end function;
 
-  constant INTEGER_BITS : positive := get_integer_bits;
+  constant WORD_BITS : positive := word_bits;
 
-  function log2ceil(arg : positive) return natural is
+  function clog(n : positive) return natural is
   begin
-    if arg = 1 then
+    if n = 1 then
       return 0;
     end if;
-    for i in 1 to INTEGER_BITS - 2 loop
-      if arg <= 2 ** i then
+    for i in 1 to WORD_BITS - 2 loop
+      if n <= 2 ** i then
         return i;
       end if;
     end loop;
-    return INTEGER_BITS - 1;
+    return WORD_BITS - 1;
   end function;
 end package body deferred_pkg;
 
@@ -53,7 +53,7 @@ entity t is
 end entity t;
 
 architecture rtl of t is
-  constant E : natural := log2ceil(13);
+  constant E : natural := clog(13);
   signal s : signed(E - 1 downto 0) := (others => '0');
 begin
   len_o <= E;

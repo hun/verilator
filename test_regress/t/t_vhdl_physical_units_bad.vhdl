@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 package phys is
-  type FREQ is range 0 to integer'high units
+  type CLK_T is range 0 to integer'high units
     Hz;
     kHz = 1000 Hz;
   end units;

@@ -10,18 +10,18 @@ library ieee;
 use ieee.std_logic_1164.all;
 
 package real_pkg is
-  subtype binary_real_t is real range 0.0 to 1.0;
-  subtype binary_integer_t is integer range 0 to 1;
-  function to_int(value : boolean) return binary_integer_t;
+  subtype unit_real_t is real range 0.0 to 1.0;
+  subtype flag_int_t is integer range 0 to 1;
+  function flag_of(cond : boolean) return flag_int_t;
 end package;
 
 library ieee;
 use ieee.std_logic_1164.all;
 
 package body real_pkg is
-  function to_int(value : boolean) return binary_integer_t is
+  function flag_of(cond : boolean) return flag_int_t is
   begin
-    if value then
+    if cond then
       return 1;
     end if;
     return 0;
@@ -45,10 +45,10 @@ use ieee.std_logic_1164.all;
 use work.real_pkg.all;
 
 architecture rtl of t is
-  constant half : binary_real_t := 0.5;
+  constant half : unit_real_t := 0.5;
   -- A comparison of the constrained real subtype, folded at elaboration
-  constant above_quarter : integer range 0 to 1 := to_int(half > 0.25);
+  constant above_quarter : integer range 0 to 1 := flag_of(half > 0.25);
 begin
-  o_bit <= to_int(i_a = '1');
+  o_bit <= flag_of(i_a = '1');
   o_above <= above_quarter;
 end architecture;
