@@ -140,6 +140,11 @@ Known limitations
   subprograms of those packages are not checked, so ``to_integer`` is
   accepted without ``use ieee.numeric_std.all``, and a missing
   ``library ieee;`` clause is not reported, where a VHDL analyzer rejects both.
+  A unit that calls these subprograms almost always declares a signal or port of
+  the matching type, and that type is checked, so the gap shows only in a unit
+  that uses the functions on ``integer`` or ``std_logic`` alone. The frontend
+  resolves these subprograms by name rather than through the package, which
+  makes a precise check hard.
 - ``case generate``, matching ``case``, enumeration range subtypes and
   resolution indications are not implemented, and neither are type attributes
   such as ``'image`` on an enumeration.

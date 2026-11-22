@@ -348,7 +348,10 @@ maintenance plan; until then the numbers are reported for information.
 - PSL directives are skipped. Library namespace handling is simplified.
 - Use clauses are scoped per design unit, and the types of the IEEE
   packages must be made visible by one. The subprograms of those packages
-  and the ``library`` clause itself are not checked.
+  and the ``library`` clause itself are not checked: a unit that calls
+  them nearly always has a signal or port of the matching type, which is
+  checked, and the frontend resolves the subprograms by name, so a precise
+  check is hard.
 - Zero-width objects outside a whole-array assignment are not modelled;
   some legal constructs are falsely rejected as ``BLKANDNBLK`` or
   ``ASSIGNIN``.
