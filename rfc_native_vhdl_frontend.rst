@@ -249,9 +249,9 @@ tree.
 7. Evidence
 ===========
 
-* 353 regression drivers, 97 diagnostic/tree goldens, 355 ``.vhdl`` fixtures,
-  228 value-checked C++ harnesses.
-* Full VHDL suite (``t_vhdl*``, ``--vlt``): 353 passed / 0 failed in ~15 s on
+* 352 regression drivers, 97 diagnostic/tree goldens, 354 ``.vhdl`` fixtures,
+  227 value-checked C++ harnesses.
+* Full VHDL suite (``t_vhdl*``, ``--vlt``): 352 passed / 0 failed in ~15 s on
   16 cores locally. Both
   distribution tests (``t_dist_test_style``, ``t_dist_copyright``) pass. The
   suite needs only the built Verilator and a C++ compiler; no test invokes GHDL

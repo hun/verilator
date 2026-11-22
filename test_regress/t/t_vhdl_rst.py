@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL counter through the selected VHDL frontend
+# DESCRIPTION: Verilator: VHDL async reset through the selected VHDL frontend
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,7 +10,7 @@
 import vltest_bootstrap
 
 test.scenarios('vlt_all')
-test.top_filename = 't/t_vhdl_native_cnt.vhdl'
+test.top_filename = 't/t_vhdl_rst.vhdl'
 
 test.compile(make_top_shell=False,
              make_main=False,

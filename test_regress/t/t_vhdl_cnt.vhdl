@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL counter, native VHDL frontend
+-- DESCRIPTION: Verilator: VHDL counter
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,

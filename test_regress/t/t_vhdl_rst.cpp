@@ -1,6 +1,6 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //
-// DESCRIPTION: Verilator: VHDL native frontend counter test
+// DESCRIPTION: Verilator: VHDL async reset test
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of either the GNU Lesser General Public License Version 3,
@@ -18,22 +18,38 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     VM_PREFIX* const topp = new VM_PREFIX;
 
-    // Initialize the clock edge state before the first rising edge.
+    int fails = 0;
     topp->clk = 0;
+    topp->rst = 0;
     topp->eval();
 
-    int fails = 0;
-    // q is the value of the counter register before the increment of this edge.
-    for (int i = 0; i < 16; ++i) {
+    // The counter wraps after 3, so q lags the edge count modulo 4
+    for (int i = 1; i <= 5; ++i) {
         topp->clk = 1;
         topp->eval();
         const int q = static_cast<int>(topp->q);
-        if (q != (i & 0xf)) {
-            std::printf("%%Error: edge %d: q=%d expected %d\n", i, q, i & 0xf);
+        if (q != (i & 3)) {
+            std::printf("%%Error: edge %d: q=%d expected %d\n", i, q, i & 3);
             ++fails;
         }
         topp->clk = 0;
         topp->eval();
+    }
+
+    // Asynchronous reset takes effect without a clock edge
+    topp->rst = 1;
+    topp->eval();
+    if (static_cast<int>(topp->q) != 0) {
+        std::printf("%%Error: async reset: q=%d expected 0\n", static_cast<int>(topp->q));
+        ++fails;
+    }
+    topp->rst = 0;
+    topp->clk = 1;
+    topp->eval();
+    // The first edge after reset deassertion counts 0 -> 1
+    if (static_cast<int>(topp->q) != 1) {
+        std::printf("%%Error: after reset edge: q=%d expected 1\n", static_cast<int>(topp->q));
+        ++fails;
     }
 
     topp->final();

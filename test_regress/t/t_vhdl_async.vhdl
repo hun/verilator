@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL asynchronous reset, native VHDL frontend
+-- DESCRIPTION: Verilator: VHDL asynchronous reset
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL hierarchy through the native VHDL frontend
+# DESCRIPTION: Verilator: VHDL hierarchy
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3

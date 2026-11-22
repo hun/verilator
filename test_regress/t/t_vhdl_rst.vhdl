@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL async reset and integer counter, native frontend
+-- DESCRIPTION: Verilator: VHDL async reset and integer counter
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,
