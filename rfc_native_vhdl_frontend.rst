@@ -12,7 +12,7 @@ spent on the working branch of about 400 commits.
 
 In short: the frontend parses a synthesizable VHDL-2008 subset and lowers it
 straight into the existing pre-width V3 AST, adding no AST node, pass or runtime
-primitive. The core diff is about 180 lines in eight files; everything else is
+primitive. The core diff is about 180 added lines in nine files; everything else is
 new files under ``src/V3Vhdl*`` plus tests and documentation. The decision most
 needed is section 5's: whether a committed pre-width AST is acceptable.
 
@@ -32,7 +32,7 @@ Alternatives considered:
 * **Out-of-process analyzer via GHDL's XML export:** this branch first took that
   route and abandoned it as too fragile; see "History of this branch" below.
 * **Linking GHDL or nvc as a library:** brings a large dependency and, for GHDL,
-  GPL licensing into an LGPL/Artistic project.
+  GPL licensing (GHDL and nvc are both GPL) into an LGPL/Artistic project.
 * **Native frontend (this RFC):** costs maintainable code in the tree, which is
   why the scope is a bounded subset and the delivery is staged.
 
@@ -55,13 +55,12 @@ the translated flow does not:
 * **Diagnostics point at the VHDL.** Verilator lint, width and ``MULTIDRIVEN``
   style warnings on translated output name lines of generated Verilog, not the
   user's ``.vhd`` file. The native frontend reports at the VHDL source location,
-  so ``-Wall``, ``/* verilator lint_off */``-style control and ``.vlt`` waivers
-  apply to code the user actually wrote.
-* **The model keeps the design's structure.** Synthesis flattens, bit-blasts
-  and renames: records, arrays, enumerations and generate hierarchy become
-  anonymous vectors and netlist names. The native flow keeps one Verilator
-  module per entity instance, so waveforms, coverage, ``--public`` access,
-  ``--hierarchical`` verilation and ``--prof`` map to VHDL names and units.
+  so ``-Wall`` and ``.vlt`` waivers apply to code the user actually wrote.
+* **The model keeps the design's hierarchy and names.** A flow that runs Yosys
+  ``synth`` flattens the design and maps it to cells with generated names. The
+  native flow keeps one Verilator module per entity instance and the VHDL signal
+  names, so waveforms, toggle coverage and ``--public-flat-rw`` access use names
+  such as ``top.u_leaf.cnt`` (checked on a two-level design).
 * **Testbench-style code in the model.** A Yosys netlist is a synthesized
   design, so constructs with no hardware meaning (``assert``/``report`` with
   ``severity failure``, ``wait for``) are, to the best of my knowledge, not
@@ -229,7 +228,8 @@ tree.
 6. Integration
 ==============
 
-* Core surface (about 180 lines added in eight files): one language enum and
+* Core surface (about 180 lines added and 46 removed or rewritten in nine
+  files, three of them build lists): one language enum and
   option plumbing in ``V3Options``, one ``V3Global`` bool and per-file dispatch
   in ``readFiles``, a 50-line change in ``V3LinkCells``, a two-line guard in
   ``V3Coalesce`` so an ``inout`` is not coalesced away, build-list entries, and
@@ -271,7 +271,7 @@ many also compare a cycle-by-cycle trace against GHDL. Upstream sources are
 fetched, not copied, so each keeps its own license.
 
 Results on this branch (lint and simulation with Verilator, trace comparison
-against GHDL 7):
+against GHDL 7.0.0-dev):
 
 .. list-table::
    :header-rows: 1
