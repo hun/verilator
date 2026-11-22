@@ -190,6 +190,10 @@ generic down with a generic map:
      cout <= full(WIDTH);
    end architecture;
 
+   library ieee;
+   use ieee.std_logic_1164.all;
+   use ieee.numeric_std.all;
+
    entity accum is
      generic (WIDTH : positive := 8);
      port (
