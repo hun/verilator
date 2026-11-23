@@ -3639,10 +3639,19 @@ bool Lowering::collectArrayAggregateSegments(FileLine* flp, const Expr& expr, co
             // when the value is an array of the aggregate's own type (IEEE 1076-2008 9.3.3.3)
             int64_t count = 1;
             VType valueType;
-            if (!(type.elemp && type.elemp->isVector())
-                && typeOfDesignator(*expr.args[i], valueType) && valueType.isVector()
-                && valueType.elemWidth == elemWidth) {
-                count = valueType.length();
+            if (!(type.elemp && type.elemp->isVector())) {
+                if (typeOfDesignator(*expr.args[i], valueType)) {
+                    if (valueType.isVector() && valueType.elemWidth == elemWidth) {
+                        count = valueType.length();
+                    }
+                } else if (expr.args[i]->kind == Expr::INDEX || expr.args[i]->kind == Expr::CALL) {
+                    // Only the lowered value knows the width of a conversion of a slice with a
+                    // run-time position; an aggregate element has no type to lower with yet
+                    AstNodeExpr* const valuep = lowerExpr(*expr.args[i], nullptr);
+                    if (!valuep) return false;
+                    count = std::max(1, valuep->width() / elemWidth);
+                    valuep->deleteTree();
+                }
             }
             const int64_t step = type.ascending ? 1 : -1;
             addRange(type.left + step * position, type.left + step * (position + count - 1),
