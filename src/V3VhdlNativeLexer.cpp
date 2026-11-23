@@ -435,9 +435,26 @@ Token Lexer::lexNumber(FileLine* flp) {
     const size_t start = m_pos;
     skipDigits();
     const std::string first = m_text.substr(start, m_pos - start);
-    // A real literal with an exponent but no decimal point, e.g. 25e6
+    // Without a decimal point, a non-negative exponent still makes an integer literal
+    // (IEEE 1076-2008 15.5.2), e.g. 25e6; a negative one can only be real
     if (peek(0) == 'e' || peek(0) == 'E') {
-        if (consumeExponent()) return makeRealToken(flp, start);
+        const bool negative = peek(1) == '-';
+        const size_t exponentStart = m_pos + 1;
+        if (consumeExponent()) {
+            if (negative) return makeRealToken(flp, start);
+            std::string digits;
+            for (size_t i = exponentStart; i < m_pos; ++i) {
+                if (std::isdigit(static_cast<unsigned char>(m_text[i])))
+                    digits.push_back(m_text[i]);
+            }
+            // A longer exponent overflows whatever the digits are
+            const int zeros = digits.size() > 2 ? 99 : std::stoi(digits);
+            std::string clean;
+            for (const char ch : first) {
+                if (ch != '_') clean.push_back(ch);
+            }
+            return lexIntegerLiteral(flp, clean + std::string(zeros, '0'));
+        }
     }
     // A bit-string literal may state its length before the base, e.g. 6x"3f"
     const char baseChar = static_cast<char>(std::tolower(static_cast<unsigned char>(peek(0))));
