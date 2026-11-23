@@ -1000,11 +1000,48 @@ AstNodeExpr* Lowering::lowerRelation(FileLine* flp, const Expr& expr, const std:
     return cmpp;
 }
 
+//! Bits of an expression made only of bit-string and character literals joined by `&`
+static bool literalConcatBits(const Expr& expr, std::string& out) {
+    switch (expr.kind) {
+    case Expr::BITS_LIT: out = expr.bits; return true;
+    case Expr::CHAR_LIT: out = std::string(1, expr.charValue); return true;
+    case Expr::PAREN: return literalConcatBits(*expr.a, out);
+    case Expr::BINARY: {
+        std::string lhs;
+        std::string rhs;
+        if (expr.text != "&" || !literalConcatBits(*expr.a, lhs)
+            || !literalConcatBits(*expr.b, rhs)) {
+            return false;
+        }
+        out = lhs + rhs;
+        return true;
+    }
+    default: return false;
+    }
+}
+
 AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperands& ops) {
     AstNodeExpr*& lp = ops.lp;
     AstNodeExpr*& rp = ops.rp;
     VType& lt = ops.lt;
     VType& rt = ops.rt;
+    // A concatenation of bit-string and character literals takes the element type of the
+    // other operand (IEEE 1076-2008 9.3.6), so `"000" & bit_vector_signal` is a bit_vector
+    if (lt.isVector() && rt.isVector() && lt.kwd != rt.kwd) {
+        std::string literalBits;
+        const bool lhsLiteral = literalConcatBits(*expr.a, literalBits);
+        if ((lhsLiteral || literalConcatBits(*expr.b, literalBits))
+            && literalBits.find_first_not_of("01") == std::string::npos) {
+            const VType& modelType = lhsLiteral ? rt : lt;
+            AstNodeExpr*& literalp = lhsLiteral ? lp : rp;
+            VType& literalType = lhsLiteral ? lt : rt;
+            const VType fixedType
+                = vectorType(flp, modelType.kwd, modelType.signing, literalType.width);
+            literalp->deleteTree();
+            literalp = makeBitsConst(flp, fixedType.dtp, literalBits);
+            literalType = fixedType;
+        }
+    }
     if (!lt.isVector() && !rt.isVector()) {
         if (lt.kind != rt.kind) {
             unsupportedError(flp, "concatenation of mismatched element types");
