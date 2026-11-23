@@ -3558,6 +3558,7 @@ bool Lowering::collectArrayAggregateSegments(FileLine* flp, const Expr& expr, co
                                              std::vector<AggregateSegment>& segments,
                                              const Expr*& othersValuep) {
     const int elemWidth = type.elemWidth;
+    int64_t position = 0;  // Elements the positional associations have filled so far
     for (size_t i = 0; i < expr.args.size(); ++i) {
         const std::vector<ExprP>& choiceList = expr.choices[i];
         if (choiceList.size() == 1 && choiceList.front()->kind == Expr::NAME
@@ -3582,10 +3583,19 @@ bool Lowering::collectArrayAggregateSegments(FileLine* flp, const Expr& expr, co
             segments.push_back(segment);
         };
         if (choiceList.empty()) {
-            // Positional: the next element in declaration order
-            const int64_t index = type.ascending ? type.left + static_cast<int64_t>(i)
-                                                 : type.left - static_cast<int64_t>(i);
-            addIndex(index, expr.args[i].get());
+            // Positional: the next element in declaration order, or the next run of elements
+            // when the value is an array of the aggregate's own type (IEEE 1076-2008 9.3.3.3)
+            int64_t count = 1;
+            VType valueType;
+            if (!(type.elemp && type.elemp->isVector())
+                && typeOfDesignator(*expr.args[i], valueType) && valueType.isVector()
+                && valueType.elemWidth == elemWidth) {
+                count = valueType.length();
+            }
+            const int64_t step = type.ascending ? 1 : -1;
+            addRange(type.left + step * position, type.left + step * (position + count - 1),
+                     expr.args[i].get());
+            position += count;
             continue;
         }
         for (const ExprP& choicep : choiceList) {
