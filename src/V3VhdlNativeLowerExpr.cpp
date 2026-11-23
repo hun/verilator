@@ -2788,6 +2788,9 @@ bool Lowering::resolveAttrDesignator(FileLine* flp, const Expr& prefix, AttrType
 
 void Lowering::resolveAttrNameType(FileLine* flp, const Expr& prefix, AttrTypeInfo& info) {
     if (!info.typep) info.typep = typeOfName(prefix);
+    if (!info.typep && m_aliases.count(prefix.text) && typeOfDesignator(prefix, info.resolved)) {
+        info.typep = &info.resolved;
+    }
     if (!info.typep) {
         const auto typeIt = m_types.find(prefix.text);
         if (typeIt != m_types.end()) {

@@ -700,7 +700,18 @@ void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoun
 }
 
 void Lowering::emitArchitectureDecls(const Architecture& arch) {
+    // An object alias is registered in declaration order: its mark may read a signal declared
+    // before it, and the initializer of a later declaration may use it
+    size_t nextAlias = 0;
+    const auto registerAliasesBefore = [&](const FileLine* flp) {
+        for (; nextAlias < arch.aliases.size(); ++nextAlias) {
+            const AliasDecl& alias = arch.aliases[nextAlias];
+            if (flp && alias.flp->lineno() > flp->lineno()) break;
+            if (!alias.hasSignature) registerAlias(alias);
+        }
+    };
     for (const Decl& decl : arch.decls) {
+        registerAliasesBefore(decl.flp);
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
             // A subprogram of the architecture sees the constants declared before it
@@ -739,11 +750,7 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
         }
     }
     finishDeferredTypes();
-    // An object alias comes last: its mark may read a signal the loop above declares
-    for (const AliasDecl& alias : arch.aliases) {
-        if (alias.hasSignature) continue;
-        registerAlias(alias);
-    }
+    registerAliasesBefore(nullptr);
 }
 
 bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
