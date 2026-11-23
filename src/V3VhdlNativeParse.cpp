@@ -1996,7 +1996,7 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
         error(std::string{"expected '(' after '"} + what + " map'");
         return;
     }
-    int mixMode = 0;  // 1: the list is positional; 2: it is named
+    int mixMode = 0;  // 1: the list so far is positional; 2: a named association has begun
     while (true) {
         if (m_failed) return;
         PortAssoc assoc;
@@ -2026,12 +2026,7 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
             m_lexer.restore(savedState);
         }
         if (named) {
-            // IEEE 1076-2008 6.5.7.1: the associations are all positional or all named
-            if (mixMode == 1) {
-                error(std::string{"named association after a positional one in a "} + what
-                      + " map (IEEE 1076-2008 6.5.7.1)");
-                return;
-            }
+            // IEEE 1076-2008 6.5.7.1: positional associations come first, then named ones
             mixMode = 2;
             Token formalTok;
             if (!takeId(formalTok)) return;

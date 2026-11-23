@@ -1529,7 +1529,6 @@ public:
         const Concurrent& conc;  // Instance statement binding the ports
         const EntityUnit* entityp;  // Entity being instantiated, null when unknown
         const PortBoundsMap& portBounds;  // Bounds of the unconstrained ports, from the instance
-        bool positional;  // The port map is positional
         bool defaultError;  // The port default was rejected, with its error reported
     };
 
@@ -1566,8 +1565,8 @@ public:
                                     AstModule*& modp);
     bool specializeInstancePorts(const Concurrent& conc, const EntityUnit* entityp,
                                  AstModule*& modp, PortBoundsMap& portBounds);
-    bool collectInstancePorts(const Concurrent& conc, AstModule* modp, std::vector<AstVar*>& ports,
-                              bool& positional);
+    bool collectInstancePorts(const Concurrent& conc, AstModule* modp,
+                              std::vector<AstVar*>& ports);
     VType instanceRecordPortType(const EntityUnit* entityp, const AstVar* portp) const;
     static const VField* findRecordField(const VType& rec, const std::string& member);
     AstNodeExpr* instanceDeclaredDefault(const Concurrent& conc, const EntityUnit* entityp,

@@ -1034,30 +1034,31 @@ bool Lowering::bindInstanceGenerics(const Concurrent& conc, const EntityUnit& en
         for (const auto& name : gen.names) items.push_back({&gen, name.first, name.second});
     }
     const std::vector<PortAssoc>& assocs = conc.genericAssociations;
-    const bool positional = std::any_of(
-        assocs.begin(), assocs.end(), [](const PortAssoc& assoc) { return assoc.formal.empty(); });
-    if (positional && assocs.size() > items.size()) {
+    // Positional associations come first and fill the generics in order; named ones follow
+    const size_t positionalCount = static_cast<size_t>(
+        std::count_if(assocs.begin(), assocs.end(),
+                      [](const PortAssoc& assoc) { return assoc.formal.empty(); }));
+    if (positionalCount > items.size()) {
         flp->v3error("VHDL: instance of '" + entity.spelling
                      + "' binds more generics than the entity has.");
         return false;
     }
-    if (!positional) {
-        for (const PortAssoc& assoc : assocs) {
-            const bool known
-                = std::any_of(items.begin(), items.end(), [&](const InstanceGeneric& item) {
-                      return item.folded == assoc.formal;
-                  });
-            if (!known) {
-                assoc.flp->v3error("VHDL: entity '" + entity.spelling + "' has no generic '"
-                                   + assoc.formalSpelling + "'.");
-                return false;
-            }
+    for (const PortAssoc& assoc : assocs) {
+        if (assoc.formal.empty()) continue;
+        const bool known
+            = std::any_of(items.begin(), items.end(), [&](const InstanceGeneric& item) {
+                  return item.folded == assoc.formal;
+              });
+        if (!known) {
+            assoc.flp->v3error("VHDL: entity '" + entity.spelling + "' has no generic '"
+                               + assoc.formalSpelling + "'.");
+            return false;
         }
     }
     for (size_t k = 0; k < items.size(); ++k) {
         const PortAssoc* assocp = nullptr;
-        if (positional) {
-            if (k < assocs.size()) assocp = &assocs[k];
+        if (k < positionalCount) {
+            assocp = &assocs[k];
         } else {
             for (const PortAssoc& assoc : assocs) {
                 if (assoc.formal == items[k].folded) assocp = &assoc;
@@ -1193,14 +1194,11 @@ bool Lowering::derivePortBounds(const EntityUnit& entity, const Concurrent& conc
             ++index;
         }
     }
-    const bool positional
-        = std::any_of(conc.associations.begin(), conc.associations.end(),
-                      [](const PortAssoc& assoc) { return assoc.formal.empty(); });
     std::vector<const PortAssoc*> assocs;
     for (size_t i = 0; i < conc.associations.size(); ++i) {
         const PortAssoc& assoc = conc.associations[i];
-        if (positional ? static_cast<int>(i) == targetIndex
-                       : assoc.formal == port.names.front().first) {
+        if (assoc.formal.empty() ? static_cast<int>(i) == targetIndex
+                                 : assoc.formal == port.names.front().first) {
             assocs.push_back(&assoc);
         }
     }
@@ -1332,14 +1330,11 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
             ++index;
         }
     }
-    const bool positional
-        = std::any_of(conc.associations.begin(), conc.associations.end(),
-                      [](const PortAssoc& assoc) { return assoc.formal.empty(); });
     std::vector<const PortAssoc*> assocs;
     for (size_t i = 0; i < conc.associations.size(); ++i) {
         const PortAssoc& assoc = conc.associations[i];
-        if (positional ? static_cast<int>(i) == targetIndex
-                       : assoc.formal == port.names.front().first) {
+        if (assoc.formal.empty() ? static_cast<int>(i) == targetIndex
+                                 : assoc.formal == port.names.front().first) {
             assocs.push_back(&assoc);
         }
     }
@@ -1660,7 +1655,7 @@ bool Lowering::specializeInstancePorts(const Concurrent& conc, const EntityUnit*
 
 //! Collect the module's ports in pin order and reject excess positional associations
 bool Lowering::collectInstancePorts(const Concurrent& conc, AstModule* modp,
-                                    std::vector<AstVar*>& ports, bool& positional) {
+                                    std::vector<AstVar*>& ports) {
     FileLine* const flp = conc.flp;
     for (AstNode* const itemp : modp->stmtspList()) {
         AstVar* const varp = VN_CAST(itemp, Var);
@@ -1669,9 +1664,10 @@ bool Lowering::collectInstancePorts(const Concurrent& conc, AstModule* modp,
     std::sort(ports.begin(), ports.end(),
               [](const AstVar* lp, const AstVar* rp) { return lp->pinNum() < rp->pinNum(); });
     // Associations without a formal name are positional: they map to the next port
-    positional = std::any_of(conc.associations.begin(), conc.associations.end(),
-                             [](const PortAssoc& assoc) { return assoc.formal.empty(); });
-    if (positional && conc.associations.size() > ports.size()) {
+    const size_t positionalCount = static_cast<size_t>(
+        std::count_if(conc.associations.begin(), conc.associations.end(),
+                      [](const PortAssoc& assoc) { return assoc.formal.empty(); }));
+    if (positionalCount > ports.size()) {
         flp->v3error("VHDL: instance of '" + conc.instanceName
                      + "' associates more ports than "
                        "the entity has.");
@@ -1971,11 +1967,14 @@ bool Lowering::bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t por
     const Concurrent& conc = ctx.conc;
     FileLine* const flp = conc.flp;
     std::vector<const PortAssoc*> assocs;
-    if (ctx.positional) {
-        if (portIndex < conc.associations.size()) assocs.push_back(&conc.associations[portIndex]);
-    } else {
-        for (const PortAssoc& assoc : conc.associations) {
-            if (assoc.formal == portp->name()) assocs.push_back(&assoc);
+    {
+        // A positional association belongs to the port at its position; the named ones
+        // that follow it name their port
+        for (size_t i = 0; i < conc.associations.size(); ++i) {
+            const PortAssoc& assoc = conc.associations[i];
+            if (assoc.formal.empty() ? i == portIndex : assoc.formal == portp->name()) {
+                assocs.push_back(&assoc);
+            }
         }
         // A whole port may be associated once; only a part of it (a slice or a record
         // element) may be associated alongside another part
@@ -2072,15 +2071,15 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     PortBoundsMap portBounds;
     if (!specializeInstancePorts(conc, entityp, modp, portBounds)) return nullptr;
     std::vector<AstVar*> ports;
-    bool positional = false;
-    if (!collectInstancePorts(conc, modp, ports, positional)) return nullptr;
-    InstancePortBind ctx{conc, entityp, portBounds, positional, false};
+    if (!collectInstancePorts(conc, modp, ports)) return nullptr;
+    InstancePortBind ctx{conc, entityp, portBounds, false};
     AstPin* pinsp = nullptr;
     for (size_t portIndex = 0; portIndex < ports.size(); ++portIndex) {
         if (!bindInstancePort(ctx, ports[portIndex], portIndex, pinsp)) return nullptr;
     }
-    if (!positional) {
+    {
         for (const PortAssoc& assoc : conc.associations) {
+            if (assoc.formal.empty()) continue;
             const bool known = std::any_of(ports.begin(), ports.end(), [&](const AstVar* portp) {
                 return portp->name() == assoc.formal;
             });

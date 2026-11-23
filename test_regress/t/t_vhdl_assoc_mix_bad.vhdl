@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL association lists may not mix forms
+-- DESCRIPTION: Verilator: VHDL a positional association may not follow a named one
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,
@@ -6,8 +6,8 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- A port or generic map is either all positional or all named (IEEE 1076-2008
--- 6.5.7.2); GHDL refuses this list.
+-- Positional associations come first and named ones after them (IEEE 1076-2008 6.5.7.1);
+-- GHDL refuses a positional association after a named one.
 
 entity child is
   port (
@@ -32,5 +32,5 @@ end;
 
 architecture rtl of t is
 begin
-  u1 : entity work.child port map (a, p2 => b, y => open);
+  u1 : entity work.child port map (p2 => b, a, y => open);
 end;
