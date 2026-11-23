@@ -1634,7 +1634,11 @@ bool Lowering::checkStdTypeVisible(const TypeSpec& spec, const std::string& mark
            {"unsigned", {"numeric_std", "numeric_bit", "std_logic_arith"}},
            {"signed", {"numeric_std", "numeric_bit", "std_logic_arith"}},
            {"u_unsigned", {"numeric_std", "numeric_bit", "std_logic_arith"}},
-           {"u_signed", {"numeric_std", "numeric_bit", "std_logic_arith"}}};
+           {"u_signed", {"numeric_std", "numeric_bit", "std_logic_arith"}},
+           {"sfixed", {"fixed_pkg", "fixed_generic_pkg"}},
+           {"ufixed", {"fixed_pkg", "fixed_generic_pkg"}},
+           {"u_sfixed", {"fixed_pkg", "fixed_generic_pkg"}},
+           {"u_ufixed", {"fixed_pkg", "fixed_generic_pkg"}}};
     const auto declared = declaredBy.find(mark);
     if (declared == declaredBy.end()) return true;
     for (const std::string& pkg : declared->second) {
@@ -1745,6 +1749,27 @@ bool Lowering::resolveTypePredefined(const TypeSpec& spec, const std::string& ma
         out.elemWidth = elem.width;
         out.typeName = mark;
         return applyRange(spec, out);
+    }
+    if (isFixedName(mark)) {
+        // sfixed and ufixed are vectors whose index range places the binary point; the
+        // range must descend (IEEE 1076-2008 fixed_pkg)
+        if (!spec.hasRange) {
+            unsupportedError(flp, "unconstrained type '" + mark + "'");
+            return false;
+        }
+        out = VType{};
+        out.kind = VType::VECTOR;
+        out.kwd = VBasicDTypeKwd::LOGIC;
+        out.signing
+            = mark == "sfixed" || mark == "u_sfixed" ? VSigning::SIGNED : VSigning::UNSIGNED;
+        out.elemWidth = 1;
+        out.typeName = out.isSigned() ? "sfixed" : "ufixed";
+        if (!applyRange(spec, out)) return false;
+        if (out.ascending) {
+            flp->v3error("VHDL: a fixed-point type needs a descending range.");
+            return false;
+        }
+        return true;
     }
     const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
                             || mark == "bit_vector" || mark == "unsigned" || mark == "signed";

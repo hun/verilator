@@ -1,0 +1,6 @@
+%Error-UNSUPPORTED: t/t_vhdl_fixed_unsup.vhdl:22:23: Unsupported: VHDL unconstrained type 'sfixed'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_vhdl_fixed_unsup.vhdl:24:11: Unsupported: VHDL fixed-point operator '/'.
+%Error-UNSUPPORTED: t/t_vhdl_fixed_unsup.vhdl:25:8: Unsupported: VHDL fixed-point operator 'not'.
+%Error-UNSUPPORTED: t/t_vhdl_fixed_unsup.vhdl:26:8: Unsupported: VHDL real argument of 'to_sfixed' that is not static.
+%Error: Exiting due to

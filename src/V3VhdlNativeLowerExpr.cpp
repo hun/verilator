@@ -222,6 +222,8 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     if (userFound) return nullptr;
     AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
     if (!operandp) return nullptr;
+    const VType loweredType = typeOfLowered(*expr.a, operandp);
+    if (isFixedType(loweredType)) return lowerFixedUnary(flp, expr, operandp, loweredType);
     const VType type = typeOfDType(operandp->dtypep());
     const bool reduction = expr.text == "and" || expr.text == "or" || expr.text == "xor"
                            || expr.text == "nand" || expr.text == "nor" || expr.text == "xnor";
@@ -317,6 +319,11 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
         }
         // A user subprogram shadows a standard-package function of the same name
         if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, contextp);
+        if (isFixedFunction(expr.a->text)) {
+            bool handled = false;
+            AstNodeExpr* const fixedp = lowerFixedCall(expr, handled);
+            if (handled) return fixedp;
+        }
         if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
         if (isConversion(expr.a->text)) return lowerConversion(expr, contextp);
         // A real has no synthesizable form, so a conversion to one is refused by name
@@ -450,6 +457,12 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* contextp) {
             AstNodeExpr* const operandp = lowerExpr(*expr.args[0], nullptr);
             if (!operandp) return nullptr;
             return makeReduction(flp, operandp, name);
+        }
+        // A call with named actuals, e.g. `resize(x, 3, -2, overflow_style => fixed_wrap)`
+        if (isFixedFunction(name) && !m_subprograms.count(name)) {
+            bool handled = false;
+            AstNodeExpr* const fixedp = lowerFixedCall(expr, handled);
+            if (handled) return fixedp;
         }
         return lowerFunctionCall(expr, contextp);
     }
@@ -1337,6 +1350,11 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
 AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
+    {
+        bool handled = false;
+        AstNodeExpr* const realp = lowerFixedRealBinary(flp, expr, handled);
+        if (handled) return realp;
+    }
     if (!binaryStaticFits(flp, expr)) return nullptr;
     const bool relationalOp = op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">"
                               || op == ">=" || op == "?=" || op == "?/=" || op == "?<"
@@ -1369,6 +1387,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* contextp) {
     if (!lp) return nullptr;
     lt = typeOfLowered(*expr.a, lp);
     rt = typeOfLowered(*expr.b, rp);
+    if (isFixedType(lt) || isFixedType(rt)) return lowerFixedBinary(flp, expr, op, ops);
     if (logicalOp && !logicalOperandsConform(*expr.a, *expr.b, lt, rt)) {
         lp->deleteTree();
         rp->deleteTree();
@@ -1651,6 +1670,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
             return nullptr;
         }
         AstNodeDType* const dtp = valuep->dtypep();
+        const VType valueType = typeOfLowered(*argsp[0], valuep);
         AstNodeExpr* resultp = nullptr;
         // shift_right sign-extends a signed operand; shift_left does not.
         // std_logic_arith's shl/shr are logical for both signednesses.
@@ -1662,6 +1682,8 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
             resultp = new AstShiftR{flp, valuep, amountp, dtp->width()};
         }
         resultp->dtypep(dtp);
+        // A fixed-point value keeps its bounds
+        if (isFixedType(valueType)) noteFixed(expr, resultp, valueType);
         return resultp;
     }
     if (fn == "rotate_left" || fn == "rotate_right") {

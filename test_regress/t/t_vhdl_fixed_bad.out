@@ -1,0 +1,16 @@
+%Error: t/t_vhdl_fixed_bad.vhdl:27:22: VHDL: a fixed-point type needs a descending range.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_fixed_bad.vhdl:29:11: VHDL: operands of '+' mix sfixed and ufixed.
+%Error: t/t_vhdl_fixed_bad.vhdl:30:11: VHDL: assignment value of type 'sfixed' does not have the target's length.
+%Error: t/t_vhdl_fixed_bad.vhdl:31:11: VHDL: operands of '+' mix a fixed-point and another type.
+%Error: t/t_vhdl_fixed_bad.vhdl:32:8: VHDL: operator '-' is not defined for ufixed.
+%Error: t/t_vhdl_fixed_bad.vhdl:33:8: VHDL: resize of a fixed-point value needs static bounds.
+%Error: t/t_vhdl_fixed_bad.vhdl:34:8: VHDL: resize result has an ascending or null range.
+%Error: t/t_vhdl_fixed_bad.vhdl:35:8: VHDL: to_sfixed result has an ascending or null range.
+%Error: t/t_vhdl_fixed_bad.vhdl:36:8: VHDL: to_sfixed needs static bounds.
+%Error: t/t_vhdl_fixed_bad.vhdl:37:8: VHDL: to_sfixed argument has 8 bits, but the result bounds name 6.
+%Error: t/t_vhdl_fixed_bad.vhdl:38:8: VHDL: to_sfixed of an unsupported argument type.
+%Error: t/t_vhdl_fixed_bad.vhdl:39:40: VHDL: to_signed does not take this fixed-point type.
+%Error: t/t_vhdl_fixed_bad.vhdl:40:18: VHDL: to_signed needs a static result size.
+%Error: t/t_vhdl_fixed_bad.vhdl:41:18: VHDL: to_unsigned does not take this fixed-point type.
+%Error: Exiting due to

@@ -622,6 +622,16 @@ bool Lowering::actualTypeBinary(const Expr& expr, VType& out) const {
     const auto physical = [](const VType& type) {
         return type.kind == VType::INT && !type.typeName.empty() && type.typeName != "integer";
     };
+    // A fixed-point value with an integer or a real is a fixed-point value
+    // (ieee.fixed_pkg); the bounds follow the operator and are fixed at lowering
+    if (isFixedType(aType) && (bType.kind == VType::REAL || bType.isInt())) {
+        out = aType;
+        return true;
+    }
+    if (isFixedType(bType) && (aType.kind == VType::REAL || aType.isInt())) {
+        out = bType;
+        return true;
+    }
     if (aType.kind == VType::INT && bType.kind == VType::INT) {
         // Addition and subtraction keep a physical type; a physical divided or
         // multiplied by an integer keeps it too, while physical/physical is an
@@ -970,6 +980,18 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
             return false;
         }
         return true;
+    }
+    // A fixed-point result has the exact bounds its operator gave it (IEEE 1076-2008
+    // fixed_pkg), unlike the width an operator result is otherwise guessed to have
+    const Expr* resultp = &value;
+    while (resultp->kind == Expr::PAREN && resultp->a) resultp = resultp->a.get();
+    const auto lowered = m_exprTypes.find(resultp);
+    if (checkShape && lowered != m_exprTypes.end() && isFixedType(lowered->second.type)
+        && isFixedType(target) && lowered->second.type.width != target.width) {
+        value.flp->v3error(std::string{"VHDL: "} + what + " of type '"
+                           + lowered->second.type.typeName
+                           + "' does not have the target's length.");
+        return false;
     }
     VType source;
     if (actualType(value, source) && !source.typeName.empty()) {

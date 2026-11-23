@@ -1076,6 +1076,31 @@ class Lowering final {
     AstNodeExpr* lowerIntrinsicStdMatch(FileLine* flp, const std::vector<ExprP>& argsp);
     AstNodeExpr* lowerIntrinsicResize(FileLine* flp, const std::string& fn,
                                       const std::vector<ExprP>& argsp);
+    //! Fixed-point types of ieee.fixed_pkg (V3VhdlNativeLowerFixed.cpp)
+    static bool isFixedName(const std::string& name);
+    static bool isFixedType(const VType& type) {
+        return type.kind == VType::VECTOR
+               && (type.typeName == "sfixed" || type.typeName == "ufixed");
+    }
+    bool fixedPackageUsed() const;
+    bool isFixedFunction(const std::string& name) const;
+    VType fixedType(FileLine* flp, bool isSigned, int left, int right) const;
+    AstNodeExpr* noteFixed(const Expr& expr, AstNodeExpr* nodep, const VType& type);
+    AstNodeExpr* fixedAlign(FileLine* flp, AstNodeExpr* valuep, const VType& type, int high,
+                            int low);
+    AstNodeExpr* fixedSel(FileLine* flp, AstNodeExpr* fromp, int lsb, int width);
+    AstNodeExpr* fixedResize(FileLine* flp, AstNodeExpr* argp, const VType& at, int left,
+                             int right, bool saturate, bool round);
+    struct BinaryOperands;
+    AstNodeExpr* lowerFixedBinary(FileLine* flp, const Expr& expr, const std::string& op,
+                                  BinaryOperands& ops);
+    AstNodeExpr* lowerFixedUnary(FileLine* flp, const Expr& expr, AstNodeExpr* operandp,
+                                 const VType& type);
+    //! `handled` is false when the call is not a fixed-point one (numeric_std's resize)
+    AstNodeExpr* lowerFixedCall(const Expr& expr, bool& handled);
+    AstNodeExpr* lowerFixedRealBinary(FileLine* flp, const Expr& expr, bool& handled);
+    AstNodeExpr* fixedConstFromReal(FileLine* flp, double real, const VType& type, bool saturate,
+                                    bool round);
     AstNodeExpr* lowerIntrinsicMinMax(FileLine* flp, const std::string& fn,
                                       const std::vector<ExprP>& argsp);
     //! Unary reduction `and`/`or`/`xor` and their negations

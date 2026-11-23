@@ -20,7 +20,17 @@ package instantiations and deferred constants), components and direct entity
 instantiation, constant and type generics, logic and numeric types, records,
 one-dimensional arrays and arrays of arrays, processes and concurrent
 assignments, generate statements, static loops, pure functions and procedures,
-``std_logic_1164``, ``numeric_std`` and the standard attributes.
+``std_logic_1164``, ``numeric_std``, the ``sfixed`` and ``ufixed`` types of
+``fixed_pkg`` and the standard attributes.
+
+``fixed_pkg`` supports ``sfixed`` and ``ufixed`` with descending ranges: ``+``, ``-``
+and ``*`` with the package's result bounds, the comparisons, unary ``-`` and ``abs``,
+``resize`` with saturate or wrap and round or truncate (the package defaults are
+``fixed_saturate`` and ``fixed_round``), ``to_sfixed``, ``to_ufixed``, ``to_slv``,
+``to_signed``, ``to_unsigned`` and ``to_integer``, and an integer or a real literal beside a
+fixed-point operand. Division, ``mod``, ``rem``, shifts, ``to_real`` and arrays of
+fixed-point elements are refused. The results of these operations were compared with
+GHDL on every operand pair of small ranges.
 
 Library clauses, ``work`` as the default library, case-insensitive name lookup,
 source locations in diagnostics, and ``.vhd``/``.vhdl`` extension detection are
@@ -133,7 +143,7 @@ Not supported
 These constructs are refused with a diagnostic: access, protected, file and
 ``textio`` types; ``force``/``release``; runtime ``'value`` and string parsing;
 physical objects and ``now``; real signals, variables and ports (real constants
-fold at elaboration) and fixed/floating-point packages;
+fold at elaboration) and the floating-point package ``float_pkg``;
 user-defined resolution functions; external names; allocators; multi-dimensional
 ports; ``linkage`` ports, ``disconnect`` and ``guarded`` signals; embedded
 other-language source; and general timing constructs. VHDL-2019 is outside the

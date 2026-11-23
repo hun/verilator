@@ -375,6 +375,7 @@ RAW_OBJS_PCH_ASTNOMT = \
   V3VhdlNativeLower.o \
   V3VhdlNativeLowerElab.o \
   V3VhdlNativeLowerExpr.o \
+  V3VhdlNativeLowerFixed.o \
   V3VhdlNativeLowerPackage.o \
   V3VhdlNativeLowerProcess.o \
   V3VhdlNativeLowerStmt.o \

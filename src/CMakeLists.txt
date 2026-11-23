@@ -408,6 +408,7 @@ set(COMMON_SOURCES
     V3VhdlNativeLower.cpp
     V3VhdlNativeLowerElab.cpp
     V3VhdlNativeLowerExpr.cpp
+    V3VhdlNativeLowerFixed.cpp
     V3VhdlNativeLowerPackage.cpp
     V3VhdlNativeLowerProcess.cpp
     V3VhdlNativeLowerStmt.cpp
