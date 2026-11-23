@@ -1,179 +1,115 @@
 ..
-   Github doesn't render images unless absolute URL
-   Do not know of a conditional tag, "only: github" nor "github display" works
    SPDX-FileCopyrightText: 2003-2026 Wilson Snyder
    SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
-|badge1| |badge2| |badge3| |badge4| |badge5|
+========================================================
+Verilator, experimental fork with a native VHDL frontend
+========================================================
 
-|badge7| |badge8|
+**This is an experimental fork. For anything that matters, use upstream
+Verilator:** https://github.com/verilator/verilator (releases, packages and
+documentation at https://verilator.org).
 
-.. |badge1| image:: https://img.shields.io/badge/Website-Verilator.org-181717.svg
-   :target: https://verilator.org
+Verilator compiles synthesizable Verilog and SystemVerilog into a C++ model
+that is then built and run as a simulator. This fork adds a frontend that
+reads VHDL-2008 directly, so that
 
-.. |badge2| image:: https://img.shields.io/badge/License-LGPL%20v3-blue.svg
-   :target: https://www.gnu.org/licenses/lgpl-3.0
+.. code-block:: bash
 
-.. |badge3| image:: https://img.shields.io/badge/License-Artistic%202.0-0298c3.svg
-   :target: https://opensource.org/licenses/Artistic-2.0
+   verilator --cc --exe --build -j 0 counter.vhdl sim_main.cpp
+   ./obj_dir/Vcounter
 
-.. |badge4| image:: https://repology.org/badge/tiny-repos/verilator.svg?header=distro%20packages
-   :target: https://repology.org/project/verilator/versions
+verilates a ``.vhd`` or ``.vhdl`` design with one command, one AST and one set
+of diagnostics, without GHDL or a VHDL-to-Verilog translation step. Everything
+after analysis is unchanged upstream Verilator: the same generated C++, the
+same runtime library and the same testbench idiom.
 
-.. |badge5| image:: https://img.shields.io/docker/pulls/verilator/verilator
-   :target: https://hub.docker.com/r/verilator/verilator
+Status
+======
 
-.. |badge7| image:: https://img.shields.io/github/actions/workflow/status/verilator/verilator/regression.yml?branch=master&label=regression
-   :target: https://github.com/verilator/verilator/actions/workflows/regression.yml
+The fork is a working proposal, not a supported product. Treat it as follows:
 
-.. |badge8| image:: https://img.shields.io/github/actions/workflow/status/verilator/verilator/rtlmeter.yml?branch=master&event=schedule&label=benchmarks
-   :target: https://verilator.github.io/verilator-rtlmeter-results
+- It is not released, versioned or packaged, and it is not endorsed by the
+  Verilator maintainers. Behavior, option names and the supported VHDL subset
+  can change or disappear.
+- Nearly all of the frontend, its tests and its documentation were written
+  with heavy assistance from an AI coding agent, under the direction of the
+  fork's author, who is responsible for the contribution and is reviewing it.
+  The provenance of generated code is also a licensing question that has not
+  had a legal review.
+- The runtime model is two-state. A VHDL design that depends on ``'U'``/``'X'``
+  propagation or nine-state resolution simulates differently here than in
+  GHDL or a commercial simulator.
+- Constructs outside the supported subset are refused with a diagnostic, but
+  the refusal list is not complete, and a few legal constructs are falsely
+  rejected. Large memories and whole-core elaborations can exhaust memory.
+- Mixed-language support is one-way: a SystemVerilog top can instantiate a
+  VHDL entity, not the reverse.
 
-Welcome to Verilator
+A design that must be correct should be checked against a reference VHDL
+simulator, or run through the ``ghdl --synth`` and Yosys flow, which covers
+more of VHDL-2008 than this frontend does.
+
+Try it
+======
+
+Build the fork like upstream Verilator, in the source tree. Configure with
+``--enable-ccwarn`` so a new compiler warning stops the build:
+
+.. code-block:: bash
+
+   git clone https://github.com/hun/verilator.git
+   cd verilator
+   git checkout vhdl-native-frontend
+   autoconf && ./configure --enable-ccwarn && make -j8
+
+Then follow the worked counter and hierarchical-accumulator examples in
+``docs/vhdl/usage.rst``. The file extension selects the language, so no
+VHDL-specific option is needed; ``--language vhdl`` covers VHDL kept in files
+with other extensions.
+
+Run the VHDL regression tests from the repository root. The suite needs only
+the built Verilator and a C++ compiler; it does not call GHDL:
+
+.. code-block:: bash
+
+   test_regress/t/t_vhdl_*.py
+
+Check what the frontend accepts
+===============================
+
+``docs/vhdl/limitations.rst`` lists the supported subset and each place where
+the model diverges from VHDL: the two-state value model, delta-cycle
+approximation, packed records and arrays, and how enumerations and records
+appear in waveforms (as plain vectors). Read it before porting a design.
+``docs/vhdl/architecture.rst`` describes how the frontend lowers VHDL into
+Verilator's AST, and the design adds no AST node, pass or runtime primitive.
+
+The branch has been run against a corpus of open-source VHDL projects (PoC,
+open-logic, hdl-modules, microwatt, neorv32, T80 and others). At the last
+count 64 of 86 ported testcases simulate with every check passing, and all 45
+cycle-by-cycle comparisons against GHDL that build match. The corpus repository
+is not public yet, so these numbers cannot be reproduced from this checkout.
+
+Read the proposal
+=================
+
+``rfc_native_vhdl_frontend.rst`` is the request for comments written for the
+upstream maintainers: motivation, design, evidence, known limitations, a
+maintenance plan and a staged way to merge the work. Whether any of it goes
+upstream is the maintainers' decision.
+
+Relation to upstream
 ====================
 
-.. list-table::
+The branch is based on upstream ``master`` and adds ``src/V3Vhdl*``, a small
+change in nine existing files, tests under ``test_regress/t/t_vhdl*`` and the
+documentation named above. The original upstream README is kept as
+``README.upstream.rst``. Bugs that also occur with SystemVerilog input belong
+in the `upstream issue tracker <https://github.com/verilator/verilator/issues>`_;
+report VHDL frontend problems on this fork instead, and do not ask the
+upstream project to support it.
 
-   - - **Welcome to Verilator, the fastest Verilog/SystemVerilog simulator.**
-          - Accepts Verilog or SystemVerilog, including UVM
-          - Performs lint code-quality checks
-          - Compiles into multithreaded C++, or SystemC
-          - Creates JSON to front-end your own tools
-     - |Logo|
-   - - |verilator multithreaded performance|
-     - **Fast**
-          - Outperforms many closed-source commercial simulators
-          - Single- and multithreaded output models
-   - - **Widely Used**
-          - Wide industry and academic deployment
-          - Out-of-the-box support from Arm and RISC-V vendor IP
-          - Over 700 contributors
-     - |verilator usage|
-   - - |verilator community|
-     - **Community Driven & Openly Licensed**
-          - Guided by the `CHIPS Alliance`_ and `Linux Foundation`_
-          - Open, and free as in both speech and beer
-          - More simulation for your verification budget
-   - - **Commercial Support Available**
-          - Commercial support contracts
-          - Design support contracts
-          - Enhancement contracts
-     - |verilator support|
-
-What Verilator Does
-===================
-
-Verilator is invoked with parameters similar to GCC or Synopsys's VCS. It
-"Verilates" the specified Verilog or SystemVerilog code by reading it,
-performing lint checks, and optionally inserting assertion checks and
-coverage-analysis points. It outputs single- or multithreaded .cpp and .h
-files, the "Verilated" code.
-
-Verilator can automatically generate a simulator executable (using
-``--binary``), or users can write their own C++/SystemC wrapper to
-instantiate the model. The resulting Verilated executable performs the
-design simulation. Verilator also supports linking Verilator-generated
-libraries, optionally encrypted, into other simulators.
-
-Verilator supports all design constructs, most verification constructs
-including UVM, intra-assignment delays (e.g, `#10`), and events.
-Tristate-bus (`z`) and unknowns (`x`) are handled in limited contexts, in a
-special manor for performance. It currently may not be the best choice if
-you are expecting a full-featured replacement for a closed-source Verilog
-simulator, performing SDF annotation, or mixed-signal simulation. However,
-if you are looking for a path to migrate SystemVerilog to C++/SystemC, or
-want high-speed simulation, Verilator is the tool for you.
-
-Performance
-===========
-
-Verilator does not directly translate Verilog HDL to C++ or SystemC.
-Rather, Verilator compiles your code into a much faster optimized and
-optionally thread-partitioned model, which is in turn wrapped inside a
-C++/SystemC module. The results are a compiled Verilog model that executes
-even on a single thread over 10x faster than standalone SystemC, and on a
-single thread is about 100 times faster than interpreted Verilog simulators
-such as `Icarus Verilog`_. Another 2-10x speedup might be gained from
-multithreading (yielding 200-1000x total over interpreted simulators).
-
-Verilator has typically similar or better performance versus closed-source
-Verilog simulators (e.g., Aldec Riviera-Pro, Cadence Incisive/NC-Verilog,
-Mentor ModelSim/Questa, Synopsys VCS, VTOC, and Pragmatic CVer/CVC). But,
-Verilator is open-sourced, so you can spend on computes rather than
-licenses. Thus, Verilator gives you the best simulation cycles/dollar.
-
-Installation & Documentation
-============================
-
-For more information:
-
-- `Verilator installation and package directory structure
-  <https://verilator.org/install>`_
-
-- `Verilator manual (HTML) <https://verilator.org/verilator_doc.html>`_, or
-  `Verilator manual (PDF) <https://verilator.org/verilator_doc.pdf>`_
-
-- `Subscribe to Verilator announcements
-  <https://github.com/verilator/verilator-announce>`_
-
-- `Verilator forum <https://verilator.org/forum>`_
-
-- `Verilator issues <https://verilator.org/issues>`_
-
-Support
-=======
-
-Verilator is a community project, guided by the `CHIPS Alliance`_ under the
-`Linux Foundation`_.
-
-We appreciate and welcome your contributions in whatever form; please see
-`Contributing to Verilator
-<https://github.com/verilator/verilator/blob/master/docs/CONTRIBUTING.rst>`_.
-Thanks to our `Contributors and Sponsors
-<https://verilator.org/guide/latest/contributors.html>`_.
-
-Verilator also supports and encourages commercial support models and
-organizations; please see `Verilator Commercial Support
-<https://verilator.org/verilator_commercial_support>`_.
-
-Related Projects
-================
-
-- `Cocotb <https://www.cocotb.org/>`_ - A coroutine-based cosimulation
-  library for writing testbenches in Python which officially supports
-  Verilator.
-
-- `GTKwave <https://gtkwave.sourceforge.net/>`_ - Waveform viewer for
-  Verilator traces.
-
-- `Icarus Verilog`_ - Icarus is a highly-featured interpreted Verilog
-  simulator. If Verilator does not support your needs, perhaps Icarus may.
-
-- `Surfer <https://surfer-project.org/>`_ - Web or offline waveform viewer
-  for Verilator traces.
-
-Open License
-============
-
-Verilator is Copyright 2003-2026 by Wilson Snyder. (Report bugs to
-`Verilator Issues <https://verilator.org/issues>`_.)
-
-Verilator is free software; you can redistribute it and/or modify it under
-the terms of either the GNU Lesser General Public License Version 3 or the
-Perl Artistic License Version 2.0. See the documentation for more details.
-
-.. _chips alliance: https://chipsalliance.org
-
-.. _icarus verilog: https://steveicarus.github.io/iverilog
-
-.. _linux foundation: https://www.linuxfoundation.org
-
-.. |Logo| image:: https://www.veripool.org/img/verilator_256_200_min.png
-
-.. |verilator multithreaded performance| image:: https://www.veripool.org/img/verilator_multithreaded_performance_bg-min.png
-
-.. |verilator usage| image:: https://www.veripool.org/img/verilator_usage_400x200-min.png
-
-.. |verilator community| image:: https://www.veripool.org/img/verilator_community_400x125-min.png
-
-.. |verilator support| image:: https://www.veripool.org/img/verilator_support_400x125-min.png
+Verilator is copyright Wilson Snyder and contributors, and is licensed under
+LGPL-3.0-only OR Artistic-2.0. The additions in this fork carry the same
+license.
