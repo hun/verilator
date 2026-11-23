@@ -1758,7 +1758,7 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         return makeReduction(flp, operandp, fn.substr(0, fn.find("_reduce")));
     }
     if ((fn == "resize" || fn == "conv_std_logic_vector" || fn == "conv_unsigned"
-         || fn == "conv_signed")
+         || fn == "conv_signed" || fn == "ext" || fn == "sxt")
         && argsp.size() == 2) {
         return lowerIntrinsicResize(flp, fn, argsp);
     }
@@ -1895,13 +1895,20 @@ AstNodeExpr* Lowering::lowerIntrinsicResize(FileLine* flp, const std::string& fn
     VSigning signing = valueType.signing;
     if (fn != "resize") {
         kwd = VBasicDTypeKwd::LOGIC;
-        if (fn == "conv_std_logic_vector") {
+        if (fn == "conv_std_logic_vector" || fn == "ext" || fn == "sxt") {
             signing = VSigning::NOSIGN;
         } else {
             signing = fn == "conv_signed" ? VSigning::SIGNED : VSigning::UNSIGNED;
         }
     }
     const VType target = vectorType(flp, kwd, signing, static_cast<int>(width));
+    if (fn == "sxt" && width > valueType.width) {
+        // std_logic_arith's sxt replicates the sign bit of a std_logic_vector, which has no
+        // signedness of its own for resizeExpr to go by
+        AstExtendS* const extendedp = new AstExtendS{flp, valuep, static_cast<int>(width)};
+        extendedp->dtypep(target.dtp);
+        return extendedp;
+    }
     return resizeExpr(valuep, target, flp);
 }
 

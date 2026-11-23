@@ -1075,6 +1075,8 @@ class Lowering final {
                                             "conv_integer",
                                             "conv_std_logic_vector",
                                             "conv_unsigned",
+                                            "ext",
+                                            "sxt",
                                             "conv_signed",
                                             "to_stdlogicvector",
                                             "to_stdulogicvector",
