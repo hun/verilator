@@ -1027,16 +1027,34 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
     VType& rt = ops.rt;
     // A concatenation of bit-string and character literals takes the element type of the
     // other operand (IEEE 1076-2008 9.3.6), so `"000" & bit_vector_signal` is a bit_vector
-    if (lt.isVector() && rt.isVector() && lt.kwd != rt.kwd) {
+    {
+        const auto elementKwd = [](const VType& type, VBasicDTypeKwd& kwd) {
+            if (type.isVector()) {
+                kwd = type.kwd;
+            } else if (type.kind == VType::BIT) {
+                kwd = VBasicDTypeKwd::BIT;
+            } else if (type.kind == VType::LOGIC) {
+                kwd = VBasicDTypeKwd::LOGIC;
+            } else {
+                return false;
+            }
+            return true;
+        };
+        VBasicDTypeKwd lhsKwd = VBasicDTypeKwd::LOGIC;
+        VBasicDTypeKwd rhsKwd = VBasicDTypeKwd::LOGIC;
         std::string literalBits;
-        const bool lhsLiteral = literalConcatBits(*expr.a, literalBits);
-        if ((lhsLiteral || literalConcatBits(*expr.b, literalBits))
-            && literalBits.find_first_not_of("01") == std::string::npos) {
+        const bool lhsLiteral = lt.isVector() && literalConcatBits(*expr.a, literalBits);
+        const bool rhsLiteral
+            = !lhsLiteral && rt.isVector() && literalConcatBits(*expr.b, literalBits);
+        if ((lhsLiteral || rhsLiteral) && elementKwd(lt, lhsKwd) && elementKwd(rt, rhsKwd)
+            && lhsKwd != rhsKwd && literalBits.find_first_not_of("01") == std::string::npos) {
             const VType& modelType = lhsLiteral ? rt : lt;
             AstNodeExpr*& literalp = lhsLiteral ? lp : rp;
             VType& literalType = lhsLiteral ? lt : rt;
             const VType fixedType
-                = vectorType(flp, modelType.kwd, modelType.signing, literalType.width);
+                = vectorType(flp, lhsLiteral ? rhsKwd : lhsKwd,
+                             modelType.isVector() ? modelType.signing : VSigning{VSigning::NOSIGN},
+                             literalType.width);
             literalp->deleteTree();
             literalp = makeBitsConst(flp, fixedType.dtp, literalBits);
             literalType = fixedType;
@@ -1077,7 +1095,11 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
                          : !rt.isVector()                 ? lt
                          : lt.signing == VSigning::NOSIGN ? rt
                                                           : lt;
-    const VType resultType = vectorType(flp, named.kwd, named.signing, lt.width + rt.width);
+    // A scalar element has no keyword of its own, so a bit takes its kind from the type
+    const VBasicDTypeKwd resultKwd = !named.isVector() && named.kind == VType::BIT
+                                         ? VBasicDTypeKwd{VBasicDTypeKwd::BIT}
+                                         : named.kwd;
+    const VType resultType = vectorType(flp, resultKwd, named.signing, lt.width + rt.width);
     AstConcat* const concatp = new AstConcat{flp, lp, rp};
     concatp->dtypep(resultType.dtp);
     // An array with an element, or with another array of its element type, is an array of
