@@ -32,6 +32,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -182,6 +183,7 @@ class Parser final {
     Lexer m_lexer;  // Token source
     Token m_cur;  // Current token
     bool m_failed = false;  // Stop after the first error
+    std::set<std::string> m_pslNames;  // Declared PSL properties and sequences, by folded name
     int m_stringContext = 0;  // Parsing a report message, which is a string
                               // whatever its characters are
     std::string m_libname;  // Library of the current file
@@ -437,8 +439,9 @@ class Parser final {
                        || t.text == "fell" || t.text == "stable" || t.text == "changed");
         };
         if (prop(a) || kw(a)) return true;
+        if (a.kind == Token::ID && m_pslNames.count(a.text)) return true;
+        if (a.kind == Token::SYM && a.text == "(" && kw(c)) return true;
         if (a.kind == Token::ID && a.text == "severity") return prop(d) || kw(d);
-        (void)c;
         return false;
     }
 
@@ -2386,12 +2389,18 @@ bool Parser::parseConcurrentPreamble(Architecture& arch, FileLine* flp) {
         }
     }
     if (!addLabel(label, flp)) return true;
-    if (isId("cover") || isId("restrict") || isId("assume") || isId("fair")
-        || isId("fairness")) {  // A PSL verification directive (IEEE 1850)
+    if (isId("cover") || isId("restrict") || isId("assume") || isId("fair") || isId("fairness")
+        || isId("property") || isId("sequence")) {  // A PSL directive or declaration (IEEE 1850)
         const auto pslSaved = m_lexer.state();
         const Token pslAhead = m_lexer.next();
         m_lexer.restore(pslSaved);
-        if (pslAhead.kind == Token::SYM && pslAhead.text == "{") {
+        // The keyword is not reserved: a directive is followed by a property, which starts
+        // with `{` or a name, never by the `<=` or `(` of an assignment or a call
+        if ((pslAhead.kind == Token::SYM && pslAhead.text == "{")
+            || pslAhead.kind == Token::ID) {
+            if ((isId("property") || isId("sequence")) && pslAhead.kind == Token::ID) {
+                m_pslNames.insert(pslAhead.text);
+            }
             advance();  // The directive keyword
             skipToStatementEnd();  // The property through its terminating ';'
             return true;
