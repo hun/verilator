@@ -1270,6 +1270,19 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
             rt = vectorT;
         }
     }
+    // std_logic_unsigned declares "+" and "-" between a std_logic_vector and a std_logic,
+    // which counts as the unsigned value 0 or 1
+    if (m_stdLogicUnsigned && (op == "+" || op == "-")
+        && ((lt.kind == VType::LOGIC && rt.isPredefinedVector() && rt.kwd == lt.kwd)
+            || (rt.kind == VType::LOGIC && lt.isPredefinedVector() && lt.kwd == rt.kwd))) {
+        if (lt.kind == VType::LOGIC) {
+            lp = resizeExpr(lp, rt, flp);
+            lt = rt;
+        } else {
+            rp = resizeExpr(rp, lt, flp);
+            rt = lt;
+        }
+    }
     if (!lt.isVector() || !rt.isVector() || lt.kwd != rt.kwd) {
         unsupportedError(flp, "arithmetic on non-numeric operands");
         lp->deleteTree();

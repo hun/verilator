@@ -155,7 +155,8 @@ Known limitations
 
 - Dynamic-index driver counts and ``std_logic_vector`` ``MULTIDRIVEN``
   diagnostics are still imprecise.
-- ``std_logic_signed`` arithmetic and comparison are not modeled.
+- ``std_logic_signed`` arithmetic and comparison are not modeled. ``std_logic_unsigned`` supports
+  ``+`` and ``-`` between a ``std_logic_vector`` and a ``std_logic``.
 - PSL directives are skipped rather than checked.
 - Visibility is enforced for the types of the IEEE packages only. The
   subprograms of those packages are not checked, so ``to_integer`` is
