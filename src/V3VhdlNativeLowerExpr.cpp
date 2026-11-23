@@ -1806,6 +1806,9 @@ AstNodeExpr* Lowering::lowerIntrinsic(const Expr& expr) {
         return makeRotate(flp, valuep, amountp, fn == "rotate_left");
     }
     if (fn == "minimum" || fn == "maximum") return lowerIntrinsicMinMax(flp, fn, argsp);
+    if (fn == "find_leftmost" || fn == "find_rightmost") {
+        return lowerIntrinsicFind(flp, fn, argsp);
+    }
     if (fn == "conv_integer" || fn == "to_stdulogic" || fn == "to_bit") {
         AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
         if (!valuep) return nullptr;
@@ -1930,6 +1933,48 @@ AstNodeExpr* Lowering::lowerIntrinsicMinMax(FileLine* flp, const std::string& fn
     AstCond* const resultp
         = new AstCond{flp, cmpp, lhsp->cloneTree(false), rhsp->cloneTree(false)};
     resultp->dtypep(dtp);
+    return resultp;
+}
+
+//! find_leftmost and find_rightmost (IEEE 1076-2008 numeric_std): the index of the first
+//! element equal to the second argument, scanning from the named end, or -1 if none is
+AstNodeExpr* Lowering::lowerIntrinsicFind(FileLine* flp, const std::string& fn,
+                                          const std::vector<ExprP>& argsp) {
+    if (argsp.size() != 2) {
+        unsupportedError(flp, "function '" + fn + "' without two arguments");
+        return nullptr;
+    }
+    AstNodeExpr* const valuep = lowerExpr(*argsp[0], nullptr);
+    if (!valuep) return nullptr;
+    const VType type = typeOfLowered(*argsp[0], valuep);
+    AstNodeExpr* const matchp = lowerExpr(*argsp[1], nullptr);
+    if (!matchp) {
+        valuep->deleteTree();
+        return nullptr;
+    }
+    if (!type.isVector() || type.elemWidth != 1) {
+        unsupportedError(flp, "function '" + fn + "' of an operand that is not a bit vector");
+        valuep->deleteTree();
+        matchp->deleteTree();
+        return nullptr;
+    }
+    // The element at bit offset k has index right + k, or right - k for an ascending range.
+    // The chain is built from the lowest-priority element out.
+    const bool leftmost = fn == "find_leftmost";
+    AstNodeExpr* resultp = makeIntConst(flp, -1);
+    for (int step = 0; step < type.width; ++step) {
+        const int offset = leftmost ? step : type.width - 1 - step;
+        AstSel* const selp = new AstSel{flp, valuep->cloneTree(false), offset, 1};
+        selp->dtypep(findBasic(flp, type.kwd));
+        AstEq* const eqp = new AstEq{flp, selp, matchp->cloneTree(false)};
+        eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        const int index = type.ascending ? type.right - offset : type.right + offset;
+        AstCond* const condp = new AstCond{flp, eqp, makeIntConst(flp, index), resultp};
+        condp->dtypep(resultp->dtypep());
+        resultp = condp;
+    }
+    valuep->deleteTree();
+    matchp->deleteTree();
     return resultp;
 }
 

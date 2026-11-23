@@ -1064,6 +1064,8 @@ class Lowering final {
                                             "rotate_right",
                                             "minimum",
                                             "maximum",
+                                            "find_leftmost",
+                                            "find_rightmost",
                                             "and_reduce",
                                             "or_reduce",
                                             "xor_reduce",
@@ -1113,6 +1115,8 @@ class Lowering final {
     AstNodeExpr* lowerFixedRealBinary(FileLine* flp, const Expr& expr, bool& handled);
     AstNodeExpr* fixedConstFromReal(FileLine* flp, double real, const VType& type, bool saturate,
                                     bool round);
+    AstNodeExpr* lowerIntrinsicFind(FileLine* flp, const std::string& fn,
+                                    const std::vector<ExprP>& argsp);
     AstNodeExpr* lowerIntrinsicMinMax(FileLine* flp, const std::string& fn,
                                       const std::vector<ExprP>& argsp);
     //! Unary reduction `and`/`or`/`xor` and their negations
