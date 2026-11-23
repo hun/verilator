@@ -1552,9 +1552,16 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
             }
         }
         // A scalar formal keeps its declared subtype: case coverage and attributes see
-        // the formal's bounds, not the actual's narrower ones. An array formal keeps the
-        // actual's bounds, which are what indexing it needs.
+        // the formal's bounds, not the actual's narrower ones.
         if (haveFormalType && !formalType.isVector()) binding.type = formalType;
+        // A constrained array formal indexes by its own bounds, whatever the actual's are
+        // (IEEE 1076-2008 4.2.2.1); an unconstrained one takes the actual's
+        if (haveFormalType && formalType.isVector() && binding.type.isVector()
+            && !formalType.unconstrainedBase && formalType.length() == binding.type.length()) {
+            binding.type.left = formalType.left;
+            binding.type.right = formalType.right;
+            binding.type.ascending = formalType.ascending;
+        }
         if (asLvalue && formalp->mode == PortMode::OUT && formalp->cls == FormalDecl::SIGNAL) {
             // Reading an out signal formal before return would see the actual's old value
             binding.readable = false;
