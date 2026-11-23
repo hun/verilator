@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: a configuration that binds a component instantiation is refused
+# DESCRIPTION: Verilator: VHDL configuration declaration selects an architecture
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -9,11 +9,13 @@
 
 import vltest_bootstrap
 
-test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_config_comp_bad.vhdl'
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_cfg_decl.vhdl'
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-          fails=True,
-          expect_filename=test.golden_filename)
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
+
+test.execute()
 
 test.passes()

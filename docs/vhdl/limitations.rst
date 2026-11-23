@@ -37,9 +37,10 @@ integer types, and all but the last two to enumeration types. ``'value`` and ``'
 run-time value are refused.
 
 A configuration specification in an architecture, ``for all|others|labels : comp use entity
-work.comp(arch);``, selects the architecture of a component instance. The entity must have the
-component's name, and a generic map, a port map, ``use configuration`` and ``use open`` are
-refused. A configuration declaration is checked but does not change the binding.
+work.comp(arch);``, selects the architecture of a component instance. A configuration declaration
+does the same for the architecture it configures and overrides a specification. The entity must
+have the component's name, and a generic map, a port map, ``use configuration`` and ``use open``
+are refused, as are two configurations that select different architectures for one instance.
 
 Library clauses, ``work`` as the default library, case-insensitive name lookup,
 source locations in diagnostics, and ``.vhd``/``.vhdl`` extension detection are

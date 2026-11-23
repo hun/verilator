@@ -197,15 +197,74 @@ struct EmitContext final {
     std::vector<const vhdlnative::EntityUnit*> portUnelaborated;
 };
 
-//! Bind each entity to one architecture and check the configuration bindings
-ArchByEntity resolveArchitectures(const vhdlnative::DesignLibrary& library) {
+//! The instances of a statement list and its nested bodies, in source order
+void collectInstanceStmts(const std::vector<std::unique_ptr<vhdlnative::Concurrent>>& stmts,
+                          std::vector<vhdlnative::Concurrent*>& out) {
+    for (const std::unique_ptr<vhdlnative::Concurrent>& statement : stmts) {
+        if (!statement) continue;
+        if (statement->kind == vhdlnative::Concurrent::INSTANCE) out.push_back(statement.get());
+        collectInstanceStmts(statement->body, out);
+        for (const vhdlnative::GenBranch& branch : statement->branches) {
+            collectInstanceStmts(branch.stmts, out);
+        }
+    }
+}
+
+//! Apply one binding of a configuration to the instances of the architecture it configures
+void applyConfigBinding(const vhdlnative::ConfigurationUnit& config,
+                        const vhdlnative::ConfigBinding& binding,
+                        const std::vector<vhdlnative::Concurrent*>& instances,
+                        const std::set<std::string>& namedLabels,
+                        std::set<const vhdlnative::Concurrent*>& configured) {
+    const std::vector<std::string> labels = splitLabels(binding.instances);
+    std::set<std::string> found;
+    for (vhdlnative::Concurrent* const instp : instances) {
+        const bool listed
+            = std::find(labels.begin(), labels.end(), instp->instanceLabel) != labels.end();
+        const bool matches
+            = binding.all || binding.others ? instp->instanceName == binding.component : listed;
+        // `others` leaves the instances that a binding of the configuration names
+        if (!matches || (binding.others && namedLabels.count(instp->instanceLabel))) continue;
+        found.insert(instp->instanceLabel);
+        if (!instp->entityInstantiation && instp->instanceName != binding.entity) {
+            vhdlnative::unsupportedError(
+                binding.flp, "configuration '" + config.spelling + "' binding component '"
+                                 + binding.component + "' to entity '" + binding.entity + "'");
+        } else if (instp->entityInstantiation && instp->instanceName != binding.entity) {
+            binding.flp->v3error("VHDL configuration '" + config.spelling + "' rebinds instance '"
+                                 + instp->instanceLabel + "' to entity '" + binding.entity
+                                 + "', not to the '" + instp->instanceName + "' it instantiates.");
+        } else if (binding.architecture.empty()) {
+            continue;
+        } else if (configured.count(instp) && instp->architectureName != binding.architecture) {
+            vhdlnative::unsupportedError(binding.flp,
+                                         "configurations selecting different architectures for "
+                                         "instance '"
+                                             + instp->instanceLabel + "'");
+        } else {
+            // A configuration declaration overrides a specification or an instance's own choice
+            instp->architectureName = binding.architecture;
+            configured.insert(instp);
+        }
+    }
+    for (const std::string& label : labels) {
+        if (!found.count(label)) {
+            binding.flp->v3error("VHDL configuration '" + config.spelling + "' binds instance '"
+                                 + label + "', which the architecture does not instantiate.");
+        }
+    }
+}
+
+//! Bind each entity to one architecture and apply the configuration bindings
+ArchByEntity resolveArchitectures(vhdlnative::DesignLibrary& library) {
     // The last analyzed architecture is the default
     ArchByEntity archByEntity;
     for (const vhdlnative::Architecture& arch : library.archs) {
         archByEntity[arch.entityName] = &arch;
     }
-    // A configuration binds component specifications; it changes nothing when each binding
-    // names the entity the architecture already instantiates directly
+    std::set<const vhdlnative::Concurrent*> configured;  // Instances a configuration selected
+    // A configuration selects the architecture of the instances it binds. A binding that
+    // names no architecture leaves the instance as written.
     for (const vhdlnative::ConfigurationUnit& config : library.configurations) {
         const auto archIt = archByEntity.find(config.entityName);
         if (archIt == archByEntity.end()) {
@@ -219,22 +278,22 @@ ArchByEntity resolveArchitectures(const vhdlnative::DesignLibrary& library) {
                                 + archIt->second->name + "'.");
             continue;
         }
+        vhdlnative::Architecture* configuredp = nullptr;
+        for (vhdlnative::Architecture& arch : library.archs) {
+            if (&arch == archIt->second) configuredp = &arch;
+        }
+        std::vector<vhdlnative::Concurrent*> instances;
+        collectInstanceStmts(configuredp->stmts, instances);
+        std::set<std::string> namedLabels;
         for (const vhdlnative::ConfigBinding& binding : config.bindings) {
             for (const std::string& label : splitLabels(binding.instances)) {
-                const vhdlnative::Concurrent* instp = findInstance(archIt->second->stmts, label);
-                if (!instp) {
-                    binding.flp->v3error("VHDL configuration '" + config.spelling
-                                         + "' binds instance '" + label
-                                         + "', which the architecture does not instantiate.");
-                } else if (!instp->entityInstantiation) {
-                    vhdlnative::unsupportedError(binding.flp, "configuration '" + config.spelling
-                                                                  + "' binding component '"
-                                                                  + binding.component + "'");
-                } else if (instp->instanceName != binding.entity) {
-                    binding.flp->v3error("VHDL configuration '" + config.spelling
-                                         + "' rebinds instance '" + label + "' to entity '"
-                                         + binding.entity + "', not to the '" + instp->instanceName
-                                         + "' it instantiates.");
+                namedLabels.insert(label);
+            }
+        }
+        for (const bool others : {false, true}) {
+            for (const vhdlnative::ConfigBinding& binding : config.bindings) {
+                if (binding.others == others) {
+                    applyConfigBinding(config, binding, instances, namedLabels, configured);
                 }
             }
         }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL configuration declaration binding with an architecture selection is refused
+# DESCRIPTION: Verilator: VHDL configuration declarations that select different architectures are refused
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,7 +10,7 @@
 import vltest_bootstrap
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_cfg_decl_arch_unsup.vhdl'
+test.top_filename = 't/t_vhdl_cfg_conflict_unsup.vhdl'
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

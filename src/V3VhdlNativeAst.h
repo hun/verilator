@@ -566,7 +566,10 @@ struct PackageInstance final {
 //! One component binding of a configuration: `for <instances> : <comp> use entity <lib>.<ent>;`
 struct ConfigBinding final {
     std::string instances;  // Folded instance labels, comma separated as written
+    bool all = false;  // `all` instead of a label list
+    bool others = false;  // `others` instead of a label list
     std::string component;  // Folded component name
+    std::string architecture;  // Folded architecture the `use entity` clause selects, or empty
     std::string libname;  // Library named by the `use entity` clause
     std::string entity;  // Folded entity name the `use entity` clause binds
     FileLine* flp = nullptr;  // Source location

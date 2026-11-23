@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_config_comp_unsup.vhdl:65:1: Unsupported: VHDL configuration 'cfg' binding component 'child' to entity 'other'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

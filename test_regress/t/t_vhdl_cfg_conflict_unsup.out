@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_cfg_conflict_unsup.vhdl:63:1: Unsupported: VHDL configurations selecting different architectures for instance 'u1'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

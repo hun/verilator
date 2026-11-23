@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: a configuration that binds a component instantiation is refused
+-- DESCRIPTION: Verilator: a configuration binding a component to a differently named entity is refused
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,
@@ -19,6 +19,21 @@ end entity child;
 architecture rtl of child is
 begin
   o <= i;
+end architecture rtl;
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity other is
+  port (
+    i : in  std_logic;
+    o : out std_logic
+  );
+end entity other;
+
+architecture rtl of other is
+begin
+  o <= not i;
 end architecture rtl;
 
 library ieee;
@@ -46,12 +61,11 @@ begin
     );
 end architecture rtl;
 
--- A component instantiation binds to a component declaration, not to an entity, so the
--- frontend would have to resolve the component to lower it
+-- A component instance binds through the component's name, so another entity is refused
 configuration cfg of t is
   for rtl
     for u_child : child
-      use entity work.child;
+      use entity work.other;
     end for;
   end for;
 end configuration cfg;

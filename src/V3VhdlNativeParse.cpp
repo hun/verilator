@@ -3440,6 +3440,11 @@ void Parser::parseConfiguration(FileLine* flp) {
         unit.entityName = partTok.text;
     }
     if (!expectId("is")) return;
+    {
+        // A `use` clause of the configuration only makes declarations visible
+        std::vector<UseClause> ignoredUses;
+        while (isId("use")) parseUseClauseInto(ignoredUses);
+    }
     if (!expectId("for")) return;
     Token archTok;
     if (!takeId(archTok)) return;
@@ -3455,19 +3460,28 @@ void Parser::parseConfiguration(FileLine* flp) {
         advance();
         ConfigBinding binding;
         binding.flp = flp;
-        while (true) {  // The instantiation list, comma separated
-            Token instTok;
-            if (!takeId(instTok)) return;
-            if (!binding.instances.empty()) binding.instances += ",";
-            binding.instances += instTok.text;
-            if (!acceptSym(",")) break;
+        if (isId("all") || isId("others")) {
+            (isId("all") ? binding.all : binding.others) = true;
+            advance();
+        } else {
+            while (true) {  // The instantiation list, comma separated
+                Token instTok;
+                if (!takeId(instTok)) return;
+                if (!binding.instances.empty()) binding.instances += ",";
+                binding.instances += instTok.text;
+                if (!acceptSym(",")) break;
+            }
         }
         expectSym(":");
         Token compTok;
         if (!takeId(compTok)) return;
         binding.component = compTok.text;
         if (!expectId("use")) return;
-        if (!expectId("entity")) return;
+        if (!isId("entity")) {  // `use configuration` and `use open`
+            unsupported("configuration binding of '" + m_cur.text + "'");
+            return;
+        }
+        advance();
         Token libTok;
         if (!takeId(libTok)) return;
         binding.libname = libTok.text;
@@ -3480,9 +3494,11 @@ void Parser::parseConfiguration(FileLine* flp) {
             if (!takeId(partTok)) return;
             binding.entity = partTok.text;
         }
-        if (isSym("(")) {  // A configuration declaration only checks its bindings
-            unsupported("architecture selection in a configuration binding");
-            return;
+        if (acceptSym("(")) {
+            Token selectedTok;
+            if (!takeId(selectedTok)) return;
+            binding.architecture = selectedTok.text;
+            expectSym(")");
         }
         expectSym(";");
         if (!expectId("end")) return;
@@ -3495,7 +3511,7 @@ void Parser::parseConfiguration(FileLine* flp) {
     if (!expectId("for")) return;
     if (!acceptSym(";")) error("expected ';' after the architecture's 'end for'");
     if (!expectId("end")) return;
-    if (!expectId("configuration")) return;
+    (void)acceptId("configuration");
     if (m_cur.kind == Token::ID) advance();  // Optional end name
     if (!acceptSym(";")) error("expected ';' after 'end configuration'");
     if (!m_failed) m_configurations.push_back(std::move(unit));
