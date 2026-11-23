@@ -1988,7 +1988,20 @@ bool Lowering::bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t por
             return false;
         }
     }
-    const VType portType = typeOfDType(portp->dtypep());
+    VType portType = typeOfDType(portp->dtypep());
+    // An enumeration port packs into a logic vector, which names no VHDL type to check against
+    VType enumPortType;
+    if (enumTypeOfDType(portp->dtypep(), enumPortType)) portType = enumPortType;
+    // A boolean port packs into one logic bit, but the actual must still be a boolean
+    if (ctx.entityp) {
+        for (const PortDecl& port : ctx.entityp->ports) {
+            const bool named = std::any_of(port.names.begin(), port.names.end(),
+                                           [&](const std::pair<std::string, std::string>& name) {
+                                               return name.first == portp->name();
+                                           });
+            if (named && port.type.mark == "boolean") portType.typeName = "boolean";
+        }
+    }
     // The packed vector of a record port does not name its elements, so an aggregate
     // actual or default takes the record type the port is declared with. An
     // unconstrained record port takes the element ranges this instance fixed.
