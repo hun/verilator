@@ -1165,6 +1165,11 @@ bool Lowering::exprNeedsLaterObject(const Expr& expr) const {
 
 bool Lowering::typeDeclNeedsLaterObject(const TypeDecl& decl) const {
     const auto specNeeds = [this](const TypeSpec& spec) {
+        // `object'subtype` and `object'element` read an object declared after the types
+        if (!spec.objectName.empty() && !m_scope.count(spec.objectName)
+            && !m_types.count(spec.objectName)) {
+            return true;
+        }
         if (spec.left && exprNeedsLaterObject(*spec.left)) return true;
         if (spec.right && exprNeedsLaterObject(*spec.right)) return true;
         for (const TypeSpec::MemberConstraint& member : spec.memberConstraints) {
