@@ -253,25 +253,33 @@ bool Lowering::evalIntAttribute(const Expr& expr, int64_t& value) const {
         value = position;
         return true;
     }
-    if (typep->kind != VType::ENUM) return false;
-    const int64_t count = static_cast<int64_t>(typep->literals.size());
-    if (attribute == "succ" || attribute == "pred") {
-        const int64_t next = attribute == "succ" ? position + 1 : position - 1;
-        if (position < 0 || position >= count) {
-            expr.flp->v3error("VHDL: '" + std::string{attribute}
-                              + "' value is outside the enumeration type.");
-            return false;
-        }
-        if (next < 0 || next >= count) {
-            expr.flp->v3error("VHDL: '" + std::string{attribute} + "' of the "
-                              + (attribute == "succ" ? "last" : "first")
-                              + " enumeration literal is outside the type.");
-            return false;
-        }
-        value = next;
-        return true;
+    const bool stepAttr = attribute == "succ" || attribute == "pred" || attribute == "leftof"
+                          || attribute == "rightof";
+    if (!stepAttr || (typep->kind != VType::ENUM && typep->kind != VType::INT)) return false;
+    // Neighbouring value in the type's order; an enumeration ascends, an integer type
+    // follows its declared direction (IEEE 1076-2008 16.2.2)
+    const bool ascending = typep->kind == VType::ENUM || typep->ascending;
+    const int64_t low = typep->kind == VType::ENUM ? 0 : std::min(typep->left, typep->right);
+    const int64_t high = typep->kind == VType::ENUM
+                             ? static_cast<int64_t>(typep->literals.size()) - 1
+                             : std::max(typep->left, typep->right);
+    const bool up = attribute == "succ" || (attribute == "rightof" && ascending)
+                    || (attribute == "leftof" && !ascending);
+    const int64_t next = up ? position + 1 : position - 1;
+    const bool isEnum = typep->kind == VType::ENUM;
+    if (position < low || position > high) {
+        expr.flp->v3error("VHDL: '" + std::string{attribute} + "' value is outside the "
+                          + (isEnum ? "enumeration type." : "type."));
+        return false;
     }
-    return false;
+    if (next < low || next > high) {
+        expr.flp->v3error("VHDL: '" + std::string{attribute} + "' of the "
+                          + (up ? "last " : "first ") + (isEnum ? "enumeration literal" : "value")
+                          + " is outside the type.");
+        return false;
+    }
+    value = next;
+    return true;
 }
 
 //! Integer value of a binary operation on two constant operands

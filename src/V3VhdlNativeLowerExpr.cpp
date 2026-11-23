@@ -2989,6 +2989,39 @@ AstNodeExpr* Lowering::lowerAttrWithArgs(FileLine* flp, const Expr& expr,
         }
         if (foldedAll) return makeStringConst(flp, text);
     }
+    const bool stepAttr = attribute == "succ" || attribute == "pred" || attribute == "leftof"
+                          || attribute == "rightof";
+    const bool boolType = type.kind == VType::LOGIC && type.typeName == "boolean";
+    if (expr.args.size() == 1 && (type.kind == VType::INT || boolType)
+        && (attribute == "pos" || attribute == "val")) {
+        AstNodeExpr* const argp = lowerExpr(*expr.args[0], &type);
+        if (!argp) return nullptr;
+        return resizeExpr(argp, attribute == "pos" ? intType(flp) : type, flp);
+    }
+    if (expr.args.size() == 1 && stepAttr && type.kind == VType::INT && type.width == 32) {
+        AstNodeExpr* argp = lowerExpr(*expr.args[0], &type);
+        if (!argp) return nullptr;
+        argp = resizeExpr(argp, type, flp);
+        const bool up = attribute == "succ" || (attribute == "rightof" && type.ascending)
+                        || (attribute == "leftof" && !type.ascending);
+        if (m_modp) {
+            // The neighbour of the last value is outside the type, a bound-check failure
+            // in VHDL rather than a wrap
+            AstNodeExpr* const atLimitp
+                = new AstEq{flp, argp->cloneTree(false),
+                            makeIntConst(flp, up ? std::max(type.left, type.right)
+                                                 : std::min(type.left, type.right))};
+            atLimitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            addRuntimeError(flp, atLimitp,
+                            "VHDL: '" + attribute + "' of the " + (up ? "last" : "first")
+                                + " value is outside the type");
+        }
+        AstNodeExpr* const resultp
+            = up ? static_cast<AstNodeExpr*>(new AstAdd{flp, argp, makeIntConst(flp, 1)})
+                 : static_cast<AstNodeExpr*>(new AstSub{flp, argp, makeIntConst(flp, 1)});
+        resultp->dtypep(type.dtp);
+        return resultp;
+    }
     unsupportedError(flp, "attribute '" + attribute + "' with arguments");
     return nullptr;
 }

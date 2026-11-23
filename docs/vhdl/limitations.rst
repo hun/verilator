@@ -32,6 +32,10 @@ fixed-point operand. Division, ``mod``, ``rem``, shifts, ``to_real`` and arrays 
 fixed-point elements are refused. The results of these operations were compared with
 GHDL on every operand pair of small ranges.
 
+The attributes ``'pos``, ``'val``, ``'succ``, ``'pred``, ``'leftof`` and ``'rightof`` apply to
+integer types, and all but the last two to enumeration types. ``'value`` and ``'image`` of a
+run-time value are refused.
+
 Library clauses, ``work`` as the default library, case-insensitive name lookup,
 source locations in diagnostics, and ``.vhd``/``.vhdl`` extension detection are
 supported. ``--top-module`` selects the top entity.
