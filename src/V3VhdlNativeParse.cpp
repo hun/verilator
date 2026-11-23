@@ -492,6 +492,18 @@ class Parser final {
     void skipLibraryClause();
     void parseRecordBody(TypeDecl& decl);
     void parseIndexConstraint(TypeSpec& type);
+    //! A configuration specification of an architecture's declarative part
+    struct ConfigSpec final {
+        FileLine* flp = nullptr;  // Source location
+        std::set<std::string> labels;  // Instance labels, empty for `all` and `others`
+        bool all = false;  // `all`
+        bool others = false;  // `others`
+        std::string component;  // Folded component name
+        std::string entity;  // Folded entity the component binds to
+        std::string architecture;  // Folded architecture, empty when none is named
+    };
+    void parseConfigSpec(std::vector<ConfigSpec>& specs);
+    void applyConfigSpec(const ConfigSpec& spec, std::vector<std::unique_ptr<Concurrent>>& stmts);
     void parseArchitecture(FileLine* flp);
     void parseConfiguration(FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
@@ -2086,6 +2098,80 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
     expectSym(")");
 }
 
+//! `for labels|all|others : component use entity [lib.]entity[(arch)];`
+void Parser::parseConfigSpec(std::vector<ConfigSpec>& specs) {
+    advance();  // 'for'
+    ConfigSpec spec;
+    spec.flp = m_cur.flp;
+    if (isId("all")) {
+        advance();
+        spec.all = true;
+    } else if (isId("others")) {
+        advance();
+        spec.others = true;
+    } else {
+        while (true) {
+            Token labelTok;
+            if (!takeId(labelTok)) return;
+            spec.labels.insert(labelTok.text);
+            if (!acceptSym(",")) break;
+        }
+    }
+    expectSym(":");
+    Token compTok;
+    if (!takeId(compTok)) return;
+    spec.component = compTok.text;
+    if (!expectId("use")) return;
+    if (!isId("entity")) {  // `use configuration` and `use open`
+        unsupported("configuration specification of '" + m_cur.text + "'");
+        return;
+    }
+    advance();
+    Token entityTok;
+    if (!takeId(entityTok)) return;
+    spec.entity = entityTok.text;
+    while (acceptSym(".")) {  // The library is not modelled
+        if (!takeId(entityTok)) return;
+        spec.entity = entityTok.text;
+    }
+    if (acceptSym("(")) {
+        Token archTok;
+        if (!takeId(archTok)) return;
+        spec.architecture = archTok.text;
+        expectSym(")");
+    }
+    if (isId("generic") || isId("port")) {
+        unsupported("configuration specification with a generic or port map");
+        return;
+    }
+    if (!acceptSym(";")) error("expected ';' after a configuration specification");
+    // The instances bind through the component's name, so only an entity of that name
+    if (spec.entity != spec.component) {
+        unsupported("configuration specification binding component '" + spec.component
+                    + "' to entity '" + spec.entity + "'");
+        return;
+    }
+    specs.push_back(std::move(spec));
+}
+
+//! Give each instance of the specified component its architecture, in the statements and
+//! the bodies nested in them. A specification with `others` yields to a label that another
+//! specification names, and to `all`.
+void Parser::applyConfigSpec(const ConfigSpec& spec,
+                             std::vector<std::unique_ptr<Concurrent>>& stmts) {
+    for (std::unique_ptr<Concurrent>& stmtp : stmts) {
+        if (!stmtp) continue;
+        if (stmtp->kind == Concurrent::INSTANCE && !stmtp->entityInstantiation
+            && stmtp->instanceName == spec.component
+            && (spec.all || spec.others || spec.labels.count(stmtp->instanceLabel))
+            && stmtp->architectureName.empty()) {
+            stmtp->architectureName = spec.architecture;
+        }
+        applyConfigSpec(spec, stmtp->body);
+        for (GenBranch& branch : stmtp->branches) applyConfigSpec(spec, branch.stmts);
+    }
+}
+
 void Parser::parseArchitecture(FileLine* flp) {
     Token nameTok;
     if (!takeName(nameTok)) return;
@@ -2106,6 +2192,7 @@ void Parser::parseArchitecture(FileLine* flp) {
         arch.entityName = entityTok.text;
     }
     if (!expectId("is")) return;
+    std::vector<ConfigSpec> configSpecs;  // Applied to the instances once they are parsed
     while (true) {
         if (m_failed) return;
         if (isId("begin")) break;
@@ -2185,9 +2272,9 @@ void Parser::parseArchitecture(FileLine* flp) {
             parsePackageInstanceTail(instTok.flp, instTok.text, instTok.spelling);
             continue;
         }
-        if (isId("for")) {  // IEEE 1076-2008 3.4.7 configuration specification
-            unsupported("configuration specification");
-            return;
+        if (isId("for")) {  // IEEE 1076-2008 7.3.2 configuration specification
+            parseConfigSpec(configSpecs);
+            continue;
         }
         if (skipFileDecl()) continue;
         error("unexpected architecture declaration '" + m_cur.text + "'");
@@ -2199,6 +2286,13 @@ void Parser::parseArchitecture(FileLine* flp) {
         while (!m_failed && !isId("end") && m_cur.kind != Token::END) {
             parseConcurrentStatement(arch);
         }
+    }
+    // `others` binds only the instances that no other specification named
+    for (const ConfigSpec& spec : configSpecs) {
+        if (!spec.others) applyConfigSpec(spec, arch.stmts);
+    }
+    for (const ConfigSpec& spec : configSpecs) {
+        if (spec.others) applyConfigSpec(spec, arch.stmts);
     }
     if (!expectId("end")) return;
     (void)acceptId("architecture");
@@ -3381,10 +3475,14 @@ void Parser::parseConfiguration(FileLine* flp) {
         Token entTok;
         if (!takeId(entTok)) return;
         binding.entity = entTok.text;
-        while (acceptSym(".")) {  // An architecture selection is not modelled
+        while (acceptSym(".")) {
             Token partTok;
             if (!takeId(partTok)) return;
             binding.entity = partTok.text;
+        }
+        if (isSym("(")) {  // A configuration declaration only checks its bindings
+            unsupported("architecture selection in a configuration binding");
+            return;
         }
         expectSym(";");
         if (!expectId("end")) return;

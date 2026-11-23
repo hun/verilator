@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL configuration specifications are refused
+# DESCRIPTION: Verilator: VHDL configuration specification binding a differently named entity is refused
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
