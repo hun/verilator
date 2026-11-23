@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_signed_pkg_unsup.vhdl:24:10: Unsupported: VHDL std_logic_signed arithmetic.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

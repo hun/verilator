@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL std_logic_signed arithmetic is refused
+-- DESCRIPTION: Verilator: VHDL std_logic_signed has no division operator
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,
@@ -20,6 +20,6 @@ end;
 
 architecture rtl of t is
 begin
-  -- std_logic_signed makes this signed; the frontend does not model that yet
-  o <= a + b;
+  -- std_logic_signed declares no "/" for std_logic_vector
+  o <= a / b;
 end;

@@ -879,13 +879,45 @@ AstNodeExpr* Lowering::lowerRelation(FileLine* flp, const Expr& expr, const std:
     reconcileRelationOperands(flp, expr, ops);
     reSignBitStringLiteral(flp, *expr.a, lp, lt, rt);
     reSignBitStringLiteral(flp, *expr.b, rp, rt, lt);
-    if (m_stdLogicSigned
-        && ((lt.kind == VType::VECTOR && lt.kwd == VBasicDTypeKwd::LOGIC)
-            || (rt.kind == VType::VECTOR && rt.kwd == VBasicDTypeKwd::LOGIC))) {
-        unsupportedError(flp, "std_logic_signed comparison");
-        lp->deleteTree();
-        rp->deleteTree();
-        return nullptr;
+    // std_logic_signed and std_logic_unsigned compare two std_logic_vectors as numbers, so
+    // vectors of different lengths are compared by value, not element by element
+    if (isSignedLogicVector(lt)
+        || (m_stdLogicUnsigned && lt.isPredefinedVector() && lt.kwd == VBasicDTypeKwd::LOGIC
+            && rt.isPredefinedVector() && rt.kwd == VBasicDTypeKwd::LOGIC
+            && lt.width != rt.width)) {
+        const bool sign = isSignedLogicVector(lt);
+        const VType widenType
+            = vectorType(flp, lt.kwd, sign ? VSigning{VSigning::SIGNED} : lt.signing,
+                         std::max(lt.width, rt.width));
+        lp = sign ? signExtendExpr(lp, widenType, flp) : resizeExpr(lp, widenType, flp);
+        rp = sign ? signExtendExpr(rp, widenType, flp) : resizeExpr(rp, widenType, flp);
+        if (sign) {
+            // The width pass only keeps a signed comparison when its operands are signed
+            lp = new AstSigned{flp, lp};
+            lp->dtypep(widenType.dtp);
+            rp = new AstSigned{flp, rp};
+            rp->dtypep(widenType.dtp);
+        }
+        AstNodeExpr* cmpp = nullptr;
+        if (cmpOp == "=") {
+            cmpp = new AstEq{flp, lp, rp};
+        } else if (cmpOp == "/=") {
+            cmpp = new AstNeq{flp, lp, rp};
+        } else if (cmpOp == "<") {
+            cmpp = sign ? static_cast<AstNodeExpr*>(new AstLtS{flp, lp, rp})
+                        : static_cast<AstNodeExpr*>(new AstLt{flp, lp, rp});
+        } else if (cmpOp == "<=") {
+            cmpp = sign ? static_cast<AstNodeExpr*>(new AstLteS{flp, lp, rp})
+                        : static_cast<AstNodeExpr*>(new AstLte{flp, lp, rp});
+        } else if (cmpOp == ">") {
+            cmpp = sign ? static_cast<AstNodeExpr*>(new AstGtS{flp, lp, rp})
+                        : static_cast<AstNodeExpr*>(new AstGt{flp, lp, rp});
+        } else {
+            cmpp = sign ? static_cast<AstNodeExpr*>(new AstGteS{flp, lp, rp})
+                        : static_cast<AstNodeExpr*>(new AstGte{flp, lp, rp});
+        }
+        cmpp->dtypep(bitDtp);
+        return cmpp;
     }
     // VHDL array equality: different lengths are unequal, equal lengths compare
     // element by element. A packed bitwise identity comparison is the same test.
@@ -1308,10 +1340,11 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
         rp->deleteTree();
         return nullptr;
     }
-    if (m_stdLogicSigned
-        && ((lt.kind == VType::VECTOR && lt.kwd == VBasicDTypeKwd::LOGIC)
-            || (rt.kind == VType::VECTOR && rt.kwd == VBasicDTypeKwd::LOGIC))) {
-        unsupportedError(flp, "std_logic_signed arithmetic");
+    // std_logic_signed reads a std_logic_vector as two's complement, which only changes
+    // how a narrower operand is extended
+    const bool signedLogic = isSignedLogicVector(lt);
+    if (signedLogic && (op == "/" || op == "mod" || op == "rem")) {
+        flp->v3error("VHDL: std_logic_signed declares no '" + op + "' operator.");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -1333,8 +1366,8 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
     }
     const int opWidth = std::max(resultWidth, std::max(lt.width, rt.width));
     const VType opType = vectorType(flp, lt.kwd, signing, opWidth);
-    lp = resizeExpr(lp, opType, flp);
-    rp = resizeExpr(rp, opType, flp);
+    lp = signedLogic ? signExtendExpr(lp, opType, flp) : resizeExpr(lp, opType, flp);
+    rp = signedLogic ? signExtendExpr(rp, opType, flp) : resizeExpr(rp, opType, flp);
     AstNodeExpr* resultp = nullptr;
     if (op == "+") {
         resultp = new AstAdd{flp, lp, rp};

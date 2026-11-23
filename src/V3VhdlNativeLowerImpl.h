@@ -623,6 +623,18 @@ class Lowering final {
     AstNodeExpr* bitConst(FileLine* flp, char bit) const {
         return makeBitsConst(flp, findBasic(flp, VBasicDTypeKwd::LOGIC), std::string(1, bit));
     }
+    //! A std_logic_vector that std_logic_signed makes a two's complement number
+    bool isSignedLogicVector(const VType& type) const {
+        return m_stdLogicSigned && !m_stdLogicUnsigned && type.isPredefinedVector()
+               && type.kwd == VBasicDTypeKwd::LOGIC;
+    }
+    //! Like resizeExpr, but widening copies the sign bit whatever the operand's type
+    AstNodeExpr* signExtendExpr(AstNodeExpr* exprp, const VType& to, FileLine* flp) const {
+        if (exprp->width() >= to.width) return resizeExpr(exprp, to, flp);
+        AstNodeExpr* const resultp = new AstExtendS{flp, exprp, to.width};
+        resultp->dtypep(to.dtp);
+        return resultp;
+    }
     AstNodeExpr* resizeExpr(AstNodeExpr* exprp, const VType& to, FileLine* flp) const {
         AstNodeExpr* resultp = exprp;
         const int fromWidth = exprp->width();
