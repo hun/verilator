@@ -196,6 +196,8 @@ AstNodeExpr* Lowering::lowerQualification(FileLine* flp, const Expr& expr, const
     }
     if (!valuep) return nullptr;
     const VType valueType = typeOfDType(valuep->dtypep());
+    // An unconstrained mark leaves the operand's own bounds (IEEE 1076-2008 9.3.6)
+    if (declared != m_types.end() && declared->second.unconstrainedBase) return valuep;
     if (declared != m_types.end()) return resizeExpr(valuep, declared->second, flp);
     // A predefined scalar mark keeps its scalar type (IEEE 1076-2008 9.3.6),
     // so `integer'(x)` stays an integer instead of becoming a vector
@@ -3120,6 +3122,11 @@ AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
         if (field.name != expr.text) continue;
         AstNodeExpr* const basep = lowerExpr(*expr.a, nullptr);
         if (!basep) return nullptr;
+        if (!field.type->dtp) {
+            unsupportedError(flp, "record element of an unconstrained array type");
+            basep->deleteTree();
+            return nullptr;
+        }
         AstSel* const selp = new AstSel{flp, basep, field.offset, field.width};
         selp->dtypep(field.type->dtp);
         return selp;
