@@ -208,6 +208,28 @@ bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileL
         }
         constType = stringType(flp, valuep->width() / 8);
         intConstant = false;
+    } else if (isUnconstrainedVectorMark(type)) {
+        // An unconstrained vector constant takes its bounds from its initial value
+        // (IEEE 1076-2008 6.4.2.2), so the value is folded before the type is fixed
+        valuep = lowerExpr(init, nullptr);
+        if (!valuep) return false;
+        if (AstConst* const foldedp = foldStatic(valuep)) {
+            if (foldedp != valuep) valuep->deleteTree();
+            valuep = foldedp;
+        }
+        const VType valueType = typeOfLowered(init, valuep);
+        const bool keepsBounds = valueType.isVector() && valueType.width == valuep->width();
+        TypeSpec bounded = copySpec(type);
+        bounded.hasRange = true;
+        bounded.ascending = keepsBounds ? valueType.ascending : false;
+        bounded.left = std::unique_ptr<Expr>(new Expr{Expr::INT_LIT});
+        bounded.left->flp = flp;
+        bounded.left->intValue = keepsBounds ? valueType.left : valuep->width() - 1;
+        bounded.right = std::unique_ptr<Expr>(new Expr{Expr::INT_LIT});
+        bounded.right->flp = flp;
+        bounded.right->intValue = keepsBounds ? valueType.right : 0;
+        if (!resolveType(bounded, constType)) return false;
+        intConstant = false;
     } else {
         // A record constant whose type leaves a member unconstrained takes that member's
         // bounds from the initial value, as a vector does

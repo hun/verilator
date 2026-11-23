@@ -978,13 +978,17 @@ class Lowering final {
         return varp;
     }
 
-    //! An unconstrained vector object whose value is a bit string: the mark leaves the
-    //! width open and the literal fixes it, e.g. `constant c : std_logic_vector := "0011"`
-    bool isLiteralSizedVector(const TypeSpec& type, const Expr* initp) const {
-        if (!initp || initp->kind != Expr::BITS_LIT) return false;
+    //! A vector mark that leaves the bounds open: the object's value fixes them
+    static bool isUnconstrainedVectorMark(const TypeSpec& type) {
         if (type.hasRange || !type.constraintMark.empty()) return false;
         return type.mark == "std_logic_vector" || type.mark == "std_ulogic_vector"
                || type.mark == "bit_vector" || type.mark == "unsigned" || type.mark == "signed";
+    }
+
+    //! An unconstrained vector object whose value is a bit string: the literal fixes the
+    //! width, e.g. `constant c : std_logic_vector := "0011"`
+    bool isLiteralSizedVector(const TypeSpec& type, const Expr* initp) const {
+        return initp && initp->kind == Expr::BITS_LIT && isUnconstrainedVectorMark(type);
     }
 
     //! The type of a string of a given length: 8-bit character codes indexed from 1 up
