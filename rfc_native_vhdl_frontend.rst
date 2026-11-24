@@ -155,8 +155,7 @@ selects it for other extensions.
   ``std_logic`` strength tracking.
 - Access, protected, file and ``textio`` runtime types; user-defined
   resolution functions.
-- VHDL-2019 as a baseline, floating-point packages, and processes with
-  several ``wait`` statements.
+- VHDL-2019 as a baseline and floating-point packages.
 - Any construct that needs a new V3 AST node, pass or runtime primitive
   that only VHDL would use.
 - VHDL-to-SystemVerilog binding inside one elaborated netlist beyond the
@@ -203,12 +202,14 @@ silently ignored.
        prints the fixed text ``report`` (``Assertion failed`` for an
        assertion).
    - - Timing
-     - A process with one ``wait for`` and a nonzero ``after`` on a
-       concurrent assignment lower to timed blocks under ``--binary``, at
-       the absolute VHDL time whatever ``--timescale`` says. A zero
-       ``after`` is a delta. A process with several waits, a nonzero
-       ``after`` inside a process, ``transport``, ``inertial`` and
-       ``reject`` are refused.
+     - A process with waits (several, or inside an ``if``, ``case`` or
+       ``for``) and a nonzero ``after`` on a concurrent assignment lower to
+       timed blocks under ``--binary``, at the absolute VHDL time whatever
+       ``--timescale`` says. ``wait for`` is a delay, ``wait on`` and
+       ``wait until`` an event control. A zero ``after`` is a delta. A
+       nonzero ``after`` inside a process, ``transport``, ``inertial``,
+       ``reject`` and a ``wait`` inside a ``while`` or bare ``loop`` are
+       refused.
 
 An object with no initializer starts at 0, where VHDL would give ``'U'`` or
 ``T'left``. This is a deliberate divergence for C++/SV users. Reset

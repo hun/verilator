@@ -361,6 +361,9 @@ class Lowering final {
     //! Set while a wait process lowers its body: a bare `wait;` reached at run time
     //! sets this flag, which gates every later activation
     AstVar* m_suspendFlagp = nullptr;
+    //! Set while a process with several waits lowers: each wait becomes a timing control
+    //! in place
+    bool m_seqWait = false;
     int m_varSeq = 0;  // Disambiguates a process's own variables module-wide
     //! Active loop, with the flags its exit/next conditions latch
     struct LoopFrame final {
@@ -1226,7 +1229,10 @@ class Lowering final {
     void makeWaitSuspendFlag(FileLine* flp);
     void lowerTimedWaitProcess(const WaitProcessLowering& ctx);
     AstSenItem* makeWaitSensitivity(const Expr& waitValue, const std::vector<Edge>& edges,
-                                    FileLine* flp) const;
+                                    FileLine* flp, bool edgesOnly = false) const;
+    static bool needsSequentialWaits(const Process& process);
+    void lowerSequentialWaitProcess(const Process& process);
+    AstNodeStmt* lowerSequentialWait(const Stmt& stmt);
     AstNodeStmt* makeWaitActivationBody(const WaitProcessLowering& ctx, AstNodeExpr* condp);
     ScopeSave saveScope() const;
     void restoreScope(const ScopeSave& saved);

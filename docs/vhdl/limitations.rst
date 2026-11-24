@@ -140,8 +140,13 @@ repeats after an ``AstDelay``. A nonzero ``after`` on a concurrent signal
 assignment is also supported and lowers to a timed always block. Both delays
 keep their absolute VHDL time whatever :vlopt:`--timescale` says. A zero
 ``after`` in a process body is a delta; a nonzero one there is refused, as are
-``transport``, ``inertial`` and ``reject``. A process with more than one
-``wait`` is refused. Rather than silently dropping a delay that would change behavior,
+``transport``, ``inertial`` and ``reject``. A process with more than one ``wait``,
+or a ``wait`` inside an ``if``, ``case`` or ``for``, lowers to one timed block that
+repeats its body: ``wait for`` is a delay, ``wait on`` and ``wait until`` are an event
+control, and a bare ``wait;`` suspends the process for good. This needs a timing
+build such as ``--binary``. A ``wait until`` that names an edge resumes on that edge
+only. A ``wait`` inside a ``while`` or bare ``loop`` is refused, as those loops are.
+Rather than silently dropping a delay that would change behavior,
 the frontend emits a diagnostic. Single top-level clock waits and simple timed
 testbench constructs are supported by the ``--binary`` timing model.
 

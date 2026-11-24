@@ -942,6 +942,7 @@ AstNodeStmt* Lowering::lowerStmt(const Stmt& stmt) {
             return new AstAssign{stmt.flp, new AstVarRef{stmt.flp, m_suspendFlagp, VAccess::WRITE},
                                  bitConst(stmt.flp, '1')};
         }
+        if (m_seqWait) return lowerSequentialWait(stmt);
         unsupportedError(stmt.flp, "wait statement inside a process body");
         return nullptr;
     }
@@ -1077,13 +1078,14 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
         }
         headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, nodep) : nodep;
         // A wait suspends the process at once: the rest of this list never runs
-        if (stmtp->kind == Stmt::WAIT) break;
+        if (stmtp->kind == Stmt::WAIT && !m_seqWait) break;
         // Severity failure ends the run at the statement (IEEE 1076-2008 10.3, 10.4):
         // nothing after an unconditional report runs, and the statements after a
         // failing assert run only when it did not fail
         if (stmtp->severity != Stmt::SEV_FAILURE) continue;
         if (stmtp->kind == Stmt::REPORT) break;
-        if (stmtp->kind != Stmt::ASSERT) continue;
+        // The assertion's condition cannot be tested again once a wait has passed time
+        if (stmtp->kind != Stmt::ASSERT || m_seqWait) continue;
         // The assertion's own If carries the failure condition; `nodep` may already be
         // wrapped by a preceding run condition or loop guard
         const AstIf* const assertp = VN_CAST(stmtNodep, If);
@@ -1301,6 +1303,10 @@ void Lowering::lowerWaitProcess(const Process& process) {
     ctx.flp = flp;
     ctx.waitIndex = process.body.size();
     ctx.stopIndex = process.body.size();
+    if (needsSequentialWaits(process)) {
+        lowerSequentialWaitProcess(process);
+        return;
+    }
     ctx.waitp = findProcessWait(process, ctx.waitIndex);
     if (!ctx.waitp) {
         lowerWaitWithoutWait(process, flp);
@@ -1401,6 +1407,86 @@ bool Lowering::findTrailingWait(const Process& process, WaitProcessLowering& ctx
     return true;
 }
 
+//! Count the waits of a statement list that are not a bare `wait;`, in nested statements too
+static void countTimedWaits(const std::vector<StmtP>& stmts, std::size_t& count) {
+    for (const StmtP& stmtp : stmts) {
+        if (!stmtp) continue;
+        if (stmtp->kind == Stmt::WAIT && !stmtp->waitForever) ++count;
+        for (const auto& branch : stmtp->branches) countTimedWaits(branch.second, count);
+        for (const auto& item : stmtp->caseItems) countTimedWaits(item.second, count);
+        countTimedWaits(stmtp->body, count);
+    }
+}
+
+//! Whether a process has waits that need to suspend it in the middle of its body
+bool Lowering::needsSequentialWaits(const Process& process) {
+    std::size_t count = 0;
+    countTimedWaits(process.body, count);
+    if (count > 1) return true;
+    if (count == 0) return false;
+    // One wait is handled by the activation scheme only at the top level of the body
+    return std::none_of(process.body.begin(), process.body.end(), [](const StmtP& stmtp) {
+        return stmtp && stmtp->kind == Stmt::WAIT && !stmtp->waitForever;
+    });
+}
+
+//! Lower a process with several waits as one timed block that repeats its whole body
+void Lowering::lowerSequentialWaitProcess(const Process& process) {
+    FileLine* const flp = process.flp;
+    m_suspendFlagp = nullptr;
+    m_seqWait = true;
+    AstNodeStmt* const bodyp = lowerStmtList(process.body);
+    m_seqWait = false;
+    if (!bodyp) return;
+    AstLoop* const loopp = new AstLoop{flp};
+    loopp->addStmtsp(new AstLoopTest{flp, loopp, bitConst(flp, '1')});
+    loopp->addStmtsp(bodyp);
+    m_modp->addStmtsp(new AstInitial{flp, loopp});
+}
+
+//! Lower one wait of a process with several waits to the timing control it stands for
+AstNodeStmt* Lowering::lowerSequentialWait(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    if (stmt.waitForever) return new AstWait{flp, bitConst(flp, '0'), nullptr};
+    if (stmt.delay) return lowerDelay(*stmt.delay, flp);
+    AstSenItem* itemsp = nullptr;
+    AstNodeExpr* condp = nullptr;
+    if (stmt.value) {
+        m_edges.clear();
+        condp = lowerCond(*stmt.value);
+        const std::vector<Edge> edges = m_edges;
+        m_edges.clear();
+        if (!condp) return nullptr;
+        itemsp = makeWaitSensitivity(*stmt.value, edges, flp, true);
+        if (!itemsp) {
+            unsupportedError(flp, "wait statement without a sensitivity item");
+            condp->deleteTree();
+            return nullptr;
+        }
+    } else {
+        for (const std::string& name : stmt.waitNames) {
+            const auto it = m_scope.find(name);
+            if (it == m_scope.end()) {
+                unsupportedError(flp, "wait on '" + name + "', which is not a signal");
+                if (itemsp) itemsp->deleteTree();
+                return nullptr;
+            }
+            AstSenItem* const itemp = new AstSenItem{
+                flp, VEdgeType::ET_CHANGED, new AstVarRef{flp, it->second.varp, VAccess::READ}};
+            itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+        }
+    }
+    AstNodeStmt* const eventp = new AstEventControl{flp, new AstSenTree{flp, itemsp}, nullptr};
+    if (!condp) return eventp;
+    // `wait until` resumes at the first event after which the condition holds
+    AstLoop* const loopp = new AstLoop{flp};
+    loopp->addStmtsp(eventp);
+    AstNodeExpr* const notp = new AstNot{flp, condp};
+    notp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    loopp->addStmtsp(new AstLoopTest{flp, loopp, notp});
+    return loopp;
+}
+
 //! Create the flag a reached bare wait sets to gate later activations
 void Lowering::makeWaitSuspendFlag(FileLine* flp) {
     m_suspendFlagp
@@ -1442,7 +1528,7 @@ void Lowering::lowerTimedWaitProcess(const WaitProcessLowering& ctx) {
 
 //! Sensitivity of a wait condition: its named edges and the levels it reads
 AstSenItem* Lowering::makeWaitSensitivity(const Expr& waitValue, const std::vector<Edge>& edges,
-                                          FileLine* flp) const {
+                                          FileLine* flp, bool edgesOnly) const {
     // Sensitivity: the clock edges the condition names, plus the levels it tests
     AstSenItem* itemsp = nullptr;
     for (const Edge& edge : edges) {
@@ -1450,6 +1536,8 @@ AstSenItem* Lowering::makeWaitSensitivity(const Expr& waitValue, const std::vect
             = new AstSenItem{flp, edge.type, new AstVarRef{flp, edge.varp, VAccess::READ}};
         itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
     }
+    // A condition that names an edge only changes with that edge
+    if (edgesOnly && itemsp) return itemsp;
     std::set<std::string> levelNames;
     collectExprNames(waitValue, levelNames);
     for (const std::string& name : levelNames) {

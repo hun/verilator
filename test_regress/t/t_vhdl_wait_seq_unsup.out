@@ -1,0 +1,4 @@
+%Error-UNSUPPORTED: t/t_vhdl_wait_seq_unsup.vhdl:24:5: Unsupported: VHDL wait statement without a sensitivity item.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_vhdl_wait_seq_unsup.vhdl:25:5: Unsupported: VHDL wait on 'c', which is not a signal.
+%Error: Exiting due to
