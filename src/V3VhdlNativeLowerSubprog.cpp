@@ -1550,7 +1550,7 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
             if (ctxp) {
                 binding.type = *ctxp;
             } else {
-                binding.type = typeOfDType(actualp->dtypep());
+                binding.type = typeOfLowered(actual, actualp);
                 // The actual is an aggregate or another untyped value: its base type is
                 // the formal's, and only its bounds come from the value
                 VType formalBase;
