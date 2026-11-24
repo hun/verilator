@@ -1701,8 +1701,8 @@ void Parser::parseIndexConstraint(TypeSpec& type) {
         while (acceptSym(".")) {  // A qualified subtype mark: `array (work.pkg.idx)`
             if (!takeId(markTok)) return;
         }
-        if (isSym("-") || isSym("+") || isSym("*") || isId("to") || isId("downto")) {
-            // The identifier began a range expression, e.g. `size - 1 downto 0`
+        if (isSym("-") || isSym("+") || isSym("*") || isSym("'") || isId("to") || isId("downto")) {
+            // The identifier began a range expression, e.g. `size - 1 downto 0` or `t'range`
             m_cur = savedTok;
             m_lexer.restore(savedState);
             parseRange(type);
