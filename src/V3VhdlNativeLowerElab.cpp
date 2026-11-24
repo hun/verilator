@@ -2214,7 +2214,11 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
     if (stmt.kind == Concurrent::BLOCK) {
         // A block's declarative items are visible to its statements only
         const ScopeSave saved = saveScope();
+        const auto savedAliases = m_aliases;
         registerSubprograms(stmt.subprograms, -1, true);
+        for (const AliasDecl& alias : stmt.aliases) {
+            if (!alias.hasSignature) registerAlias(alias);
+        }
         emitLocalDecls(stmt.decls, stmt.types, "__Vblk_");
         registerComponents(stmt.components);
         ++m_blockDepth;
@@ -2223,6 +2227,7 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         }
         --m_blockDepth;
         restoreScope(saved);
+        m_aliases = savedAliases;
         return;
     }
     if (stmt.kind == Concurrent::INSTANCE) {

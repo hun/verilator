@@ -512,6 +512,7 @@ struct Concurrent final {
     // INSTANCE: the `generic map` associations, formal names the generic constant
     std::vector<PortAssoc> genericAssociations;
     std::vector<Decl> decls;  // BLOCK: declarative items
+    std::vector<AliasDecl> aliases;  // BLOCK: object aliases
     std::vector<TypeDecl> types;  // BLOCK/GEN_FOR
     std::vector<SubprogramDecl> subprograms;  // BLOCK/GEN_FOR
     std::vector<ComponentDecl> components;  // BLOCK/GEN_FOR

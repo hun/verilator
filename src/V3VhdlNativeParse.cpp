@@ -2696,6 +2696,11 @@ void Parser::parseConcurrentBlock(FileLine* flp, Architecture& arch) {
             skipContextClause();
             continue;
         }
+        if (isId("alias")) {
+            advance();
+            parseAliasInto(block->aliases);
+            continue;
+        }
         if (isId("disconnect")) {
             unsupported("disconnection specification");
             return;
