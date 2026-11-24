@@ -1171,6 +1171,25 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
     AstNodeExpr*& rp = ops.rp;
     VType& lt = ops.lt;
     VType& rt = ops.rt;
+    // A null array has no elements, so the concatenation is the other operand (IEEE
+    // 1076-2008 9.2.5). Only an object is known to be constrained: an array type with an
+    // open range has no elements either.
+    const auto isNullObject = [this](const Expr& operand) {
+        if (operand.kind != Expr::NAME) return false;
+        const auto bindIt = activeEnv().find(operand.text);
+        const VType* const typep = bindIt != activeEnv().end()   ? &bindIt->second.type
+                                   : m_scope.count(operand.text) ? typeOfName(operand)
+                                                                 : nullptr;
+        return typep && typep->isVector() && typep->length() == 0;
+    };
+    if (isNullObject(*expr.a)) {
+        lp->deleteTree();
+        return rp;
+    }
+    if (isNullObject(*expr.b)) {
+        rp->deleteTree();
+        return lp;
+    }
     // A concatenation of bit-string and character literals takes the element type of the
     // other operand (IEEE 1076-2008 9.3.6), so `"000" & bit_vector_signal` is a bit_vector
     {

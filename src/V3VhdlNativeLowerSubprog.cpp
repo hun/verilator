@@ -2191,6 +2191,8 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
     };
 
     if (!bindFunctionLocals(*subp, env)) return finish(nullptr);
+    // A function declared in this body sees the types and names of the body
+    m_inlineFrames.back().liveScope = saveScope();
     VType retType;
     const VType* const outerRetp = m_funcRetp;
     // An unconstrained array return type takes its width from the body and the context
