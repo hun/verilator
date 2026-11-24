@@ -3539,7 +3539,14 @@ void Lowering::registerAlias(const AliasDecl& alias) {
     }
     AliasInfo info;
     info.designatorp = alias.designator.get();
-    if (alias.mark.flp && resolveType(alias.mark, info.type)) info.hasType = true;
+    if (alias.mark.flp && resolveType(alias.mark, info.type)) {
+        info.hasType = true;
+    } else if (alias.designator->kind == Expr::EXTERNAL
+               && resolveType(*alias.designator->typeSpec, info.type)) {
+        // The subtype of an external name is its declared type, which a field or index
+        // of the alias needs
+        info.hasType = true;
+    }
     m_aliases[alias.name] = info;
 }
 
