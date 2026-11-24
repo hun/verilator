@@ -1046,8 +1046,10 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
         }
         // Only a simple designator has a width this pass can trust: a call or a
         // conversion is constrained by its context, and an operator result carries no
-        // declared bounds.
-        const bool sized = checkShape
+        // declared bounds. A name that is a function called without parentheses is a call.
+        const bool bareCall = value.kind == Expr::NAME && !m_scope.count(value.text)
+                              && m_subprograms.count(value.text);
+        const bool sized = checkShape && !bareCall
                            && (value.kind == Expr::NAME || value.kind == Expr::SELECTED
                                || value.kind == Expr::SLICE);
         if (sized && !sameShape(target, source)) {
