@@ -36,6 +36,11 @@ The attributes ``'pos``, ``'val``, ``'succ``, ``'pred``, ``'leftof`` and ``'righ
 integer types, and all but the last two to enumeration types. ``'value`` and ``'image`` of a
 run-time value are refused.
 
+An external name, ``<< signal dut.accum : std_logic_vector(7 downto 0) >>``, reads an
+object of an instance. The path starts at this unit, as ``dut.accum`` or ``.top.dut.accum``,
+or climbs out of blocks with ``^``. Paths through an indexed generate, to a package object,
+or up out of this unit are refused.
+
 A configuration specification in an architecture, ``for all|others|labels : comp use entity
 work.comp(arch);``, selects the architecture of a component instance. A configuration declaration
 does the same for the architecture it configures and overrides a specification. The entity must
@@ -156,7 +161,7 @@ These constructs are refused with a diagnostic: access, protected, file and
 ``textio`` types; ``force``/``release``; runtime ``'value`` and string parsing;
 physical objects and ``now``; real signals, variables and ports (real constants
 fold at elaboration) and the floating-point package ``float_pkg``;
-user-defined resolution functions; external names; allocators; multi-dimensional
+user-defined resolution functions; allocators; multi-dimensional
 ports; ``linkage`` ports, ``disconnect`` and ``guarded`` signals; embedded
 other-language source; and general timing constructs. VHDL-2019 is outside the
 baseline. Zero-width arrays are supported as empty values only in whole-array

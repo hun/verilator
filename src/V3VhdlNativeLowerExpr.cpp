@@ -540,6 +540,32 @@ AstNodeExpr* Lowering::lowerOthersAssociation(FileLine* flp, const Expr& expr,
     return repeatValue(flp, valuep, contextp->length(), contextp->dtp);
 }
 
+//! An external name is a hierarchical reference down the instances of this unit, which
+//! the link stage resolves
+AstNodeExpr* Lowering::lowerExternalName(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    std::vector<const Expr*> steps;
+    for (const Expr* stepp = expr.a.get(); stepp; stepp = stepp->a.get()) steps.push_back(stepp);
+    std::reverse(steps.begin(), steps.end());
+    // An absolute path starts at the root entity, which is this unit when it is the top
+    if (expr.intValue < 0 && steps.size() > 1 && steps.front()->text == m_entityName) {
+        steps.erase(steps.begin());
+    } else if (expr.intValue < 0 || expr.intValue > m_blockDepth) {
+        // Each `^` leaves a block, which is part of this module
+        unsupportedError(flp, "external name that does not start in this unit");
+        return nullptr;
+    }
+    VType type;
+    if (!resolveType(*expr.typeSpec, type)) return nullptr;
+    AstNodeExpr* refp = new AstParseRef{flp, steps.front()->text};
+    for (std::size_t i = 1; i < steps.size(); ++i) {
+        refp = new AstDot{flp, false, refp, new AstParseRef{flp, steps[i]->text}};
+    }
+    refp->dtypep(type.dtp);
+    if (m_recordExternals) m_externalReads.push_back(refp->cloneTree(false));
+    return refp;
+}
+
 AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     switch (expr.kind) {
@@ -553,6 +579,7 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* contextp) {
     case Expr::UNAFFECTED:
         unsupportedError(flp, "'unaffected' outside an assignment");
         return nullptr;
+    case Expr::EXTERNAL: return lowerExternalName(expr);
     case Expr::TRUE_LIT: return bitConst(flp, '1');
     case Expr::FALSE_LIT: return bitConst(flp, '0');
     case Expr::CHAR_LIT: return lowerCharLiteral(flp, expr, contextp);
@@ -2384,6 +2411,7 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) 
 
 AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
     FileLine* const flp = expr.flp;
+    if (expr.kind == Expr::EXTERNAL) return lowerExternalName(expr);
     if (expr.kind == Expr::NAME) {
         if (activeEnv().count(expr.text)) return inlineBinding(flp, expr.text, write);
         const auto constIt = m_consts.find(expr.text);

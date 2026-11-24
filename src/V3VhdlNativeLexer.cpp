@@ -548,7 +548,8 @@ Token Lexer::scanToken() {
     if (c == '"') return lexStringLiteral(tok.flp);
     if (c == '(' || c == ')' || c == ';' || c == ':' || c == ',' || c == '.' || c == '='
         || c == '<' || c == '>' || c == '+' || c == '-' || c == '*' || c == '/' || c == '&'
-        || c == '|' || c == '#' || c == '?' || c == '{' || c == '}' || c == '[' || c == ']') {
+        || c == '|' || c == '#' || c == '?' || c == '{' || c == '}' || c == '[' || c == ']'
+        || c == '^' || c == '@') {
         return lexSymbol(tok.flp);
     }
     unsupportedError(tok.flp, std::string{"character '"} + c + "'");

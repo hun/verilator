@@ -756,6 +756,7 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
 bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
                     const GenericBindings* bindingsp, const PortBoundsMap* portBoundsp) {
     m_modp = modp;
+    m_entityName = entity.name;
     if (!emitPrelude(entity, arch, bindingsp)) return false;
     emitEntityDecls(entity, arch);
     emitPorts(entity, portBoundsp);
@@ -2216,9 +2217,11 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         registerSubprograms(stmt.subprograms, -1, true);
         emitLocalDecls(stmt.decls, stmt.types, "__Vblk_");
         registerComponents(stmt.components);
+        ++m_blockDepth;
         for (const auto& bodyConcp : stmt.body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
+        --m_blockDepth;
         restoreScope(saved);
         return;
     }

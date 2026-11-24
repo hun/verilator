@@ -152,6 +152,7 @@ public:
 enum class PortMode : uint8_t { IN, OUT, INOUT };
 
 struct Expr;
+struct TypeSpec;
 using ExprP = std::unique_ptr<Expr>;
 
 struct Expr final {
@@ -179,6 +180,10 @@ struct Expr final {
         AGG_POSITIONAL,  // args=element values, leftmost index first
         AGG_NAMED,  // args=values, choices=one choice list per value
         UNAFFECTED,  // `unaffected`: a waveform that leaves the assignment target unchanged
+        // External name `<< class path : subtype >>`: text=class, a=path as a chain of
+        // SELECTED names, intValue=`^` levels up (-1 when the path is absolute),
+        // typeSpec=subtype
+        EXTERNAL,
     } kind;
     FileLine* flp = nullptr;  // Source location
     std::string text;  // Name/operator, folded
@@ -194,6 +199,7 @@ struct Expr final {
     std::vector<std::vector<ExprP>> choices;
     // CALL: the formal associated with each actual; empty for a positional actual
     std::vector<std::string> formalNames;
+    std::shared_ptr<const TypeSpec> typeSpec;  // EXTERNAL: the subtype; shared by copies
 
     explicit Expr(Kind kind_)
         : kind{kind_} {}
@@ -213,6 +219,7 @@ inline ExprP cloneExpr(const Expr& expr) {
     out->charValue = expr.charValue;
     out->bits = expr.bits;
     out->formalNames = expr.formalNames;
+    out->typeSpec = expr.typeSpec;
     out->a = expr.a ? cloneExpr(*expr.a) : ExprP{};
     out->b = expr.b ? cloneExpr(*expr.b) : ExprP{};
     out->c = expr.c ? cloneExpr(*expr.c) : ExprP{};

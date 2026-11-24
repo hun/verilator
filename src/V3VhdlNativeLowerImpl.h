@@ -285,6 +285,8 @@ class Lowering final {
     // Package constants whose initialization is deferred
     std::vector<DeferredConst> m_deferredConsts;
     std::string m_unitName;  // Unit being emitted, which owns its deferred constants
+    int m_blockDepth = 0;  // Block statements around the construct being emitted
+    std::string m_entityName;  // Folded name of the entity whose architecture is emitted
     //! A pure function call the elaboration-time folders are evaluating: its formals
     //! bound to the values of the actuals, plus the declaration to stop a body folding
     //! into itself. Only the innermost frame is in scope and every actual is already
@@ -1248,6 +1250,9 @@ class Lowering final {
     AstNodeStmt* assertBody(FileLine* flp, const Expr& condition, const Expr* messagep,
                             Stmt::Severity severity);
     AstNodeStmt* lowerDelay(const Expr& expr, FileLine* flp);
+    //! Hierarchical reads of the process being lowered, which sensitize a process(all)
+    std::vector<AstNodeExpr*> m_externalReads;
+    bool m_recordExternals = false;  // A process body is being lowered
     static void collectReadNames(const std::vector<StmtP>& stmts, std::set<std::string>& names);
     bool stmtsContainEdge(const std::vector<StmtP>& stmts) const;
     static void collectExprNames(const Expr& expr, std::set<std::string>& names);
@@ -1501,6 +1506,7 @@ class Lowering final {
                                   const InlineCont& cont, const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncCase(const Stmt& stmt, const InlineCont& cont,
                               const InlineCont* exitContp, int depth);
+    AstNodeExpr* lowerExternalName(const Expr& expr);
     AstNodeExpr* evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth);
     bool conjunctFolds(const Expr& cond, bool value);
     AstNodeExpr* evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth);

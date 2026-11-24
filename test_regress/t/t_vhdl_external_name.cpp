@@ -1,0 +1,52 @@
+// -*- mode: C++; c-file-style: "cc-mode" -*-
+//
+// DESCRIPTION: Verilator: VHDL an external name of a signal in an instance
+//
+// This program is free software; you can redistribute it and/or modify it
+// under the terms of either the GNU Lesser General Public License Version 3,
+// or the Perl Artistic License Version 2.0.
+// SPDX-FileCopyrightText: 2026 Wilson Snyder
+// SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+#include <verilated.h>
+
+#include VM_PREFIX_INCLUDE
+
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    Verilated::commandArgs(argc, argv);
+    VM_PREFIX* const topp = new VM_PREFIX;
+
+    int fails = 0;
+    int model = 0;
+    topp->clk = 0;
+    topp->rst = 1;
+    topp->a = 0;
+    topp->eval();
+    for (int cycle = 0; cycle < 40; ++cycle) {
+        const int a = (cycle * 37 + 5) & 0xff;
+        topp->rst = cycle < 2;
+        topp->a = a;
+        topp->clk = 0;
+        topp->eval();
+        topp->clk = 1;
+        topp->eval();
+        model = cycle < 2 ? 0 : (model + a) & 0xff;
+        if (topp->rel != model || topp->abs_q != model || topp->als != model) {
+            std::printf("%%Error: cycle %d rel=%d abs=%d als=%d exp=%d\n", cycle, topp->rel,
+                        topp->abs_q, topp->als, model);
+            ++fails;
+        }
+    }
+
+    topp->final();
+    delete topp;
+
+    if (fails) {
+        std::printf("%%Error: %d failures\n", fails);
+        return 1;
+    }
+    std::printf("*-* All Finished *-*\n");
+    return 0;
+}

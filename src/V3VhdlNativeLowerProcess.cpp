@@ -79,7 +79,11 @@ void Lowering::lowerProcess(const Process& process) {
     m_edges.clear();
     m_initial = false;
     m_varVals.clear();
+    for (AstNodeExpr* const readp : m_externalReads) readp->deleteTree();
+    m_externalReads.clear();
+    m_recordExternals = true;
     AstNodeStmt* bodyp = lowerStmtList(process.body);
+    m_recordExternals = false;
     const std::vector<Edge> edges = m_edges;
     m_edges.clear();
     // Record the current signal values for the next run's edge detection
@@ -205,6 +209,16 @@ AstSenItem* Lowering::buildProcessSensitivity(const Process& process,
         AstSenItem* const itemp = new AstSenItem{process.flp, VEdgeType::ET_CHANGED, exprp};
         itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
     }
+    // process(all) also runs when an object it reads in another unit changes
+    for (AstNodeExpr* const readp : m_externalReads) {
+        if (!process.sensitivityAll || sensBad) {
+            readp->deleteTree();
+            continue;
+        }
+        AstSenItem* const itemp = new AstSenItem{process.flp, VEdgeType::ET_CHANGED, readp};
+        itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
+    }
+    m_externalReads.clear();
     if (sensBad) {
         if (itemsp) itemsp->deleteTree();
         return nullptr;

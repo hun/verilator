@@ -470,6 +470,7 @@ class Parser final {
     ExprP parseMul();
     ExprP parseUnary();
     ExprP parsePrimary();
+    ExprP parseExternalName();
     ExprP parseDesignator();
     bool parseRange(TypeSpec& type);
     //! Consume `severity <note|warning|error|failure>`, which decides if the run stops
@@ -724,11 +725,68 @@ ExprP Parser::parseUnary() {
     return parsePrimary();
 }
 
-ExprP Parser::parsePrimary() {
-    if (m_cur.kind == Token::SYM && m_cur.text == "<<") {  // IEEE 1076-2008 8.7 external name
-        unsupported("external name");
+//! `<< class path : subtype >>` (IEEE 1076-2008 8.7): a name of an object in another
+//! design unit, through its instance hierarchy
+ExprP Parser::parseExternalName() {
+    ExprP node = std::make_unique<Expr>(Expr::EXTERNAL);
+    node->flp = m_cur.flp;
+    advance();  // '<<'
+    Token classTok;
+    if (!takeId(classTok)) return nullptr;
+    if (classTok.text != "signal" && classTok.text != "constant" && classTok.text != "variable") {
+        error("expected 'signal', 'constant' or 'variable' in an external name");
         return nullptr;
     }
+    node->text = classTok.text;
+    if (isSym("@")) {
+        unsupported("external name of a package object");
+        return nullptr;
+    }
+    node->intValue = acceptSym(".") ? -1 : 0;
+    while (node->intValue >= 0 && acceptSym("^")) {
+        ++node->intValue;
+        if (!acceptSym(".")) {
+            error("expected '.' after '^' in an external name");
+            return nullptr;
+        }
+    }
+    Token nameTok;
+    if (!takeId(nameTok)) return nullptr;
+    ExprP path = std::make_unique<Expr>(Expr::NAME);
+    path->flp = nameTok.flp;
+    path->text = nameTok.text;
+    path->spelling = nameTok.spelling;
+    while (acceptSym(".")) {
+        if (!takeId(nameTok)) return nullptr;
+        ExprP step = std::make_unique<Expr>(Expr::SELECTED);
+        step->flp = nameTok.flp;
+        step->text = nameTok.text;
+        step->spelling = nameTok.spelling;
+        step->a = std::move(path);
+        path = std::move(step);
+    }
+    if (isSym("(")) {
+        unsupported("external name through an indexed generate");
+        return nullptr;
+    }
+    node->a = std::move(path);
+    if (!acceptSym(":")) {
+        error("expected ':' in an external name");
+        return nullptr;
+    }
+    auto type = std::make_shared<TypeSpec>();
+    parseTypeSpec(*type);
+    if (m_failed) return nullptr;
+    node->typeSpec = std::move(type);
+    if (!acceptSym(">>")) {
+        error("expected '>>' at the end of an external name");
+        return nullptr;
+    }
+    return node;
+}
+
+ExprP Parser::parsePrimary() {
+    if (m_cur.kind == Token::SYM && m_cur.text == "<<") return parseExternalName();
     if (m_cur.kind == Token::INT || m_cur.kind == Token::REAL || m_cur.kind == Token::BITS
         || m_cur.kind == Token::CHAR) {
         ExprP node;
@@ -875,6 +933,7 @@ ExprP Parser::parsePrimary() {
 }
 
 ExprP Parser::parseDesignator() {
+    if (isSym("<<")) return parseExternalName();
     Token nameTok;
     if (!takeId(nameTok)) return nullptr;
     ExprP node = std::make_unique<Expr>(Expr::NAME);
