@@ -2633,18 +2633,25 @@ AstNodeExpr* Lowering::lowerIndexChain(const Expr& expr, AstNodeExpr* basep,
             curp->deleteTree();
             return nullptr;
         }
+        // An enumeration value as an index is its position (IEEE 1076-2008 9.3.6), which
+        // is also its encoding
+        VType indexEnum;
         if (!typeOfDType(indexp->dtypep()).isInt()) {
-            // An enumeration value as an index is its position (IEEE 1076-2008 9.3.6):
-            // a literal, a constant, or a formal an inlined body bound to one
-            int64_t position = 0;
-            if (!evalInt(*expr.args[ai], position)) {
-                unsupportedError(flp, "non-integer index");
+            if (enumTypeOfDType(indexp->dtypep(), indexEnum)) {
+                indexp = new AstExtend{flp, indexp, 32};
+                indexp->dtypep(findBasic(flp, VBasicDTypeKwd::INT));
+            } else {
+                // A formal an inlined body bound to an enumeration literal has no enum type
+                int64_t position = 0;
+                if (!evalInt(*expr.args[ai], position)) {
+                    unsupportedError(flp, "non-integer index");
+                    indexp->deleteTree();
+                    curp->deleteTree();
+                    return nullptr;
+                }
                 indexp->deleteTree();
-                curp->deleteTree();
-                return nullptr;
+                indexp = makeIntConst(flp, position);
             }
-            indexp->deleteTree();
-            indexp = makeIntConst(flp, position);
         }
         // The right bound is the least significant element in either direction
         AstNodeExpr* offsetp = indexp;
