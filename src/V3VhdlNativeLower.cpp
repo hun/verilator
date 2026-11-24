@@ -196,19 +196,18 @@ void addPhysicalUnits(const TypeDecl& decl, Design& design) {
 
 //! Whether the expression converts to a real somewhere: such a conversion has no form
 //! in the model, so the expression it belongs to must fold at elaboration time
-bool mentionsRealConversion(const Expr& expr) {
-    switch (expr.kind) {
-    case Expr::INDEX:
-        if (expr.a && expr.a->kind == Expr::NAME && expr.a->text == "real") return true;
-        break;
-    case Expr::PAREN:
-    case Expr::UNARY: break;
-    default: break;
+bool mentionsRealValue(const Expr& expr) {
+    if (expr.kind == Expr::REAL_LIT) return true;
+    if (expr.kind == Expr::INDEX && expr.a && expr.a->kind == Expr::NAME) {
+        static const std::set<std::string> realFunctions
+            = {"real", "ceil", "floor", "round", "trunc", "log2", "log10", "log",
+               "exp",  "sqrt", "sin",   "cos",   "tan",   "asin", "acos",  "atan"};
+        if (realFunctions.count(expr.a->text)) return true;
     }
-    if (expr.a && mentionsRealConversion(*expr.a)) return true;
-    if (expr.b && mentionsRealConversion(*expr.b)) return true;
+    if (expr.a && mentionsRealValue(*expr.a)) return true;
+    if (expr.b && mentionsRealValue(*expr.b)) return true;
     for (const ExprP& argp : expr.args) {
-        if (argp && mentionsRealConversion(*argp)) return true;
+        if (argp && mentionsRealValue(*argp)) return true;
     }
     return false;
 }

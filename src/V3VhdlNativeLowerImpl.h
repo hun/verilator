@@ -1617,7 +1617,7 @@ public:
 bool predefinedUnit(const std::string& unit, int64_t& out);
 bool physicalValue(const Design& design, const Expr& expr, int64_t& out);
 void addPhysicalUnits(const TypeDecl& decl, Design& design);
-bool mentionsRealConversion(const Expr& expr);
+bool mentionsRealValue(const Expr& expr);
 bool isIndexRangeAttribute(const std::string& attribute);
 bool aggregateHasOthers(const Expr& expr);
 VType cloneArrayChain(const VType& type);

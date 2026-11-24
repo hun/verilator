@@ -510,6 +510,33 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
             value = realIt->second;
             return true;
         }
+        // The constants of ieee.math_real (IEEE 1076.2-1996 5.1), unless a declaration of
+        // the same name is visible
+        static const std::map<std::string, double> mathRealConsts
+            = {{"math_e", 2.71828182845904523536},
+               {"math_1_over_e", 0.36787944117144232160},
+               {"math_pi", 3.14159265358979323846},
+               {"math_2_pi", 6.28318530717958647693},
+               {"math_1_over_pi", 0.31830988618379067154},
+               {"math_pi_over_2", 1.57079632679489661923},
+               {"math_pi_over_3", 1.04719755119659774615},
+               {"math_pi_over_4", 0.78539816339744830962},
+               {"math_3_pi_over_2", 4.71238898038468985769},
+               {"math_log_of_2", 0.69314718055994530942},
+               {"math_log_of_10", 2.30258509299404568402},
+               {"math_log2_of_e", 1.44269504088896340736},
+               {"math_log10_of_e", 0.43429448190325182765},
+               {"math_sqrt_2", 1.41421356237309504880},
+               {"math_1_over_sqrt_2", 0.70710678118654752440},
+               {"math_sqrt_pi", 1.77245385090551602730},
+               {"math_deg_to_rad", 0.01745329251994329577},
+               {"math_rad_to_deg", 57.29577951308232087680}};
+        const auto mathIt = mathRealConsts.find(expr.text);
+        if (mathIt != mathRealConsts.end() && !m_scope.count(expr.text)
+            && !m_consts.count(expr.text) && !m_constValues.count(expr.text)) {
+            value = mathIt->second;
+            return true;
+        }
         int64_t intValue = 0;
         if (!evalInt(expr, intValue)) return false;
         value = static_cast<double>(intValue);

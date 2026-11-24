@@ -431,7 +431,7 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
     // result does. math_pkg's `floor_log2` is `natural(log2(real(value)))`
     if (expr.a && expr.a->kind == Expr::NAME
         && (expr.a->text == "natural" || expr.a->text == "positive" || expr.a->text == "integer")
-        && mentionsRealConversion(expr)) {
+        && mentionsRealValue(expr)) {
         int64_t foldedValue = 0;
         if (evalInt(expr, foldedValue)) return makeIntConst(flp, foldedValue);
     }
