@@ -1229,7 +1229,7 @@ string V3Number::toString() const {
 }
 
 uint32_t V3Number::edataWord(int eword) const {
-    UASSERT(!isFourState(), "edataWord with 4-state " << *this);
+    UASSERT(!m_data.num()[eword].m_valueX, "edataWord with 4-state " << *this);
     return m_data.num()[eword].m_value;
 }
 
