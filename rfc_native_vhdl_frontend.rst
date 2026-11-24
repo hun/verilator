@@ -393,7 +393,7 @@ maintenance plan; until then the numbers are reported for information.
 - Dynamic-index driver counts and ``std_logic_vector`` ``MULTIDRIVEN``
   diagnostics are imprecise.
 - ``std_logic_signed`` arithmetic and comparison, ``case generate``,
-  matching ``case``, enumeration range subtypes, resolution indications and
+  enumeration range subtypes, resolution indications and
   some type attributes are not implemented.
 - PSL directives are skipped. Library namespace handling is simplified.
 - Waveforms keep the hierarchy and signal names, but an enumeration shows

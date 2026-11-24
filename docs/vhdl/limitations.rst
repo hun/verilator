@@ -191,7 +191,7 @@ Known limitations
   that uses the functions on ``integer`` or ``std_logic`` alone. The frontend
   resolves these subprograms by name rather than through the package, which
   makes a precise check hard.
-- ``case generate``, matching ``case``, enumeration range subtypes and
+- ``case generate``, enumeration range subtypes and
   resolution indications are not implemented, and neither are type attributes
   such as ``'image`` on an enumeration.
 - Library namespace handling is simplified; library names can come from a

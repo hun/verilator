@@ -550,6 +550,7 @@ class Parser final {
     bool parseConditionalTail(Stmt& stmt, bool allowUnaffected);
     StmtP parseIf(FileLine* flp);
     StmtP parseCase(FileLine* flp);
+    static StmtP matchingCaseToIf(Stmt& caseStmt);
     StmtP parseFor(FileLine* flp);
     bool parseLoopEnd(const char* what);
 
@@ -3442,9 +3443,40 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
     m_packages.push_back(std::move(pkg));
 }
 
+//! A matching case `case? s is when "1-" | "01" => ...` is an if chain of `s ?= choice`
+//! tests, which carries the don't-care positions of the choices. Its choices may not
+//! overlap (IEEE 1076-2008 10.9), so the order of the tests does not matter.
+StmtP Parser::matchingCaseToIf(Stmt& caseStmt) {
+    auto stmt = std::make_unique<Stmt>(Stmt::IF);
+    stmt->flp = caseStmt.flp;
+    for (auto& item : caseStmt.caseItems) {
+        ExprP cond;
+        for (ExprP& choice : item.first) {
+            ExprP match = std::make_unique<Expr>(Expr::BINARY);
+            match->flp = choice->flp;
+            match->text = "?=";
+            match->a = cloneExpr(*caseStmt.selector);
+            match->b = std::move(choice);
+            if (!cond) {
+                cond = std::move(match);
+                continue;
+            }
+            ExprP orp = std::make_unique<Expr>(Expr::BINARY);
+            orp->flp = cond->flp;
+            orp->text = "or";
+            orp->a = std::move(cond);
+            orp->b = std::move(match);
+            cond = std::move(orp);
+        }
+        stmt->branches.emplace_back(std::move(cond), std::move(item.second));
+    }
+    return stmt;
+}
+
 StmtP Parser::parseCase(FileLine* flp) {
     auto stmt = std::make_unique<Stmt>(Stmt::CASE);
     stmt->flp = flp;
+    const bool matching = acceptSym("?");
     stmt->selector = parseExpr();
     if (!stmt->selector) return nullptr;
     if (!expectId("is")) return nullptr;
@@ -3463,12 +3495,16 @@ StmtP Parser::parseCase(FileLine* flp) {
     }
     if (!expectId("end")) return nullptr;
     if (!expectId("case")) return nullptr;
+    if (matching && !acceptSym("?")) {
+        error("expected '?' after 'end case' of a matching case");
+        return nullptr;
+    }
     if (m_cur.kind == Token::ID) advance();  // Optional end label
     if (!acceptSym(";")) {
         error("expected ';' after 'end case'");
         return nullptr;
     }
-    return stmt;
+    return matching ? matchingCaseToIf(*stmt) : std::move(stmt);
 }
 
 StmtP Parser::parseFor(FileLine* flp) {
