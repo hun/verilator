@@ -296,6 +296,111 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     return nullptr;
 }
 
+//! to_string, to_bstring, to_ostring and to_hstring (IEEE 1076-2008 5.3.2.4, 16.4). A vector
+//! of known width gives a string of known length, one character per bit or per group of
+//! bits. An integer, Boolean or enumeration value has a text whose length depends on the
+//! value, so only a static one is supported.
+AstNodeExpr* Lowering::lowerToString(FileLine* flp, const Expr& expr, const std::string& name) {
+    if (expr.args.size() != 1 || !expr.args[0]) {
+        unsupportedError(flp,
+                         "'" + name + "' with " + std::to_string(expr.args.size()) + " arguments");
+        return nullptr;
+    }
+    AstNodeExpr* argp = lowerExpr(*expr.args[0], nullptr);
+    if (!argp) return nullptr;
+    const VType type = typeOfLowered(*expr.args[0], argp);
+    const bool bitwise = type.kind == VType::LOGIC || type.kind == VType::BIT
+                         || (type.isVector() && type.elemWidth == 1);
+    const bool boolean = type.kind == VType::LOGIC && type.typeName == "boolean";
+    if (!bitwise || boolean) {
+        // The text of a scalar value is its literal or its decimal digits
+        AstConst* constp = name == "to_string" ? foldStatic(argp) : nullptr;
+        if (!constp || !(type.isInt() || type.kind == VType::ENUM || boolean)) {
+            argp->deleteTree();
+            unsupportedError(flp, "'" + name + "' of a value whose text length is not static");
+            return nullptr;
+        }
+        std::string text;
+        if (type.isInt()) {
+            text = std::to_string(type.intLow < 0 ? static_cast<int64_t>(constp->num().toSQuad())
+                                                  : static_cast<int64_t>(constp->num().toUQuad()));
+        } else if (boolean) {
+            text = constp->num().isNeqZero() ? "true" : "false";
+        } else {
+            const uint32_t pos = constp->num().toUInt();
+            text = pos < type.literals.size() ? type.literals[pos] : std::string{};
+            // A character literal's text is the character
+            if (text.size() == 3 && text.front() == '\'') text = text.substr(1, 1);
+        }
+        if (constp != argp) constp->deleteTree();
+        argp->deleteTree();
+        return makeStringConst(flp, text);
+    }
+    if (type.isVector() && type.length() <= 0) {
+        argp->deleteTree();
+        unsupportedError(flp, "'" + name + "' of a null array");  // Its text is the empty string
+        return nullptr;
+    }
+    // Bits per character: a hex digit is four, an octal digit three, anything else one
+    const int group = name == "to_hstring" ? 4 : name == "to_ostring" ? 3 : 1;
+    const int width = argp->width();
+    const int digits = (width + group - 1) / group;
+    const int pad = digits * group - width;
+    AstNodeExpr* valuep = argp;
+    if (pad > 0) {
+        // The value extends to whole digits by its sign for a signed vector, else by zeros
+        AstNodeExpr* padp = nullptr;
+        if (type.signing == VSigning::SIGNED) {
+            padp = new AstReplicate{flp, new AstSel{flp, argp->cloneTree(false), width - 1, 1},
+                                    static_cast<uint32_t>(pad)};
+            padp->dtypep(findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, pad));
+        } else {
+            padp = new AstConst{flp, V3Number{flp, pad, 0u}};
+            padp->dtypep(findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, pad));
+        }
+        valuep = new AstConcat{flp, padp, argp};
+        valuep->dtypep(
+            findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, width + pad));
+    }
+    AstNodeDType* const groupDtp
+        = findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, group);
+    AstNodeExpr* resultp = nullptr;
+    for (int digit = digits - 1; digit >= 0; --digit) {
+        AstNodeExpr* const bitsp = new AstSel{flp, valuep->cloneTree(false), digit * group, group};
+        bitsp->dtypep(groupDtp);
+        // The character of a digit: a chain of compares against each value, the last one
+        // being the remaining value
+        const int values = 1 << group;
+        AstNodeExpr* charp = makeStringConst(flp, std::string(1, "0123456789ABCDEF"[values - 1]));
+        for (int value = values - 2; value >= 0; --value) {
+            V3Number num{flp, group, static_cast<uint32_t>(value)};
+            AstConst* const valueConstp = new AstConst{flp, num};
+            valueConstp->dtypep(groupDtp);
+            AstNodeExpr* const eqp = new AstEq{flp, bitsp->cloneTree(false), valueConstp};
+            eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+            AstNodeExpr* const condp = new AstCond{
+                flp, eqp, makeStringConst(flp, std::string(1, "0123456789ABCDEF"[value])), charp};
+            condp->dtypep(charp->dtypep());
+            charp = condp;
+        }
+        bitsp->deleteTree();
+        if (resultp) {
+            AstNodeExpr* const joinedp = new AstConcat{flp, resultp, charp};
+            joinedp->dtypep(findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED,
+                                            resultp->width() + 8));
+            resultp = joinedp;
+        } else {
+            resultp = charp;
+        }
+    }
+    valuep->deleteTree();
+    if (AstConst* const foldedp = foldStatic(resultp)) {
+        if (foldedp != resultp) resultp->deleteTree();
+        return foldedp;
+    }
+    return resultp;
+}
+
 AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* contextp) {
     // An expression that converts a real back to an integer folds whole at
     // elaboration time: the real itself has no form in the model, but the integer
@@ -325,6 +430,13 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
             if (handled) return fixedp;
         }
         if (isIntrinsic(expr.a->text)) return lowerIntrinsic(expr);
+        if (isToStringFunction(expr.a->text)) {
+            AstNodeExpr* const stringp = lowerToString(flp, expr, expr.a->text);
+            // A comparison with a string literal reads the literal as characters
+            if (stringp)
+                m_exprTypes[&expr] = LoweredType{stringp, stringType(flp, stringp->width() / 8)};
+            return stringp;
+        }
         if (isConversion(expr.a->text)) return lowerConversion(expr, contextp);
         // A real has no synthesizable form, so a conversion to one is refused by name
         if (expr.a->text == "real") {

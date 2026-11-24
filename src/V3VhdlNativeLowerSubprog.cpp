@@ -722,6 +722,10 @@ bool Lowering::actualTypeIndex(const Expr& expr, VType& out) const {
     // The parser writes an array index, a function call, and a type conversion all as
     // INDEX; the prefix says which.
     if (!expr.a || expr.a->kind != Expr::NAME) return false;
+    if (isToStringFunction(expr.a->text) && !m_subprograms.count(expr.a->text)) {
+        out = stringType(expr.flp, 1);  // Its length is the lowered value's
+        return true;
+    }
     if (m_subprograms.count(expr.a->text)) {
         Expr call{Expr::CALL};
         call.flp = expr.flp;

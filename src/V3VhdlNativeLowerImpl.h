@@ -1007,6 +1007,11 @@ class Lowering final {
         return initp && initp->kind == Expr::BITS_LIT && isUnconstrainedVectorMark(type);
     }
 
+    //! The predefined functions that return the text of a value
+    static bool isToStringFunction(const std::string& name) {
+        return name == "to_string" || name == "to_bstring" || name == "to_ostring"
+               || name == "to_hstring";
+    }
     //! The type of a string of a given length: 8-bit character codes indexed from 1 up
     VType stringType(FileLine* flp, int length) const {
         VType type;
@@ -1158,6 +1163,7 @@ class Lowering final {
     AstNodeExpr* lowerQualification(FileLine* flp, const Expr& expr, const VType* contextp);
     AstNodeExpr* lowerUnary(FileLine* flp, const Expr& expr, const VType* contextp);
     AstNodeExpr* lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* contextp);
+    AstNodeExpr* lowerToString(FileLine* flp, const Expr& expr, const std::string& name);
     AstNodeExpr* lowerOthersAssociation(FileLine* flp, const Expr& expr, const VType* contextp);
     //! Lowered operands of a binary expression with their resolved VHDL types
     struct BinaryOperands final {
