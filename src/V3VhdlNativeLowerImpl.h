@@ -1163,6 +1163,7 @@ class Lowering final {
     AstNodeExpr* lowerQualification(FileLine* flp, const Expr& expr, const VType* contextp);
     AstNodeExpr* lowerUnary(FileLine* flp, const Expr& expr, const VType* contextp);
     AstNodeExpr* lowerIndexedCall(FileLine* flp, const Expr& expr, const VType* contextp);
+    ExprP indexOfNoFormalCall(const Expr& expr) const;
     AstNodeExpr* lowerToString(FileLine* flp, const Expr& expr, const std::string& name);
     AstNodeExpr* lowerOthersAssociation(FileLine* flp, const Expr& expr, const VType* contextp);
     //! Lowered operands of a binary expression with their resolved VHDL types

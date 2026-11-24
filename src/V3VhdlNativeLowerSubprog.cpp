@@ -2073,7 +2073,7 @@ bool Lowering::bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env) {
 void Lowering::noteReturnedType(InlineFrame& frame, const Expr& value, AstNodeExpr* valuep) {
     if (frame.returnedTypeMixed) return;
     const VType type = typeOfLowered(value, valuep);
-    if (type.kind != VType::ARRAY || !type.dtp || type.width != valuep->width()) return;
+    if (!type.isVector() || !type.dtp || type.width != valuep->width()) return;
     if (frame.hasReturnedType
         && (frame.returnedType.left != type.left || frame.returnedType.right != type.right
             || frame.returnedType.ascending != type.ascending)) {
@@ -2107,7 +2107,8 @@ AstNodeExpr* Lowering::adoptCallResultType(AstNodeExpr* resultp, const Subprogra
     VType structType;
     bool haveStruct = retType.kind == VType::ARRAY && retType.elemWidth > 0;
     const InlineFrame& frame = m_inlineFrames.back();
-    if (!haveStruct && frame.hasReturnedType && !frame.returnedTypeMixed
+    // A return type without bounds of its own takes the ones the body returned
+    if ((!haveStruct || retType.width == 0) && frame.hasReturnedType && !frame.returnedTypeMixed
         && frame.returnedType.width == resultp->width()) {
         m_arrayDtypes[resultp->dtypep()] = frame.returnedType;
         return resultp;

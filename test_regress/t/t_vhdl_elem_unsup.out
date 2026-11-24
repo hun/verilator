@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_elem_unsup.vhdl:43:8: Unsupported: VHDL index of an array with an unconstrained element.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

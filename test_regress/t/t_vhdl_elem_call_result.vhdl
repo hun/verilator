@@ -6,9 +6,8 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- `T_SLV` is an array whose element is itself unconstrained, so an element of a
--- returned T_SLV has no width to select. The frontend reports an index of one rather than
--- emit a zero-width select.
+-- `T_SLV` is an array whose element is itself unconstrained. An element of a returned
+-- T_SLV takes its width from the local the body returns.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -32,13 +31,13 @@ library ieee;
 use ieee.std_logic_1164.all;
 use work.openelem.all;
 
-entity t_vhdl_elem_unsup is
+entity t is
   port (
     o : out std_logic
   );
 end entity;
 
-architecture rtl of t_vhdl_elem_unsup is
+architecture rtl of t is
 begin
   o <= row(c)(1)(3);
 end architecture;

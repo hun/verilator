@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: one element of an array a function returns with an open element
+# DESCRIPTION: Verilator: the result of a function without formals indexed in place
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -9,12 +9,13 @@
 
 import vltest_bootstrap
 
-test.scenarios('vlt')
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_call_result_index.vhdl'
 
-test.top_filename = 't/t_vhdl_elem_unsup.vhdl'
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-          fails=True,
-          expect_filename=test.golden_filename)
+test.execute()
 
 test.passes()

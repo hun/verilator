@@ -296,6 +296,30 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     return nullptr;
 }
 
+//! Arguments to a function that has no formals index its result: `fun(0, 0)` is `fun`'s
+//! value indexed (IEEE 1076-2008 9.3.3.1). Null when the call is something else.
+ExprP Lowering::indexOfNoFormalCall(const Expr& expr) const {
+    if (expr.kind != Expr::INDEX || !expr.a || expr.a->kind != Expr::NAME || expr.args.empty()) {
+        return nullptr;
+    }
+    const auto candidates = visibleSubprograms(expr.a->text);
+    const bool noFormals = !candidates.empty()
+                           && std::all_of(candidates.begin(), candidates.end(),
+                                          [this](const SubprogramDecl* const subp) {
+                                              return subp->kind == SubprogramDecl::FUNCTION
+                                                     && formalSlots(*subp).empty();
+                                          });
+    if (!noFormals) return nullptr;
+    ExprP indexed = std::make_unique<Expr>(Expr::INDEX);
+    indexed->flp = expr.flp;
+    indexed->a = std::make_unique<Expr>(Expr::CALL);
+    indexed->a->flp = expr.a->flp;
+    indexed->a->text = expr.a->text;
+    indexed->a->spelling = expr.a->spelling;
+    for (const ExprP& argp : expr.args) indexed->args.push_back(argp ? cloneExpr(*argp) : ExprP{});
+    return indexed;
+}
+
 //! to_string, to_bstring, to_ostring and to_hstring (IEEE 1076-2008 5.3.2.4, 16.4). A vector
 //! of known width gives a string of known length, one character per bit or per group of
 //! bits. An integer, Boolean or enumeration value has a text whose length depends on the
@@ -423,7 +447,11 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
             return lowerEdgeCall(expr);
         }
         // A user subprogram shadows a standard-package function of the same name
-        if (m_subprograms.count(expr.a->text)) return lowerFunctionCall(expr, contextp);
+        if (m_subprograms.count(expr.a->text)) {
+            const ExprP indexedp = indexOfNoFormalCall(expr);
+            if (indexedp) return lowerIndexedCall(flp, *indexedp, contextp);
+            return lowerFunctionCall(expr, contextp);
+        }
         if (isFixedFunction(expr.a->text)) {
             bool handled = false;
             AstNodeExpr* const fixedp = lowerFixedCall(expr, handled);
@@ -2325,11 +2353,17 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
                 = expr.a->kind == Expr::CALL
                   || (expr.a->kind == Expr::INDEX && expr.a->a && expr.a->a->kind == Expr::NAME
                       && m_subprograms.count(expr.a->a->text));
+            const ExprP noFormalsp = callPrefix ? indexOfNoFormalCall(*expr.a) : nullptr;
             const SubprogramDecl* const subp
-                = callPrefix ? resolveCall(*expr.a, true, nullptr) : nullptr;
+                = callPrefix ? resolveCall(noFormalsp ? *noFormalsp->a : *expr.a, true, nullptr)
+                             : nullptr;
             const auto typeIt = subp ? m_types.find(subp->returnType.mark) : m_types.end();
-            if (subp && typeIt != m_types.end() && typeIt->second.kind == VType::ARRAY
-                && !subp->returnType.hasRange && subp->returnType.constraintMark.empty()) {
+            const auto shapeIt = m_arrayDtypes.find(basep->dtypep());
+            if (shapeIt != m_arrayDtypes.end() && shapeIt->second.width == basep->width()
+                && shapeIt->second.isVector()) {
+                baseType = shapeIt->second;  // The shape the body returned
+            } else if (subp && typeIt != m_types.end() && typeIt->second.kind == VType::ARRAY
+                       && !subp->returnType.hasRange && subp->returnType.constraintMark.empty()) {
                 baseType = typeIt->second;  // The element width survives only in the type
             } else {
                 baseType = typeOfDType(basep->dtypep());
