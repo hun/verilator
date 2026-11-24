@@ -52,6 +52,17 @@ namespace vhdlnative {
 //! Whether two base type names are the same VHDL type or closely related (IEEE
 //! 1076-2008 9.3.6): std_logic is the resolved subtype of std_ulogic, and
 //! std_logic_vector of std_ulogic_vector (IEEE 1164)
+int controlCharacterCode(const std::string& name) {
+    static const char* const names[]
+        = {"nul", "soh", "stx", "etx", "eot", "enq", "ack", "bel", "bs",  "ht",  "lf",
+           "vt",  "ff",  "cr",  "so",  "si",  "dle", "dc1", "dc2", "dc3", "dc4", "nak",
+           "syn", "etb", "can", "em",  "sub", "esc", "fsp", "gsp", "rsp", "usp"};
+    for (int code = 0; code < 32; ++code) {
+        if (name == names[code]) return code;
+    }
+    return name == "del" ? 127 : -1;
+}
+
 bool baseTypesRelated(const std::string& a, const std::string& b) {
     if (a == b) return true;
     const auto logic

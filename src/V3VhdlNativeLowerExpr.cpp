@@ -152,6 +152,12 @@ AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* c
             call.spelling = expr.spelling;
             return lowerFunctionCall(call, contextp);
         }
+        // A control character such as NUL is a literal of the character type, which a
+        // context of eight bits stands for
+        const int code = controlCharacterCode(expr.text);
+        if (code >= 0 && contextp && contextp->isVector() && contextp->width == 8) {
+            return makeVectorConst(flp, *contextp, static_cast<unsigned char>(code));
+        }
         flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'.");
         return nullptr;
     }

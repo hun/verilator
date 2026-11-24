@@ -86,6 +86,9 @@ struct VType final {
     int indexOffset(int index) const { return ascending ? right - index : index - right; }
 };
 
+//! Code of a control character named by an enumeration literal of the predefined
+//! `character` type (IEEE 1076-2008 16.3), or -1 when the lower-cased name is not one
+int controlCharacterCode(const std::string& name);
 bool baseTypesRelated(const std::string& a, const std::string& b);
 bool arrayBaseTypesRelated(const std::string& a, const std::string& b);
 bool literalIntegerExpr(const Expr& expr);
