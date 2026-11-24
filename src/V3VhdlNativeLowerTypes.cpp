@@ -195,6 +195,26 @@ bool Lowering::evalIntName(const Expr& expr, int64_t& value) const {
 
 //! Integer value of an attribute of a type mark, including its position attributes
 bool Lowering::evalIntAttribute(const Expr& expr, int64_t& value) const {
+    // The bounds of a slice with static bounds are the ones it names, and its length follows
+    if (expr.a && expr.a->kind == Expr::SLICE && expr.a->b && expr.a->c && expr.args.empty()
+        && (expr.text == "length" || expr.text == "left" || expr.text == "right"
+            || expr.text == "low" || expr.text == "high")) {
+        int64_t left = 0;
+        int64_t right = 0;
+        if (!evalInt(*expr.a->b, left) || !evalInt(*expr.a->c, right)) return false;
+        const bool descending = expr.a->text == "downto";
+        if (expr.text == "length") {
+            value = descending ? std::max<int64_t>(left - right + 1, 0)
+                               : std::max<int64_t>(right - left + 1, 0);
+        } else if (expr.text == "left") {
+            value = left;
+        } else if (expr.text == "right") {
+            value = right;
+        } else {
+            value = expr.text == "low" ? std::min(left, right) : std::max(left, right);
+        }
+        return true;
+    }
     // Attributes of a type mark or name whose value is known statically
     if (!expr.a || expr.a->kind != Expr::NAME) return false;
     const VType* typep = typeOfName(*expr.a);
