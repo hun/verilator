@@ -1225,6 +1225,11 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
             literalType = fixedType;
         }
     }
+    // An element that is itself an array, such as a byte, joins an array of that element
+    const auto isElementOfArray = [this](const VType& elem, const VType& array) {
+        return array.kind == VType::ARRAY && array.elemp && !array.elemp->typeName.empty()
+               && arrayBaseTypesRelated(elem.typeName, array.elemp->typeName);
+    };
     if (!lt.isVector() && !rt.isVector()) {
         if (lt.kind != rt.kind) {
             unsupportedError(flp, "concatenation of mismatched element types");
@@ -1242,7 +1247,8 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
                    || expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)
                && (expr.b->kind == Expr::NAME || expr.b->kind == Expr::SELECTED
                    || expr.b->kind == Expr::INDEX || expr.b->kind == Expr::SLICE)
-               && !arrayBaseTypesRelated(lt.typeName, rt.typeName)) {
+               && !arrayBaseTypesRelated(lt.typeName, rt.typeName) && !isElementOfArray(lt, rt)
+               && !isElementOfArray(rt, lt)) {
         flp->v3error("VHDL: concatenation of operands of unrelated array types.");
         lp->deleteTree();
         rp->deleteTree();
