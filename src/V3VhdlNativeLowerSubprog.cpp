@@ -1623,7 +1623,8 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         AstNodeExpr* const initp = lowerExpr(*formal.init, nullptr);
         if (!initp) return false;
         InlineBinding binding{initp, false, true, VType{}, nullptr};
-        binding.type = typeOfDType(initp->dtypep());
+        binding.type = formal.type.mark == "string" ? stringType(formal.flp, initp->width() / 8)
+                                                    : typeOfDType(initp->dtypep());
         env[slots[s].second] = std::move(binding);
     }
     return true;
