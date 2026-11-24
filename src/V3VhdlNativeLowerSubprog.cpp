@@ -2060,6 +2060,22 @@ bool Lowering::bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env) {
     return true;
 }
 
+//! Keep the array structure of a returned value, so an unconstrained return type can take
+//! its bounds from the body: `return ret` of a constrained local
+void Lowering::noteReturnedType(InlineFrame& frame, const Expr& value, AstNodeExpr* valuep) {
+    if (frame.returnedTypeMixed) return;
+    const VType type = typeOfLowered(value, valuep);
+    if (type.kind != VType::ARRAY || !type.dtp || type.width != valuep->width()) return;
+    if (frame.hasReturnedType
+        && (frame.returnedType.left != type.left || frame.returnedType.right != type.right
+            || frame.returnedType.ascending != type.ascending)) {
+        frame.returnedTypeMixed = true;
+        return;
+    }
+    frame.returnedType = type;
+    frame.hasReturnedType = true;
+}
+
 //! Give an inlined call's result the declared return type, or the caller's type when the
 //! widths agree, and record the element structure of an array result
 AstNodeExpr* Lowering::adoptCallResultType(AstNodeExpr* resultp, const SubprogramDecl& subp,
@@ -2082,6 +2098,12 @@ AstNodeExpr* Lowering::adoptCallResultType(AstNodeExpr* resultp, const Subprogra
     // takes the element type from the declaration and the element count from the result.
     VType structType;
     bool haveStruct = retType.kind == VType::ARRAY && retType.elemWidth > 0;
+    const InlineFrame& frame = m_inlineFrames.back();
+    if (!haveStruct && frame.hasReturnedType && !frame.returnedTypeMixed
+        && frame.returnedType.width == resultp->width()) {
+        m_arrayDtypes[resultp->dtypep()] = frame.returnedType;
+        return resultp;
+    }
     if (haveStruct) {
         structType = retType;
     } else {
@@ -2404,6 +2426,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             AstNodeExpr* const valuep = lowerExpr(*stmt.value, m_funcRetp);
             if (!valuep) return nullptr;
             if (!m_inlineFrames.empty()) {
+                noteReturnedType(m_inlineFrames.back(), *stmt.value, valuep);
                 VType retType;
                 if (formalType(m_inlineFrames.back().declp->returnType, retType)
                     && !valueConforms(retType, *stmt.value, "return value", false)) {

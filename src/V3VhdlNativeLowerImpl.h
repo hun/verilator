@@ -201,6 +201,10 @@ class Lowering final {
         ScopeSave entryScope;  // The caller's scope when the call was made
         ScopeSave liveScope;  // Grows with procedure locals
         InlineEnv* envp = nullptr;  // Bindings of this inlining
+        //! Structure of the array the body returns, when every return agrees on it
+        VType returnedType = VType{};
+        bool hasReturnedType = false;
+        bool returnedTypeMixed = false;  // Two returns gave arrays of different shape
     };
     //! Active bindings, referenced before the scope tables: a callee owns its map while
     //! its body lowers, so nested lowering sees it
@@ -1479,6 +1483,7 @@ class Lowering final {
                                    const SubprogramDecl* forcedp = nullptr);
     const SubprogramRef* visibleRef(const SubprogramDecl* declp) const;
     bool bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env);
+    void noteReturnedType(InlineFrame& frame, const Expr& value, AstNodeExpr* valuep);
     AstNodeExpr* adoptCallResultType(AstNodeExpr* resultp, const SubprogramDecl& subp,
                                      const VType& retType, const VType* contextp, FileLine* flp);
     AstNodeExpr* evalFuncBlock(const std::vector<StmtP>& stmts, std::size_t index, InlineEnv& env,

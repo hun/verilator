@@ -240,11 +240,27 @@ bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileL
             realConstant = constType.kind == VType::REAL;
         }
         // An array whose element type leaves a member unconstrained has no width until its
-        // aggregate fixes one, which is not modelled
+        // value fixes one: a call takes its bounds from what the function returns
         if (!constType.dtp && constType.kind == VType::ARRAY
             && (!constType.elemp || constType.elemp->width == 0)) {
-            unsupportedError(flp, "constant of an array of unconstrained elements");
-            return false;
+            if (init.kind == Expr::AGG_POSITIONAL || init.kind == Expr::AGG_NAMED) {
+                unsupportedError(flp, "constant of an array of unconstrained elements");
+                return false;
+            }
+            valuep = lowerExpr(init, nullptr);
+            if (!valuep) return false;
+            if (AstConst* const foldedp = foldStatic(valuep)) {
+                if (foldedp != valuep) valuep->deleteTree();
+                valuep = foldedp;
+            }
+            const VType valueType = typeOfLowered(init, valuep);
+            if (valueType.kind != VType::ARRAY || !valueType.dtp
+                || valueType.width != valuep->width() || valueType.width == 0) {
+                unsupportedError(flp, "constant of an array of unconstrained elements");
+                return false;
+            }
+            constType = valueType;
+            intConstant = false;
         }
         // An unconstrained array constant whose initializer is a value rather than an
         // aggregate takes its length from that value, as a function returning an
