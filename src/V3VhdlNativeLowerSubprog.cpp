@@ -531,7 +531,21 @@ bool Lowering::actualType(const Expr& expr, VType& out) const {
 
 //! Type a unary expression, or the element type a logical reduction yields
 bool Lowering::actualTypeUnary(const Expr& expr, VType& out) const {
-    if (!visibleSubprograms(expr.text).empty()) return false;
+    // A user-defined operator on this operand's type decides the result type; one on
+    // other types, as a package may declare for its own, does not
+    const std::vector<const SubprogramDecl*> userOps = visibleSubprograms(expr.text);
+    if (!userOps.empty()) {
+        VType operand;
+        if (!expr.a || !actualType(*expr.a, operand)) return false;
+        for (const SubprogramDecl* const subp : userOps) {
+            const std::vector<std::pair<const FormalDecl*, std::string>> slots = formalSlots(*subp);
+            VType formal;
+            if (slots.size() != 1 || !formalType(slots[0].first->type, formal)
+                || typesMatch(formal, operand)) {
+                return false;
+            }
+        }
+    }
     // The explicit condition operator yields boolean (IEEE 1076-2008 9.2.9)
     if (expr.text == "??") {
         out = VType{};
