@@ -2464,6 +2464,10 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             continue;
         }
         if (stmt.kind == Stmt::REPORT || stmt.kind == Stmt::ASSERT) continue;
+        if (stmt.kind == Stmt::CALL) {
+            if (!evalProcedureCall(stmt, depth + 1)) return nullptr;
+            continue;
+        }
         if (stmt.kind == Stmt::RETURN) {
             if (!stmt.value) {
                 unsupportedError(flp, "return without a value in a VHDL function body");
@@ -2528,11 +2532,15 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
 bool Lowering::isStraightLine(const std::vector<StmtP>& stmts) {
     for (const StmtP& stmtp : stmts) {
         switch (stmtp->kind) {
+        case Stmt::CALL:
         case Stmt::VAR_ASSIGN:
         case Stmt::REPORT:
         case Stmt::ASSERT: break;
         case Stmt::IF:
             if (!isStraightIf(*stmtp)) return false;
+            break;
+        case Stmt::FOR:
+            if (!isStraightLine(stmtp->body)) return false;
             break;
         default: return false;
         }
@@ -2561,10 +2569,69 @@ bool Lowering::evalStraightLine(const std::vector<StmtP>& stmts, InlineEnv& env,
             if (!stmtp->alternatives.empty() || !evalFuncVarAssign(*stmtp)) ok = false;
         } else if (stmtp->kind == Stmt::IF) {
             ok = evalMergedBranches(*stmtp, 0, env, depth + 1);
+        } else if (stmtp->kind == Stmt::CALL) {
+            ok = evalProcedureCall(*stmtp, depth + 1);
+        } else if (stmtp->kind == Stmt::FOR) {
+            // The body is straight-line, so the loop ends in one continuation: it carries
+            // the bindings of the last iteration back into env
+            const InlineCont endCont = [&](InlineEnv& endEnv) -> AstNodeExpr* {
+                InlineEnv copy = cloneInlineEnv(endEnv);
+                deleteInlineEnv(env);
+                env = std::move(copy);
+                return makeIntConst(stmtp->flp, 0);
+            };
+            AstNodeExpr* const donep = evalFuncFor(*stmtp, endCont, depth + 1);
+            ok = donep != nullptr;
+            if (donep) donep->deleteTree();
         }
         if (!ok) break;
     }
     m_inlinep = savedInlinep;
+    return ok;
+}
+
+//! A call of a procedure the function declares: its body runs on a copy of the function's
+//! bindings, and what it leaves in the names it does not declare itself goes back
+bool Lowering::evalProcedureCall(const Stmt& stmt, int depth) {
+    const SubprogramRef* refp = nullptr;
+    const SubprogramDecl* const subp = resolveCall(*stmt.value, false, &refp);
+    if (!subp) return false;
+    if (!refp || refp->frame != static_cast<int>(m_inlineFrames.size()) - 1
+        || !isStraightLine(subp->body) || !m_inlineBodies.insert(subp).second) {
+        unsupportedError(stmt.flp, "this statement form in an inlined VHDL function body");
+        return false;
+    }
+    InlineEnv& callerEnv = activeEnv();
+    InlineEnv env = cloneInlineEnv(callerEnv);
+    AstNodeStmt* unusedPrologsp = nullptr;  // Only in mode formals bind here
+    bool ok = bindSubprogramFormals(*stmt.value, *subp, env, unusedPrologsp, false, false);
+    const ScopeSave outer = saveScope();
+    InlineEnv* const savedInlinep = m_inlinep;
+    m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
+    m_inlinep = &env;
+    ok = ok && bindFunctionLocals(*subp, env);
+    m_inlineFrames.back().liveScope = saveScope();
+    ok = ok && evalStraightLine(subp->body, env, depth);
+    m_inlineFrames.pop_back();
+    m_inlinep = savedInlinep;
+    restoreScope(outer);
+    m_inlineBodies.erase(subp);
+    if (ok) {
+        std::set<std::string> own;
+        for (const FormalDecl& formal : subp->formals) {
+            for (const auto& name : formal.names) own.insert(name.first);
+        }
+        for (const Decl& decl : subp->decls) {
+            for (const auto& name : decl.names) own.insert(name.first);
+        }
+        for (auto& entry : callerEnv) {
+            const auto it = env.find(entry.first);
+            if (own.count(entry.first) || it == env.end()) continue;
+            entry.second.exprp->deleteTree();
+            entry.second.exprp = it->second.exprp->cloneTree(false);
+        }
+    }
+    deleteInlineEnv(env);
     return ok;
 }
 
