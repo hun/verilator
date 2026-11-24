@@ -2159,7 +2159,11 @@ AstNodeExpr* Lowering::adoptCallResultType(AstNodeExpr* resultp, const Subprogra
     // A return type without bounds of its own takes the ones the body returned
     if ((!haveStruct || retType.width == 0) && frame.hasReturnedType && !frame.returnedTypeMixed
         && frame.returnedType.width == resultp->width()) {
-        m_arrayDtypes[resultp->dtypep()] = frame.returnedType;
+        // The data type is shared by every value of this width, so only a type with
+        // element structure to keep is worth recording against it
+        if (frame.returnedType.kind == VType::ARRAY) {
+            m_arrayDtypes[resultp->dtypep()] = frame.returnedType;
+        }
         return resultp;
     }
     if (haveStruct) {
