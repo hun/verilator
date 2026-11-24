@@ -2489,6 +2489,17 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 return evalFuncBlock(stmts, i + 1, restEnv, cont, exitContp, depth);
             };
             if (stmt.kind == Stmt::IF) {
+                if (isStraightIf(stmt)) {
+                    // No arm leaves the function or loop, so the rest of the body is
+                    // lowered once, after the arms merge, rather than once per arm
+                    InlineEnv mergedEnv = cloneInlineEnv(activeEnv());
+                    AstNodeExpr* resultp = nullptr;
+                    if (evalMergedBranches(stmt, 0, mergedEnv, depth + 1)) {
+                        resultp = restCont(mergedEnv);
+                    }
+                    deleteInlineEnv(mergedEnv);
+                    return resultp;
+                }
                 return evalFuncBranches(stmt, 0, restCont, exitContp, depth + 1);
             }
             if (stmt.kind == Stmt::CASE) return evalFuncCase(stmt, restCont, exitContp, depth + 1);
@@ -2511,6 +2522,118 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                          "function does not return a value on all paths");
     }
     return resultp;
+}
+
+//! True when every arm only assigns variables, so the arms' effects can be merged
+bool Lowering::isStraightLine(const std::vector<StmtP>& stmts) {
+    for (const StmtP& stmtp : stmts) {
+        switch (stmtp->kind) {
+        case Stmt::VAR_ASSIGN:
+        case Stmt::REPORT:
+        case Stmt::ASSERT: break;
+        case Stmt::IF:
+            if (!isStraightIf(*stmtp)) return false;
+            break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
+bool Lowering::isStraightIf(const Stmt& stmt) {
+    for (const auto& branch : stmt.branches) {
+        if (!isStraightLine(branch.second)) return false;
+    }
+    return true;
+}
+
+bool Lowering::evalStraightLine(const std::vector<StmtP>& stmts, InlineEnv& env, int depth) {
+    if (depth > 64) {
+        unsupportedError(m_inlineFrames.back().declp->flp,
+                         "VHDL function statement nesting is too deep");
+        return false;
+    }
+    InlineEnv* const savedInlinep = m_inlinep;
+    m_inlinep = &env;
+    bool ok = true;
+    for (const StmtP& stmtp : stmts) {
+        if (stmtp->kind == Stmt::VAR_ASSIGN) {
+            if (!stmtp->alternatives.empty() || !evalFuncVarAssign(*stmtp)) ok = false;
+        } else if (stmtp->kind == Stmt::IF) {
+            ok = evalMergedBranches(*stmtp, 0, env, depth + 1);
+        }
+        if (!ok) break;
+    }
+    m_inlinep = savedInlinep;
+    return ok;
+}
+
+//! Evaluate the if arms from branchIndex on into env: each variable an arm changes
+//! becomes a conditional between the arms' values
+bool Lowering::evalMergedBranches(const Stmt& stmt, std::size_t branchIndex, InlineEnv& env,
+                                  int depth) {
+    const auto& branch = stmt.branches[branchIndex];
+    if (!branch.first) return evalStraightLine(branch.second, env, depth);
+    InlineEnv* const savedInlinep = m_inlinep;
+    m_inlinep = &env;
+    AstNodeExpr* const condp = lowerCond(*branch.first);
+    m_inlinep = savedInlinep;
+    if (!condp) return false;
+    const bool hasNext = branchIndex + 1 < stmt.branches.size();
+    // A condition that folds takes one arm only
+    if (AstConst* const foldedp = foldStatic(condp)) {
+        const bool taken = foldedp->num().isTrue();
+        foldedp->deleteTree();
+        condp->deleteTree();
+        if (taken) return evalStraightLine(branch.second, env, depth);
+        return hasNext ? evalMergedBranches(stmt, branchIndex + 1, env, depth) : true;
+    }
+    InlineEnv thenEnv = cloneInlineEnv(env);
+    InlineEnv elseEnv = cloneInlineEnv(env);
+    bool ok = false;
+    {
+        // Both arms are lowered here, so a statement one of them emits would run on both
+        const RuntimeBranchScope scope{m_runtimeBranchDepth};
+        ok = evalStraightLine(branch.second, thenEnv, depth)
+             && (!hasNext || evalMergedBranches(stmt, branchIndex + 1, elseEnv, depth));
+    }
+    if (ok) {
+        for (auto& entry : env) {
+            AstNodeExpr* thenp = thenEnv[entry.first].exprp;
+            AstNodeExpr* elsep = elseEnv[entry.first].exprp;
+            if (thenp->sameTree(elsep)) continue;
+            if (thenp->width() != elsep->width()) {
+                if (thenp->width() > elsep->width()) {
+                    elsep = resizeExpr(elsep, typeOfDType(thenp->dtypep()), stmt.flp);
+                } else {
+                    thenp = resizeExpr(thenp, typeOfDType(elsep->dtypep()), stmt.flp);
+                }
+                elseEnv[entry.first].exprp = elsep;
+                thenEnv[entry.first].exprp = thenp;
+            }
+            AstCond* const mergedp = new AstCond{stmt.flp, condp->cloneTree(false),
+                                                 thenp->cloneTree(false), elsep->cloneTree(false)};
+            mergedp->dtypep(thenp->dtypep());
+            entry.second.exprp->deleteTree();
+            entry.second.exprp = mergedp;
+            if (!m_materializeLocals) continue;
+            // A later merge reads this value twice, so held as an expression it doubles
+            // per merge. The temporary is assigned once, so computing it ahead of the
+            // enclosing arm is harmless.
+            AstVar* const varp
+                = new AstVar{stmt.flp, VVarType::VAR,
+                             "__Vfn_" + std::to_string(++m_localVarSeq) + "__" + entry.first,
+                             mergedp->dtypep()};
+            m_modp->addStmtsp(varp);
+            addPendingStmt(
+                new AstAssign{stmt.flp, new AstVarRef{stmt.flp, varp, VAccess::WRITE}, mergedp});
+            entry.second.exprp = new AstVarRef{stmt.flp, varp, VAccess::READ};
+        }
+    }
+    deleteInlineEnv(thenEnv);
+    deleteInlineEnv(elseEnv);
+    condp->deleteTree();
+    return ok;
 }
 
 AstNodeExpr* Lowering::evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,

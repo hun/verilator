@@ -1492,6 +1492,10 @@ class Lowering final {
                                   const InlineCont& cont, const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncBlockBody(const std::vector<StmtP>& stmts, std::size_t index,
                                    const InlineCont& cont, const InlineCont* exitContp, int depth);
+    static bool isStraightLine(const std::vector<StmtP>& stmts);
+    static bool isStraightIf(const Stmt& stmt);
+    bool evalStraightLine(const std::vector<StmtP>& stmts, InlineEnv& env, int depth);
+    bool evalMergedBranches(const Stmt& stmt, std::size_t branchIndex, InlineEnv& env, int depth);
     AstNodeExpr* evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,
                                   const InlineCont& cont, const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncCase(const Stmt& stmt, const InlineCont& cont,
