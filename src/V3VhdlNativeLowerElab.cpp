@@ -1545,7 +1545,11 @@ bool Lowering::checkComponentConformance(const Concurrent& conc, const EntityUni
     }
     for (const PortDecl& port : entity.ports) {
         for (const auto& name : port.names) {
-            if (componentPorts.count(name.first)) continue;
+            // The default binding leaves the entity's other ports unassociated, which only
+            // an input without a default value makes an error (IEEE 1076-2008 6.5.6.3)
+            if (componentPorts.count(name.first) || port.dir != PortMode::IN || port.init) {
+                continue;
+            }
             port.flp->v3error("VHDL: entity '" + entity.spelling + "' has port '" + name.second
                               + "', which component '" + component.spelling
                               + "' does not declare.");
@@ -1555,10 +1559,6 @@ bool Lowering::checkComponentConformance(const Concurrent& conc, const EntityUni
     std::map<std::string, const GenericDecl*> componentGenerics;
     for (const GenericDecl& generic : component.generics) {
         for (const auto& name : generic.names) componentGenerics[name.first] = &generic;
-    }
-    std::set<std::string> entityGenerics;
-    for (const GenericDecl& generic : entity.generics) {
-        for (const auto& name : generic.names) entityGenerics.insert(name.first);
     }
     for (const auto& entry : componentGenerics) {
         const GenericDecl* entityGenericp = nullptr;
@@ -1585,11 +1585,15 @@ bool Lowering::checkComponentConformance(const Concurrent& conc, const EntityUni
             ok = false;
         }
     }
-    for (const std::string& name : entityGenerics) {
-        if (componentGenerics.count(name)) continue;
-        entity.flp->v3error("VHDL: entity '" + entity.spelling + "' has generic '" + name
-                            + "', which component '" + component.spelling + "' does not declare.");
-        ok = false;
+    for (const GenericDecl& generic : entity.generics) {
+        for (const auto& entry : generic.names) {
+            // A generic the component omits takes its default value
+            if (componentGenerics.count(entry.first) || generic.init) continue;
+            entity.flp->v3error("VHDL: entity '" + entity.spelling + "' has generic '"
+                                + entry.first + "', which component '" + component.spelling
+                                + "' does not declare.");
+            ok = false;
+        }
     }
     for (const PortAssoc& assoc : conc.associations) {
         if (assoc.formal.empty() || componentPorts.count(assoc.formal)) continue;
