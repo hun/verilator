@@ -210,6 +210,39 @@ void collectInstanceStmts(const std::vector<std::unique_ptr<vhdlnative::Concurre
     }
 }
 
+//! The generic map of a binding indication gives the entity's generics a value of their own,
+//! over the one the instance's generic map gave. A name in it that is a generic of the
+//! component takes the actual the instance maps to it.
+void applyBindingGenericMap(const vhdlnative::ConfigBinding& binding,
+                            vhdlnative::Concurrent& instance) {
+    for (const vhdlnative::PortAssoc& bound : binding.genericMap) {
+        vhdlnative::PortAssoc assoc;
+        assoc.flp = bound.flp;
+        assoc.formal = bound.formal;
+        assoc.formalSpelling = bound.formalSpelling;
+        if (bound.actual) {
+            assoc.actual = vhdlnative::cloneExpr(*bound.actual);
+            if (assoc.actual->kind == vhdlnative::Expr::NAME) {
+                for (const vhdlnative::PortAssoc& given : instance.genericAssociations) {
+                    if (given.formal == assoc.actual->text && given.actual) {
+                        assoc.actual = vhdlnative::cloneExpr(*given.actual);
+                        break;
+                    }
+                }
+            }
+        }
+        const auto sameFormal
+            = [&](const vhdlnative::PortAssoc& other) { return other.formal == assoc.formal; };
+        const auto it = std::find_if(instance.genericAssociations.begin(),
+                                     instance.genericAssociations.end(), sameFormal);
+        if (it != instance.genericAssociations.end()) {
+            *it = std::move(assoc);
+        } else {
+            instance.genericAssociations.push_back(std::move(assoc));
+        }
+    }
+}
+
 //! Apply one binding of a configuration to the instances of the architecture it configures
 void applyConfigBinding(const vhdlnative::ConfigurationUnit& config,
                         const vhdlnative::ConfigBinding& binding,
@@ -227,14 +260,18 @@ void applyConfigBinding(const vhdlnative::ConfigurationUnit& config,
         if (!matches || (binding.others && namedLabels.count(instp->instanceLabel))) continue;
         found.insert(instp->instanceLabel);
         if (!instp->entityInstantiation && instp->instanceName != binding.entity) {
-            vhdlnative::unsupportedError(
-                binding.flp, "configuration '" + config.spelling + "' binding component '"
-                                 + binding.component + "' to entity '" + binding.entity + "'");
+            // The component is bound to an entity of another name; its ports and generics
+            // pair with the entity's by name, as for a default binding
+            instp->instanceName = binding.entity;
+            applyBindingGenericMap(binding, *instp);
+            if (!binding.architecture.empty()) instp->architectureName = binding.architecture;
+            configured.insert(instp);
         } else if (instp->entityInstantiation && instp->instanceName != binding.entity) {
             binding.flp->v3error("VHDL configuration '" + config.spelling + "' rebinds instance '"
                                  + instp->instanceLabel + "' to entity '" + binding.entity
                                  + "', not to the '" + instp->instanceName + "' it instantiates.");
         } else if (binding.architecture.empty()) {
+            applyBindingGenericMap(binding, *instp);
             continue;
         } else if (configured.count(instp) && instp->architectureName != binding.architecture) {
             vhdlnative::unsupportedError(binding.flp,
@@ -244,6 +281,7 @@ void applyConfigBinding(const vhdlnative::ConfigurationUnit& config,
         } else {
             // A configuration declaration overrides a specification or an instance's own choice
             instp->architectureName = binding.architecture;
+            applyBindingGenericMap(binding, *instp);
             configured.insert(instp);
         }
     }
@@ -266,6 +304,16 @@ ArchByEntity resolveArchitectures(vhdlnative::DesignLibrary& library) {
     // A configuration selects the architecture of the instances it binds. A binding that
     // names no architecture leaves the instance as written.
     for (const vhdlnative::ConfigurationUnit& config : library.configurations) {
+        for (const std::string& used : config.usedConfigurations) {
+            const bool known = std::any_of(
+                library.configurations.begin(), library.configurations.end(),
+                [&](const vhdlnative::ConfigurationUnit& other) { return other.name == used; });
+            if (!known) {
+                config.flp->v3error("VHDL configuration '" + config.spelling
+                                    + "' uses configuration '" + used
+                                    + "', which was not analyzed.");
+            }
+        }
         const auto archIt = archByEntity.find(config.entityName);
         if (archIt == archByEntity.end()) {
             config.flp->v3error("VHDL configuration '" + config.spelling + "' configures entity '"

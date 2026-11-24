@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_cfg_decl_conf_unsup.vhdl:68:11: Unsupported: VHDL configuration binding of 'configuration'.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

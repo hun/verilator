@@ -3500,7 +3500,23 @@ void Parser::parseConfiguration(FileLine* flp) {
         if (!takeId(compTok)) return;
         binding.component = compTok.text;
         if (!expectId("use")) return;
-        if (!isId("entity")) {  // `use configuration` and `use open`
+        if (isId("configuration")) {
+            // Every configuration of the design applies to its own entity, so naming one
+            // here binds nothing further
+            advance();
+            Token nameTok2;
+            if (!takeId(nameTok2)) return;
+            while (acceptSym(".")) {
+                if (!takeId(nameTok2)) return;
+            }
+            unit.usedConfigurations.push_back(nameTok2.text);
+            expectSym(";");
+            if (!expectId("end")) return;
+            if (!expectId("for")) return;
+            if (!acceptSym(";")) error("expected ';' after 'end for'");
+            continue;
+        }
+        if (!isId("entity")) {  // `use open`
             unsupported("configuration binding of '" + m_cur.text + "'");
             return;
         }
@@ -3522,6 +3538,16 @@ void Parser::parseConfiguration(FileLine* flp) {
             if (!takeId(selectedTok)) return;
             binding.architecture = selectedTok.text;
             expectSym(")");
+        }
+        if (isId("generic")) {
+            advance();
+            if (!expectId("map")) return;
+            parseAssocList(binding.genericMap, "generic");
+            if (m_failed) return;
+        }
+        if (isId("port")) {
+            unsupported("port map in a configuration binding");
+            return;
         }
         expectSym(";");
         if (!expectId("end")) return;

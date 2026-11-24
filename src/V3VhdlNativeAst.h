@@ -202,6 +202,31 @@ struct Expr final {
 struct Stmt;
 using StmtP = std::unique_ptr<Stmt>;
 
+//! Deep copy of an expression
+inline ExprP cloneExpr(const Expr& expr) {
+    ExprP out = std::make_unique<Expr>(expr.kind);
+    out->flp = expr.flp;
+    out->text = expr.text;
+    out->spelling = expr.spelling;
+    out->intValue = expr.intValue;
+    out->realValue = expr.realValue;
+    out->charValue = expr.charValue;
+    out->bits = expr.bits;
+    out->formalNames = expr.formalNames;
+    out->a = expr.a ? cloneExpr(*expr.a) : ExprP{};
+    out->b = expr.b ? cloneExpr(*expr.b) : ExprP{};
+    out->c = expr.c ? cloneExpr(*expr.c) : ExprP{};
+    for (const ExprP& argp : expr.args) out->args.push_back(argp ? cloneExpr(*argp) : ExprP{});
+    for (const std::vector<ExprP>& choiceList : expr.choices) {
+        std::vector<ExprP> copy;
+        for (const ExprP& choicep : choiceList) {
+            copy.push_back(choicep ? cloneExpr(*choicep) : ExprP{});
+        }
+        out->choices.push_back(std::move(copy));
+    }
+    return out;
+}
+
 struct Stmt final {
     enum Kind : uint8_t {
         ASSIGN,
@@ -574,6 +599,7 @@ struct ConfigBinding final {
     std::string architecture;  // Folded architecture the `use entity` clause selects, or empty
     std::string libname;  // Library named by the `use entity` clause
     std::string entity;  // Folded entity name the `use entity` clause binds
+    std::vector<PortAssoc> genericMap;  // `generic map (...)` of the binding indication
     FileLine* flp = nullptr;  // Source location
 };
 
@@ -587,6 +613,7 @@ struct ConfigurationUnit final {
     std::string entityName;  // Folded entity the configuration configures
     std::string archName;  // Folded architecture of that entity
     std::vector<ConfigBinding> bindings;  // Component bindings
+    std::vector<std::string> usedConfigurations;  // Folded names of `use configuration`
 };
 
 //! A context declaration: a named bundle of library and use clauses

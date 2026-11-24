@@ -773,28 +773,7 @@ class Lowering final {
     bool closedOverFormals(const Expr& expr, const std::map<std::string, ExprP>& args) const;
     void popPureCall() const;
     //! Deep copy of a frontend expression, for a synthesized type constraint
-    static ExprP cloneExpr(const Expr& expr) {
-        ExprP out = std::make_unique<Expr>(expr.kind);
-        out->flp = expr.flp;
-        out->text = expr.text;
-        out->spelling = expr.spelling;
-        out->intValue = expr.intValue;
-        out->charValue = expr.charValue;
-        out->bits = expr.bits;
-        out->formalNames = expr.formalNames;
-        out->a = expr.a ? cloneExpr(*expr.a) : ExprP{};
-        out->b = expr.b ? cloneExpr(*expr.b) : ExprP{};
-        out->c = expr.c ? cloneExpr(*expr.c) : ExprP{};
-        for (const ExprP& argp : expr.args) out->args.push_back(argp ? cloneExpr(*argp) : ExprP{});
-        for (const std::vector<ExprP>& choiceList : expr.choices) {
-            std::vector<ExprP> copy;
-            for (const ExprP& choicep : choiceList) {
-                copy.push_back(choicep ? cloneExpr(*choicep) : ExprP{});
-            }
-            out->choices.push_back(std::move(copy));
-        }
-        return out;
-    }
+    static ExprP cloneExpr(const Expr& expr) { return vhdlnative::cloneExpr(expr); }
     //! Whether two expressions are structurally the same
     static bool sameExpr(const Expr& l, const Expr& r) {
         if (l.kind != r.kind || l.text != r.text || l.intValue != r.intValue
