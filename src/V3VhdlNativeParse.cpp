@@ -511,6 +511,7 @@ class Parser final {
     void applyConfigSpec(const ConfigSpec& spec, std::vector<std::unique_ptr<Concurrent>>& stmts);
     void parseArchitecture(FileLine* flp);
     void parseConfiguration(FileLine* flp);
+    void parseConfigItems(ConfigurationUnit& unit, FileLine* flp);
     void parseConcurrentStatement(Architecture& arch);
     //! Consume PSL/label/instantiation/process prefixes; return true if the statement is done
     bool parseConcurrentPreamble(Architecture& arch, FileLine* flp);
@@ -3442,6 +3443,122 @@ bool Parser::parseLoopEnd(const char* what) {
     return true;
 }
 
+//! The items of a block configuration, up to its `end`: nested block configurations
+//! (`for gen_label ... end for;`, which name a generate or block) and component
+//! configurations (`for inst : comp use ...; end for;`). A binding applies to the instances
+//! of its label wherever they sit in the architecture, so the nesting only has to parse.
+void Parser::parseConfigItems(ConfigurationUnit& unit, FileLine* flp) {
+    while (true) {
+        if (m_failed) return;
+        if (isId("end")) return;
+        if (isId("use")) {  // A `use` clause of the block only makes declarations visible
+            std::vector<UseClause> ignoredUses;
+            parseUseClauseInto(ignoredUses);
+            continue;
+        }
+        if (!isId("for")) {
+            unsupported("configuration item '" + m_cur.text + "'");
+            return;
+        }
+        advance();
+        ConfigBinding binding;
+        binding.flp = flp;
+        bool component = false;  // `labels : comp`, else a block configuration
+        if (isId("all") || isId("others")) {
+            (isId("all") ? binding.all : binding.others) = true;
+            advance();
+            component = true;
+        } else {
+            while (true) {  // The label, or the instantiation list, comma separated
+                Token instTok;
+                if (!takeId(instTok)) return;
+                if (!binding.instances.empty()) binding.instances += ",";
+                binding.instances += instTok.text;
+                if (isSym("(")) {  // `for gen(0)`: one iteration of a generate
+                    int depth = 0;
+                    do {
+                        if (isSym("(")) ++depth;
+                        if (isSym(")")) --depth;
+                        advance();
+                    } while (depth > 0 && m_cur.kind != Token::END);
+                }
+                if (!acceptSym(",")) break;
+            }
+            component = isSym(":");
+        }
+        if (!component) {
+            // A block configuration holds items of its own
+            parseConfigItems(unit, flp);
+            if (m_failed) return;
+            if (!expectId("end")) return;
+            if (!expectId("for")) return;
+            if (!acceptSym(";")) error("expected ';' after 'end for'");
+            continue;
+        }
+        expectSym(":");
+        Token compTok;
+        if (!takeId(compTok)) return;
+        binding.component = compTok.text;
+        bool bound = false;  // `use entity`, which is all that selects anything here
+        if (isId("use")) {
+            advance();
+            if (isId("configuration")) {
+                // Every configuration of the design applies to its own entity, so naming
+                // one here binds nothing further
+                advance();
+                Token nameTok2;
+                if (!takeId(nameTok2)) return;
+                while (acceptSym(".")) {
+                    if (!takeId(nameTok2)) return;
+                }
+                unit.usedConfigurations.push_back(nameTok2.text);
+            } else if (isId("entity")) {
+                advance();
+                Token libTok;
+                if (!takeId(libTok)) return;
+                binding.libname = libTok.text;
+                expectSym(".");
+                Token entTok;
+                if (!takeId(entTok)) return;
+                binding.entity = entTok.text;
+                while (acceptSym(".")) {
+                    Token partTok;
+                    if (!takeId(partTok)) return;
+                    binding.entity = partTok.text;
+                }
+                if (acceptSym("(")) {
+                    Token selectedTok;
+                    if (!takeId(selectedTok)) return;
+                    binding.architecture = selectedTok.text;
+                    expectSym(")");
+                }
+                if (isId("generic")) {
+                    advance();
+                    if (!expectId("map")) return;
+                    parseAssocList(binding.genericMap, "generic");
+                    if (m_failed) return;
+                }
+                if (isId("port")) {
+                    unsupported("port map in a configuration binding");
+                    return;
+                }
+                bound = true;
+            } else {  // `use open`
+                unsupported("configuration binding of '" + m_cur.text + "'");
+                return;
+            }
+            expectSym(";");
+        }
+        // The bound entity's own blocks may be configured here as well
+        parseConfigItems(unit, flp);
+        if (m_failed) return;
+        if (!expectId("end")) return;
+        if (!expectId("for")) return;
+        if (!acceptSym(";")) error("expected ';' after 'end for'");
+        if (bound) unit.bindings.push_back(std::move(binding));
+    }
+}
+
 //! `configuration name of entity is for arch (for insts : comp use entity lib.ent;) end for; end
 //! configuration;`
 void Parser::parseConfiguration(FileLine* flp) {
@@ -3472,89 +3589,8 @@ void Parser::parseConfiguration(FileLine* flp) {
     Token archTok;
     if (!takeId(archTok)) return;
     unit.archName = archTok.text;
-    while (true) {
-        if (m_failed) return;
-        if (isId("end")) break;
-        if (!isId("for")) {
-            // A `use` clause of the configuration only makes declarations visible
-            unsupported("configuration item '" + m_cur.text + "'");
-            return;
-        }
-        advance();
-        ConfigBinding binding;
-        binding.flp = flp;
-        if (isId("all") || isId("others")) {
-            (isId("all") ? binding.all : binding.others) = true;
-            advance();
-        } else {
-            while (true) {  // The instantiation list, comma separated
-                Token instTok;
-                if (!takeId(instTok)) return;
-                if (!binding.instances.empty()) binding.instances += ",";
-                binding.instances += instTok.text;
-                if (!acceptSym(",")) break;
-            }
-        }
-        expectSym(":");
-        Token compTok;
-        if (!takeId(compTok)) return;
-        binding.component = compTok.text;
-        if (!expectId("use")) return;
-        if (isId("configuration")) {
-            // Every configuration of the design applies to its own entity, so naming one
-            // here binds nothing further
-            advance();
-            Token nameTok2;
-            if (!takeId(nameTok2)) return;
-            while (acceptSym(".")) {
-                if (!takeId(nameTok2)) return;
-            }
-            unit.usedConfigurations.push_back(nameTok2.text);
-            expectSym(";");
-            if (!expectId("end")) return;
-            if (!expectId("for")) return;
-            if (!acceptSym(";")) error("expected ';' after 'end for'");
-            continue;
-        }
-        if (!isId("entity")) {  // `use open`
-            unsupported("configuration binding of '" + m_cur.text + "'");
-            return;
-        }
-        advance();
-        Token libTok;
-        if (!takeId(libTok)) return;
-        binding.libname = libTok.text;
-        expectSym(".");
-        Token entTok;
-        if (!takeId(entTok)) return;
-        binding.entity = entTok.text;
-        while (acceptSym(".")) {
-            Token partTok;
-            if (!takeId(partTok)) return;
-            binding.entity = partTok.text;
-        }
-        if (acceptSym("(")) {
-            Token selectedTok;
-            if (!takeId(selectedTok)) return;
-            binding.architecture = selectedTok.text;
-            expectSym(")");
-        }
-        if (isId("generic")) {
-            advance();
-            if (!expectId("map")) return;
-            parseAssocList(binding.genericMap, "generic");
-            if (m_failed) return;
-        }
-        if (isId("port")) {
-            unsupported("port map in a configuration binding");
-            return;
-        }
-        expectSym(";");
-        if (!expectId("end")) return;
-        if (!expectId("for")) return;
-        if (!acceptSym(";")) error("expected ';' after 'end for'");
-        unit.bindings.push_back(std::move(binding));
-    }
+    parseConfigItems(unit, flp);
+    if (m_failed) return;
     // The architecture's own `end for`
     if (!expectId("end")) return;
     if (!expectId("for")) return;
