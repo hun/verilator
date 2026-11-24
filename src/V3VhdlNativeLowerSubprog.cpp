@@ -712,7 +712,9 @@ bool Lowering::actualTypeName(const Expr& expr, VType& out) const {
 //! Type an indexed expression, which may be an array index, a call or a conversion
 bool Lowering::actualTypeIndex(const Expr& expr, VType& out) const {
     if (expr.a && expr.a->kind == Expr::NAME
-        && (expr.a->text == "rising_edge" || expr.a->text == "falling_edge")) {
+        && (expr.a->text == "rising_edge" || expr.a->text == "falling_edge"
+            || expr.a->text == "is_x" || expr.a->text == "is_x01" || expr.a->text == "is_x01z"
+            || expr.a->text == "is_ux01")) {
         out = VType{};
         out.kind = VType::LOGIC;
         out.typeName = "boolean";
