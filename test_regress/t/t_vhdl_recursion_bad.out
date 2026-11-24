@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_recursion_bad.vhdl:25:12: Unsupported: VHDL recursive call of function 'count' that does not end on a static condition.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_recursive_bad.vhdl:20:12: Unsupported: VHDL recursive call of function 'f'.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

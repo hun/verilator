@@ -2028,7 +2028,11 @@ bool Lowering::bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env) {
         VType declType;
         const bool resolved = resolveType(decl.type, declType);
         AstNodeExpr* initp = nullptr;
-        if (decl.init) {
+        // A local whose range is null holds no elements, so its value needs no evaluating:
+        // `lower : v(mid - 1 downto 0) := v(mid - 1 downto 0)` with `mid = 0`
+        const bool nullRange
+            = resolved && decl.type.hasRange && declType.isVector() && declType.length() == 0;
+        if (decl.init && !nullRange) {
             initp = lowerExpr(*decl.init, resolved ? &declType : nullptr);
         } else if (resolved) {
             initp = makeVectorConst(decl.flp, declType, 0);
@@ -2166,11 +2170,17 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
     }
     // An actual may call this same subprogram again: nesting is not recursion, so the body
     // is marked only once its actuals are bound
-    if (!m_inlineBodies.insert(subp).second) {
+    // A recursive call is inlined again, so the recursion has to end at elaboration: on a
+    // condition that folds, such as a length. One that does not never reaches its end.
+    if (m_inlineFrames.empty()) m_recursiveCalls = 0;
+    int& depth = m_functionDepth[subp];
+    if (depth >= MAX_RECURSION_DEPTH || (depth > 0 && ++m_recursiveCalls > MAX_FOLD_ITERATIONS)) {
         deleteInlineEnv(env);
-        unsupportedError(call.flp, "recursive call of function '" + subp->spelling + "'");
+        unsupportedError(call.flp, "recursive call of function '" + subp->spelling
+                                       + "' that does not end on a static condition");
         return nullptr;
     }
+    ++depth;
     const ScopeSave outer = saveScope();
     InlineEnv* const savedInlinep = m_inlinep;
     m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
@@ -2186,7 +2196,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
         m_inlineFrames.pop_back();
         m_inlinep = savedInlinep;
         restoreScope(outer);
-        m_inlineBodies.erase(subp);
+        --m_functionDepth[subp];
         return nullp;
     };
 

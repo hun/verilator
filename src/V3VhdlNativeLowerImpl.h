@@ -39,6 +39,7 @@ namespace vhdlnative {
 
 //! Maximum iterations folded out of a static loop or generate
 static constexpr int64_t MAX_FOLD_ITERATIONS = 4096;
+static constexpr int MAX_RECURSION_DEPTH = 64;  // Nested inlinings of one function
 //! Maximum width of a vector expression folded by a conversion
 static constexpr int64_t MAX_FOLD_WIDTH = 4096;
 //! Maximum width of a constant folded into a memory image
@@ -215,7 +216,9 @@ class Lowering final {
     std::deque<InlineFrame> m_inlineFrames;  // Active inlinings, innermost last
     // Loops of the active static function inlinings, innermost last
     std::vector<FuncLoopTarget> m_funcLoopTargets;
-    std::set<const SubprogramDecl*> m_inlineBodies;  // Recursion guard
+    std::set<const SubprogramDecl*> m_inlineBodies;  // Recursion guard of procedures
+    std::map<const SubprogramDecl*, int> m_functionDepth;  // Active inlinings of a function
+    int m_recursiveCalls = 0;  // Recursive inlinings under the outermost call
     //! Cost of the element writes folded into one inlined body; each rebuilds the local value
     int64_t m_funcWriteCost = 0;
     std::map<std::string, std::vector<SubprogramRef>> m_subprograms;  // Visible, by name
