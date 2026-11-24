@@ -6,8 +6,9 @@
 VHDL supported subset and known divergences
 =============================================
 
-Verilator reads synthesizable VHDL-2008 directly and lowers it to the same
-internal representation as SystemVerilog. It is not a VHDL simulator: the
+Verilator reads VHDL-2008 directly and lowers it to the same internal
+representation as SystemVerilog. It accepts what that representation and the
+runtime already express, not only what a synthesis tool accepts. It is not a VHDL simulator: the
 runtime model is two-state, and constructs outside the supported subset are
 refused with a diagnostic rather than silently ignored. See
 :doc:`usage` for the command-line flow.

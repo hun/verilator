@@ -9,7 +9,7 @@ RFC: native VHDL frontend for Verilator
 
 Status: draft for maintainer discussion. This is a design proposal, not a
 pull request. Please decide the scope questions in section 11 before review
-effort is spent on the working branch of about 400 commits.
+effort is spent on the working branch of about 490 commits.
 
 AI assistance: nearly all of the frontend, its tests and its documentation
 were written with heavy assistance from an AI coding agent, under the
@@ -20,9 +20,9 @@ comparisons against GHDL described in section 7 are further checks, not a
 substitute for that review. The provenance of generated code is also a
 licensing question (see "Licensing of the corpus").
 
-In short: the frontend parses a synthesizable VHDL-2008 subset and lowers
-it straight into the existing pre-width V3 AST, adding no AST node, pass or
-runtime primitive. The core diff is about 180 added lines in nine files;
+In short: the frontend parses the VHDL-2008 that lowers to Verilator's
+existing two-state model and lowers it straight into the existing pre-width
+V3 AST, adding no AST node, pass or runtime primitive. The core diff is about 180 added lines in nine files;
 everything else is new files under ``src/V3Vhdl*`` plus tests and
 documentation. The decision most needed is section 5's: whether a committed
 pre-width AST is acceptable.
@@ -100,8 +100,8 @@ resolution functions, and access, protected and file types, whereas this
 frontend is a bounded two-state subset (sections 3, 4 and 8). A design
 outside the subset should keep using the Yosys path. The case for the
 native frontend is therefore diagnostics, structure, tooling integration
-and dependency reduction for the synthesizable subset, not wider language
-coverage.
+and dependency reduction for the VHDL that lowers to Verilator's model,
+not wider language coverage.
 
 History of this branch
 ----------------------
@@ -133,10 +133,18 @@ test oracle for the corpus trace comparisons in section 7.
 2. Proposal
 ===========
 
-Parse synthesizable VHDL-2008 directly, elaborate it, and lower it into the
-existing V3 AST. There is **no new V3 AST node, no new pipeline pass, and
+Parse VHDL-2008 directly, elaborate it, and lower it into the existing V3
+AST. There is **no new V3 AST node, no new pipeline pass, and
 no new runtime primitive** that exists only for VHDL. There is no external
-analyzer, no GHDL/nvc dependency, and no GPL-only component. Files ending
+analyzer, no GHDL/nvc dependency, and no GPL-only component.
+
+The scope rule follows from that: a construct is accepted when it lowers
+to what the V3 AST and the runtime already express and gives the result
+GHDL gives on the two-state subset. It is not limited to what a synthesis
+tool accepts: ``assert``/``report``, ``wait for`` and external names are in,
+because each lowers to an existing construct. A construct that needs a new
+node, pass or runtime primitive only for VHDL is refused, however common it
+is in VHDL. Files ending
 in ``.vhd`` or ``.vhdl`` select the VHDL frontend; ``--language vhdl``
 selects it for other extensions.
 
@@ -147,8 +155,10 @@ selects it for other extensions.
   ``std_logic`` strength tracking.
 - Access, protected, file and ``textio`` runtime types; user-defined
   resolution functions.
-- VHDL-2019 as a baseline, general ``wait``/delay timing, fixed- and
-  floating-point packages.
+- VHDL-2019 as a baseline, floating-point packages, and processes with
+  several ``wait`` statements.
+- Any construct that needs a new V3 AST node, pass or runtime primitive
+  that only VHDL would use.
 - VHDL-to-SystemVerilog binding inside one elaborated netlist beyond the
   boundary described in section 6.
 
@@ -265,17 +275,17 @@ entity's emitted tree.
 - Source layout: lexer, parser/AST, package elaboration, and seven lowering
   units (``types``, ``expr``, ``stmt``, ``subprog``, ``process``,
   ``package``, ``elab``) with two private headers. The largest unit is
-  ~3.7k lines; the ``Lowering`` class declaration is ~1.4k lines.
-- Frontend total is ~21.1k lines. Against base ``53a72711`` the branch is
-  about 405 commits, 1083 files, ~60k insertions (including tests).
+  ~4.2k lines; the ``Lowering`` class declaration is ~1.5k lines.
+- Frontend total is ~23.2k lines in 21 files. Against base ``53a72711`` the
+  branch is about 490 commits, 1332 files, ~71k insertions (including tests).
 
 7. Evidence
 ===========
 
-- 355 regression drivers, 98 diagnostic/tree goldens, 355 ``.vhdl``
-  fixtures, 228 value-checked C++ harnesses.
-- Full VHDL suite (``t_vhdl*``, ``--vlt``): 355 passed / 0 failed in ~15 s
-  on 16 cores locally. Both distribution tests (``t_dist_test_style``,
+- 414 regression drivers, 104 diagnostic/tree goldens, 414 ``.vhdl``
+  fixtures, 280 value-checked C++ harnesses.
+- Full VHDL suite (``t_vhdl*``, ``--vlt``): 414 passed / 0 failed in ~20 s
+  on 16 jobs locally. Both distribution tests (``t_dist_test_style``,
   ``t_dist_copyright``) pass. The suite needs only the built Verilator and
   a C++ compiler; no test invokes GHDL or nvc.
 

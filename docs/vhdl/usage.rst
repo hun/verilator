@@ -16,8 +16,8 @@ Verilator design like any other: the same command line, the same generated
 C++, the same runtime library, and the same C++ testbench idiom as
 :ref:`Example C++ Execution`.
 
-The frontend accepts the synthesizable subset of IEEE 1076-2008 plus a
-limited testbench idiom. What is inside that subset, and where the
+The frontend accepts the subset of IEEE 1076-2008 that lowers to Verilator's
+two-state model, including a limited testbench idiom. What is inside that subset, and where the
 two-state model diverges from VHDL, is documented in :doc:`limitations`; this
 guide shows the flow rather than the full matrix.
 
