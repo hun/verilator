@@ -780,6 +780,11 @@ bool Lowering::actualTypeIndex(const Expr& expr, VType& out) const {
         out = intType(expr.flp);
         return true;
     }
+    // A conversion to a predefined scalar such as boolean has that type, not the operand's
+    TypeSpec scalarMark;
+    scalarMark.flp = expr.flp;
+    scalarMark.mark = expr.a->text;
+    if (formalType(scalarMark, out) && !out.isVector()) return true;
     if (!isConversion(expr.a->text) || !operandType.isVector()) return false;
     out = literalVectorType(expr.flp, expr.a->text, operandType.width);
     out.left = operandType.left;
