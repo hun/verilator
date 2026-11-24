@@ -1509,6 +1509,7 @@ class Lowering final {
     AstNodeExpr* evalFuncCase(const Stmt& stmt, const InlineCont& cont,
                               const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth);
+    bool conjunctFolds(const Expr& cond, bool value);
     AstNodeExpr* evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth);
     AstNodeExpr* updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
                                     AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width);

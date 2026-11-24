@@ -2406,6 +2406,16 @@ AstNodeExpr* Lowering::evalFuncExitNext(const std::vector<StmtP>& stmts, std::si
         targetp = cont(activeEnv());
     }
     if (!condExprp) return targetp;
+    // A condition that folds takes one path only, so a loop ending on a static exit
+    // condition ends where it unrolls
+    if (AstConst* const foldedp = foldStatic(condExprp)) {
+        const bool taken = foldedp->num().isTrue();
+        foldedp->deleteTree();
+        condExprp->deleteTree();
+        if (taken) return targetp;
+        if (targetp) targetp->deleteTree();
+        return evalFuncBlockBody(stmts, i + 1, cont, exitContp, depth);
+    }
     // The statements after a conditional exit/next only run when it is not taken
     AstNodeExpr* restp = evalFuncBlockBody(stmts, i + 1, cont, exitContp, depth);
     if (!targetp || !restp) {
@@ -2460,7 +2470,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             return valuep;
         }
         if (stmt.kind == Stmt::IF || stmt.kind == Stmt::CASE || stmt.kind == Stmt::FOR
-            || stmt.kind == Stmt::WHILE) {
+            || stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) {
             // Control statements continue with the rest of this statement list
             const InlineCont restCont = [&](InlineEnv& restEnv) -> AstNodeExpr* {
                 return evalFuncBlock(stmts, i + 1, restEnv, cont, exitContp, depth);
@@ -2469,7 +2479,9 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
                 return evalFuncBranches(stmt, 0, restCont, exitContp, depth + 1);
             }
             if (stmt.kind == Stmt::CASE) return evalFuncCase(stmt, restCont, exitContp, depth + 1);
-            if (stmt.kind == Stmt::WHILE) return evalFuncWhile(stmt, restCont, depth + 1);
+            if (stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) {
+                return evalFuncWhile(stmt, restCont, depth + 1);
+            }
             return evalFuncFor(stmt, restCont, depth + 1);
         }
         if (stmt.kind == Stmt::EXIT || stmt.kind == Stmt::NEXT) {
@@ -2756,29 +2768,60 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
     return evalIteration(left, activeEnv());
 }
 
+//! Whether a conjunct of a condition folds to `value`. `and` on Booleans evaluates its left
+//! operand first and the right one only when that is true (IEEE 1076-2008 9.2.2), so
+//! `idx < 4 and x(idx) = '0'` is false at idx = 4 without reading x(4).
+bool Lowering::conjunctFolds(const Expr& cond, bool value) {
+    if (cond.kind == Expr::PAREN && cond.a) return conjunctFolds(*cond.a, value);
+    if (cond.kind == Expr::BINARY && cond.text == "and" && cond.a && cond.b) {
+        return conjunctFolds(*cond.a, value) || conjunctFolds(*cond.b, value);
+    }
+    AstNodeExpr* const condp = lowerCond(cond);
+    if (!condp) return false;
+    AstConst* const foldedp = foldStatic(condp);
+    const bool matches = foldedp && foldedp->num().isTrue() == value;
+    if (foldedp) foldedp->deleteTree();
+    condp->deleteTree();
+    return matches;
+}
+
 AstNodeExpr* Lowering::evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth) {
     FileLine* const flp = stmt.flp;
     // One frame per iteration, like a for loop; the difference is that the trip count comes
-    // from repeatedly evaluating the condition
+    // from repeatedly evaluating the condition. A bare `loop` has none: only an exit ends it.
     std::function<AstNodeExpr*(int, InlineEnv&)> evalIteration;
     evalIteration = [&](int iteration, InlineEnv& inEnv) -> AstNodeExpr* {
-        AstNodeExpr* const condp = lowerCond(*stmt.value);
-        if (!condp) return nullptr;
-        // The condition has to say whether the loop runs at all, or the fold cannot know
-        // how many times the body is applied
-        AstConst* const foldedp = foldStatic(condp);
-        if (!foldedp) {
-            condp->deleteTree();
-            unsupportedError(flp, "function while loop whose condition is not static");
-            return nullptr;
+        AstNodeExpr* condp = nullptr;
+        bool taken = true;
+        if (stmt.value && conjunctFolds(*stmt.value, false)) {
+            taken = false;
+        } else if (stmt.value) {
+            condp = lowerCond(*stmt.value);
+            if (!condp) return nullptr;
+            // A condition that folds says whether the loop runs; one that does not splits
+            // the paths, and a later iteration has to fold for the unrolling to end
+            if (AstConst* const foldedp = foldStatic(condp)) {
+                taken = foldedp->num().isTrue();
+                foldedp->deleteTree();
+                condp->deleteTree();
+                condp = nullptr;
+            } else if (!conjunctFolds(*stmt.value, true)) {
+                // Nothing in it folds, so nothing bounds the unrolling
+                condp->deleteTree();
+                unsupportedError(flp, "function while loop whose condition is not static");
+                return nullptr;
+            }
         }
-        const bool taken = foldedp->num().isTrue();
-        foldedp->deleteTree();
-        condp->deleteTree();
         if (!taken) return postCont(inEnv);
-        if (iteration >= MAX_FOLD_ITERATIONS) {
-            unsupportedError(flp, "function while loop with more than "
-                                      + std::to_string(MAX_FOLD_ITERATIONS) + " iterations");
+        const bool dynamic = condp != nullptr;
+        const int64_t limit
+            = dynamic || !stmt.value ? MAX_FOLD_ITERATIONS / 4 : MAX_FOLD_ITERATIONS;
+        if (iteration >= limit) {
+            if (condp) condp->deleteTree();
+            unsupportedError(flp, std::string{"function "} + (stmt.value ? "while loop" : "loop")
+                                      + " with more than " + std::to_string(limit)
+                                      + (dynamic || !stmt.value ? " iterations before a static end"
+                                                                : " iterations"));
             return nullptr;
         }
         InlineEnv bodyEnv = cloneInlineEnv(inEnv);
@@ -2790,10 +2833,32 @@ AstNodeExpr* Lowering::evalFuncWhile(const Stmt& stmt, const InlineCont& postCon
             = [&](InlineEnv& exitEnv) -> AstNodeExpr* { return postCont(exitEnv); };
         // The continuations live in this iteration's frame, as for a for loop
         m_funcLoopTargets.push_back(FuncLoopTarget{stmt.loopLabel, &bodyCont, &exitCont});
-        AstNodeExpr* const resultp
-            = evalFuncBlock(stmt.body, 0, bodyEnv, bodyCont, &exitCont, depth);
+        AstNodeExpr* bodyp = nullptr;
+        AstNodeExpr* afterp = nullptr;
+        {
+            // With a condition that does not fold, both paths are lowered
+            const RuntimeBranchScope scope{dynamic ? m_runtimeBranchDepth : m_unusedDepth};
+            bodyp = evalFuncBlock(stmt.body, 0, bodyEnv, bodyCont, &exitCont, depth);
+            if (dynamic && bodyp) afterp = postCont(inEnv);
+        }
         m_funcLoopTargets.pop_back();
         deleteInlineEnv(bodyEnv);
+        if (!dynamic) return bodyp;
+        if (!bodyp || !afterp) {
+            condp->deleteTree();
+            if (bodyp) bodyp->deleteTree();
+            if (afterp) afterp->deleteTree();
+            return nullptr;
+        }
+        if (bodyp->width() != afterp->width()) {
+            if (bodyp->width() > afterp->width()) {
+                afterp = resizeExpr(afterp, typeOfDType(bodyp->dtypep()), flp);
+            } else {
+                bodyp = resizeExpr(bodyp, typeOfDType(afterp->dtypep()), flp);
+            }
+        }
+        AstCond* const resultp = new AstCond{flp, condp, bodyp, afterp};
+        resultp->dtypep(bodyp->dtypep());
         return resultp;
     };
     return evalIteration(0, activeEnv());
