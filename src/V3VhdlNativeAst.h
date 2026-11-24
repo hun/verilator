@@ -265,6 +265,8 @@ struct TypeSpec final {
         bool ascending = false;  // "to", else "downto"
         ExprP lo, hi;  // Bounds in written order, e.g. 3 downto 0 -> lo=3, hi=0
         ExprP range;  // A range attribute instead: rec_t(x(sig'range)), IEEE 1076-2008 6.3
+        // Constraints of the member's elements, outermost first: rec_t(x(0 to 3)(y(7 downto 0)))
+        std::vector<TypeSpec> elementConstraints;
     };
     // Per-member discrete ranges of a record subtype constraint
     std::vector<MemberConstraint> memberConstraints;

@@ -478,6 +478,8 @@ class Parser final {
     void parseTypeSpec(TypeSpec& type);
     //! The `name(range)` list of a record constraint
     bool parseMemberConstraints(TypeSpec& type);
+    void parseChainedConstraints(TypeSpec& type);
+    void parseMemberElementConstraints(const TypeSpec& type, TypeSpec::MemberConstraint& member);
     void parsePortClause(std::vector<PortDecl>& ports);
     void parseEntity(FileLine* flp);
     void parseNameList(std::vector<std::pair<std::string, std::string>>& names);
@@ -1039,6 +1041,15 @@ bool Parser::parseRange(TypeSpec& type) {
     return true;
 }
 
+//! The groups after a member's range, `x(0 to 3)(y(7 downto 0))`, constrain its elements
+void Parser::parseMemberElementConstraints(const TypeSpec& type,
+                                           TypeSpec::MemberConstraint& member) {
+    TypeSpec chain;
+    chain.mark = type.mark;  // For the message if a name is wrong
+    parseChainedConstraints(chain);
+    member.elementConstraints = std::move(chain.indexConstraints);
+}
+
 //! The `name(range)` list of a record constraint, e.g. `rec_t(f(3 downto 0), g(x'range))`.
 //! A member's range is either written out or named by a range attribute.
 bool Parser::parseMemberConstraints(TypeSpec& type) {
@@ -1063,6 +1074,7 @@ bool Parser::parseMemberConstraints(TypeSpec& type) {
             member.range = std::move(member.lo);
             member.lo = nullptr;
             expectSym(")");
+            parseMemberElementConstraints(type, member);
             type.memberConstraints.push_back(std::move(member));
             if (acceptSym(",")) continue;
             return true;
@@ -1073,6 +1085,7 @@ bool Parser::parseMemberConstraints(TypeSpec& type) {
         member.hi = parseExpr();
         if (!member.hi) return false;
         expectSym(")");
+        parseMemberElementConstraints(type, member);
         type.memberConstraints.push_back(std::move(member));
         if (acceptSym(",")) continue;
         return true;
@@ -1163,6 +1176,12 @@ void Parser::parseTypeSpec(TypeSpec& type) {
             expectSym(")");
         }
     }
+    parseChainedConstraints(type);
+}
+
+//! The `(r2)(r3)` groups after a subtype's first constraint: each is an index range or a
+//! record constraint on the element the previous groups lead to, kept in `indexConstraints`
+void Parser::parseChainedConstraints(TypeSpec& type) {
     while (isSym("(")) {  // A further index range of a nested `t(r1)(r2)` subtype
         // A `name(range)` list is a record constraint on this level, not an index range, and
         // it may hold a single member: `t(open)(f(r))`. An attribute at this level, as in

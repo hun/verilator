@@ -1443,6 +1443,9 @@ TypeSpec Lowering::copySpec(const TypeSpec& spec) {
         if (member.lo) copy.lo = cloneExpr(*member.lo);
         if (member.hi) copy.hi = cloneExpr(*member.hi);
         if (member.range) copy.range = cloneExpr(*member.range);
+        for (const TypeSpec& element : member.elementConstraints) {
+            copy.elementConstraints.push_back(copySpec(element));
+        }
         out.memberConstraints.push_back(std::move(copy));
     }
     for (const TypeSpec& nested : spec.indexConstraints) {
@@ -1543,6 +1546,17 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
         } else if (!staticIntFold(member.lo, lo) || !staticIntFold(member.hi, hi)) {
             unsupportedError(flp, "non-static record element constraint");
             return false;
+        }
+        if (!member.elementConstraints.empty()) {
+            // The elements are constrained first, so the member's width counts them
+            TypeSpec chain;
+            chain.flp = flp;
+            for (const TypeSpec& element : member.elementConstraints) {
+                chain.indexConstraints.push_back(copySpec(element));
+            }
+            VType memberType = *fieldp->type;
+            if (!applyIndexConstraints(chain, memberType)) return false;
+            fieldp->type = std::make_shared<VType>(memberType);
         }
         setRecordField(flp, *fieldp, static_cast<int>(lo), static_cast<int>(hi), ascending);
     }
