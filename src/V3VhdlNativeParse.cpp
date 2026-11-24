@@ -2140,6 +2140,19 @@ void Parser::parseAssocList(std::vector<PortAssoc>& out, const char* what) {
                 }
                 expectSym(")");
                 assoc.hasFormalRange = true;
+                // `signed(port) => actual` converts the port between array types of one
+                // element type, which keeps its bits, so it associates the port itself
+                const std::string& mark = assoc.formal;
+                const bool vectorMark = mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                                        || mark == "bit_vector" || mark == "unsigned"
+                                        || mark == "signed" || mark == "u_unsigned"
+                                        || mark == "u_signed";
+                if (vectorMark && !assoc.formalRight && assoc.formalLeft->kind == Expr::NAME) {
+                    assoc.formal = assoc.formalLeft->text;
+                    assoc.formalSpelling = assoc.formalLeft->spelling;
+                    assoc.formalLeft.reset();
+                    assoc.hasFormalRange = false;
+                }
             }
             if (!acceptSym("=>")) {
                 error(std::string{"expected '=>' in a "} + what + " association");
