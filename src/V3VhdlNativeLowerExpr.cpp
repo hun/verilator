@@ -1539,6 +1539,27 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
             rt = lt;
         }
     }
+    // An unsigned or signed vector plus or minus a single std_logic: the bit is the number
+    // 0 or 1, as wide as the vector, and the result keeps the vector's type
+    if (op == "+" || op == "-") {
+        const auto isBit = [](const VType& type) {
+            return type.kind == VType::LOGIC && type.typeName != "boolean";
+        };
+        const auto isNumericVector = [](const VType& type) {
+            return type.isVector() && type.kwd == VBasicDTypeKwd::LOGIC
+                   && type.signing != VSigning::NOSIGN;
+        };
+        const bool leftBit = isBit(lt) && isNumericVector(rt);
+        if (leftBit || (isBit(rt) && isNumericVector(lt))) {
+            VType& bitType = leftBit ? lt : rt;
+            AstNodeExpr*& bitp = leftBit ? lp : rp;
+            const VType& vectorT = leftBit ? rt : lt;
+            const VType wide = vectorType(flp, vectorT.kwd, VSigning::UNSIGNED, vectorT.width);
+            bitp = resizeExpr(bitp, wide, flp);
+            bitp->dtypep(vectorT.dtp);
+            bitType = vectorT;
+        }
+    }
     if (!lt.isVector() || !rt.isVector() || lt.kwd != rt.kwd) {
         unsupportedError(flp, "arithmetic on non-numeric operands");
         lp->deleteTree();
