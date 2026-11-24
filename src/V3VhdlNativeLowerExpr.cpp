@@ -1808,12 +1808,14 @@ AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
         flp->v3error("VHDL: unknown signal '" + expr.args[0]->spelling + "' in an edge function.");
         return nullptr;
     }
-    // The std_logic_1164 edge functions take a scalar std_ulogic (IEEE 1164 3.2.6);
-    // a vector, an integer, a boolean or a bit has no such overload
+    // std_logic_1164 defines the edge functions for a scalar std_ulogic and STANDARD
+    // for a bit or a boolean (IEEE 1076-2008 16.3); a vector or an integer has no overload
     VType argType;
     if (actualType(*expr.args[0], argType)
-        && (argType.kind != VType::LOGIC || argType.isVector() || argType.typeName == "boolean")) {
-        flp->v3error("VHDL: " + expr.a->text + " operand is not std_ulogic.");
+        && ((argType.kind != VType::LOGIC && argType.kind != VType::BIT
+             && argType.typeName != "boolean")
+            || argType.isVector())) {
+        flp->v3error("VHDL: " + expr.a->text + " operand is not a scalar std_ulogic, bit or boolean.");
         return nullptr;
     }
     const bool rising = expr.a->text == "rising_edge";
