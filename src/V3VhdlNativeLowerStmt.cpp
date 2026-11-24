@@ -941,10 +941,13 @@ AstNodeStmt* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::REPORT) return lowerReport(stmt);
     if (stmt.kind == Stmt::ASSERT) return lowerAssert(stmt);
     if (stmt.kind == Stmt::CALL) {
-        // `std.env.finish` ends the simulation
-        if (stmt.value && stmt.value->kind == Expr::SELECTED && stmt.value->text == "finish"
-            && !m_subprograms.count("finish")) {
-            return new AstFinish{stmt.flp};
+        // `finish` and `stop` of std.env end the simulation, with or without a status
+        const Expr& callee = stmt.value->kind == Expr::INDEX && stmt.value->a ? *stmt.value->a
+                                                                              : *stmt.value;
+        if ((callee.text == "finish" || callee.text == "stop")
+            && !m_subprograms.count(callee.text)) {
+            if (callee.text == "finish") return new AstFinish{stmt.flp};
+            return new AstStop{stmt.flp, false};
         }
         return lowerProcedureCall(*stmt.value, m_concurrentProc > 0);
     }

@@ -219,7 +219,8 @@ while a dynamic one conservatively covers the whole signal. `std_logic` and the
 arrays built from it are resolved and exempt.
 
 **Reports and termination.** ``report`` and ``assert`` lower to a display;
-``std.env.finish`` lowers to ``$finish``. A literal message is kept whole as a
+``std.env.finish`` lowers to ``$finish`` and ``std.env.stop`` to ``$stop``, by either
+the full or the bare name, and a status argument is ignored. A literal message is kept whole as a
 string, whatever its characters are -- the parser does not retype it as a bit
 string. A non-literal message is not modelled, but the statement still runs: its
 text falls back to ``report`` (or to ``Assertion failed`` for an assertion). A
