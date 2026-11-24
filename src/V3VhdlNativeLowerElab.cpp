@@ -2196,9 +2196,9 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
         const ScopeSave saved = saveScope();
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
+        registerSubprograms(takenp->subprograms, -1, true);
         emitLocalDecls(takenp->decls, takenp->types, "__Vgen_");
         registerComponents(takenp->components);
-        registerSubprograms(takenp->subprograms, -1);
         for (const auto& bodyConcp : takenp->stmts) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
@@ -2209,9 +2209,9 @@ void Lowering::emitConcurrent(const Concurrent& conc) {
     if (stmt.kind == Concurrent::BLOCK) {
         // A block's declarative items are visible to its statements only
         const ScopeSave saved = saveScope();
+        registerSubprograms(stmt.subprograms, -1, true);
         emitLocalDecls(stmt.decls, stmt.types, "__Vblk_");
         registerComponents(stmt.components);
-        registerSubprograms(stmt.subprograms, -1);
         for (const auto& bodyConcp : stmt.body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }
@@ -2284,9 +2284,9 @@ void Lowering::emitGenerateFor(const Concurrent& stmt) {
         const std::string savedSuffix = m_genSuffix;
         m_genSuffix = savedSuffix + "__gen" + std::to_string(++m_genSeq);
         m_consts[stmt.loopVar] = value;
+        registerSubprograms(stmt.subprograms, -1, true);
         emitLocalDecls(stmt.decls, stmt.types, "__Vgen_");
         registerComponents(stmt.components);
-        registerSubprograms(stmt.subprograms, -1);
         for (const auto& bodyConcp : stmt.body) {
             if (bodyConcp) emitConcurrent(*bodyConcp);
         }

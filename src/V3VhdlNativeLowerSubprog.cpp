@@ -93,9 +93,11 @@ void Lowering::registerSubprograms(const std::vector<SubprogramDecl>& decls, int
     for (const SubprogramDecl& decl : decls) {
         m_imported.erase(decl.name);  // The local declaration shadows the package member
         std::vector<SubprogramRef>& refs = m_subprograms[decl.name];
-        // A specification and its completing body are one subprogram; two bodies are not
+        // A specification and its completing body are one subprogram; two bodies of one
+        // declarative region are not, while an inner region hides the outer one
         if (decl.hasBody && std::any_of(refs.begin(), refs.end(), [&](const SubprogramRef& ref) {
-                return !ref.imported && ref.declp->hasBody && homograph(*ref.declp, decl);
+                return !ref.imported && ref.declp->hasBody && ref.processLocal == processLocal
+                       && ref.frame == frame && homograph(*ref.declp, decl);
             })) {
             decl.flp->v3error("VHDL: duplicate subprogram body for '" + decl.spelling + "'.");
             continue;
