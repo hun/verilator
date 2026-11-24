@@ -90,7 +90,9 @@ assignment; variable assignment is immediate. Verilator's settle scheduling
 approximates VHDL delta cycles, but ordering between independent processes is
 not guaranteed to match a simulator cycle for cycle. ``process(all)`` infers
 sensitivity from the signals read by the lowered body; explicit sensitivity
-lists are honored as written.
+lists are honored as written. ``postponed`` on a process or an assertion is
+accepted and ignored: the statement runs with the others, not at the end of the
+time step.
 
 Integers, ranges and packing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

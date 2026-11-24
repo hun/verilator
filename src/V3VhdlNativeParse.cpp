@@ -2411,6 +2411,7 @@ bool Parser::parseConcurrentPreamble(Architecture& arch, FileLine* flp) {
         }
     }
     if (!addLabel(label, flp)) return true;
+    (void)acceptId("postponed");  // Only moves the statement to the end of its time step
     if (isId("cover") || isId("restrict") || isId("assume") || isId("fair") || isId("fairness")
         || isId("property") || isId("sequence")) {  // A PSL directive or declaration (IEEE 1850)
         const auto pslSaved = m_lexer.state();
@@ -2931,6 +2932,7 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
     }
     if (m_failed) return;
     if (!expectId("end")) return;
+    (void)acceptId("postponed");
     (void)acceptId("process");
     if (m_cur.kind == Token::ID) advance();  // Optional end label
     if (!acceptSym(";")) {
