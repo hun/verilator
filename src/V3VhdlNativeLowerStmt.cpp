@@ -411,12 +411,17 @@ bool Lowering::choicesComplete(AstNodeDType* selDtp, const VType& selType,
     }
     return false;
 }
-void Lowering::addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message) {
+AstNodeStmt* Lowering::makeRuntimeErrorStmt(FileLine* flp, AstNodeExpr* condp,
+                                            const std::string& message) {
     AstNodeStmt* bodyp
         = new AstDisplay{flp, VDisplayType::DT_ERROR, message, nullptr, nullptr, 'd'};
     bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstFinish{flp});
+    return new AstIf{flp, condp, bodyp, nullptr};
+}
+
+void Lowering::addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message) {
     m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ALWAYS_COMB, nullptr,
-                                    new AstIf{flp, condp, bodyp, nullptr}});
+                                    makeRuntimeErrorStmt(flp, condp, message)});
 }
 
 void Lowering::checkDrivers() {

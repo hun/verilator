@@ -1390,6 +1390,9 @@ class Lowering final {
     //! Report every unresolved signal that more than one emitted assignment drives
     void checkDrivers();
     //! Emit `if (cond) $error(message); $finish;` as a module-level run-time check
+    //! The statement that reports a run-time error and ends the run when `condp` holds
+    AstNodeStmt* makeRuntimeErrorStmt(FileLine* flp, AstNodeExpr* condp,
+                                      const std::string& message);
     void addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::string& message);
     bool aggregateBounds(const Expr& agg, int64_t& low, int64_t& high) const;
     //! Bounds an unconstrained array target takes from an aggregate's own choices

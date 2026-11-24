@@ -1434,6 +1434,7 @@ AstNodeExpr* Lowering::lowerIntArithmetic(FileLine* flp, const Expr& expr, const
     VType& lt = ops.lt;
     const VType& rt = ops.rt;
     // IEEE 1076-2008 9.1: dividing by zero is an error
+    AstNodeExpr* zeroTestp = nullptr;  // True when the divisor is zero
     if (op == "/" || op == "mod" || op == "rem") {
         int64_t divisor = 0;
         if (evalInt(*expr.b, divisor) && divisor == 0) {
@@ -1442,15 +1443,28 @@ AstNodeExpr* Lowering::lowerIntArithmetic(FileLine* flp, const Expr& expr, const
             rp->deleteTree();
             return nullptr;
         }
-        if (m_modp) {
+        // A divisor that folds to a nonzero value needs no check, and a check would keep
+        // the division from folding
+        bool knownNonzero = false;
+        {
+            AstNodeExpr* const probep = rp->cloneTree(false);
+            AstConst* const foldedp = foldStatic(probep);
+            if (foldedp) {
+                knownNonzero = !foldedp->num().isEqZero();
+                if (foldedp != probep) probep->deleteTree();
+                foldedp->deleteTree();
+            } else {
+                probep->deleteTree();
+            }
+        }
+        if (m_modp && !knownNonzero) {
             // A dynamic divisor can reach zero at run time, where the standard
             // requires an error rather than a silent zero. Test the whole value with a
             // reduction so the operand's width and signedness need no constant.
             AstRedOr* const anyBitp = new AstRedOr{flp, rp->cloneTree(false)};
             anyBitp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-            AstNodeExpr* const zeroTestp = new AstNot{flp, anyBitp};
+            zeroTestp = new AstNot{flp, anyBitp};
             zeroTestp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-            addRuntimeError(flp, zeroTestp, "VHDL: division by zero");
         }
     }
     AstNodeExpr* resultp = nullptr;
@@ -1495,9 +1509,13 @@ AstNodeExpr* Lowering::lowerIntArithmetic(FileLine* flp, const Expr& expr, const
     if ((op == "/" || op == "mod" || op == "rem") && std::max(lt.width, rt.width) > lt.width) {
         AstNodeExpr* const narrowp = new AstSel{flp, resultp, 0, lt.width};
         narrowp->dtypep(lt.dtp);
-        return narrowp;
+        resultp = narrowp;
     }
-    return resultp;
+    if (!zeroTestp) return resultp;
+    // The check is part of the value, so it only runs where the division does: not on the
+    // branch of an `if b /= 0` that keeps it away from a zero divisor
+    return new AstExprStmt{flp, makeRuntimeErrorStmt(flp, zeroTestp, "VHDL: division by zero"),
+                           resultp};
 }
 
 AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
@@ -1813,13 +1831,35 @@ AstNodeExpr* Lowering::makeRem(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, 
     return remp;
 }
 
-//! VHDL mod takes the divisor's sign, so it is ((a % b) + b) % b
+//! VHDL mod takes the divisor's sign: the remainder, plus the divisor when that remainder is
+//! not zero and its sign differs from the divisor's. The sum of two numbers of opposite signs
+//! fits the operand width, which `((a % b) + b) % b` would overflow.
 AstNodeExpr* Lowering::makeMod(FileLine* flp, AstNodeExpr* lp, AstNodeExpr* rp, AstNodeDType* dtp,
                                bool sign) {
     AstNodeExpr* const remp = makeRem(flp, lp, rp->cloneTree(false), dtp, sign);
-    AstNodeExpr* const plusp = new AstAdd{flp, remp, rp};
+    if (!sign) {
+        rp->deleteTree();
+        return remp;
+    }
+    AstNodeDType* const bitp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+    const int msb = dtp->width() - 1;
+    AstNodeExpr* const zerop = new AstConst{flp, V3Number{flp, dtp->width(), 0u}};
+    zerop->dtypep(dtp);
+    AstNodeExpr* const nonzerop = new AstNeq{flp, remp->cloneTree(false), zerop};
+    nonzerop->dtypep(bitp);
+    AstNodeExpr* const remSignp = new AstSel{flp, remp->cloneTree(false), msb, 1};
+    remSignp->dtypep(bitp);
+    AstNodeExpr* const divSignp = new AstSel{flp, rp->cloneTree(false), msb, 1};
+    divSignp->dtypep(bitp);
+    AstNodeExpr* const differp = new AstXor{flp, remSignp, divSignp};
+    differp->dtypep(bitp);
+    AstNodeExpr* const adjustp = new AstAnd{flp, nonzerop, differp};
+    adjustp->dtypep(bitp);
+    AstNodeExpr* const plusp = new AstAdd{flp, remp->cloneTree(false), rp};
     plusp->dtypep(dtp);
-    return makeRem(flp, plusp, rp->cloneTree(false), dtp, sign);
+    AstCond* const resultp = new AstCond{flp, adjustp, plusp, remp};
+    resultp->dtypep(dtp);
+    return resultp;
 }
 
 //! One rotation of a vector: the low `count mod width` bits move to the other end
