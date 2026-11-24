@@ -15,7 +15,10 @@ entity t is
         b : in std_logic_vector(2 downto 0);
         sum : out std_logic_vector(3 downto 0);
         prod : out std_logic_vector(6 downto 0);
-        mixed : out std_logic_vector(6 downto 0));
+        mixed : out std_logic_vector(6 downto 0);
+        plus : out std_logic_vector(3 downto 0);
+        neg : out std_logic_vector(3 downto 0);
+        magnitude : out std_logic_vector(3 downto 0));
 end entity t;
 
 architecture rtl of t is
@@ -26,4 +29,8 @@ begin
   prod <= unsigned(a) * unsigned(b);
   -- Unsigned times signed is signed, as wide as both operands together
   mixed <= unsigned(a) * signed(b);
+  -- The unary operators have both results as well
+  plus <= +unsigned(a);
+  neg <= -signed(a);
+  magnitude <= abs signed(a);
 end architecture rtl;

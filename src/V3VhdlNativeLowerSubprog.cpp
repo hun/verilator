@@ -1021,10 +1021,14 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
             double integral = 0.0;
             if (integralRealLiteral(value, integral)) return true;
         }
-        // std_logic_arith declares each arithmetic operator on unsigned and signed operands
-        // with a std_logic_vector result as well, which the target then selects
-        if (m_stdLogicArith && resultp->kind == Expr::BINARY
-            && (resultp->text == "+" || resultp->text == "-" || resultp->text == "*")
+        // std_logic_arith declares each arithmetic operator on unsigned and signed operands,
+        // unary ones too, with a std_logic_vector result as well, which the target then selects
+        const bool arithmetic
+            = (resultp->kind == Expr::BINARY
+               && (resultp->text == "+" || resultp->text == "-" || resultp->text == "*"))
+              || (resultp->kind == Expr::UNARY
+                  && (resultp->text == "+" || resultp->text == "-" || resultp->text == "abs"));
+        if (m_stdLogicArith && arithmetic
             && (source.typeName == "unsigned" || source.typeName == "signed")
             && target.isPredefinedVector() && target.signing == VSigning::NOSIGN
             && target.kwd == VBasicDTypeKwd::LOGIC) {

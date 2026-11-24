@@ -31,7 +31,11 @@ int main(int argc, char** argv) {
         const unsigned sum = (c.a + c.b) & 0xF;
         const unsigned prod = (c.a * c.b) & 0x7F;
         const unsigned mixed = static_cast<unsigned>(static_cast<int>(c.a) * bs) & 0x7F;
-        if (topp->sum != sum || topp->prod != prod || topp->mixed != mixed) {
+        const int as = (c.a & 8) ? static_cast<int>(c.a) - 16 : static_cast<int>(c.a);
+        const unsigned neg = static_cast<unsigned>(-as) & 0xF;
+        const unsigned magnitude = static_cast<unsigned>(as < 0 ? -as : as) & 0xF;
+        if (topp->sum != sum || topp->prod != prod || topp->mixed != mixed || topp->plus != c.a
+            || topp->neg != neg || topp->magnitude != magnitude) {
             std::printf("%%Error: a=%u b=%u sum=%x prod=%x mixed=%x exp %x %x %x\n", c.a, c.b,
                         static_cast<unsigned>(topp->sum), static_cast<unsigned>(topp->prod),
                         static_cast<unsigned>(topp->mixed), sum, prod, mixed);
