@@ -1545,6 +1545,21 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
         rp->deleteTree();
         return nullptr;
     }
+    // std_logic_arith adds and subtracts an unsigned and a signed operand as signed, the
+    // unsigned one widened by a zero bit so it keeps its value
+    if (m_stdLogicArith && (op == "+" || op == "-") && lt.kwd == VBasicDTypeKwd::LOGIC
+        && ((lt.signing == VSigning::UNSIGNED && rt.signing == VSigning::SIGNED)
+            || (lt.signing == VSigning::SIGNED && rt.signing == VSigning::UNSIGNED))) {
+        const bool leftUnsigned = lt.signing == VSigning::UNSIGNED;
+        VType& unsignedType = leftUnsigned ? lt : rt;
+        AstNodeExpr*& unsignedp = leftUnsigned ? lp : rp;
+        const VType widened
+            = vectorType(flp, unsignedType.kwd, VSigning::UNSIGNED, unsignedType.width + 1);
+        unsignedp = resizeExpr(unsignedp, widened, flp);
+        unsignedType = vectorType(flp, unsignedType.kwd, VSigning::SIGNED, widened.width);
+        unsignedp->dtypep(unsignedType.dtp);
+        unsignedType.typeName = "signed";
+    }
     // Two vector operands must have one base type; a numeric_std unsigned and a
     // std_logic_vector do not mix (IEEE 1076-2008 9.2.5)
     if (!lt.typeName.empty() && !rt.typeName.empty()
