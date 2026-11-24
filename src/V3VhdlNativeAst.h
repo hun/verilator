@@ -494,6 +494,9 @@ struct Concurrent final {
     std::string architectureName;
     // True for a direct `entity work.X`; false when the instantiation names a component
     bool entityInstantiation = false;
+    // True for `label : configuration work.X`: instanceName holds X until the configuration
+    // names the entity and its architecture
+    bool configurationInstantiation = false;
     // ASSIGN/COND_ASSIGN: `after <delay>`
     ExprP delay;
     // ASSIGN: further waveform elements of a list, each with its own `after` delay

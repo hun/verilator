@@ -523,7 +523,8 @@ class Parser final {
     void parseConcurrentAssignOrCall(FileLine* flp, Architecture& arch);
     ExprP parseChoice();
     bool parseChoices(std::vector<ExprP>& choices);
-    void parseInstance(Architecture& arch, FileLine* flp, const std::string& label, bool direct);
+    void parseInstance(Architecture& arch, FileLine* flp, const std::string& label, bool direct,
+                       bool configuration = false);
     void parseGenericClauseInto(std::vector<GenericDecl>& generics);
     void parsePackageInstanceTail(FileLine* flp, const std::string& name,
                                   const std::string& spelling);
@@ -1929,7 +1930,7 @@ void Parser::parseComponentDecl(std::vector<ComponentDecl>& components) {
 
 //! `[entity] name [generic map (...)] [port map (...)];`
 void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string& label,
-                           bool direct) {
+                           bool direct, bool configuration) {
     auto inst = std::make_unique<Concurrent>(Concurrent::INSTANCE);
     inst->flp = flp;
     inst->instanceLabel = label.empty() ? "inst" : label;
@@ -1954,6 +1955,7 @@ void Parser::parseInstance(Architecture& arch, FileLine* flp, const std::string&
         expectSym(")");
     }
     inst->entityInstantiation = direct;
+    inst->configurationInstantiation = configuration;
     while (true) {
         if (isId("generic")) {
             advance();
@@ -2425,6 +2427,12 @@ bool Parser::parseConcurrentPreamble(Architecture& arch, FileLine* flp) {
             skipToStatementEnd();  // The property through its terminating ';'
             return true;
         }
+    }
+    if (isId("configuration") && !label.empty()) {
+        // `label : configuration work.X`: X names the entity and its architecture
+        advance();
+        parseInstance(arch, flp, label, true, true);
+        return true;
     }
     if (isId("entity") || isId("component")) {
         // `entity NAME` and the `component NAME` spelling of an instantiation both name the

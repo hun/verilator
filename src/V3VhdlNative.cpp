@@ -300,6 +300,29 @@ ArchByEntity resolveArchitectures(vhdlnative::DesignLibrary& library) {
     for (const vhdlnative::Architecture& arch : library.archs) {
         archByEntity[arch.entityName] = &arch;
     }
+    // `label : configuration work.X` instantiates the entity of X with the architecture X
+    // selects; X's own bindings apply to that entity like any configuration's
+    for (vhdlnative::Architecture& arch : library.archs) {
+        std::vector<vhdlnative::Concurrent*> instances;
+        collectInstanceStmts(arch.stmts, instances);
+        for (vhdlnative::Concurrent* const instp : instances) {
+            if (!instp->configurationInstantiation) continue;
+            instp->configurationInstantiation = false;
+            const auto configIt
+                = std::find_if(library.configurations.begin(), library.configurations.end(),
+                               [&](const vhdlnative::ConfigurationUnit& config) {
+                                   return config.name == instp->instanceName;
+                               });
+            if (configIt == library.configurations.end()) {
+                instp->flp->v3error("VHDL: instance '" + instp->instanceLabel
+                                    + "' names configuration '" + instp->instanceName
+                                    + "', which was not analyzed.");
+                continue;
+            }
+            instp->instanceName = configIt->entityName;
+            instp->architectureName = configIt->archName;
+        }
+    }
     std::set<const vhdlnative::Concurrent*> configured;  // Instances a configuration selected
     // A configuration selects the architecture of the instances it binds. A binding that
     // names no architecture leaves the instance as written.
@@ -320,15 +343,19 @@ ArchByEntity resolveArchitectures(vhdlnative::DesignLibrary& library) {
                                 + config.entityName + "', which has no architecture.");
             continue;
         }
-        if (archIt->second->name != config.archName) {
-            config.flp->v3error("VHDL configuration '" + config.spelling + "' names architecture '"
-                                + config.archName + "', but the analyzed one is '"
-                                + archIt->second->name + "'.");
-            continue;
-        }
+        // The configuration configures the architecture it names, which need not be the
+        // one an instance gets when it names none
         vhdlnative::Architecture* configuredp = nullptr;
         for (vhdlnative::Architecture& arch : library.archs) {
-            if (&arch == archIt->second) configuredp = &arch;
+            if (arch.entityName == config.entityName && arch.name == config.archName) {
+                configuredp = &arch;
+            }
+        }
+        if (!configuredp) {
+            config.flp->v3error("VHDL configuration '" + config.spelling + "' names architecture '"
+                                + config.archName + "', which entity '" + config.entityName
+                                + "' does not have.");
+            continue;
         }
         std::vector<vhdlnative::Concurrent*> instances;
         collectInstanceStmts(configuredp->stmts, instances);
