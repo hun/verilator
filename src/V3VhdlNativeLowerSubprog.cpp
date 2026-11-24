@@ -999,7 +999,8 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
     const Expr* resultp = &value;
     while (resultp->kind == Expr::PAREN && resultp->a) resultp = resultp->a.get();
     const auto lowered = m_exprTypes.find(resultp);
-    if (checkShape && lowered != m_exprTypes.end() && isFixedType(lowered->second.type)
+    if (checkShape && !m_unfoldedBranch && lowered != m_exprTypes.end()
+        && isFixedType(lowered->second.type)
         && isFixedType(target) && lowered->second.type.width != target.width) {
         value.flp->v3error(std::string{"VHDL: "} + what + " of type '"
                            + lowered->second.type.typeName
@@ -1049,7 +1050,7 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
         // declared bounds. A name that is a function called without parentheses is a call.
         const bool bareCall = value.kind == Expr::NAME && !m_scope.count(value.text)
                               && m_subprograms.count(value.text);
-        const bool sized = checkShape && !bareCall
+        const bool sized = checkShape && !m_unfoldedBranch && !bareCall
                            && (value.kind == Expr::NAME || value.kind == Expr::SELECTED
                                || value.kind == Expr::SLICE);
         if (sized && !sameShape(target, source)) {

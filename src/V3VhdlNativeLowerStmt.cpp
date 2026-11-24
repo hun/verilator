@@ -870,6 +870,23 @@ AstNodeStmt* Lowering::lowerIf(const Stmt& stmt) {
     // A value tracked before the statement still holds inside each branch, which are
     // lowered in reverse, so each one starts from the same values
     const auto entryVals = saveVarVals();
+    // A branch runs only if no earlier condition held, so an earlier condition over
+    // constants that did not fold leaves it undecided as well
+    std::vector<bool> unfolded(stmt.branches.size(), false);
+    bool undecided = false;
+    for (std::size_t i = 0; i < stmt.branches.size(); ++i) {
+        const auto& cond = stmt.branches[i].first;
+        bool staticValue = false;
+        if (cond && !evalCond(*cond, staticValue)) {
+            std::set<std::string> names;
+            collectExprNames(*cond, names);
+            undecided = undecided
+                        || std::none_of(names.begin(), names.end(), [&](const std::string& name) {
+                               return m_scope.count(name);
+                           });
+        }
+        unfolded[i] = undecided;
+    }
     for (std::size_t i = stmt.branches.size(); i-- > 0;) {
         const auto& branch = stmt.branches[i];
         // A static condition decides its branch before it is lowered: a branch that cannot
@@ -878,7 +895,9 @@ AstNodeStmt* Lowering::lowerIf(const Stmt& stmt) {
         bool staticValue = false;
         const bool isStatic = branch.first && evalCond(*branch.first, staticValue);
         restoreVarVals(entryVals);
+        m_unfoldedBranch += unfolded[i];
         AstNodeStmt* bodyp = (isStatic && !staticValue) ? nullptr : lowerStmtList(branch.second);
+        m_unfoldedBranch -= unfolded[i];
         if (!branch.first) {
             elsesp = bodyp;
             continue;

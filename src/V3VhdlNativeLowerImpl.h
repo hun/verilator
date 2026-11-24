@@ -364,6 +364,10 @@ class Lowering final {
     //! Set while a process with several waits lowers: each wait becomes a timing control
     //! in place
     bool m_seqWait = false;
+    //! Nesting of if branches that a condition over elaboration constants guards but the
+    //! frontend could not fold: such a branch may never run, so a length mismatch in it is
+    //! a run-time matter (IEEE 1076-2008 9.2.5)
+    int m_unfoldedBranch = 0;
     int m_varSeq = 0;  // Disambiguates a process's own variables module-wide
     //! Active loop, with the flags its exit/next conditions latch
     struct LoopFrame final {
