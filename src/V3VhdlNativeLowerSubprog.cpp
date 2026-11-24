@@ -1021,6 +1021,15 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
             double integral = 0.0;
             if (integralRealLiteral(value, integral)) return true;
         }
+        // std_logic_arith declares each arithmetic operator on unsigned and signed operands
+        // with a std_logic_vector result as well, which the target then selects
+        if (m_stdLogicArith && resultp->kind == Expr::BINARY
+            && (resultp->text == "+" || resultp->text == "-" || resultp->text == "*")
+            && (source.typeName == "unsigned" || source.typeName == "signed")
+            && target.isPredefinedVector() && target.signing == VSigning::NOSIGN
+            && target.kwd == VBasicDTypeKwd::LOGIC) {
+            return true;
+        }
         // std_logic is the resolved subtype of std_ulogic (IEEE 1164)
         if (!baseTypesRelated(source.typeName, target.typeName)) {
             value.flp->v3error(std::string{"VHDL: "} + what + " of type '" + source.typeName

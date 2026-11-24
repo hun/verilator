@@ -1566,9 +1566,10 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
         rp->deleteTree();
         return nullptr;
     }
-    // std_logic_arith adds and subtracts an unsigned and a signed operand as signed, the
-    // unsigned one widened by a zero bit so it keeps its value
-    if (m_stdLogicArith && (op == "+" || op == "-") && lt.kwd == VBasicDTypeKwd::LOGIC
+    // std_logic_arith adds, subtracts and multiplies an unsigned and a signed operand as
+    // signed, the unsigned one widened by a zero bit so it keeps its value
+    bool mixedMultiply = false;
+    if (m_stdLogicArith && (op == "+" || op == "-" || op == "*") && lt.kwd == VBasicDTypeKwd::LOGIC
         && ((lt.signing == VSigning::UNSIGNED && rt.signing == VSigning::SIGNED)
             || (lt.signing == VSigning::SIGNED && rt.signing == VSigning::UNSIGNED))) {
         const bool leftUnsigned = lt.signing == VSigning::UNSIGNED;
@@ -1580,6 +1581,7 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
         unsignedType = vectorType(flp, unsignedType.kwd, VSigning::SIGNED, widened.width);
         unsignedp->dtypep(unsignedType.dtp);
         unsignedType.typeName = "signed";
+        mixedMultiply = op == "*";
     }
     // Two vector operands must have one base type; a numeric_std unsigned and a
     // std_logic_vector do not mix (IEEE 1076-2008 9.2.5)
@@ -1618,7 +1620,8 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
     const VSigning signing = lt.signing;
     int resultWidth = 0;
     if (op == "*") {
-        resultWidth = lt.width + rt.width;
+        // The widened unsigned operand adds a bit the product does not have
+        resultWidth = lt.width + rt.width - (mixedMultiply ? 1 : 0);
     } else if (op == "/" || op == "mod" || op == "rem") {
         resultWidth = lt.width;
     } else {
