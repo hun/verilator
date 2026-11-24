@@ -775,6 +775,10 @@ bool Lowering::actualTypeAttr(const Expr& expr, VType& out) const {
         out = intType(expr.flp);
         return true;
     }
+    if (expr.text == "image") {
+        out = stringType(expr.flp, 1);  // Its length is the lowered value's
+        return true;
+    }
     // Signal attributes that yield a boolean
     if (expr.text == "event" || expr.text == "active" || expr.text == "quiet"
         || expr.text == "stable" || expr.text == "rising_edge" || expr.text == "falling_edge") {

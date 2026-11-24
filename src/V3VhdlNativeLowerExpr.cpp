@@ -826,8 +826,14 @@ bool Lowering::lowerBinaryOperands(const Expr& expr, const std::string& op, bool
                               || logicalOp;
         VType aType;
         VType bType;
-        const bool aKnown = sameType && actualType(*expr.a, aType);
-        const bool bKnown = sameType && actualType(*expr.b, bType);
+        // A concatenation takes no type from its operands, except that a string beside a
+        // literal of logic characters makes that literal characters too
+        const auto knownOperand = [&](const Expr& operand, VType& type) {
+            if (op == "&") return actualType(operand, type) && type.typeName == "string";
+            return sameType && actualType(operand, type);
+        };
+        const bool aKnown = knownOperand(*expr.a, aType);
+        const bool bKnown = knownOperand(*expr.b, bType);
         if (aKnown != bKnown) {
             const bool lowerLeftFirst = aKnown;
             AstNodeExpr* const knownp = lowerExpr(lowerLeftFirst ? *expr.a : *expr.b, nullptr);
@@ -845,7 +851,7 @@ bool Lowering::lowerBinaryOperands(const Expr& expr, const std::string& op, bool
                 = arithmeticOp && aggregateOperand && !aggregateHasOthers(untyped);
             // An unconstrained base type gives an aggregate the index range of its own choices,
             // even when the known operand is a constrained subtype of it (IEEE 1076-2008 9.3.3.3)
-            VType ctxType = known;
+            VType ctxType = op == "&" ? (lowerLeftFirst ? aType : bType) : known;
             if (known.unconstrainedBase && aggregateOperand && !aggregateHasOthers(untyped)) {
                 ctxType.width = 0;
             }
