@@ -651,6 +651,12 @@ class Lowering final {
                            : static_cast<AstNodeExpr*>(new AstExtend{flp, exprp, to.width});
         } else if (fromWidth > to.width) {
             resultp = new AstSel{flp, exprp, 0, to.width};
+        } else if (exprp->dtypep() && to.dtp
+                   && exprp->dtypep()->isSigned() != to.dtp->isSigned()) {
+            // A new dtype alone does not last: the width pass gives a reference back its
+            // variable's signedness, so `signed(slv)` is marked as a signed operand
+            resultp = to.dtp->isSigned() ? static_cast<AstNodeExpr*>(new AstSigned{flp, exprp})
+                                         : static_cast<AstNodeExpr*>(new AstUnsigned{flp, exprp});
         }
         resultp->dtypep(to.dtp);
         return resultp;

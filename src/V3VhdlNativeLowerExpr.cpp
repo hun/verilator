@@ -2331,8 +2331,9 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) 
         kwd = VBasicDTypeKwd::BIT;
     }
     const VType target = vectorType(flp, kwd, signing, valueType.width);
-    valuep->dtypep(target.dtp);
-    return valuep;
+    // A change of signedness is marked, since a dtype alone is lost when the width pass
+    // gives a variable reference back its own
+    return resizeExpr(valuep, target, flp);
 }
 
 AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
