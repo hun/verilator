@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -2017,28 +2018,36 @@ bool Lowering::bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env) {
     registerSubprograms(subp.subprograms, static_cast<int>(m_inlineFrames.size() - 1));
     // An alias denotes its designator; its subtype mark gives it bounds of its own. An
     // alias with a signature renames a subprogram, so it is registered as one instead of
-    // being valued like an object alias would be
-    for (const AliasDecl& alias : subp.aliases) {
-        if (!alias.designator) continue;
-        if (alias.hasSignature) {
-            registerSubprogramAlias(alias);
-            continue;
+    // being valued like an object alias would be. It binds where it is declared, after
+    // the locals before it, which it may name.
+    std::size_t nextAlias = 0;
+    const auto bindAliasesBefore = [&](int lineno) {
+        for (; nextAlias < subp.aliases.size() && subp.aliases[nextAlias].flp->lineno() < lineno;
+             ++nextAlias) {
+            const AliasDecl& alias = subp.aliases[nextAlias];
+            if (!alias.designator) continue;
+            if (alias.hasSignature) {
+                registerSubprogramAlias(alias);
+                continue;
+            }
+            AstNodeExpr* const valuep = lowerExpr(*alias.designator, nullptr);
+            if (!valuep) return false;
+            InlineBinding binding{valuep, false, true, VType{}, nullptr};
+            VType aliasType;
+            if (alias.mark.flp && resolveType(alias.mark, aliasType)
+                && aliasType.width == valuep->width()) {
+                valuep->dtypep(aliasType.dtp);
+                binding.type = aliasType;
+            } else {
+                binding.type = typeOfDType(valuep->dtypep());
+            }
+            env[alias.name] = std::move(binding);
         }
-        AstNodeExpr* const valuep = lowerExpr(*alias.designator, nullptr);
-        if (!valuep) return false;
-        InlineBinding binding{valuep, false, true, VType{}, nullptr};
-        VType aliasType;
-        if (alias.mark.flp && resolveType(alias.mark, aliasType)
-            && aliasType.width == valuep->width()) {
-            valuep->dtypep(aliasType.dtp);
-            binding.type = aliasType;
-        } else {
-            binding.type = typeOfDType(valuep->dtypep());
-        }
-        env[alias.name] = std::move(binding);
-    }
+        return true;
+    };
     // Locals are bound to values; assignments rebuild the whole bound expression
     for (const Decl& decl : subp.decls) {
+        if (!bindAliasesBefore(decl.flp->lineno())) return false;
         registerTypesBefore(decl.flp->lineno());
         VType declType;
         const bool resolved = resolveType(decl.type, declType);
@@ -2084,6 +2093,7 @@ bool Lowering::bindFunctionLocals(const SubprogramDecl& subp, InlineEnv& env) {
         }
         if (materialize) initp->deleteTree();
     }
+    if (!bindAliasesBefore(INT_MAX)) return false;
     // A type no declaration follows still belongs to the part
     for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
     return true;
