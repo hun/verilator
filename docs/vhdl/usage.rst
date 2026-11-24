@@ -152,6 +152,12 @@ What the C++ side sees:
   it drives one it writes the low W bits of the two's complement value. An
   ``integer`` port behaves the same way, as an unsigned 32-bit field.
 
+- A port of the top entity whose name is a C++ keyword, such as ``const``,
+  is a class member named with a ``__SYM__`` prefix, ``__SYM__const``, and
+  Verilator reports :option:`SYMRSVDWORD` for it, as for a SystemVerilog
+  port. A testbench uses the prefixed name. The warning is an error unless
+  it is disabled with ``-Wno-SYMRSVDWORD``, or the port is renamed.
+
 - The model is two-state: a signal that VHDL would leave at ``'U'`` starts
   at 0 in the model. See the known divergences in :doc:`limitations` for
   what this means for metavalue checks and resolution.
