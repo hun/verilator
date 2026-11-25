@@ -248,12 +248,11 @@ bool Lowering::evalIntAttribute(const Expr& expr, int64_t& value) const {
         return true;
     }
     if (attribute == "low") {
-        value = typep->kind == VType::ENUM ? 0 : std::min(typep->left, typep->right);
+        value = std::min(typep->left, typep->right);
         return true;
     }
     if (attribute == "high") {
-        value = typep->kind == VType::ENUM ? static_cast<int64_t>(typep->literals.size()) - 1
-                                           : std::max(typep->left, typep->right);
+        value = std::max(typep->left, typep->right);
         return true;
     }
     if (expr.args.size() != 1) return false;
@@ -266,8 +265,7 @@ bool Lowering::evalIntAttribute(const Expr& expr, int64_t& value) const {
     if (attribute == "val") {
         // IEEE 1076-2008 16.2.2: 'val outside the type's range is an error
         if (typep->kind == VType::ENUM) {
-            const int64_t count = static_cast<int64_t>(typep->literals.size());
-            if (position < 0 || position >= count) {
+            if (position < typep->left || position > typep->right) {
                 expr.flp->v3error("VHDL: 'val outside the range of the type.");
                 return false;
             }
@@ -280,11 +278,9 @@ bool Lowering::evalIntAttribute(const Expr& expr, int64_t& value) const {
     if (!stepAttr || (typep->kind != VType::ENUM && typep->kind != VType::INT)) return false;
     // Neighbouring value in the type's order; an enumeration ascends, an integer type
     // follows its declared direction (IEEE 1076-2008 16.2.2)
-    const bool ascending = typep->kind == VType::ENUM || typep->ascending;
-    const int64_t low = typep->kind == VType::ENUM ? 0 : std::min(typep->left, typep->right);
-    const int64_t high = typep->kind == VType::ENUM
-                             ? static_cast<int64_t>(typep->literals.size()) - 1
-                             : std::max(typep->left, typep->right);
+    const bool ascending = typep->ascending;
+    const int64_t low = std::min(typep->left, typep->right);
+    const int64_t high = std::max(typep->left, typep->right);
     const bool up = attribute == "succ" || (attribute == "rightof" && ascending)
                     || (attribute == "leftof" && !ascending);
     const int64_t next = up ? position + 1 : position - 1;
@@ -1059,6 +1055,9 @@ void Lowering::registerEnumType(FileLine* flp, const TypeDecl& decl, VType& type
     while ((1 << width) < static_cast<int>(decl.literals.size())) ++width;
     type.kind = VType::ENUM;
     type.width = width;
+    type.left = 0;
+    type.right = static_cast<int>(decl.literals.size()) - 1;
+    type.ascending = true;
     type.dtp = enumDType(flp, decl, width);
     for (const auto& literal : decl.literals) type.literals.push_back(literal.first);
     for (size_t i = 0; i < decl.literals.size(); ++i) {
@@ -1437,6 +1436,61 @@ void Lowering::finishDeferredTypes() {
 
 //! Bounds of an index constraint; a discrete range attribute such as `sig'range`
 //! contributes the bounds and direction of its prefix
+//! Bounds of a loop range written as an integer or enumeration type mark, `mid` or
+//! `mid'range`; an enumeration is counted by literal position. False for anything else.
+bool Lowering::discreteTypeRange(const Expr& range, int64_t& left, int64_t& right, bool& up) {
+    const bool attr = range.kind == Expr::ATTR
+                      && (range.text == "range" || range.text == "reverse_range");
+    const Expr* const namep = attr ? range.a.get() : &range;
+    if (!namep || namep->kind != Expr::NAME) return false;
+    // A declared object of that name hides the type mark
+    if (activeEnv().count(namep->text) || m_scope.count(namep->text)
+        || m_constTypes.count(namep->text)) {
+        return false;
+    }
+    const auto typeIt = m_types.find(namep->text);
+    if (typeIt == m_types.end()) return false;
+    const VType& type = typeIt->second;
+    if (type.kind == VType::INT) {
+        left = type.intLow;
+        right = type.intHigh;
+        up = left <= right;
+    } else if (type.kind == VType::ENUM) {
+        left = type.left;
+        right = type.right;
+        up = true;
+    } else {
+        return false;
+    }
+    if (attr && range.text == "reverse_range") {
+        std::swap(left, right);
+        up = !up;
+    }
+    return true;
+}
+
+//! The enumeration type a for loop's parameter takes, null for an integer parameter. The
+//! range is a type mark or its 'range, or its first bound is an enumeration literal.
+const VType* Lowering::loopEnumType(const Stmt& loop) const {
+    const Expr* const bound = loop.b.get();
+    if (!bound) return nullptr;
+    const Expr* const namep = !loop.c && bound->kind == Expr::ATTR ? bound->a.get() : bound;
+    if (!namep || namep->kind != Expr::NAME) return nullptr;
+    if (!loop.c) {
+        const auto typeIt = m_types.find(namep->text);
+        return typeIt != m_types.end() && typeIt->second.kind == VType::ENUM ? &typeIt->second
+                                                                          : nullptr;
+    }
+    if (m_ambiguousLiterals.count(namep->text) || !m_enumConsts.count(namep->text)) return nullptr;
+    for (const auto& type : m_types) {
+        if (type.second.kind != VType::ENUM) continue;
+        for (const std::string& literal : type.second.literals) {
+            if (literal == namep->text) return &type.second;
+        }
+    }
+    return nullptr;
+}
+
 bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right,
                                 bool& ascending) {
     if (spec.right) {
@@ -1535,6 +1589,7 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
             type.intHigh = static_cast<int>(std::max(left, right));
             return true;
         }
+        if (type.kind == VType::ENUM) return true;  // The bounds are literal positions
         if (type.isVector()) {
             type.width = type.elemWidth * type.length();
             type.dtp = type.kind == VType::ARRAY

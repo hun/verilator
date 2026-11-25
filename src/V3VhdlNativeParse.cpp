@@ -520,6 +520,7 @@ class Parser final {
     void parseConcurrentSelectedAssign(FileLine* flp, Architecture& arch);
     void parseConcurrentForGenerate(FileLine* flp, Architecture& arch);
     void parseConcurrentIfGenerate(FileLine* flp, Architecture& arch);
+    void parseConcurrentCaseGenerate(FileLine* flp, Architecture& arch);
     void parseConcurrentBlock(FileLine* flp, Architecture& arch);
     void parseConcurrentAssert(FileLine* flp, Architecture& arch);
     void parseConcurrentAssignOrCall(FileLine* flp, Architecture& arch);
@@ -2536,6 +2537,10 @@ void Parser::parseConcurrentStatement(Architecture& arch) {
         parseConcurrentIfGenerate(flp, arch);
         return;
     }
+    if (isId("case")) {
+        parseConcurrentCaseGenerate(flp, arch);
+        return;
+    }
     if (isId("block")) {
         parseConcurrentBlock(flp, arch);
         return;
@@ -2730,6 +2735,71 @@ void Parser::parseConcurrentIfGenerate(FileLine* flp, Architecture& arch) {
     arch.stmts.push_back(std::move(gen));
 }
 
+//! A case generate is an if generate whose conditions test the selector against each
+//! choice; `others` is the else part. Its choices are static and may not overlap
+//! (IEEE 1076-2008 11.8), so the order of the tests does not matter.
+void Parser::parseConcurrentCaseGenerate(FileLine* flp, Architecture& arch) {
+    advance();
+    auto gen = std::make_unique<Concurrent>(Concurrent::GEN_IF);
+    gen->flp = flp;
+    const ExprP selector = parseExpr();
+    if (!selector) return;
+    if (!expectId("generate")) return;
+    const auto binary = [](const char* op, ExprP lhs, ExprP rhs) {
+        ExprP out = std::make_unique<Expr>(Expr::BINARY);
+        out->flp = lhs->flp;
+        out->text = op;
+        out->a = std::move(lhs);
+        out->b = std::move(rhs);
+        return out;
+    };
+    while (isId("when")) {
+        advance();
+        if (m_cur.kind == Token::ID) {  // An alternative label, `when name: choice =>`
+            const auto saved = m_lexer.state();
+            const Token nameTok = m_cur;
+            advance();
+            const bool labelled = isSym(":");
+            m_cur = nameTok;
+            m_lexer.restore(saved);
+            if (labelled) {
+                advance();  // The label's name
+                advance();  // The colon
+            }
+        }
+        std::vector<ExprP> choices;
+        if (!parseChoices(choices)) return;
+        expectSym("=>");
+        if (m_failed) return;
+        GenBranch branch;  // No condition for `others`: the else part
+        for (ExprP& choice : choices) {
+            ExprP match;
+            if (choice->kind == Expr::SLICE) {
+                const bool up = choice->text == "to";
+                ExprP lo = binary(up ? ">=" : "<=", cloneExpr(*selector), std::move(choice->b));
+                ExprP hi = binary(up ? "<=" : ">=", cloneExpr(*selector), std::move(choice->c));
+                match = binary("and", std::move(lo), std::move(hi));
+            } else {
+                match = binary("=", cloneExpr(*selector), std::move(choice));
+            }
+            branch.cond = branch.cond ? binary("or", std::move(branch.cond), std::move(match))
+                                      : std::move(match);
+        }
+        parseConcurrentList(branch.stmts, &branch.decls, &branch.types, &branch.subprograms,
+                            &branch.components);
+        if (m_failed) return;
+        const bool others = !branch.cond;
+        gen->branches.push_back(std::move(branch));
+        if (others) break;  // `others` is the last alternative
+    }
+    if (gen->branches.empty()) {
+        error("expected 'when' in a case generate");
+        return;
+    }
+    if (!parseGenerateEnd()) return;
+    arch.stmts.push_back(std::move(gen));
+}
+
 void Parser::parseConcurrentBlock(FileLine* flp, Architecture& arch) {
     advance();
     auto block = std::make_unique<Concurrent>(Concurrent::BLOCK);
@@ -2918,7 +2988,7 @@ void Parser::parseConcurrentList(std::vector<std::unique_ptr<Concurrent>>& out,
                                  std::vector<ComponentDecl>* componentsp) {
     LabelScope labelScope{*this};
     Architecture scratch;  // The statements of a generate body
-    while (!m_failed && !isId("end") && !isId("elsif") && !isId("else")
+    while (!m_failed && !isId("end") && !isId("elsif") && !isId("else") && !isId("when")
            && m_cur.kind != Token::END) {
         // A generate body separates its declarative part from its statements
         if (isId("begin")) {

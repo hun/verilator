@@ -2610,7 +2610,9 @@ void Lowering::emitGenerateFor(const Concurrent& stmt) {
                   && (stmt.lo->text == "range" || stmt.lo->text == "reverse_range")
               ? stmt.lo.get()
               : nullptr;
-    if (rangep) {
+    if (!stmt.hi && stmt.lo && discreteTypeRange(*stmt.lo, left, right, up)) {
+        // `for i in <type mark> generate` or `<type mark>'range`
+    } else if (rangep) {
         if (!rangep->a || rangep->a->kind != Expr::NAME) {
             unsupportedError(stmt.flp, "generate over 'range of a non-name prefix");
             return;
@@ -2625,16 +2627,8 @@ void Lowering::emitGenerateFor(const Concurrent& stmt) {
         right = reverse ? rangeTypep->left : rangeTypep->right;
         up = reverse ? !rangeTypep->ascending : rangeTypep->ascending;
     } else if (!stmt.hi && stmt.lo && stmt.lo->kind == Expr::NAME) {
-        // `for i in <subtype> generate` iterates the subtype's own bounds
-        // (IEEE 1076-2008 11.8), as a loop over a discrete subtype does
-        const auto subtypeIt = m_types.find(stmt.lo->text);
-        if (subtypeIt == m_types.end() || subtypeIt->second.kind != VType::INT) {
-            unsupportedError(stmt.flp, "generate over a name that is not a subtype");
-            return;
-        }
-        left = subtypeIt->second.intLow;
-        right = subtypeIt->second.intHigh;
-        up = left <= right;
+        unsupportedError(stmt.flp, "generate over a name that is not a subtype");
+        return;
     } else if (!staticInt(stmt.lo, left) || !staticInt(stmt.hi, right)) {
         unsupportedError(stmt.flp, "generate range that is not static");
         return;

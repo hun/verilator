@@ -124,7 +124,7 @@ AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* c
         return nullptr;
     }
     const auto constIt = m_consts.find(expr.text);
-    if (constIt != m_consts.end()) return makeIntConst(flp, constIt->second);
+    if (constIt != m_consts.end()) return makeNamedConst(flp, expr.text, constIt->second);
     const auto preIt = m_preConsts.find(expr.text);
     if (preIt != m_preConsts.end()) return makeIntConst(flp, preIt->second);
     const auto valueIt = m_constValues.find(expr.text);
@@ -2659,7 +2659,7 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
                 flp->v3error("VHDL: cannot assign to constant '" + expr.spelling + "'.");
                 return nullptr;
             }
-            return makeIntConst(flp, constIt->second);
+            return makeNamedConst(flp, expr.text, constIt->second);
         }
         const auto preIt = m_preConsts.find(expr.text);
         if (preIt != m_preConsts.end()) {

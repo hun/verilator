@@ -21,7 +21,7 @@ package instantiations, deferred constants and signals declared in a package
 specification), components and direct entity
 instantiation, constant and type generics, logic and numeric types, records,
 one-dimensional arrays and arrays of arrays, processes and concurrent
-assignments, generate statements, static loops, pure functions and procedures,
+assignments, generate statements (``for``, ``if`` and ``case``), static loops, pure functions and procedures,
 ``std_logic_1164``, ``numeric_std``, the ``sfixed`` and ``ufixed`` types of
 ``fixed_pkg`` and the standard attributes.
 
@@ -55,6 +55,12 @@ A function call is evaluated during elaboration. A loop in its body whose condit
 to constants runs up to 1048576 iterations under one call, so a constant function can fill a
 sine table of 16384 entries; a constant wider than 1048576 bits is refused. A loop whose
 condition depends on a signal is unrolled, up to 4096 iterations.
+
+An enumeration subtype may carry a range, ``subtype mid is st range s1 to s3;``. Its
+``'left``, ``'right``, ``'low``, ``'high``, ``'val``, ``'succ`` and ``'pred`` follow that range,
+but a value outside it is not detected at run time. A ``for`` loop, a function loop or a
+``for generate`` may run over an enumeration type or subtype, or over its ``'range``; the
+loop parameter has that type, and the loop is unrolled like an integer one.
 
 The attributes ``'pos``, ``'val``, ``'succ``, ``'pred``, ``'leftof`` and ``'rightof`` apply to
 integer types, and all but the last two to enumeration types. ``'value`` and ``'image`` of a
@@ -244,8 +250,7 @@ Known limitations
   that uses the functions on ``integer`` or ``std_logic`` alone. The frontend
   resolves these subprograms by name rather than through the package, which
   makes a precise check hard.
-- ``case generate``, enumeration range subtypes and
-  resolution indications are not implemented, and neither are type attributes
+- Resolution indications are not implemented, and neither are type attributes
   such as ``'image`` on an enumeration.
 - Library namespace handling is simplified; library names can come from a
   libmap even for a VHDL ``work`` file in a mixed run.

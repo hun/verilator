@@ -1686,12 +1686,8 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
     bool up = stmt.rangeAscending;
     if (!stmt.c) {
         // `for i in subtype loop`: a discrete subtype is its own range
-        const auto subtypeIt
-            = stmt.b && stmt.b->kind == Expr::NAME ? m_types.find(stmt.b->text) : m_types.end();
-        if (subtypeIt != m_types.end() && subtypeIt->second.kind == VType::INT) {
-            left = subtypeIt->second.intLow;
-            right = subtypeIt->second.intHigh;
-            up = left <= right;
+        if (stmt.b && discreteTypeRange(*stmt.b, left, right, up)) {
+            // The bounds of the type mark
         } else {
             // `for i in name'range loop`: the bounds come from the prefix's type
             if (!stmt.b || stmt.b->kind != Expr::ATTR
@@ -1757,6 +1753,15 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
     const auto savedConst = m_consts.find(stmt.loopVar);
     const bool hadConst = savedConst != m_consts.end();
     const int64_t savedValue = hadConst ? savedConst->second : 0;
+    // An enumeration parameter is a constant of that type, so it compares and assigns as one
+    const auto savedType = m_constTypes.find(stmt.loopVar);
+    const bool hadType = savedType != m_constTypes.end();
+    const VType savedTypeValue = hadType ? savedType->second : VType{};
+    if (const VType* const enump = loopEnumType(stmt)) {
+        m_constTypes[stmt.loopVar] = *enump;
+    } else {
+        m_constTypes.erase(stmt.loopVar);
+    }
     AstNodeExpr* const exitNotp = [&]() -> AstNodeExpr* {
         AstNodeExpr* const notp = new AstNot{flp, new AstVarRef{flp, frame.exitp, VAccess::READ}};
         notp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
@@ -1782,6 +1787,11 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
         m_consts[stmt.loopVar] = savedValue;
     } else {
         m_consts.erase(stmt.loopVar);
+    }
+    if (hadType) {
+        m_constTypes[stmt.loopVar] = savedTypeValue;
+    } else {
+        m_constTypes.erase(stmt.loopVar);
     }
     if (boundSavep) activeEnv()[stmt.loopVar] = *boundSavep;
     m_loops.pop_back();

@@ -620,6 +620,23 @@ class Lowering final {
         constp->dtypep(type.dtp);
         return constp;
     }
+    //! A folded constant of the type recorded for its name: an enumeration literal for an
+    //! enumeration loop parameter, an integer otherwise
+    AstConst* makeNamedConst(FileLine* flp, const std::string& name, int64_t value) const {
+        const auto typeIt = m_constTypes.find(name);
+        return typeIt != m_constTypes.end() && typeIt->second.kind == VType::ENUM
+                   ? makeEnumConst(flp, typeIt->second, value)
+                   : makeIntConst(flp, value);
+    }
+    AstConst* makeEnumConst(FileLine* flp, const VType& type, int64_t value) const {
+        AstConst* const constp
+            = new AstConst{flp, V3Number{flp, type.width, static_cast<uint32_t>(value)}};
+        constp->dtypep(type.dtp);
+        return constp;
+    }
+    AstConst* loopConst(FileLine* flp, int64_t value, const VType* enump) const {
+        return enump ? makeEnumConst(flp, *enump, value) : makeIntConst(flp, value);
+    }
     AstConst* makeTimeConst(FileLine* flp, int64_t value) const {
         const VType type = timeType(flp);
         V3Number num{flp, type.width, static_cast<uint32_t>(value)};
@@ -806,6 +823,8 @@ class Lowering final {
     //! Recompute a record's total width, MSB-first offsets and packed dtype
     void finalizeRecordFields(FileLine* flp, VType& rec);
     bool constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right, bool& ascending);
+    bool discreteTypeRange(const Expr& range, int64_t& left, int64_t& right, bool& up);
+    const VType* loopEnumType(const Stmt& loop) const;
     //! The index range an array attribute names: `A'HIGH(2)` is the second one, and an
     //! attribute written without an index is the first, IEEE 1076-2008 16.2.3
     const VType* indexRangeLevel(const Expr& expr, const VType& type) const;

@@ -3279,6 +3279,7 @@ bool Lowering::funcForBounds(const Stmt& stmt, int64_t& left, int64_t& right, bo
     if (!stmt.c) {
         // `for i in name'range` / `name'reverse_range`: the bounds come from the prefix type
         const Expr* const rangep = stmt.b.get();
+        if (rangep && discreteTypeRange(*rangep, left, right, up)) return true;
         if (!rangep || rangep->kind != Expr::ATTR || !rangep->a
             || (rangep->text != "range" && rangep->text != "reverse_range")) {
             unsupportedError(flp, "function loop range without static bounds");
@@ -3402,13 +3403,14 @@ Lowering::FuncExec Lowering::execFuncIterations(const Stmt& stmt, int64_t value,
                                                 bool up, int depth) {
     FileLine* const flp = stmt.flp;
     const bool isFor = stmt.kind == Stmt::FOR;
+    const VType* const enump = isFor ? loopEnumType(stmt) : nullptr;
     while (true) {
         if (isFor) {
             if (up ? value > right : value < right) return FuncExec::NORMAL;
             InlineBinding& loopBinding = activeEnv()[stmt.loopVar];
             if (loopBinding.exprp) loopBinding.exprp->deleteTree();
-            loopBinding
-                = InlineBinding{makeIntConst(flp, value), false, true, intType(flp), nullptr};
+            loopBinding = InlineBinding{loopConst(flp, value, enump), false, true,
+                                        enump ? *enump : intType(flp), nullptr};
             value += up ? 1 : -1;
         } else if (stmt.value) {
             // As evalFuncWhile: a false conjunct ends the loop before the rest is lowered
@@ -3518,6 +3520,7 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
     int64_t right = 0;
     bool up = true;
     if (!funcForBounds(stmt, left, right, up)) return nullptr;
+    const VType* const enump = loopEnumType(stmt);
     if (up ? right < left : right > left) return postCont(activeEnv());  // Empty range
     const int64_t step = up ? 1 : -1;
     // Each iteration becomes a continuation frame; the body's continuation is the next
@@ -3531,8 +3534,8 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
             return nullptr;
         }
         InlineEnv iterEnv = cloneInlineEnv(inEnv);
-        InlineBinding loopBinding{makeIntConst(flp, value), false, true, VType{}, nullptr};
-        loopBinding.type = intType(flp);
+        InlineBinding loopBinding{loopConst(flp, value, enump), false, true, VType{}, nullptr};
+        loopBinding.type = enump ? *enump : intType(flp);
         iterEnv[stmt.loopVar] = std::move(loopBinding);
         const int64_t nextValue = value + step;
         const bool more = up ? nextValue <= right : nextValue >= right;
