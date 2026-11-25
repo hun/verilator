@@ -1900,8 +1900,42 @@ AstNodeStmt* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
 }
 
 AstNodeStmt* Lowering::lowerWhile(const Stmt& stmt) {
-    unsupportedError(stmt.flp, stmt.kind == Stmt::WHILE ? "while loop" : "bare loop");
-    return nullptr;
+    FileLine* const flp = stmt.flp;
+    // The test runs again before every iteration, so no value tracked before the loop holds
+    m_varVals.clear();
+    AstNodeStmt* condPendingp = nullptr;
+    AstNodeExpr* testp = nullptr;  // The condition; a bare loop has none
+    if (stmt.value) {
+        AstNodeExpr* const condp = lowerCond(*stmt.value);
+        if (!condp) return nullptr;
+        condPendingp = takePendingStmts();
+        testp = condp;
+    }
+    // `exit` and `next` latch the same per-loop flags as a for loop
+    LoopFrame frame;
+    frame.label = stmt.loopLabel;
+    frame.exitp = newLoopFlag(flp, "exit");
+    frame.nextp = newLoopFlag(flp, "next");
+    frame.guard = usesExitNext(stmt.body);
+    m_loops.push_back(frame);
+    AstNodeExpr* const exitNotp = new AstNot{flp, new AstVarRef{flp, frame.exitp, VAccess::READ}};
+    exitNotp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+    if (testp) {
+        AstNodeExpr* const andp = new AstAnd{flp, testp, exitNotp};
+        andp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        testp = andp;
+    } else {
+        testp = exitNotp;
+    }
+    AstLoop* const loopp = new AstLoop{flp};
+    if (condPendingp) loopp->addStmtsp(condPendingp);
+    loopp->addStmtsp(new AstLoopTest{flp, loopp, testp});
+    // The next flag only skips the rest of one iteration
+    if (frame.guard) loopp->addStmtsp(clearLoopFlag(flp, frame.nextp));
+    AstNodeStmt* const bodyp = lowerStmtList(stmt.body);
+    m_loops.pop_back();
+    if (bodyp) loopp->addStmtsp(bodyp);
+    return AstNode::addNext<AstNodeStmt, AstNodeStmt>(clearLoopFlag(flp, frame.exitp), loopp);
 }
 
 //######################################################################

@@ -155,12 +155,13 @@ keep their absolute VHDL time whatever :vlopt:`--timescale` says. A delay may be
 computed at run time, such as ``wait for n * 10 ns`` with ``n`` a signal. A zero
 ``after`` in a process body is a delta; a nonzero one there is refused, as are
 ``transport``, ``inertial`` and ``reject``. A process with more than one ``wait``,
-or a ``wait`` inside an ``if``, ``case`` or ``for``, or inside a procedure the process
-calls, lowers to one timed block that repeats its body. ``wait for`` is a delay,
-``wait on`` and ``wait until`` are an event control, and a bare ``wait;`` suspends
-the process for good. This needs a timing
-build such as ``--binary``. A ``wait until`` that names an edge resumes on that edge
-only. A ``wait`` inside a ``while`` or bare ``loop`` is refused, as those loops are.
+or a ``wait`` inside an ``if``, ``case``, ``for``, ``while`` or bare ``loop``, or
+inside a procedure the process calls, lowers to one timed block that repeats its body:
+``wait for`` is a delay, ``wait on`` and ``wait until`` are an event control, and a bare
+``wait;`` suspends the process for good. This needs a timing build such as
+``--binary``. A ``wait until`` that names an edge resumes on that edge only. A ``while``
+or bare ``loop`` in a process body runs at run time, with ``exit`` and ``next``, and its
+condition is tested before each iteration.
 Rather than silently dropping a delay that would change behavior,
 the frontend emits a diagnostic. Single top-level clock waits and simple timed
 testbench constructs are supported by the ``--binary`` timing model.
