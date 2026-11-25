@@ -538,7 +538,8 @@ bool Lowering::actualTypeUnary(const Expr& expr, VType& out) const {
         VType operand;
         if (!expr.a || !actualType(*expr.a, operand)) return false;
         for (const SubprogramDecl* const subp : userOps) {
-            const std::vector<std::pair<const FormalDecl*, std::string>> slots = formalSlots(*subp);
+            const std::vector<std::pair<const FormalDecl*, std::string>> slots
+                = formalSlots(*subp);
             VType formal;
             if (slots.size() != 1 || !formalType(slots[0].first->type, formal)
                 || typesMatch(formal, operand)) {
@@ -1019,8 +1020,8 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
     while (resultp->kind == Expr::PAREN && resultp->a) resultp = resultp->a.get();
     const auto lowered = m_exprTypes.find(resultp);
     if (checkShape && !m_unfoldedBranch && lowered != m_exprTypes.end()
-        && isFixedType(lowered->second.type)
-        && isFixedType(target) && lowered->second.type.width != target.width) {
+        && isFixedType(lowered->second.type) && isFixedType(target)
+        && lowered->second.type.width != target.width) {
         value.flp->v3error(std::string{"VHDL: "} + what + " of type '"
                            + lowered->second.type.typeName
                            + "' does not have the target's length.");
@@ -3152,7 +3153,84 @@ AstNodeExpr* Lowering::updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstN
     return resultp;
 }
 
+AstNodeStmt* Lowering::lowerUniform(const Expr& callExpr) {
+    FileLine* const flp = callExpr.flp;
+    if (callExpr.args.size() != 3) {
+        unsupportedError(flp, "'uniform' without three arguments");
+        return nullptr;
+    }
+    AstNodeDType* const intDtp = intType(flp).dtp;
+    AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+    AstNodeDType* const realDtp = findBasic(flp, VBasicDTypeKwd::DOUBLE);
+    const auto typed = [&](AstNodeExpr* nodep, AstNodeDType* dtp) {
+        nodep->dtypep(dtp);
+        return nodep;
+    };
+    const auto intConst = [&](int64_t value) { return makeIntConst(flp, value); };
+    // The seed after its step, s' = a*(s rem m) - (s/m)*b, plus c when that is negative. The
+    // seed is lowered once and copied per use, so each use is the same value.
+    const auto seedStep
+        = [&](const Expr& seedExpr, int64_t m, int64_t a, int64_t b, int64_t c) -> AstNodeExpr* {
+        AstNodeExpr* const seedp = lowerExpr(seedExpr, nullptr);
+        if (!seedp) return nullptr;
+        const auto stepValue = [&]() -> AstNodeExpr* {
+            AstNodeExpr* const remp
+                = typed(new AstModDivS{flp, seedp->cloneTree(false), intConst(m)}, intDtp);
+            AstNodeExpr* const quotp
+                = typed(new AstDivS{flp, seedp->cloneTree(false), intConst(m)}, intDtp);
+            AstNodeExpr* const scaledp = typed(new AstMul{flp, intConst(a), remp}, intDtp);
+            AstNodeExpr* const offsetp = typed(new AstMul{flp, quotp, intConst(b)}, intDtp);
+            return typed(new AstSub{flp, scaledp, offsetp}, intDtp);
+        };
+        AstNodeExpr* const resultp = typed(
+            new AstCond{flp, typed(new AstLtS{flp, stepValue(), intConst(0)}, bitDtp),
+                        typed(new AstAdd{flp, stepValue(), intConst(c)}, intDtp), stepValue()},
+            intDtp);
+        seedp->deleteTree();
+        return resultp;
+    };
+    // Both seeds step before the result, which reads the new seeds, as the reference body does
+    AstNodeExpr* const seed1p = seedStep(*callExpr.args[0], 53668, 40014, 12211, 2147483563);
+    AstNodeExpr* const seed2p = seedStep(*callExpr.args[1], 52774, 40692, 3791, 2147483399);
+    AstNodeExpr* const write1p = seed1p ? lowerDesignator(*callExpr.args[0], true) : nullptr;
+    AstNodeExpr* const write2p = seed2p ? lowerDesignator(*callExpr.args[1], true) : nullptr;
+    AstNodeExpr* const z1p = lowerExpr(*callExpr.args[0], nullptr);
+    AstNodeExpr* const z2p = lowerExpr(*callExpr.args[1], nullptr);
+    AstNodeExpr* const writeXp = lowerDesignator(*callExpr.args[2], true);
+    if (!seed1p || !seed2p || !write1p || !write2p || !z1p || !z2p || !writeXp) {
+        for (AstNodeExpr* const nodep : {seed1p, seed2p, write1p, write2p, z1p, z2p, writeXp}) {
+            if (nodep) nodep->deleteTree();
+        }
+        return nullptr;
+    }
+    // The difference of the seeds, plus 2147483562 when it is below 1; scaled to [0, 1)
+    const auto diffValue = [&]() {
+        return typed(new AstSub{flp, z1p->cloneTree(false), z2p->cloneTree(false)}, intDtp);
+    };
+    AstNodeExpr* const zp
+        = typed(new AstCond{flp, typed(new AstLtS{flp, diffValue(), intConst(1)}, bitDtp),
+                            typed(new AstAdd{flp, diffValue(), intConst(2147483562)}, intDtp),
+                            diffValue()},
+                intDtp);
+    AstNodeExpr* const realZp = typed(new AstIToRD{flp, zp}, realDtp);
+    AstNodeExpr* const scaleConstp
+        = typed(new AstConst{flp, AstConst::RealDouble{}, 4.656613e-10}, realDtp);
+    AstNodeExpr* const scaledp = typed(new AstMulD{flp, realZp, scaleConstp}, realDtp);
+    z1p->deleteTree();
+    z2p->deleteTree();
+    AstNodeStmt* const seed1Stmtp = new AstAssign{flp, write1p, seed1p};
+    AstNodeStmt* const seed2Stmtp = new AstAssign{flp, write2p, seed2p};
+    AstNodeStmt* const resultStmtp = new AstAssign{flp, writeXp, scaledp};
+    return AstNode::addNext<AstNodeStmt, AstNodeStmt>(
+        AstNode::addNext<AstNodeStmt, AstNodeStmt>(seed1Stmtp, seed2Stmtp), resultStmtp);
+}
+
 AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent) {
+    // ieee.math_real is not parsed, so its uniform is lowered here
+    if (callExpr.kind == Expr::INDEX && callExpr.a && callExpr.a->text == "uniform"
+        && !m_subprograms.count("uniform")) {
+        return lowerUniform(callExpr);
+    }
     const SubprogramRef* refp = nullptr;
     const SubprogramDecl* const subp = resolveCall(callExpr, false, &refp);
     if (!subp) {

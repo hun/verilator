@@ -513,6 +513,9 @@ class Lowering final {
             || basicp->keyword() == VBasicDTypeKwd::LONGINT) {
             type.kind = VType::INT;
             type.typeName = "integer";
+        } else if (basicp->keyword() == VBasicDTypeKwd::DOUBLE) {
+            type.kind = VType::REAL;
+            type.typeName = "real";
         } else if (basicp->isRanged()) {
             // A ranged width-1 dtype is a one-element vector, not a scalar
             type.kind = VType::VECTOR;
@@ -671,6 +674,15 @@ class Lowering final {
         }
         resultp->dtypep(to.dtp);
         return resultp;
+    }
+
+    //! A selected element or field of a packed value: a real holds the bits of its double
+    static AstNodeExpr* packedElementValue(FileLine* flp, AstNodeExpr* selp, const VType& elem) {
+        if (elem.kind != VType::REAL) {
+            selp->dtypep(elem.dtp);
+            return selp;
+        }
+        return new AstBitsToRealD{flp, selp};
     }
 
     bool resolveType(const TypeSpec& spec, VType& out);
@@ -1200,6 +1212,10 @@ class Lowering final {
                                     const VType& rt, AstNodeExpr*& lp, AstNodeExpr*& rp,
                                     AstNodeDType* bitDtp);
     AstNodeExpr* lowerConversion(const Expr& expr, const VType* contextp);
+    //! `real(x)`: an integer converted to a double, or a real itself
+    AstNodeExpr* lowerRealConversion(const Expr& expr);
+    //! An operator with a real operand, on doubles
+    AstNodeExpr* lowerRealBinary(FileLine* flp, const std::string& op, BinaryOperands& ops);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
     AstNodeExpr* lowerSel(const Expr& expr, AstNodeExpr* basep, const VType& baseType);
     AstNodeExpr* lowerRangeAttrSlice(FileLine* flp, const Expr& rangeExpr, AstNodeExpr* basep,
@@ -1528,6 +1544,8 @@ class Lowering final {
     AstNodeExpr* updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
                                     AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width);
     AstNodeStmt* lowerProcedureCall(const Expr& callExpr, bool concurrent);
+    //! `uniform` of ieee.math_real: its seed steps and the real result
+    AstNodeStmt* lowerUniform(const Expr& callExpr);
     AstNodeStmt* lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,
                                 bool& fallsThroughp);
     AstNodeStmt* lowerProcChainWithTail(const std::vector<StmtP>& stmts,

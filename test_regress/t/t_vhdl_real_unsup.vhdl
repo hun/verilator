@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: a conversion to a real has no synthesizable form
+-- DESCRIPTION: Verilator: a real port has no model yet
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,
@@ -11,16 +11,12 @@ use ieee.std_logic_1164.all;
 
 entity t is
   port (
+    p : in real;
     o : out std_logic
   );
 end entity t;
 
 architecture rtl of t is
-  function to_real(value : integer) return real is
-  begin
-    return real(value);
-  end function to_real;
 begin
-  -- Both operands are calls, so the conversion inside each is lowered
-  o <= '1' when to_real(3) > to_real(0) else '0';
+  o <= '1' when p > 0.5 else '0';
 end architecture rtl;

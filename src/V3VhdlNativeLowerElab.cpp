@@ -647,6 +647,10 @@ void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoun
         } else if (!resolveType(port.type, type)) {
             continue;
         }
+        if (type.kind == VType::REAL) {
+            unsupportedError(port.flp, "real variable, signal, or port");
+            continue;
+        }
         if (rejectUnmodelledObject(type, port.flp, /*allowUnconstrained:*/ true)) continue;
         if (port.dir == PortMode::INOUT) {
             // V3Tristate needs a four-state net; a VHDL `bit` (or bit_vector) inout

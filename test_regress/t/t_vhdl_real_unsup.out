@@ -1,3 +1,5 @@
-%Error-UNSUPPORTED: t/t_vhdl_real_unsup.vhdl:21:12: Unsupported: VHDL conversion to a real value.
+%Error-UNSUPPORTED: t/t_vhdl_real_unsup.vhdl:14:5: Unsupported: VHDL real variable, signal, or port.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: t/t_vhdl_real_unsup.vhdl:21:17: VHDL: unknown identifier 'p'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: Exiting due to

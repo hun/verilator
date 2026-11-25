@@ -287,6 +287,11 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     }
     if (expr.text == "+") return operandp;
     if (expr.text == "-") {
+        if (type.kind == VType::REAL) {
+            AstNegateD* const negp = new AstNegateD{flp, operandp};
+            negp->dtypep(type.dtp);
+            return negp;
+        }
         // numeric_std defines unary minus for signed vectors and integers
         if (!type.isInt() && !(type.isVector() && type.isSigned())) {
             unsupportedError(flp, "unary '-' on a non-signed value");
@@ -472,11 +477,7 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
             return stringp;
         }
         if (isConversion(expr.a->text)) return lowerConversion(expr, contextp);
-        // A real has no synthesizable form, so a conversion to one is refused by name
-        if (expr.a->text == "real") {
-            unsupportedError(flp, "conversion to a real value");
-            return nullptr;
-        }
+        if (expr.a->text == "real") return lowerRealConversion(expr);
         // A predefined scalar type mark applied to a value is the identity conversion
         if (expr.a->text == "boolean" || expr.a->text == "bit" || expr.a->text == "std_logic"
             || expr.a->text == "std_ulogic") {
@@ -581,7 +582,11 @@ AstNodeExpr* Lowering::lowerExpr(const Expr& expr, const VType* contextp) {
         if (!physicalValue(*m_designp, expr, scaled)) return nullptr;
         return makeTimeConst(flp, scaled);
     }
-    case Expr::REAL_LIT: unsupportedError(flp, "real value in this context"); return nullptr;
+    case Expr::REAL_LIT: {
+        AstConst* const constp = new AstConst{flp, AstConst::RealDouble{}, expr.realValue};
+        constp->dtypep(findBasic(flp, VBasicDTypeKwd::DOUBLE));
+        return constp;
+    }
     case Expr::UNAFFECTED:
         unsupportedError(flp, "'unaffected' outside an assignment");
         return nullptr;
@@ -1713,6 +1718,50 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
     return resultp;
 }
 
+AstNodeExpr* Lowering::lowerRealBinary(FileLine* flp, const std::string& op, BinaryOperands& ops) {
+    AstNodeExpr*& lp = ops.lp;
+    AstNodeExpr*& rp = ops.rp;
+    if (ops.lt.kind != VType::REAL || ops.rt.kind != VType::REAL) {
+        unsupportedError(flp, "operator '" + op + "' on a real and a non-real value");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    AstNodeDType* const realDtp = findBasic(flp, VBasicDTypeKwd::DOUBLE);
+    AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+    AstNodeExpr* resultp = nullptr;
+    if (op == "+") {
+        resultp = new AstAddD{flp, lp, rp};
+    } else if (op == "-") {
+        resultp = new AstSubD{flp, lp, rp};
+    } else if (op == "*") {
+        resultp = new AstMulD{flp, lp, rp};
+    } else if (op == "/") {
+        resultp = new AstDivD{flp, lp, rp};
+    } else if (op == "=") {
+        resultp = new AstEqD{flp, lp, rp};
+    } else if (op == "/=") {
+        resultp = new AstNeqD{flp, lp, rp};
+    } else if (op == "<") {
+        resultp = new AstLtD{flp, lp, rp};
+    } else if (op == "<=") {
+        resultp = new AstLteD{flp, lp, rp};
+    } else if (op == ">") {
+        resultp = new AstGtD{flp, lp, rp};
+    } else if (op == ">=") {
+        resultp = new AstGteD{flp, lp, rp};
+    } else {
+        unsupportedError(flp, "operator '" + op + "' on a real value");
+        lp->deleteTree();
+        rp->deleteTree();
+        return nullptr;
+    }
+    const bool relational
+        = op == "=" || op == "/=" || op == "<" || op == "<=" || op == ">" || op == ">=";
+    resultp->dtypep(relational ? bitDtp : realDtp);
+    return resultp;
+}
+
 AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     const std::string& op = expr.text;
@@ -1753,6 +1802,7 @@ AstNodeExpr* Lowering::lowerBinary(const Expr& expr, const VType* contextp) {
     if (!lp) return nullptr;
     lt = typeOfLowered(*expr.a, lp);
     rt = typeOfLowered(*expr.b, rp);
+    if (lt.kind == VType::REAL || rt.kind == VType::REAL) return lowerRealBinary(flp, op, ops);
     if (isFixedType(lt) || isFixedType(rt)) return lowerFixedBinary(flp, expr, op, ops);
     if (logicalOp && !logicalOperandsConform(*expr.a, *expr.b, lt, rt)) {
         lp->deleteTree();
@@ -1815,7 +1865,8 @@ AstNodeExpr* Lowering::lowerEdgeCall(const Expr& expr) {
         && ((argType.kind != VType::LOGIC && argType.kind != VType::BIT
              && argType.typeName != "boolean")
             || argType.isVector())) {
-        flp->v3error("VHDL: " + expr.a->text + " operand is not a scalar std_ulogic, bit or boolean.");
+        flp->v3error("VHDL: " + expr.a->text
+                     + " operand is not a scalar std_ulogic, bit or boolean.");
         return nullptr;
     }
     const bool rising = expr.a->text == "rising_edge";
@@ -2270,6 +2321,27 @@ AstNodeExpr* Lowering::lowerIntrinsicFind(FileLine* flp, const std::string& fn,
     return resultp;
 }
 
+AstNodeExpr* Lowering::lowerRealConversion(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    if (expr.args.size() != 1) {
+        unsupportedError(flp, "conversion 'real' with " + std::to_string(expr.args.size())
+                                  + " arguments");
+        return nullptr;
+    }
+    AstNodeExpr* const valuep = lowerExpr(*expr.args[0], nullptr);
+    if (!valuep) return nullptr;
+    const VType valueType = typeOfDType(valuep->dtypep());
+    if (valueType.kind == VType::REAL) return valuep;
+    if (!valueType.isInt()) {
+        unsupportedError(flp, "conversion 'real' of a non-integer value");
+        valuep->deleteTree();
+        return nullptr;
+    }
+    AstNodeExpr* const realp = new AstIToRD{flp, valuep};
+    realp->dtypep(findBasic(flp, VBasicDTypeKwd::DOUBLE));
+    return realp;
+}
+
 AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) {
     FileLine* const flp = expr.flp;
     const std::string& name = expr.a->text;
@@ -2388,6 +2460,12 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) 
     }
     if (name == "integer" || name == "natural" || name == "positive") {
         if (valueType.isInt()) return valuep;
+        // A real rounds to the nearest integer, halfway cases away from zero (IEEE 1076-2008 16.3)
+        if (valueType.kind == VType::REAL) {
+            AstNodeExpr* const roundp = new AstRToIRoundS{flp, valuep};
+            roundp->dtypep(intType(flp).dtp);
+            return roundp;
+        }
         if (!valueType.isVector() || valueType.width > 32) {
             unsupportedError(flp, name + " of this operand");
             valuep->deleteTree();
@@ -2672,8 +2750,7 @@ AstNodeExpr* Lowering::lowerIndexChain(const Expr& expr, AstNodeExpr* basep,
             offsetp = scaledp;
         }
         AstSel* const selp = new AstSel{flp, curp, offsetp, levelWidth};
-        selp->dtypep(levelElem.dtp);
-        curp = selp;
+        curp = packedElementValue(flp, selp, levelElem);
         levelType = levelElem;
     }
     return curp;
@@ -3668,8 +3745,7 @@ AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
             return nullptr;
         }
         AstSel* const selp = new AstSel{flp, basep, field.offset, field.width};
-        selp->dtypep(field.type->dtp);
-        return selp;
+        return packedElementValue(flp, selp, *field.type);
     }
     flp->v3error("VHDL: record has no element '" + expr.spelling + "'.");
     return nullptr;
@@ -4094,6 +4170,22 @@ AstNodeExpr* Lowering::lowerAggregateSegment(FileLine* flp, const VType& type,
         segType = type.kind == VType::RECORD
                       ? vectorType(flp, type.kwd, VSigning::UNSIGNED, segment.width)
                       : vectorType(flp, type.kwd, type.signing, segment.width);
+    }
+    if (segType.kind == VType::REAL) {
+        // A real element is the bit pattern of its double, so the aggregate stays packed
+        double realValue = 0.0;
+        if (!evalReal(*segment.exprp, realValue)) {
+            unsupportedError(flp, "real element that is not static");
+            return nullptr;
+        }
+        uint64_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(realValue), "double is 64 bits");
+        std::memcpy(&bits, &realValue, sizeof(bits));
+        V3Number num{flp, 64, 0u};
+        num.setQuad(bits);
+        AstConst* const constp = new AstConst{flp, num};
+        constp->dtypep(findVectorWidth(flp, VBasicDTypeKwd::LOGIC, VSigning::UNSIGNED, 64));
+        return constp;
     }
     AstNodeExpr* valuep = nullptr;
     if (type.isVector() && segment.width > type.elemWidth) {

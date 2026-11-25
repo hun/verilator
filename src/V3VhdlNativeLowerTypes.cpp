@@ -810,15 +810,10 @@ bool Lowering::mentionsReal(const Expr& expr) const {
     }
 }
 
-//! A real survives only as an elaboration-time constant; reject any object that would
-//! need a runtime floating type so it reports as unsupported instead of emitting a
-//! variable with no data type. Likewise reject an object whose type stayed unconstrained
-//! (null data type); ports defer their width to a binding, so they opt out.
+//! Reject an object the model cannot hold so it reports as unsupported instead of emitting a
+//! variable with no data type. An object whose type stayed unconstrained (null data type) is
+//! rejected too; ports defer their width to a binding, so they opt out.
 bool Lowering::rejectUnmodelledObject(const VType& type, FileLine* flp, bool allowUnconstrained) {
-    if (type.kind == VType::REAL) {
-        unsupportedError(flp, "real variable, signal, or port");
-        return true;
-    }
     // A physical value is a count of its step unit only while elaborating: the subset
     // has no run-time physical object (5.14)
     if (type.kind == VType::INT && type.kwd == VBasicDTypeKwd::LONGINT) {
@@ -836,7 +831,7 @@ bool Lowering::rejectUnmodelledObject(const VType& type, FileLine* flp, bool all
     static constexpr int MAX_NESTING = 32;
     const auto rejectNested = [&](const VType& nested, const auto& self, int depth) -> bool {
         if (depth > MAX_NESTING) v3fatalSrc("VHDL type nesting exceeds the supported depth");
-        if (nested.kind == VType::REAL) {
+        if (nested.kind == VType::REAL && depth > 0) {
             unsupportedError(flp, "real object element");
             return true;
         }
@@ -1778,12 +1773,13 @@ bool Lowering::resolveTypePredefined(const TypeSpec& spec, const std::string& ma
         return true;
     }
     if (mark == "real") {
-        // A scalar handled only at elaboration: it has no width for a constraint to
-        // bound, and any use that would need a runtime type (a variable, a port, ...)
-        // is rejected where it appears -- see rejectUnmodelledObject.
+        // A double: a real constant folds at elaboration, and a real variable or signal is
+        // a double in the model. Its width is that of the double, so a resize is a no-op.
         out = VType{};
         out.kind = VType::REAL;
-        out.dtp = nullptr;
+        out.dtp = findBasic(flp, VBasicDTypeKwd::DOUBLE);
+        out.width = 64;
+        out.kwd = VBasicDTypeKwd::DOUBLE;
         out.typeName = "real";
         return true;
     }

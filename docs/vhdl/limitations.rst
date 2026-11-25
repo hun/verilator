@@ -33,6 +33,12 @@ fixed-point operand. Division, ``mod``, ``rem``, shifts, ``to_real`` and arrays 
 fixed-point elements are refused. The results of these operations were compared with
 GHDL on every operand pair of small ranges.
 
+A ``real`` variable or signal is a double: ``+``, ``-``, ``*``, ``/``, unary ``-``, the six
+comparisons, and ``real`` of an integer. ``integer`` of a real rounds to the nearest integer,
+halfway cases away from zero. A real subtype's range is not checked. ``uniform`` of
+``ieee.math_real`` follows the IEEE 1076.2 generator, the same sequence as GHDL. A constant
+array or record with real elements or fields is folded to its bit patterns.
+
 The attributes ``'pos``, ``'val``, ``'succ``, ``'pred``, ``'leftof`` and ``'rightof`` apply to
 integer types, and all but the last two to enumeration types. ``'value`` and ``'image`` of a
 run-time value are refused.
@@ -165,8 +171,9 @@ Not supported
 
 These constructs are refused with a diagnostic: access, protected, file and
 ``textio`` types; ``force``/``release``; runtime ``'value`` and string parsing;
-physical objects and ``now``; real signals, variables and ports (real constants
-fold at elaboration) and the floating-point package ``float_pkg``;
+physical objects and ``now``; real ports; arrays and records with real elements that
+are variables or signals; the operators ``**`` and ``mod`` on a real; and the floating-point
+package ``float_pkg``;
 user-defined resolution functions; allocators; multi-dimensional
 ports; ``linkage`` ports, ``disconnect`` and ``guarded`` signals; embedded
 other-language source; and general timing constructs. VHDL-2019 is outside the
