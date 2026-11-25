@@ -2393,11 +2393,15 @@ bool Lowering::evalFuncElementAssign(const Stmt& stmt) {
     // Each element write rebuilds the local's whole value, and a body that reads
     // the local back grows the rebuilt tree by that read too. The budget follows
     // the value's size, which is what every write copies
-    m_funcWriteCost += 64 + it->second.exprp->width() / 64 + it->second.exprp->nodeCount();
-    if (m_funcWriteCost > MAX_FOLD_WRITE_COST) {
+    // A constant local is updated in place below when the write folds, which adds no nodes
+    AstConst* const constLocalp = VN_CAST(it->second.exprp, Const);
+    const auto chargeWrite = [&]() {
+        m_funcWriteCost += 64 + it->second.exprp->width() / 64 + it->second.exprp->nodeCount();
+        if (m_funcWriteCost <= MAX_FOLD_WRITE_COST) return true;
         unsupportedError(flp, "function body with too many element assignments");
         return false;
-    }
+    };
+    if (!constLocalp && !chargeWrite()) return false;
     AstNodeExpr* const readp = lowerDesignator(target, false);
     AstSel* const selp = VN_CAST(readp, Sel);
     if (!selp) {
@@ -2427,6 +2431,39 @@ bool Lowering::evalFuncElementAssign(const Stmt& stmt) {
         readp->deleteTree();
         offsetp->deleteTree();
         return false;
+    }
+    if (constLocalp) {
+        // Both the position and the value are constants: overwrite the bits of the local
+        AstNodeExpr* const sizedp = valuep->width() == selp->widthConst()
+                                        ? valuep
+                                        : resizeExpr(valuep, typeOfDType(selp->dtypep()), flp);
+        AstConst* const posp = foldStatic(offsetp);
+        AstConst* const bitsp = foldStatic(sizedp);
+        if (posp && bitsp && posp->num().isFourState() == false
+            && posp->toSInt() >= 0 && posp->toSInt() + bitsp->width() <= constLocalp->width()) {
+            const int lsb = posp->toSInt();
+            for (int bit = 0; bit < bitsp->width(); ++bit) {
+                const V3Number& value = bitsp->num();
+                constLocalp->num().setBit(
+                    lsb + bit, value.bitIs1(bit) ? '1' : value.bitIsX(bit) ? 'x'
+                                                       : value.bitIsZ(bit) ? 'z' : '0');
+            }
+            posp->deleteTree();
+            bitsp->deleteTree();
+            sizedp->deleteTree();
+            offsetp->deleteTree();
+            readp->deleteTree();
+            return true;
+        }
+        if (posp) posp->deleteTree();
+        if (bitsp) bitsp->deleteTree();
+        valuep = sizedp;
+        if (!chargeWrite()) {
+            valuep->deleteTree();
+            offsetp->deleteTree();
+            readp->deleteTree();
+            return false;
+        }
     }
     AstNodeExpr* const updatedp
         = updateLocalElement(flp, it->second.exprp->cloneTree(false), valuep, selp->dtypep(),
