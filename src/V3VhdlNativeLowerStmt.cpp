@@ -1431,21 +1431,35 @@ bool Lowering::findTrailingWait(const Process& process, WaitProcessLowering& ctx
     return true;
 }
 
-//! Count the waits of a statement list that are not a bare `wait;`, in nested statements too
-static void countTimedWaits(const std::vector<StmtP>& stmts, std::size_t& count) {
+//! Count the waits of a statement list that are not a bare `wait;`, in nested statements and
+//! in the bodies of the procedures it calls. `seen` stops a recursive procedure
+void Lowering::countTimedWaits(const std::vector<StmtP>& stmts,
+                               std::set<const SubprogramDecl*>& seen, std::size_t& count) const {
     for (const StmtP& stmtp : stmts) {
         if (!stmtp) continue;
         if (stmtp->kind == Stmt::WAIT && !stmtp->waitForever) ++count;
-        for (const auto& branch : stmtp->branches) countTimedWaits(branch.second, count);
-        for (const auto& item : stmtp->caseItems) countTimedWaits(item.second, count);
-        countTimedWaits(stmtp->body, count);
+        if (stmtp->kind == Stmt::CALL) {
+            const Expr& callExpr = *stmtp->value;
+            const std::string name
+                = callExpr.kind == Expr::INDEX && callExpr.a ? callExpr.a->text : callExpr.text;
+            const auto it = m_subprograms.find(name);
+            if (it == m_subprograms.end()) continue;
+            for (const SubprogramRef& ref : it->second) {
+                if (ref.declp && ref.declp->hasBody && seen.insert(ref.declp).second)
+                    countTimedWaits(ref.declp->body, seen, count);
+            }
+        }
+        for (const auto& branch : stmtp->branches) countTimedWaits(branch.second, seen, count);
+        for (const auto& item : stmtp->caseItems) countTimedWaits(item.second, seen, count);
+        countTimedWaits(stmtp->body, seen, count);
     }
 }
 
 //! Whether a process has waits that need to suspend it in the middle of its body
 bool Lowering::needsSequentialWaits(const Process& process) {
+    std::set<const SubprogramDecl*> seen;
     std::size_t count = 0;
-    countTimedWaits(process.body, count);
+    countTimedWaits(process.body, seen, count);
     if (count > 1) return true;
     if (count == 0) return false;
     // One wait is handled by the activation scheme only at the top level of the body
@@ -1489,14 +1503,14 @@ AstNodeStmt* Lowering::lowerSequentialWait(const Stmt& stmt) {
         }
     } else {
         for (const std::string& name : stmt.waitNames) {
-            const auto it = m_scope.find(name);
-            if (it == m_scope.end()) {
+            AstVar* const varp = visibleVar(name);
+            if (!varp) {
                 unsupportedError(flp, "wait on '" + name + "', which is not a signal");
                 if (itemsp) itemsp->deleteTree();
                 return nullptr;
             }
-            AstSenItem* const itemp = new AstSenItem{
-                flp, VEdgeType::ET_CHANGED, new AstVarRef{flp, it->second.varp, VAccess::READ}};
+            AstSenItem* const itemp = new AstSenItem{flp, VEdgeType::ET_CHANGED,
+                                                     new AstVarRef{flp, varp, VAccess::READ}};
             itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
         }
     }
@@ -1565,17 +1579,27 @@ AstSenItem* Lowering::makeWaitSensitivity(const Expr& waitValue, const std::vect
     std::set<std::string> levelNames;
     collectExprNames(waitValue, levelNames);
     for (const std::string& name : levelNames) {
-        const auto it = m_scope.find(name);
-        if (it == m_scope.end()) continue;
+        AstVar* const varp = visibleVar(name);
+        if (!varp) continue;
         if (std::any_of(edges.begin(), edges.end(),
-                        [&](const Edge& edge) { return edge.varp == it->second.varp; })) {
+                        [&](const Edge& edge) { return edge.varp == varp; })) {
             continue;  // Already an edge item
         }
-        AstSenItem* const itemp = new AstSenItem{
-            flp, VEdgeType::ET_CHANGED, new AstVarRef{flp, it->second.varp, VAccess::READ}};
+        AstSenItem* const itemp
+            = new AstSenItem{flp, VEdgeType::ET_CHANGED, new AstVarRef{flp, varp, VAccess::READ}};
         itemsp = itemsp ? AstNode::addNext<AstSenItem, AstSenItem>(itemsp, itemp) : itemp;
     }
     return itemsp;
+}
+
+AstVar* Lowering::visibleVar(const std::string& name) const {
+    const auto bindingIt = activeEnv().find(name);
+    if (bindingIt != activeEnv().end()) {
+        const AstVarRef* const refp = VN_CAST(bindingIt->second.exprp, VarRef);
+        return refp ? refp->varp() : nullptr;
+    }
+    const auto it = m_scope.find(name);
+    return it == m_scope.end() ? nullptr : it->second.varp;
 }
 
 //! Body run on each activation, with single-shot and bare-wait gating applied

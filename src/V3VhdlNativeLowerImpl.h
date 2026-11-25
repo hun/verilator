@@ -1004,8 +1004,7 @@ class Lowering final {
     //! The variable a name denotes; an alias of a signal denotes its target, which is
     //! not in the scope under its own name
     AstVar* lookupVar(const Expr& nameExpr) {
-        const auto it = m_scope.find(nameExpr.text);
-        if (it != m_scope.end()) return it->second.varp;
+        if (AstVar* const varp = visibleVar(nameExpr.text)) return varp;
         AstNodeExpr* const aliasp = lowerAlias(nameExpr, false);
         AstVarRef* const refp = VN_CAST(aliasp, VarRef);
         AstVar* const varp = refp ? refp->varp() : nullptr;
@@ -1262,7 +1261,12 @@ class Lowering final {
     void lowerTimedWaitProcess(const WaitProcessLowering& ctx);
     AstSenItem* makeWaitSensitivity(const Expr& waitValue, const std::vector<Edge>& edges,
                                     FileLine* flp, bool edgesOnly = false) const;
-    static bool needsSequentialWaits(const Process& process);
+    //! The variable a name denotes: a formal of an inlined subprogram bound to one, or a
+    //! name in scope
+    AstVar* visibleVar(const std::string& name) const;
+    bool needsSequentialWaits(const Process& process);
+    void countTimedWaits(const std::vector<StmtP>& stmts, std::set<const SubprogramDecl*>& seen,
+                         std::size_t& count) const;
     void lowerSequentialWaitProcess(const Process& process);
     AstNodeStmt* lowerSequentialWait(const Stmt& stmt);
     AstNodeStmt* makeWaitActivationBody(const WaitProcessLowering& ctx, AstNodeExpr* condp);
