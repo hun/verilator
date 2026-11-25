@@ -42,6 +42,9 @@ static constexpr int64_t MAX_FOLD_ITERATIONS = 4096;
 //! Maximum loop iterations one function call runs in place (Lowering::execFuncStatic)
 static constexpr int64_t MAX_EXEC_ITERATIONS = 1 << 20;
 static constexpr int MAX_RECURSION_DEPTH = 64;  // Nested inlinings of one function
+//! Largest tracked variable value, in expression nodes; a variable that reads itself in
+//! each assignment would otherwise double its tracked value per statement
+static constexpr std::size_t MAX_TRACKED_VALUE_NODES = 256;
 //! Maximum width of a vector expression folded by a conversion
 static constexpr int64_t MAX_FOLD_WIDTH = 4096;
 //! Maximum width of a constant folded into a memory image
@@ -931,6 +934,21 @@ class Lowering final {
         conOut = 0;
         return true;
     }
+    static std::size_t exprNodes(const Expr& expr) {
+        std::size_t count = 1;
+        for (const Expr* const childp : {expr.a.get(), expr.b.get(), expr.c.get()}) {
+            if (childp) count += exprNodes(*childp);
+        }
+        for (const ExprP& argp : expr.args) {
+            if (argp) count += exprNodes(*argp);
+        }
+        for (const auto& choiceList : expr.choices) {
+            for (const ExprP& choicep : choiceList) {
+                if (choicep) count += exprNodes(*choicep);
+            }
+        }
+        return count;
+    }
     //! Clone an expression, replacing variables with their tracked values
     ExprP substVars(const Expr& expr, int depth = 0) const {
         ExprP copy = std::make_unique<Expr>(expr.kind);
@@ -987,7 +1005,12 @@ class Lowering final {
             }
             if (basep && basep->kind == Expr::NAME) {
                 if (stmt.target->kind == Expr::NAME && stmt.value) {
-                    m_varVals[basep->text] = substVars(*stmt.value);
+                    ExprP valuep = substVars(*stmt.value);
+                    if (exprNodes(*valuep) > MAX_TRACKED_VALUE_NODES) {
+                        m_varVals.erase(basep->text);  // Too large to be worth tracking
+                    } else {
+                        m_varVals[basep->text] = std::move(valuep);
+                    }
                 } else {
                     m_varVals.erase(basep->text);  // Partial or conditional write: unknown
                 }
