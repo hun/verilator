@@ -1,6 +1,7 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //
-// DESCRIPTION: Verilator: an aggregate element that is a conversion of a slice at a run-time position
+// DESCRIPTION: Verilator: an aggregate element that is a conversion of a slice at a run-time
+// position
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of either the GNU Lesser General Public License Version 3,

@@ -1,6 +1,7 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //
-// DESCRIPTION: Verilator: VHDL predefined function called where same-named overloads do not take the actuals
+// DESCRIPTION: Verilator: VHDL predefined function called where same-named overloads do not take
+// the actuals
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of either the GNU Lesser General Public License Version 3,

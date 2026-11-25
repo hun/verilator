@@ -2999,8 +2999,8 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         }
         // A literal range in the other direction stays the documented extension `t_vhdl_range`
         // pins: its left bound is the most significant element
-        return sliceOf(flp, basep, baseType, elemWidth, static_cast<int>(hi),
-                       static_cast<int>(lo), expr.text != "downto");
+        return sliceOf(flp, basep, baseType, elemWidth, static_cast<int>(hi), static_cast<int>(lo),
+                       expr.text != "downto");
     }
     return lowerDynamicSlice(expr, basep, baseType);
 }

@@ -2492,8 +2492,7 @@ bool Parser::parseConcurrentPreamble(Architecture& arch, FileLine* flp) {
         m_lexer.restore(pslSaved);
         // The keyword is not reserved: a directive is followed by a property, which starts
         // with `{` or a name, never by the `<=` or `(` of an assignment or a call
-        if ((pslAhead.kind == Token::SYM && pslAhead.text == "{")
-            || pslAhead.kind == Token::ID) {
+        if ((pslAhead.kind == Token::SYM && pslAhead.text == "{") || pslAhead.kind == Token::ID) {
             if ((isId("property") || isId("sequence")) && pslAhead.kind == Token::ID) {
                 m_pslNames.insert(pslAhead.text);
             }

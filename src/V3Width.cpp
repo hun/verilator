@@ -2858,10 +2858,10 @@ class WidthVisitor final : public VNVisitor {
         UASSERT_OBJ(!nodep->timeunit().isNone(), nodep, "$time import no units");
         if (!VN_IS(nodep->lhsp(), Const)) {
             // A run-time value is scaled to the time unit; V3Timing rounds it to ticks
-            AstMulD* const scaledp = new AstMulD{
-                nodep->fileline(), nodep->lhsp()->unlinkFrBack(),
-                new AstConst{nodep->fileline(), AstConst::RealDouble{},
-                             1.0 / nodep->timeunit().multiplier()}};
+            AstMulD* const scaledp
+                = new AstMulD{nodep->fileline(), nodep->lhsp()->unlinkFrBack(),
+                              new AstConst{nodep->fileline(), AstConst::RealDouble{},
+                                           1.0 / nodep->timeunit().multiplier()}};
             nodep->replaceWith(scaledp);
             VL_DO_DANGLING(nodep->deleteTree(), nodep);
             return;
