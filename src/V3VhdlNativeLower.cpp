@@ -44,6 +44,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -268,6 +269,24 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
             [&](const PackageUnit& pkg) { return !pkg.isBody && pkg.name == owner; });
         if (it == library.packages.end()) break;
         lowering.emitPackage(*it, table.impl());
+    }
+}
+
+void linkPackageSignalRefs(AstNetlist* rootp, const PackageTable& table) {
+    // A reference to a package signal names its package, which the scope pass needs to find
+    // the variable's scope; the references of one unit cannot name it themselves
+    std::unordered_map<const AstVar*, AstPackage*> owners;
+    for (const auto& entry : table.impl().packages) {
+        for (const auto& signal : entry.second.signals) {
+            owners[signal.second.varp] = signal.second.pkgp;
+        }
+    }
+    if (owners.empty()) return;
+    for (AstNodeModule* const modp : rootp->modulespList()) {
+        modp->foreach([&](AstVarRef* const refp) {
+            const auto it = owners.find(refp->varp());
+            if (it != owners.end()) refp->classOrPackagep(it->second);
+        });
     }
 }
 

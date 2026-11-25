@@ -17,7 +17,8 @@ Supported subset
 ----------------
 
 The subset covers entities and architectures, packages (including generic
-package instantiations and deferred constants), components and direct entity
+package instantiations, deferred constants and signals declared in a package
+specification), components and direct entity
 instantiation, constant and type generics, logic and numeric types, records,
 one-dimensional arrays and arrays of arrays, processes and concurrent
 assignments, generate statements, static loops, pure functions and procedures,
@@ -105,6 +106,12 @@ sensitivity from the signals read by the lowered body; explicit sensitivity
 lists are honored as written. ``postponed`` on a process or an assertion is
 accepted and ignored: the statement runs with the others, not at the end of the
 time step.
+
+A signal declared in a package specification is one signal that every unit using
+the package reads and drives, through a use clause, an alias or a qualified name.
+An unresolved one may have one driver across the design; an entity that is
+instantiated more than once and drives it from one process is counted once. A
+signal in a package body is refused.
 
 Integers, ranges and packing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

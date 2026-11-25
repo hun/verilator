@@ -3435,6 +3435,11 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             continue;
         }
         if (skipFileDecl()) continue;
+        if (isId("signal") && !isBody) {
+            advance();
+            parseDeclInto(pkg.decls, Decl::SIGNAL);
+            continue;
+        }
         if (isId("signal") || isId("shared") || isId("variable") || isId("group")) {
             unsupported("package declarative item '" + m_cur.text + "'");
             return;

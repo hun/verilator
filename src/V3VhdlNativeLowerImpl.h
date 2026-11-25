@@ -53,8 +53,17 @@ struct AliasInfo final {
     bool hasType = false;  // The alias has a subtype indication
 };
 
+//! A signal a package declares. The variable lives in the package's own module, so
+//! every unit that sees the signal reads and drives that one variable.
+struct PackageSignal final {
+    AstVar* varp = nullptr;  // The signal
+    AstPackage* pkgp = nullptr;  // Package holding the signal
+    VType type;  // Resolved type of the signal
+};
+
 struct PackageInfo final {
     std::map<std::string, AliasInfo> aliases;  // Aliases by folded name
+    std::map<std::string, PackageSignal> signals;  // Signals by folded name
     std::map<std::string, VType> types;  // Declared types by folded name
     std::map<std::string, int64_t> consts;  // Integer constants by folded name
     std::map<std::string, AstConst*> constValues;  // Typed constants by folded name
@@ -382,6 +391,8 @@ class Lowering final {
     std::string m_genSuffix;  // Suffix for names created inside a generate
     const ModuleMap* m_modulesp = nullptr;  // Modules of the instantiated entities
     const PackageTable::Impl* m_packagesp = nullptr;  // Packages visible to this unit
+    AstPackage* m_pkgp = nullptr;  // Package whose signals are being emitted
+    std::map<std::string, PackageSignal> m_packageSignals;  // Signals of the package emitted
     std::set<std::string> m_imported;  // Names that came from a used package
     std::set<std::string> m_ambiguousTypes;  // Type names imported from two packages
     std::set<std::string> m_ambiguousLiterals;  // Enumeration literals from two types
@@ -402,9 +413,6 @@ class Lowering final {
     //! Latest lowering of each aggregate or concatenation; an earlier one does not match
     std::map<const Expr*, LoweredType> m_exprTypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
-    //! Signals whose type has no resolution function: at most one driver (IEEE 1076-2008
-    //! 6.4.2.3), unlike std_logic and the arrays built from it
-    std::set<AstVar*> m_unresolvedSignals;
     std::map<std::string, AliasInfo> m_aliases;  // Aliases visible in the unit, by folded name
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
     Design* const m_designp;  // Design context for generic specialization
@@ -1350,7 +1358,6 @@ class Lowering final {
     //! run-time replication to stay below the Verilator replication limit
     AstNodeExpr* repeatValue(FileLine* flp, AstNodeExpr* valuep, int count, AstNodeDType* dtp);
     bool deriveAggregateType(const Expr& expr, VType& out);
-    AstConst* foldStatic(AstNodeExpr* exprp) const;
     AstNodeExpr* lowerSelectedExpr(const Expr& expr);
     const VType* typeOfName(const Expr& expr) const;
     const VType* discreteRangeType(const Expr& expr) const;
@@ -1422,8 +1429,6 @@ class Lowering final {
         }
         return false;
     }
-    //! Report every unresolved signal that more than one emitted assignment drives
-    void checkDrivers();
     //! Emit `if (cond) $error(message); $finish;` as a module-level run-time check
     //! The statement that reports a run-time error and ends the run when `condp` holds
     AstNodeStmt* makeRuntimeErrorStmt(FileLine* flp, AstNodeExpr* condp,
@@ -1559,6 +1564,8 @@ class Lowering final {
     static std::vector<const Stmt*> rawPtrs(const std::vector<StmtP>& stmts);
 
 public:
+    //! Fold a static expression to a constant, or null when one operand is not static
+    static AstConst* foldStatic(AstNodeExpr* exprp);
     explicit Lowering(AstNetlist* rootp, const PackageTable::Impl* packagesp = nullptr,
                       const ModuleMap* modulesp = nullptr, Design* designp = nullptr)
         : m_rootp{rootp}
@@ -1643,6 +1650,8 @@ public:
     void emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
                      const GenericBindings* bindingsp = nullptr,
                      const std::string& publishName = {});
+    void emitPackageSignal(const PackageUnit& pkg, const Decl& decl, const std::string& pubName,
+                           const PackageTable::Impl& table);
     void completeDeferredConsts();
     PackageInfo publishedInfo(const PackageUnit& pkg);
     void instantiatePackage(const std::vector<PackageUnit>& packages, const PackageInstance& inst,

@@ -424,12 +424,12 @@ void Lowering::addRuntimeError(FileLine* flp, AstNodeExpr* condp, const std::str
                                     makeRuntimeErrorStmt(flp, condp, message)});
 }
 
-void Lowering::checkDrivers() {
+void checkDrivers(AstNetlist* rootp, const Design& design) {
     // A composite signal's scalar subelements are separate signals (IEEE 1076-2008
     // 6.4.2.3), so drivers are compared per bit position. Each emitted always/initial
     // statement and each bare continuous assignment is one driver; a write whose index
     // is not static is taken to cover the whole signal. A declared initial value is not
-    // a driver.
+    // a driver. Every unit is counted, because a package signal is driven from several.
     struct Range final {
         int lsb = 0;  // Least significant bit of the driven range
         int width = 0;  // Bit width of the driven range
@@ -437,34 +437,36 @@ void Lowering::checkDrivers() {
     };
     std::map<AstVar*, std::vector<Range>> ranges;
     int driver = 0;
-    for (AstNode* stmtp = m_modp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
-        if (VN_IS(stmtp, InitialStatic) || VN_IS(stmtp, Var) || VN_IS(stmtp, Cell)) continue;
-        if (!VN_IS(stmtp, Always) && !VN_IS(stmtp, Initial) && !VN_IS(stmtp, AssignW)
-            && !VN_IS(stmtp, AssignDly) && !VN_IS(stmtp, Assign)) {
-            continue;
-        }
-        ++driver;
-        stmtp->foreach([&](AstVarRef* refp) {
-            if (refp->access() != VAccess::WRITE) return;
-            AstVar* const varp = refp->varp();
-            if (!m_unresolvedSignals.count(varp)) return;
-            Range range;
-            range.driver = driver;
-            range.width = varp->width();
-            // Compose the selects around the write, so a record element or array element
-            // covers only its own bits; the indices are folded here rather than later
-            AstNode* nodep = refp;
-            while (AstSel* const selp = VN_CAST(nodep->backp(), Sel)) {
-                if (selp->fromp() != nodep) break;
-                AstConst* const lsbp = foldStatic(selp->lsbp());
-                if (!lsbp) break;
-                range.lsb += static_cast<int>(lsbp->toUInt());
-                lsbp->deleteTree();
-                range.width = selp->widthConst();
-                nodep = selp;
+    for (AstNodeModule* const modp : rootp->modulespList()) {
+        for (AstNode* stmtp = modp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
+            if (VN_IS(stmtp, InitialStatic) || VN_IS(stmtp, Var) || VN_IS(stmtp, Cell)) continue;
+            if (!VN_IS(stmtp, Always) && !VN_IS(stmtp, Initial) && !VN_IS(stmtp, AssignW)
+                && !VN_IS(stmtp, AssignDly) && !VN_IS(stmtp, Assign)) {
+                continue;
             }
-            ranges[varp].push_back(range);
-        });
+            ++driver;
+            stmtp->foreach([&](AstVarRef* refp) {
+                if (refp->access() != VAccess::WRITE) return;
+                AstVar* const varp = refp->varp();
+                if (!design.unresolvedSignals.count(varp)) return;
+                Range range;
+                range.driver = driver;
+                range.width = varp->width();
+                // Compose the selects around the write, so a record element or array element
+                // covers only its own bits; the indices are folded here rather than later
+                AstNode* nodep = refp;
+                while (AstSel* const selp = VN_CAST(nodep->backp(), Sel)) {
+                    if (selp->fromp() != nodep) break;
+                    AstConst* const lsbp = Lowering::foldStatic(selp->lsbp());
+                    if (!lsbp) break;
+                    range.lsb += static_cast<int>(lsbp->toUInt());
+                    lsbp->deleteTree();
+                    range.width = selp->widthConst();
+                    nodep = selp;
+                }
+                ranges[varp].push_back(range);
+            });
+        }
     }
     for (const auto& entry : ranges) {
         const std::vector<Range>& vec = entry.second;

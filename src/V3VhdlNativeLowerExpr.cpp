@@ -2594,6 +2594,15 @@ AstNodeExpr* Lowering::lowerDesignator(const Expr& expr, bool write) {
         return lowerSel(expr, basep, baseType);
     }
     if (expr.kind == Expr::SELECTED) {
+        std::string pkgName;
+        if (expr.a && packageNameOf(*expr.a, pkgName)) {
+            const PackageInfo& info = m_packagesp->packages.at(pkgName);
+            const auto sigIt = info.signals.find(expr.text);
+            if (sigIt != info.signals.end()) {
+                const VAccess access = write ? VAccess::WRITE : VAccess::READ;
+                return new AstVarRef{flp, sigIt->second.varp, access};
+            }
+        }
         VType prefixType;
         if (!expr.a || !typeOfDesignator(*expr.a, prefixType)
             || prefixType.kind != VType::RECORD) {
@@ -3718,6 +3727,9 @@ AstNodeExpr* Lowering::lowerPackageMember(const Expr& expr, const std::string& p
     if (valueIt != m_constValues.end()) return valueIt->second->cloneTree(false);
     const auto enumIt = m_enumConsts.find(expr.text);
     if (enumIt != m_enumConsts.end()) return enumIt->second->cloneTree(false);
+    const PackageInfo& info = m_packagesp->packages.at(pkgName);
+    const auto sigIt = info.signals.find(expr.text);
+    if (sigIt != info.signals.end()) return new AstVarRef{flp, sigIt->second.varp, VAccess::READ};
     flp->v3error("VHDL: package '" + pkgName + "' has no declaration '" + expr.spelling + "'.");
     return nullptr;
 }
@@ -3755,7 +3767,7 @@ AstNodeExpr* Lowering::lowerSelectedExpr(const Expr& expr) {
 //! not known. The expression is left as it is, so a caller that needs a value keeps the
 //! run-time form. This is the frontend's own fold: VHDL is lowered while
 //! V3Global::readFiles holds the user4 slot V3Const claims, and a nested claim aborts.
-AstConst* Lowering::foldStatic(AstNodeExpr* exprp) const {
+AstConst* Lowering::foldStatic(AstNodeExpr* exprp) {
     if (!exprp) return nullptr;
     const auto result = [&](const V3Number& num) {
         AstConst* const constp = new AstConst{exprp->fileline(), num};

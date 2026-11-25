@@ -557,4 +557,6 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     orderEntities(ctx);
     elaborateEntities(ctx);
     finishElaboration(ctx);
+    vhdlnative::checkDrivers(rootp, ctx.design);
+    vhdlnative::linkPackageSignalRefs(rootp, ctx.packages);
 }

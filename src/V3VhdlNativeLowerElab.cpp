@@ -233,6 +233,15 @@ void Lowering::importPackage(const std::string& name, const std::string& only) {
         m_consts[constant.first] = constant.second;
         m_imported.insert(constant.first);
     }
+    for (const auto& signal : info.signals) {
+        if (!wants(signal.first)) continue;
+        if (m_scope.count(signal.first)) continue;
+        m_scope[signal.first] = VarInfo{signal.second.varp, signal.second.type};
+        if (!isResolvedType(signal.second.type)) {
+            m_designp->unresolvedSignals.insert(signal.second.varp);
+        }
+        m_imported.insert(signal.first);
+    }
     for (const auto& value : info.constValues) {
         if (!wants(value.first)) continue;
         if (m_consts.count(value.first) || m_constValues.count(value.first)) continue;
@@ -336,6 +345,7 @@ static void mergePackageInfo(PackageInfo& dest, PackageInfo& info) {
     }
     for (std::unique_ptr<AstConst>& constp : info.owned) dest.owned.push_back(std::move(constp));
     for (const SubprogramDecl* const subp : info.subprograms) dest.subprograms.push_back(subp);
+    for (const auto& signal : info.signals) dest.signals[signal.first] = signal.second;
     for (const auto& component : info.components) {
         dest.components[component.first] = component.second;
     }
@@ -382,6 +392,49 @@ void Lowering::completeDeferredConsts() {
     if (!stillDeferred) finishDeferredTypes();
 }
 
+//! Declare a signal of a package specification. The first emission creates the variable in
+//! a package of its own; a later one (for deferred constants) reuses the variable already
+//! published, so the signal is never declared twice.
+void Lowering::emitPackageSignal(const PackageUnit& pkg, const Decl& decl,
+                                 const std::string& pubName, const PackageTable::Impl& table) {
+    VType type;
+    if (!resolveType(decl.type, type)) return;
+    if (rejectUnmodelledObject(type, decl.flp)) return;
+    const auto pkgIt = table.packages.find(pubName);
+    for (const auto& name : decl.names) {
+        if (!reserveName(name.first, name.second, decl.flp)) continue;
+        const bool reused
+            = pkgIt != table.packages.end() && pkgIt->second.signals.count(name.first);
+        PackageSignal signal;
+        if (reused) {
+            signal = pkgIt->second.signals.at(name.first);
+        } else {
+            if (!m_pkgp) {
+                m_pkgp = new AstPackage{pkg.flp, pubName, pkg.libname};
+                m_pkgp->inLibrary(pkg.inLibrary);
+                m_rootp->addModulesp(m_pkgp);
+            }
+            AstVar* const varp = new AstVar{decl.flp, VVarType::VAR, name.first, type.dtp};
+            traceDeclared(varp);
+            m_pkgp->addStmtsp(varp);
+            if (!isResolvedType(type)) m_designp->unresolvedSignals.insert(varp);
+            signal = PackageSignal{varp, m_pkgp, type};
+        }
+        m_packageSignals[name.first] = signal;
+        m_scope[name.first] = VarInfo{signal.varp, type};
+        if (reused || !decl.init) continue;
+        AstNodeExpr* const lhsp = new AstVarRef{decl.flp, signal.varp, VAccess::WRITE};
+        AstNodeExpr* rhsp = lowerExpr(*decl.init, &type);
+        if (rhsp && valueConforms(type, *decl.init, "initial value")) {
+            rhsp = resizeExpr(rhsp, type, decl.flp);
+            m_pkgp->addStmtsp(new AstInitialStatic{decl.flp, new AstAssign{decl.flp, lhsp, rhsp}});
+        } else {
+            if (rhsp) rhsp->deleteTree();
+            lhsp->deleteTree();
+        }
+    }
+}
+
 //! What a package publishes, taken from the tables its emission filled; clears them
 PackageInfo Lowering::publishedInfo(const PackageUnit& pkg) {
     PackageInfo info;
@@ -394,6 +447,7 @@ PackageInfo Lowering::publishedInfo(const PackageUnit& pkg) {
     info.ambiguousLiterals = m_ambiguousLiterals;
     info.realConsts = std::move(m_realConsts);
     info.owned = std::move(m_ownedConsts);
+    info.signals = std::move(m_packageSignals);
     for (const ComponentDecl& component : pkg.components) {
         info.components[component.name] = &component;
     }
@@ -467,6 +521,8 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     m_aliases.clear();
     m_subprograms.clear();
     m_components.clear();
+    m_pkgp = nullptr;
+    m_packageSignals.clear();
     // The packages named by the unit's `use` clauses are visible here as well, as they
     // are in an entity or an architecture. What the package declares itself wins: those
     // registrations overwrite, and `importPackage` never replaces a name it finds.
@@ -493,6 +549,10 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // evaluates against this scope and not against whatever the caller has
     m_moduleScope = saveScope();
     for (const Decl& decl : pkg.decls) {
+        if (decl.kind == Decl::SIGNAL) {
+            emitPackageSignal(pkg, decl, pubName, table);
+            continue;
+        }
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
         // A subprogram of this unit evaluates against what the unit has declared before
         // it, so a body that reads a constant declared earlier in the same package body
@@ -579,7 +639,7 @@ void Lowering::emitEntityDecls(const EntityUnit& entity, const Architecture& arc
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
             if (decl.kind == Decl::SIGNAL && !isResolvedType(type)) {
-                m_unresolvedSignals.insert(varp);
+                m_designp->unresolvedSignals.insert(varp);
             }
             if (!decl.init) continue;
             AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
@@ -698,7 +758,7 @@ void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoun
             varp->declTyped(true);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
-            if (!isResolvedType(type)) m_unresolvedSignals.insert(varp);
+            if (!isResolvedType(type)) m_designp->unresolvedSignals.insert(varp);
         }
     }
 }
@@ -733,7 +793,7 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
             m_scope[name.first] = VarInfo{varp, type};
             if (decl.kind == Decl::VARIABLE) m_variables.insert(name.first);
             if (decl.kind == Decl::SIGNAL && !isResolvedType(type)) {
-                m_unresolvedSignals.insert(varp);
+                m_designp->unresolvedSignals.insert(varp);
             }
             if (decl.init) {
                 AstNodeExpr* const lhsp = new AstVarRef{decl.flp, varp, VAccess::WRITE};
@@ -784,7 +844,6 @@ bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModul
     }
     m_passive = savedPassive;
     for (const auto& stmtp : arch.stmts) emitConcurrent(*stmtp);
-    checkDrivers();
 
     m_modp = nullptr;
     m_scope.clear();

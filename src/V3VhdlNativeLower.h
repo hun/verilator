@@ -34,6 +34,7 @@
 
 class AstModule;
 class AstNetlist;
+class AstVar;
 
 namespace vhdlnative {
 
@@ -111,6 +112,9 @@ struct Design final {
     std::map<std::pair<std::string, std::string>, AstModule*> archModules;
     std::map<SpecKey, AstModule*, SpecKeyLess> specializations;  // Binding key -> module
     std::unordered_set<std::string> instantiated;  // Entities named by at least one instance
+    // Signals whose type has no resolution function, in any unit: at most one driver across
+    // the design (IEEE 1076-2008 6.4.2.3). A package signal is driven from every unit.
+    std::set<AstVar*> unresolvedSignals;
     std::unordered_set<std::string> baseUsed;  // Entities whose base module an instance binds to
     UnconstrainedRecordMap unconstrainedRecordMembers;  // Unconstrained record elements
     // Physical unit name -> multiple of its type's step unit, and the names two physical
@@ -150,6 +154,13 @@ void collectUnconstrainedRecordMembers(const DesignLibrary& library,
 
 //! Record the physical unit names declared by the packages and entities of the library
 void collectPhysicalUnits(const DesignLibrary& library, Design& design) VL_MT_DISABLED;
+
+//! Point every reference to a package signal at its package, which the references of one
+//! unit cannot name themselves
+void linkPackageSignalRefs(AstNetlist* rootp, const PackageTable& table) VL_MT_DISABLED;
+
+//! Report every unresolved signal that more than one emitted statement drives
+void checkDrivers(AstNetlist* rootp, const Design& design) VL_MT_DISABLED;
 
 //! Lower one entity/architecture pair into the module created for its entity. False
 //! if the entity's generics have no defaults to elaborate, and no binding supplied
