@@ -1253,8 +1253,10 @@ bool Lowering::typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string
 //! declarative part is registered before that part's objects exist, so
 //! `array (...) of std_logic_vector(sig'range)` has to wait for `sig`
 bool Lowering::exprNeedsLaterObject(const Expr& expr) const {
-    if (expr.kind == Expr::ATTR && (expr.text == "range" || expr.text == "reverse_range") && expr.a
-        && expr.a->kind == Expr::NAME) {
+    if (expr.kind == Expr::ATTR && expr.a && expr.a->kind == Expr::NAME
+        && (expr.text == "range" || expr.text == "reverse_range" || expr.text == "low"
+            || expr.text == "high" || expr.text == "left" || expr.text == "right"
+            || expr.text == "length" || expr.text == "ascending")) {
         const std::string& name = expr.a->text;
         const bool known = activeEnv().count(name) || m_scope.count(name) || m_consts.count(name)
                            || m_preConsts.count(name) || m_constValues.count(name)
