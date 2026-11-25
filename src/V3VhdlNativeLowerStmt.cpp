@@ -1095,6 +1095,17 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
         }
         updateVarVals(*stmtp);
         if (!nodep) continue;
+        // A failing assert latches a flag: the statements after it run only when it did not
+        // fail, and its condition must not be read again after they change what it reads
+        AstVar* assertFlagp = nullptr;
+        if (stmtp->kind == Stmt::ASSERT && stmtp->severity == Stmt::SEV_FAILURE && !m_seqWait) {
+            if (AstIf* const assertp = VN_CAST(stmtNodep, If)) {
+                assertFlagp = newLoopFlag(stmtp->flp, "assert");
+                assertp->addThensp(setLoopFlag(stmtp->flp, assertFlagp, nullptr));
+                nodep = AstNode::addNext<AstNodeStmt, AstNodeStmt>(
+                    clearLoopFlag(stmtp->flp, assertFlagp), nodep);
+            }
+        }
         // Statements after a conditional exit/next only run when it was not taken
         if (runCondp) nodep = new AstIf{stmtp->flp, runCondp->cloneTree(false), nodep, nullptr};
         if (AstNodeExpr* const guardp = loopGuard(stmtp->flp)) {
@@ -1108,14 +1119,10 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
         // failing assert run only when it did not fail
         if (stmtp->severity != Stmt::SEV_FAILURE) continue;
         if (stmtp->kind == Stmt::REPORT) break;
-        // The assertion's condition cannot be tested again once a wait has passed time
-        if (stmtp->kind != Stmt::ASSERT || m_seqWait) continue;
-        // The assertion's own If carries the failure condition; `nodep` may already be
-        // wrapped by a preceding run condition or loop guard
-        const AstIf* const assertp = VN_CAST(stmtNodep, If);
-        if (!assertp) continue;
-        AstNodeExpr* const passedp = new AstNot{stmtp->flp, assertp->condp()->cloneTree(false)};
-        passedp->dtypep(assertp->condp()->dtypep());
+        if (!assertFlagp) continue;
+        AstNodeExpr* const passedp
+            = new AstNot{stmtp->flp, new AstVarRef{stmtp->flp, assertFlagp, VAccess::READ}};
+        passedp->dtypep(findBasic(stmtp->flp, VBasicDTypeKwd::LOGIC));
         if (runCondp) {
             AstNodeExpr* const andp = new AstAnd{stmtp->flp, runCondp, passedp};
             andp->dtypep(passedp->dtypep());
