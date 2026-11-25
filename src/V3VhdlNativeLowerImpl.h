@@ -1290,6 +1290,9 @@ class Lowering final {
     void emitProcessDecls(const Process& process, std::set<std::string>& varNames);
     AstNodeStmt* lowerFor(const Stmt& stmt);
     AstNodeStmt* lowerForRuntime(const Stmt& stmt);
+    void appendReportText(const Expr& expr, std::string& fmt, AstNodeExpr*& argsp);
+    AstDisplay* reportDisplay(FileLine* flp, VDisplayType type, const Expr* messagep,
+                              const char* fallback);
     AstNodeStmt* lowerReport(const Stmt& stmt);
     //! A failing assertion reports, and `severity failure` ends the run
     AstNodeStmt* lowerAssert(const Stmt& stmt);
@@ -1678,7 +1681,6 @@ bool aggregateHasOthers(const Expr& expr);
 VType cloneArrayChain(const VType& type);
 std::string stringTextOfConst(AstConst* constp);
 bool astHasZ(AstNode* nodep);
-std::string reportText(const Expr* exprp, const char* fallback);
 bool homograph(const SubprogramDecl& lhs, const SubprogramDecl& rhs);
 bool readsFile(const SubprogramDecl& subp);
 bool isUnconstrainedMark(const std::string& mark);

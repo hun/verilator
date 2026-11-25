@@ -1829,15 +1829,53 @@ AstNodeStmt* Lowering::lowerForRuntime(const Stmt& stmt) {
     return resultp;
 }
 
-//! The text of a literal report message, or a default when there is none
-std::string reportText(const Expr* exprp, const char* fallback) {
-    if (!exprp) return fallback;
-    if (exprp->kind != Expr::STRING_LIT) return fallback;
-    std::string text = exprp->spelling;
-    if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
-        text = text.substr(1, text.size() - 2);
+//! Appends the text of a report message built from literals, `&` and integer'image to the
+//! format string, with each integer as an argument; any other part prints as `?`
+void Lowering::appendReportText(const Expr& expr, std::string& fmt, AstNodeExpr*& argsp) {
+    switch (expr.kind) {
+    case Expr::STRING_LIT: {
+        std::string text = expr.spelling;
+        if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+            text = text.substr(1, text.size() - 2);
+        }
+        for (const char c : text) fmt += c == '%' ? "%%" : std::string(1, c);
+        return;
     }
-    return text;
+    case Expr::BITS_LIT: fmt += expr.bits; return;
+    case Expr::CHAR_LIT: fmt += expr.charValue == '%' ? "%%" : std::string(1, expr.charValue); return;
+    case Expr::PAREN: appendReportText(*expr.a, fmt, argsp); return;
+    case Expr::BINARY:
+        if (expr.text == "&") {
+            appendReportText(*expr.a, fmt, argsp);
+            appendReportText(*expr.b, fmt, argsp);
+            return;
+        }
+        break;
+    case Expr::ATTR:
+        if (expr.text == "image" && expr.args.size() == 1 && expr.a && expr.a->kind == Expr::NAME
+            && (expr.a->text == "integer" || expr.a->text == "natural"
+                || expr.a->text == "positive")) {
+            VType intT = intType(expr.flp);
+            AstNodeExpr* const valuep = lowerExpr(*expr.args[0], &intT);
+            if (valuep) {
+                fmt += "%0d";
+                argsp = AstNode::addNext<AstNodeExpr, AstNodeExpr>(argsp, valuep);
+                return;
+            }
+        }
+        break;
+    default: break;
+    }
+    fmt += '?';
+}
+
+AstDisplay* Lowering::reportDisplay(FileLine* flp, VDisplayType type, const Expr* messagep,
+                                    const char* fallback) {
+    if (!messagep) return new AstDisplay{flp, type, fallback, nullptr, nullptr, 'd'};
+    std::string fmt;
+    AstNodeExpr* argsp = nullptr;
+    appendReportText(*messagep, fmt, argsp);
+    return new AstDisplay{flp, type, fmt, nullptr, argsp, 'd'};
 }
 
 AstNodeStmt* Lowering::lowerReport(const Stmt& stmt) {
@@ -1847,12 +1885,8 @@ AstNodeStmt* Lowering::lowerReport(const Stmt& stmt) {
     // other severities only report
     const bool failure = stmt.severity == Stmt::SEV_FAILURE;
     AstNodeStmt* const displayp
-        = new AstDisplay{stmt.flp,
-                         failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY,
-                         reportText(stmt.value.get(), "report"),
-                         nullptr,
-                         nullptr,
-                         'd'};
+        = reportDisplay(stmt.flp, failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY,
+                        stmt.value.get(), "report");
     if (failure) {
         return AstNode::addNext<AstNodeStmt, AstNodeStmt>(displayp, new AstStop{stmt.flp, true});
     }
@@ -1875,12 +1909,8 @@ AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Ex
     failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     const bool failure = severity == Stmt::SEV_FAILURE;
     AstNodeStmt* bodyp
-        = new AstDisplay{flp,
-                         failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY,
-                         reportText(messagep, "Assertion failed"),
-                         nullptr,
-                         nullptr,
-                         'd'};
+        = reportDisplay(flp, failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY,
+                        messagep, "Assertion failed");
     if (failure) bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstStop{flp, true});
     return new AstIf{flp, failp, bodyp, nullptr};
 }
