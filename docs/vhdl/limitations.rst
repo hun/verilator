@@ -250,8 +250,8 @@ Known limitations
   that uses the functions on ``integer`` or ``std_logic`` alone. The frontend
   resolves these subprograms by name rather than through the package, which
   makes a precise check hard.
-- Resolution indications are not implemented, and neither are type attributes
-  such as ``'image`` on an enumeration.
+- Resolution indications are not implemented. ``'image`` of an enumeration value is
+  supported as a constant and inside a ``report`` message, not as a general string.
 - Library namespace handling is simplified; library names can come from a
   libmap even for a VHDL ``work`` file in a mixed run.
 - Some legal constructs are rejected as ``BLKANDNBLK`` or ``ASSIGNIN``.

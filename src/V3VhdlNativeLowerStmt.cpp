@@ -1869,6 +1869,34 @@ AstNodeStmt* Lowering::lowerForRuntime(const Stmt& stmt) {
     return resultp;
 }
 
+//! The literal of an enumeration value as a string, picked by position. The literals are
+//! chained as SystemVerilog strings, so the differing lengths need no padding.
+AstNodeExpr* Lowering::lowerEnumImage(const Expr& expr, const VType& type) {
+    FileLine* const flp = expr.flp;
+    AstNodeExpr* const valuep = lowerExpr(*expr.args[0], &type);
+    if (!valuep) return nullptr;
+    AstNodeExpr* const argp = resizeExpr(valuep, type, flp);
+    auto textOf = [&](size_t position) -> AstNodeExpr* {
+        AstNodeExpr* const stringp = new AstCvtPackString{
+            flp, makeStringConst(flp, type.literals[position])};
+        stringp->dtypep(findBasic(flp, VBasicDTypeKwd::STRING));
+        return stringp;
+    };
+    AstNodeExpr* resultp = textOf(0);
+    for (size_t position = 1; position < type.literals.size(); ++position) {
+        AstConst* const posp
+            = new AstConst{flp, V3Number{flp, type.width, static_cast<uint32_t>(position)}};
+        posp->dtypep(type.dtp);
+        AstNodeExpr* const eqp = new AstEq{flp, argp->cloneTree(false), posp};
+        eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
+        AstCond* const condp = new AstCond{flp, eqp, textOf(position), resultp};
+        condp->dtypep(resultp->dtypep());
+        resultp = condp;
+    }
+    argp->deleteTree();
+    return resultp;
+}
+
 //! Appends the text of a report message built from literals, `&` and integer'image to the
 //! format string, with each integer as an argument; any other part prints as `?`
 void Lowering::appendReportText(const Expr& expr, std::string& fmt, AstNodeExpr*& argsp) {
@@ -1903,6 +1931,19 @@ void Lowering::appendReportText(const Expr& expr, std::string& fmt, AstNodeExpr*
                 fmt += "%0d";
                 argsp = AstNode::addNext<AstNodeExpr, AstNodeExpr>(argsp, valuep);
                 return;
+            }
+        }
+        if (expr.text == "image" && expr.args.size() == 1 && expr.a && expr.a->kind == Expr::NAME) {
+            TypeSpec spec;
+            spec.flp = expr.flp;
+            spec.mark = expr.a->text;
+            VType type;
+            if (formalType(spec, type) && type.kind == VType::ENUM) {
+                if (AstNodeExpr* const textp = lowerEnumImage(expr, type)) {
+                    fmt += "%s";
+                    argsp = AstNode::addNext<AstNodeExpr, AstNodeExpr>(argsp, textp);
+                    return;
+                }
             }
         }
         break;

@@ -1405,6 +1405,7 @@ class Lowering final {
                                     const VType& type);
     AstNodeExpr* lowerCharacterAttr(FileLine* flp, const Expr& expr, const std::string& attribute,
                                     const VType& type);
+    AstNodeExpr* lowerEnumImage(const Expr& expr, const VType& type);
     AstNodeExpr* lowerEnumAttr(FileLine* flp, const Expr& expr, const std::string& attribute,
                                const VType& type);
     AstNodeExpr* lowerAttrWithArgs(FileLine* flp, const Expr& expr, const std::string& attribute,
