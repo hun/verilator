@@ -1206,6 +1206,8 @@ class Lowering final {
     AstNodeExpr* lowerDynamicSlice(const Expr& expr, AstNodeExpr* basep, const VType& baseType);
     bool sliceBound(const ExprP& expr, const std::string& prefix, const VType& baseType,
                     int64_t& out);
+    bool staticSliceRange(const Expr& expr, const VType& baseType, int64_t& hi, int64_t& lo);
+    bool isNullSliceArg(const Expr& arg);
     AstNodeExpr* sliceOf(FileLine* flp, AstNodeExpr* basep, const VType& baseType, int elemWidth,
                          int hi, int lo, bool ascending);
 

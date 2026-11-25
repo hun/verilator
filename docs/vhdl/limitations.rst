@@ -171,7 +171,8 @@ user-defined resolution functions; allocators; multi-dimensional
 ports; ``linkage`` ports, ``disconnect`` and ``guarded`` signals; embedded
 other-language source; and general timing constructs. VHDL-2019 is outside the
 baseline. Zero-width arrays are supported as empty values only in whole-array
-assignments; other uses are not modeled.
+assignments, and a slice with a static null range converted by ``to_integer`` gives 0 as
+numeric_std does; other uses are not modeled.
 
 Known limitations
 -----------------

@@ -2318,6 +2318,9 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) 
                                   + " arguments");
         return nullptr;
     }
+    // numeric_std returns 0 for a null argument (IEEE 1076.3 TO_INTEGER), and the model has
+    // no zero-width value to pass on, so a null slice converted to integer folds to 0 here
+    if (name == "to_integer" && isNullSliceArg(*expr.args[0])) return makeIntConst(flp, 0);
     // A constant operand folds first: a real expression inside it never reaches the
     // model, which has no real type, and the conversion of a constant is a constant.
     // A vector-valued designator must not fold to an integer, or the conversion would
@@ -2756,23 +2759,9 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         }
         return lowerIndexChain(expr, basep, baseType);
     }
-    // A bound may be an attribute of the sliced prefix itself, e.g. `s(s'left-1 downto 1)`:
-    // the prefix's own type fixes it, so it needs no scope lookup of a record element
-    const auto boundValue = [&](const ExprP& bound, int64_t& out) -> bool {
-        return sliceBound(bound, expr.a ? expr.a->spelling : std::string(), baseType, out);
-    };
-    int64_t leftValue = 0;
-    int64_t rightValue = 0;
-    if (boundValue(expr.b, leftValue) && boundValue(expr.c, rightValue)) {
-        int hi = 0;
-        int lo = 0;
-        if (expr.text == "downto") {
-            hi = static_cast<int>(leftValue);
-            lo = static_cast<int>(rightValue);
-        } else {
-            lo = static_cast<int>(leftValue);
-            hi = static_cast<int>(rightValue);
-        }
+    int64_t hi = 0;
+    int64_t lo = 0;
+    if (staticSliceRange(expr, baseType, hi, lo)) {
         if (hi < lo) {
             flp->v3error("VHDL: empty or reversed slice.");
             basep->deleteTree();
@@ -2780,9 +2769,45 @@ AstNodeExpr* Lowering::lowerSel(const Expr& expr, AstNodeExpr* basep, const VTyp
         }
         // A literal range in the other direction stays the documented extension `t_vhdl_range`
         // pins: its left bound is the most significant element
-        return sliceOf(flp, basep, baseType, elemWidth, hi, lo, expr.text != "downto");
+        return sliceOf(flp, basep, baseType, elemWidth, static_cast<int>(hi),
+                       static_cast<int>(lo), expr.text != "downto");
     }
     return lowerDynamicSlice(expr, basep, baseType);
+}
+
+//! The element range of a slice with static bounds, as hi and lo in element order. False
+//! when a bound is not static
+bool Lowering::staticSliceRange(const Expr& expr, const VType& baseType, int64_t& hi,
+                                int64_t& lo) {
+    // A bound may be an attribute of the sliced prefix itself, e.g. `s(s'left-1 downto 1)`:
+    // the prefix's own type fixes it, so it needs no scope lookup of a record element
+    const std::string prefix = expr.a ? expr.a->spelling : std::string();
+    int64_t leftValue = 0;
+    int64_t rightValue = 0;
+    if (!sliceBound(expr.b, prefix, baseType, leftValue)
+        || !sliceBound(expr.c, prefix, baseType, rightValue)) {
+        return false;
+    }
+    const bool downto = expr.text == "downto";
+    hi = downto ? leftValue : rightValue;
+    lo = downto ? rightValue : leftValue;
+    return true;
+}
+
+//! Whether an argument is a slice with a static null range, possibly under the unsigned or
+//! signed conversion that numeric_std applies first
+bool Lowering::isNullSliceArg(const Expr& arg) {
+    const Expr* slicep = &arg;
+    if (arg.kind == Expr::INDEX && arg.args.size() == 1 && arg.a && arg.a->kind == Expr::NAME
+        && (arg.a->text == "unsigned" || arg.a->text == "signed")) {
+        slicep = arg.args[0].get();
+    }
+    if (slicep->kind != Expr::SLICE || !slicep->a) return false;
+    VType baseType;
+    if (!typeOfDesignator(*slicep->a, baseType) || !baseType.isVector()) return false;
+    int64_t hi = 0;
+    int64_t lo = 0;
+    return staticSliceRange(*slicep, baseType, hi, lo) && hi < lo;
 }
 
 //! Slice assignment with a run-time width: VHDL bounds the result by the source, so every
