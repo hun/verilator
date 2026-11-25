@@ -2242,7 +2242,10 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
     // is marked only once its actuals are bound
     // A recursive call is inlined again, so the recursion has to end at elaboration: on a
     // condition that folds, such as a length. One that does not never reaches its end.
-    if (m_inlineFrames.empty()) m_recursiveCalls = 0;
+    if (m_inlineFrames.empty()) {
+        m_recursiveCalls = 0;
+        m_execIterations = 0;
+    }
     int& depth = m_functionDepth[subp];
     if (depth >= MAX_RECURSION_DEPTH || (depth > 0 && ++m_recursiveCalls > MAX_FOLD_ITERATIONS)) {
         deleteInlineEnv(env);
@@ -2446,14 +2449,15 @@ bool Lowering::evalFuncElementAssign(const Stmt& stmt) {
                                         : resizeExpr(valuep, typeOfDType(selp->dtypep()), flp);
         AstConst* const posp = foldStatic(offsetp);
         AstConst* const bitsp = foldStatic(sizedp);
-        if (posp && bitsp && posp->num().isFourState() == false
-            && posp->toSInt() >= 0 && posp->toSInt() + bitsp->width() <= constLocalp->width()) {
+        if (posp && bitsp && posp->num().isFourState() == false && posp->toSInt() >= 0
+            && posp->toSInt() + bitsp->width() <= constLocalp->width()) {
             const int lsb = posp->toSInt();
             for (int bit = 0; bit < bitsp->width(); ++bit) {
                 const V3Number& value = bitsp->num();
-                constLocalp->num().setBit(
-                    lsb + bit, value.bitIs1(bit) ? '1' : value.bitIsX(bit) ? 'x'
-                                                       : value.bitIsZ(bit) ? 'z' : '0');
+                constLocalp->num().setBit(lsb + bit, value.bitIs1(bit)   ? '1'
+                                                     : value.bitIsX(bit) ? 'x'
+                                                     : value.bitIsZ(bit) ? 'z'
+                                                                         : '0');
             }
             posp->deleteTree();
             bitsp->deleteTree();
@@ -2549,6 +2553,26 @@ AstNodeExpr* Lowering::evalFuncExitNext(const std::vector<StmtP>& stmts, std::si
     return resultp;
 }
 
+//! The value a return statement of an inlined function body gives the call
+AstNodeExpr* Lowering::evalFuncReturn(const Stmt& stmt) {
+    if (!stmt.value) {
+        unsupportedError(stmt.flp, "return without a value in a VHDL function body");
+        return nullptr;
+    }
+    AstNodeExpr* const valuep = lowerExpr(*stmt.value, m_funcRetp);
+    if (!valuep) return nullptr;
+    if (!m_inlineFrames.empty()) {
+        noteReturnedType(m_inlineFrames.back(), *stmt.value, valuep);
+        VType retType;
+        if (formalType(m_inlineFrames.back().declp->returnType, retType)
+            && !valueConforms(retType, *stmt.value, "return value", false)) {
+            valuep->deleteTree();
+            return nullptr;
+        }
+    }
+    return valuep;
+}
+
 AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::size_t index,
                                          const InlineCont& cont, const InlineCont* exitContp,
                                          int depth) {
@@ -2569,24 +2593,7 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             if (!evalProcedureCall(stmt, depth + 1)) return nullptr;
             continue;
         }
-        if (stmt.kind == Stmt::RETURN) {
-            if (!stmt.value) {
-                unsupportedError(flp, "return without a value in a VHDL function body");
-                return nullptr;
-            }
-            AstNodeExpr* const valuep = lowerExpr(*stmt.value, m_funcRetp);
-            if (!valuep) return nullptr;
-            if (!m_inlineFrames.empty()) {
-                noteReturnedType(m_inlineFrames.back(), *stmt.value, valuep);
-                VType retType;
-                if (formalType(m_inlineFrames.back().declp->returnType, retType)
-                    && !valueConforms(retType, *stmt.value, "return value", false)) {
-                    valuep->deleteTree();
-                    return nullptr;
-                }
-            }
-            return valuep;
-        }
+        if (stmt.kind == Stmt::RETURN) return evalFuncReturn(stmt);
         if (stmt.kind == Stmt::IF || stmt.kind == Stmt::CASE || stmt.kind == Stmt::FOR
             || stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) {
             // Control statements continue with the rest of this statement list
@@ -3002,28 +3009,27 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
     return resultp;
 }
 
-AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth) {
+//! The bounds and direction of a for loop of an inlined function body
+bool Lowering::funcForBounds(const Stmt& stmt, int64_t& left, int64_t& right, bool& up) {
     FileLine* const flp = stmt.flp;
-    int64_t left = 0;
-    int64_t right = 0;
-    bool up = stmt.rangeAscending;
+    up = stmt.rangeAscending;
     if (!stmt.c) {
         // `for i in name'range` / `name'reverse_range`: the bounds come from the prefix type
         const Expr* const rangep = stmt.b.get();
         if (!rangep || rangep->kind != Expr::ATTR || !rangep->a
             || (rangep->text != "range" && rangep->text != "reverse_range")) {
             unsupportedError(flp, "function loop range without static bounds");
-            return nullptr;
+            return false;
         }
         VType bounds;
         if (!typeOfDesignator(*rangep->a, bounds)) {
             unsupportedError(flp, "function loop range of an unresolved name");
-            return nullptr;
+            return false;
         }
         const VType* const levelp = indexRangeLevel(*rangep, bounds);
         if (!levelp) {
             unsupportedError(flp, "function loop range of an unknown index");
-            return nullptr;
+            return false;
         }
         left = levelp->left;
         right = levelp->right;
@@ -3035,8 +3041,220 @@ AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont,
     } else if (!staticIntFold(stmt.b, left) || !staticIntFold(stmt.c, right)) {
         // A bound may be a local constant whose initializer folds only through a call
         unsupportedError(flp, "function loop range that is not static");
-        return nullptr;
+        return false;
     }
+    return true;
+}
+
+//! Whether a condition of an inlined function body folds; taken is its value
+bool Lowering::foldFuncCond(const Expr& cond, bool& taken) {
+    AstNodeExpr* const condp = lowerCond(cond);
+    AstConst* const foldedp = foldStatic(condp);
+    if (condp) condp->deleteTree();
+    if (!foldedp) return false;
+    taken = foldedp->num().isTrue();
+    foldedp->deleteTree();
+    return true;
+}
+
+//! Run a loop of an inlined function body in place, on one copy of the bindings, when
+//! every condition in it folds. The continuation-passing evaluation keeps a copy of the
+//! bindings and a C++ frame alive per iteration, which a table of 64k entries cannot
+//! afford. False, with no effect left behind, where that evaluation has to take over: a
+//! condition that does not fold, a statement form not run here, a local held by a
+//! variable. resultp is the loop's value otherwise, null after an error.
+bool Lowering::execFuncStatic(const Stmt& loop, const InlineCont& postCont, int depth,
+                              AstNodeExpr*& resultp) {
+    for (const auto& entry : activeEnv()) {
+        // Its writes are statements, which an attempt given up would leave behind
+        if (entry.second.materializedp) return false;
+    }
+    const int64_t savedWriteCost = m_funcWriteCost;
+    const int64_t savedIterations = m_execIterations;
+    const int savedRecursiveCalls = m_recursiveCalls;
+    const bool savedMaterialize = m_materializeLocals;
+    AstNodeStmt* const savedPendingp = takePendingStmts();
+    const int savedErrors = V3Error::errorCount();
+    InlineEnv env = cloneInlineEnv(activeEnv());
+    InlineEnv* const savedInlinep = m_inlinep;
+    m_inlinep = &env;
+    // A call in the loop must not turn its locals into variables, for the same reason
+    m_materializeLocals = false;
+    FuncExec status = execFuncLoop(loop, depth);
+    m_materializeLocals = savedMaterialize;
+    m_inlinep = savedInlinep;
+    // An exit or next not taken by a loop here belongs to an enclosing loop
+    if (status == FuncExec::EXIT || status == FuncExec::NEXT || m_pendingStmtp) {
+        status = FuncExec::ABORT;
+    }
+    discardPendingStmts();
+    m_pendingStmtp = savedPendingp;
+    if (status == FuncExec::ABORT && V3Error::errorCount() == savedErrors) {
+        if (m_execResultp) m_execResultp->deleteTree();
+        m_execResultp = nullptr;
+        deleteInlineEnv(env);
+        m_funcWriteCost = savedWriteCost;
+        m_execIterations = savedIterations;
+        m_recursiveCalls = savedRecursiveCalls;
+        return false;
+    }
+    // An error found here is the one the other evaluation would report on the same path
+    resultp = nullptr;
+    if (status == FuncExec::RETURN) {
+        resultp = m_execResultp;
+        m_execResultp = nullptr;
+    } else if (status == FuncExec::NORMAL) {
+        resultp = postCont(env);
+    }
+    deleteInlineEnv(env);
+    return true;
+}
+
+//! One loop statement run in place; the loop parameter is bound like the unrolled form does
+Lowering::FuncExec Lowering::execFuncLoop(const Stmt& stmt, int depth) {
+    if (stmt.kind != Stmt::FOR) return execFuncIterations(stmt, 0, 0, true, depth);
+    int64_t value = 0;
+    int64_t right = 0;
+    bool up = true;
+    if (!funcForBounds(stmt, value, right, up)) return FuncExec::ABORT;
+    // The parameter hides a name of the same spelling only inside the loop (IEEE 1076-2008
+    // 10.10)
+    InlineEnv& env = activeEnv();
+    const auto hiddenIt = env.find(stmt.loopVar);
+    const bool hides = hiddenIt != env.end();
+    const InlineBinding hidden = hides ? hiddenIt->second : InlineBinding{};
+    if (hides) env.erase(hiddenIt);
+    const FuncExec status = execFuncIterations(stmt, value, right, up, depth);
+    const auto loopIt = env.find(stmt.loopVar);
+    if (loopIt != env.end()) {
+        loopIt->second.exprp->deleteTree();
+        env.erase(loopIt);
+    }
+    if (hides) env[stmt.loopVar] = hidden;
+    return status;
+}
+
+//! The iterations of a loop run in place; value and right are a for loop's bounds
+Lowering::FuncExec Lowering::execFuncIterations(const Stmt& stmt, int64_t value, int64_t right,
+                                                bool up, int depth) {
+    FileLine* const flp = stmt.flp;
+    const bool isFor = stmt.kind == Stmt::FOR;
+    while (true) {
+        if (isFor) {
+            if (up ? value > right : value < right) return FuncExec::NORMAL;
+            InlineBinding& loopBinding = activeEnv()[stmt.loopVar];
+            if (loopBinding.exprp) loopBinding.exprp->deleteTree();
+            loopBinding
+                = InlineBinding{makeIntConst(flp, value), false, true, intType(flp), nullptr};
+            value += up ? 1 : -1;
+        } else if (stmt.value) {
+            // As evalFuncWhile: a false conjunct ends the loop before the rest is lowered
+            if (conjunctFolds(*stmt.value, false)) return FuncExec::NORMAL;
+            bool taken = false;
+            if (!foldFuncCond(*stmt.value, taken)) return FuncExec::ABORT;
+            if (!taken) return FuncExec::NORMAL;
+        }
+        // The cap is on all iterations under one call, so nested loops stay bounded too
+        if (++m_execIterations > MAX_EXEC_ITERATIONS) {
+            unsupportedError(flp, std::string{"function "}
+                                      + (!isFor && stmt.value ? "while loop" : "loop")
+                                      + " with more than " + std::to_string(MAX_EXEC_ITERATIONS)
+                                      + " iterations");
+            return FuncExec::ABORT;
+        }
+        const FuncExec status = execFuncStmts(stmt.body, depth);
+        if (status == FuncExec::EXIT || status == FuncExec::NEXT) {
+            if (!m_execLabel.empty() && m_execLabel != stmt.loopLabel) return status;
+            if (status == FuncExec::EXIT) return FuncExec::NORMAL;
+        } else if (status != FuncExec::NORMAL) {
+            return status;
+        }
+    }
+}
+
+//! The arm a case statement takes, null when no choice matches; false if the selector or a
+//! choice does not fold
+bool Lowering::execFuncCaseArm(const Stmt& stmt, const std::vector<StmtP>*& armp) {
+    AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
+    AstConst* const selConstp = foldStatic(selectorp);
+    bool ok = selConstp && !selConstp->num().isFourState();
+    // Every choice is lowered, as evalFuncCase does, so a bad one is reported either way
+    for (const auto& item : stmt.caseItems) {
+        if (!ok) break;
+        std::vector<AstConst*> cops;
+        ok = lowerChoiceConsts(item.first, selectorp->dtypep(), cops);
+        bool matches = cops.empty();
+        for (AstConst* const cop : cops) {
+            if (cop->num().isCaseEq(selConstp->num())) matches = true;
+            cop->deleteTree();
+        }
+        if (ok && matches && !armp) armp = &item.second;
+    }
+    if (selConstp) selConstp->deleteTree();
+    if (selectorp) selectorp->deleteTree();
+    return ok;
+}
+
+//! Statements of a loop body run in place on the active bindings
+Lowering::FuncExec Lowering::execFuncStmts(const std::vector<StmtP>& stmts, int depth) {
+    if (depth > 64) return FuncExec::ABORT;  // evalFuncBlock reports it
+    for (const StmtP& stmtp : stmts) {
+        const Stmt& stmt = *stmtp;
+        FuncExec status = FuncExec::NORMAL;
+        switch (stmt.kind) {
+        case Stmt::VAR_ASSIGN:
+            if (!stmt.alternatives.empty() || !evalFuncVarAssign(stmt)) return FuncExec::ABORT;
+            break;
+        case Stmt::REPORT:
+        case Stmt::ASSERT: break;
+        case Stmt::CALL:
+            if (!evalProcedureCall(stmt, depth + 1)) return FuncExec::ABORT;
+            break;
+        case Stmt::RETURN:
+            m_execResultp = evalFuncReturn(stmt);
+            return m_execResultp ? FuncExec::RETURN : FuncExec::ABORT;
+        case Stmt::IF:
+            for (const auto& branch : stmt.branches) {
+                bool taken = true;
+                if (branch.first && !foldFuncCond(*branch.first, taken)) return FuncExec::ABORT;
+                if (!taken) continue;
+                status = execFuncStmts(branch.second, depth + 1);
+                break;
+            }
+            break;
+        case Stmt::CASE: {
+            const std::vector<StmtP>* armp = nullptr;
+            if (!execFuncCaseArm(stmt, armp)) return FuncExec::ABORT;
+            // No choice matched and no others: the rest of the body runs (IEEE 1076-2008 10.9)
+            if (armp) status = execFuncStmts(*armp, depth + 1);
+            break;
+        }
+        case Stmt::FOR:
+        case Stmt::WHILE:
+        case Stmt::LOOP: status = execFuncLoop(stmt, depth + 1); break;
+        case Stmt::EXIT:
+        case Stmt::NEXT: {
+            bool taken = true;
+            if (stmt.value && !foldFuncCond(*stmt.value, taken)) return FuncExec::ABORT;
+            if (!taken) break;
+            m_execLabel = stmt.loopLabel;
+            return stmt.kind == Stmt::EXIT ? FuncExec::EXIT : FuncExec::NEXT;
+        }
+        default: return FuncExec::ABORT;
+        }
+        if (status != FuncExec::NORMAL) return status;
+    }
+    return FuncExec::NORMAL;
+}
+
+AstNodeExpr* Lowering::evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth) {
+    AstNodeExpr* staticp = nullptr;
+    if (execFuncStatic(stmt, postCont, depth, staticp)) return staticp;
+    FileLine* const flp = stmt.flp;
+    int64_t left = 0;
+    int64_t right = 0;
+    bool up = true;
+    if (!funcForBounds(stmt, left, right, up)) return nullptr;
     if (up ? right < left : right > left) return postCont(activeEnv());  // Empty range
     const int64_t step = up ? 1 : -1;
     // Each iteration becomes a continuation frame; the body's continuation is the next
@@ -3090,6 +3308,8 @@ bool Lowering::conjunctFolds(const Expr& cond, bool value) {
 }
 
 AstNodeExpr* Lowering::evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth) {
+    AstNodeExpr* staticp = nullptr;
+    if (execFuncStatic(stmt, postCont, depth, staticp)) return staticp;
     FileLine* const flp = stmt.flp;
     // One frame per iteration, like a for loop; the difference is that the trip count comes
     // from repeatedly evaluating the condition. A bare `loop` has none: only an exit ends it.
@@ -3286,6 +3506,7 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
         return nullptr;  // resolveCall reported the reason for a known subprogram
     }
     m_funcWriteCost = 0;  // This call's own fold budget
+    if (m_inlineFrames.empty()) m_execIterations = 0;
     InlineEnv env;
     AstNodeStmt* prologsp = nullptr;  // Out-parameter initializations
     // The captured environment supplies enclosing names; formals bind on top of them

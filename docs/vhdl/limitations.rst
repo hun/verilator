@@ -51,6 +51,11 @@ only in a constant. The functions compute with the C library, which agrees with 
 approximations within 1e-7 on the values tested. For a magnitude of ``2**31 - 1`` or more,
 ``ceil``, ``floor`` and ``round`` differ from the body, which returns its argument there.
 
+A function call is evaluated during elaboration. A loop in its body whose conditions all fold
+to constants runs up to 1048576 iterations under one call, so a constant function can fill a
+sine table of 16384 entries; a constant wider than 1048576 bits is refused. A loop whose
+condition depends on a signal is unrolled, up to 4096 iterations.
+
 The attributes ``'pos``, ``'val``, ``'succ``, ``'pred``, ``'leftof`` and ``'rightof`` apply to
 integer types, and all but the last two to enumeration types. ``'value`` and ``'image`` of a
 run-time value are refused.

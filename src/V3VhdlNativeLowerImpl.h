@@ -39,6 +39,8 @@ namespace vhdlnative {
 
 //! Maximum iterations folded out of a static loop or generate
 static constexpr int64_t MAX_FOLD_ITERATIONS = 4096;
+//! Maximum loop iterations one function call runs in place (Lowering::execFuncStatic)
+static constexpr int64_t MAX_EXEC_ITERATIONS = 1 << 20;
 static constexpr int MAX_RECURSION_DEPTH = 64;  // Nested inlinings of one function
 //! Maximum width of a vector expression folded by a conversion
 static constexpr int64_t MAX_FOLD_WIDTH = 4096;
@@ -230,6 +232,11 @@ class Lowering final {
     int m_recursiveCalls = 0;  // Recursive inlinings under the outermost call
     //! Cost of the element writes folded into one inlined body; each rebuilds the local value
     int64_t m_funcWriteCost = 0;
+    //! How a statement run in place by execFuncStatic ended
+    enum class FuncExec : uint8_t { NORMAL, EXIT, NEXT, RETURN, ABORT };
+    int64_t m_execIterations = 0;  // Loop iterations run in place under the outermost call
+    std::string m_execLabel;  // Loop label of the EXIT/NEXT being taken, empty for innermost
+    AstNodeExpr* m_execResultp = nullptr;  // Value of the RETURN being taken
     std::map<std::string, std::vector<SubprogramRef>> m_subprograms;  // Visible, by name
     std::map<std::string, const ComponentDecl*> m_components;  // Visible, by name
     int m_concurrentProc = 0;  // Lowering a concurrent procedure call body
@@ -1554,6 +1561,16 @@ class Lowering final {
     AstNodeExpr* evalFuncCase(const Stmt& stmt, const InlineCont& cont,
                               const InlineCont* exitContp, int depth);
     AstNodeExpr* lowerExternalName(const Expr& expr);
+    AstNodeExpr* evalFuncReturn(const Stmt& stmt);
+    bool funcForBounds(const Stmt& stmt, int64_t& left, int64_t& right, bool& up);
+    bool foldFuncCond(const Expr& cond, bool& taken);
+    bool execFuncStatic(const Stmt& loop, const InlineCont& postCont, int depth,
+                        AstNodeExpr*& resultp);
+    FuncExec execFuncLoop(const Stmt& stmt, int depth);
+    FuncExec execFuncIterations(const Stmt& stmt, int64_t value, int64_t right, bool up,
+                                int depth);
+    FuncExec execFuncStmts(const std::vector<StmtP>& stmts, int depth);
+    bool execFuncCaseArm(const Stmt& stmt, const std::vector<StmtP>*& armp);
     AstNodeExpr* evalFuncFor(const Stmt& stmt, const InlineCont& postCont, int depth);
     bool conjunctFolds(const Expr& cond, bool value);
     AstNodeExpr* evalFuncWhile(const Stmt& stmt, const InlineCont& postCont, int depth);

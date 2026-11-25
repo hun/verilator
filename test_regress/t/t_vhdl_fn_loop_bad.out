@@ -1,4 +1,4 @@
-%Error-UNSUPPORTED: t/t_vhdl_fn_loop_bad.vhdl:22:5: Unsupported: VHDL function loop with more than 4096 iterations.
+%Error-UNSUPPORTED: t/t_vhdl_fn_loop_bad.vhdl:22:5: Unsupported: VHDL function loop with more than 1048576 iterations.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error-UNSUPPORTED: t/t_vhdl_fn_loop_bad.vhdl:32:5: Unsupported: VHDL function while loop with more than 4096 iterations.
+%Error-UNSUPPORTED: t/t_vhdl_fn_loop_bad.vhdl:32:5: Unsupported: VHDL function while loop with more than 1048576 iterations.
 %Error: Exiting due to
