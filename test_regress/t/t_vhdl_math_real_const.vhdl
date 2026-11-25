@@ -22,6 +22,9 @@ architecture rtl of t is
   constant pi100 : integer := integer(floor(MATH_PI * 100.0));
   constant root : integer := integer(floor(log10(sqrt(4096.0 * MATH_SQRT_PI))));
   constant degrees : integer := integer(round(MATH_PI_OVER_2 * MATH_RAD_TO_DEG));
+  constant atan4 : integer := integer(floor(arctan(1.0) * 4.0 * 100.0));
+  constant asin1 : integer := integer(round(arcsin(1.0) * MATH_RAD_TO_DEG));
+  constant acos0 : integer := integer(round(arccos(0.0) * MATH_RAD_TO_DEG));
   signal packed : std_logic_vector(15 downto 0)
     := std_logic_vector(to_unsigned(integer(floor(sqrt(4096.0 * MATH_SQRT_PI))), 16));
 begin
@@ -30,6 +33,8 @@ begin
   o(2) <= '1' when root = 1 else '0';
   o(3) <= '1' when degrees = 90 else '0';
   o(4) <= '1' when to_integer(unsigned(packed)) = 85 else '0';
-  o(7 downto 5) <= "111";
+  o(5) <= '1' when atan4 = 314 else '0';
+  o(6) <= '1' when asin1 = 90 else '0';
+  o(7) <= '1' when acos0 = 90 else '0';
   w <= packed;
 end architecture rtl;

@@ -700,13 +700,13 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
             value = std::cos(operand);
         } else if (fn == "tan") {
             value = std::tan(operand);
-        } else if (fn == "asin") {
+        } else if (fn == "arcsin") {
             if (operand < -1.0 || operand > 1.0) return false;
             value = std::asin(operand);
-        } else if (fn == "acos") {
+        } else if (fn == "arccos") {
             if (operand < -1.0 || operand > 1.0) return false;
             value = std::acos(operand);
-        } else if (fn == "atan") {
+        } else if (fn == "arctan") {
             value = std::atan(operand);
         } else if (fn == "sinh") {
             value = std::sinh(operand);
