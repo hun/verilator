@@ -3390,6 +3390,24 @@ StmtP Parser::parseSequentialAssignOrCall(FileLine* flp) {
     auto stmt = std::make_unique<Stmt>(Stmt::ASSIGN);
     stmt->flp = flp;
     stmt->target = std::move(target);
+    if (isId("force") || isId("release")) {
+        stmt->force = isId("force") ? Stmt::FORCE_SET : Stmt::FORCE_RELEASE;
+        advance();
+        if (isId("out")) {  // The driving value rather than the effective one
+            unsupported("force or release of the driving value ('out')");
+            return nullptr;
+        }
+        acceptId("in");
+        if (stmt->force == Stmt::FORCE_RELEASE) {
+            stmt->value = std::make_unique<Expr>(Expr::UNAFFECTED);
+            stmt->value->flp = flp;
+        } else {
+            stmt->value = parseExpr();
+            if (!stmt->value) return nullptr;
+        }
+        expectSym(";");
+        return stmt;
+    }
     stmt->value = parseWaveformValue();
     if (!stmt->value) return nullptr;
     if (isId("when") && !parseConditionalTail(*stmt, true)) return nullptr;

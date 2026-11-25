@@ -766,6 +766,12 @@ AstNodeStmt* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool varia
             return nullptr;
         }
     }
+    if (stmt.force == Stmt::FORCE_RELEASE) {
+        AstNodeExpr* const releasep = lowerDesignator(*stmt.target, true);
+        if (!releasep) return nullptr;
+        v3Global.setHasForceableSignals();
+        return new AstRelease{stmt.flp, releasep};
+    }
     // A bare `x <= unaffected;` leaves the target unchanged, so emit nothing
     if (stmt.alternatives.empty() && stmt.value && stmt.value->kind == Expr::UNAFFECTED) {
         return nullptr;
@@ -809,6 +815,10 @@ AstNodeStmt* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool varia
     // Only variable assignments update immediately; a signal write waits for the
     // delta even in the time-zero activation (IEEE 1076-2008 10.5)
     if (variable) return new AstAssign{stmt.flp, lhsp, rhsp};
+    if (stmt.force == Stmt::FORCE_SET) {
+        v3Global.setHasForceableSignals();
+        return new AstAssignForce{stmt.flp, lhsp, rhsp};
+    }
     // A concurrent procedure call drives its signal actuals as continuous assignments
     if (m_concurrentProc) return new AstAssignW{stmt.flp, lhsp, rhsp};
     return new AstAssignDly{stmt.flp, lhsp, rhsp};

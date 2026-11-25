@@ -253,6 +253,8 @@ struct Stmt final {
     } kind;
     FileLine* flp = nullptr;  // Source location
     ExprP target;  // ASSIGN/VAR_ASSIGN
+    //! ASSIGN: `force` writes value over the drivers, `release` (value is `unaffected`) ends it
+    enum Force : uint8_t { FORCE_NONE, FORCE_SET, FORCE_RELEASE } force = FORCE_NONE;
     ExprP value;  // ASSIGN/VAR_ASSIGN/RETURN; CALL: the call expression
     // ASSIGN/VAR_ASSIGN: a conditional waveform `v1 when c1 else ... vN`; empty for a
     // plain assignment. (value, condition); a null condition marks the trailing else.
