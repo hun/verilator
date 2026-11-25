@@ -454,6 +454,8 @@ class Lowering final {
         VType elem;
         elem.kind = type.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
         elem.dtp = findBasic(flp, type.kwd);
+        // Named, so an element is no longer a logic value that boolean's overload would take
+        elem.typeName = type.kwd == VBasicDTypeKwd::BIT ? "bit" : "std_logic";
         return elem;
     }
     VType intType(FileLine* flp) const {
@@ -1482,6 +1484,7 @@ class Lowering final {
     bool relationalOperandsConform(const Expr& a, const Expr& b) const;
     bool formalsAccept(const Expr& call, const SubprogramDecl& sub) const;
     bool formalsExact(const Expr& call, const SubprogramDecl& sub) const;
+    bool userDeclarationShadows(const Expr& call) const;
     std::vector<const SubprogramDecl*> visibleSubprograms(const std::string& name) const;
     const SubprogramDecl* resolveCall(const Expr& call, bool function,
                                       const SubprogramRef** foundpp = nullptr,

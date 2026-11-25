@@ -456,7 +456,7 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
         if (m_subprograms.count(expr.a->text)) {
             const ExprP indexedp = indexOfNoFormalCall(expr);
             if (indexedp) return lowerIndexedCall(flp, *indexedp, contextp);
-            return lowerFunctionCall(expr, contextp);
+            if (userDeclarationShadows(expr)) return lowerFunctionCall(expr, contextp);
         }
         if (isFixedFunction(expr.a->text)) {
             bool handled = false;
@@ -3042,14 +3042,7 @@ bool Lowering::typeOfDesignator(const Expr& expr, VType& out) const {
                     return false;  // A sliced dimension keeps its structure in the selection
                 }
                 if (!current.isVector()) return false;
-                if (current.kind == VType::ARRAY && current.elemp) {
-                    current = *current.elemp;
-                } else {
-                    VType elem;
-                    elem.kind = current.kwd == VBasicDTypeKwd::BIT ? VType::BIT : VType::LOGIC;
-                    elem.dtp = findBasic(expr.flp, current.kwd);
-                    current = elem;
-                }
+                current = elementType(current, expr.flp);
             }
             out = current;
             return true;

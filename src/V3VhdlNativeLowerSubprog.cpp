@@ -1350,6 +1350,23 @@ bool Lowering::formalsExact(const Expr& call, const SubprogramDecl& sub) const {
     return true;
 }
 
+//! Whether a user declaration of a call's name hides the standard function of that name.
+//! It does when it takes the actuals; a name that no standard function has always does.
+//! Otherwise the call is the standard function's (IEEE 1076-2008 12.5), as an overload
+//! like numeric_std's to_unsigned or resize does not take a call meant for the standard one.
+bool Lowering::userDeclarationShadows(const Expr& call) const {
+    const std::string& name = call.a->text;
+    if (!isIntrinsic(name) && !isConversion(name) && !isFixedFunction(name)
+        && !isToStringFunction(name)) {
+        return true;
+    }
+    for (const SubprogramDecl* const subp : visibleSubprograms(name)) {
+        std::string why;
+        if (subprogramMatches(call, *subp, why) && formalsAccept(call, *subp)) return true;
+    }
+    return false;
+}
+
 //! A user-defined infix operator whose formals exactly match the operands
 AstNodeExpr* Lowering::lowerUserOperator(const Expr& expr, const VType* contextp, bool& found) {
     found = false;
