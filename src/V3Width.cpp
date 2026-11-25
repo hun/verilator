@@ -2855,9 +2855,19 @@ class WidthVisitor final : public VNVisitor {
         // LHS is a real number in seconds
         // Need to round to time units and precision
         userIterateAndNext(nodep->lhsp(), WidthVP{SELF, BOTH}.p());
+        UASSERT_OBJ(!nodep->timeunit().isNone(), nodep, "$time import no units");
+        if (!VN_IS(nodep->lhsp(), Const)) {
+            // A run-time value is scaled to the time unit; V3Timing rounds it to ticks
+            AstMulD* const scaledp = new AstMulD{
+                nodep->fileline(), nodep->lhsp()->unlinkFrBack(),
+                new AstConst{nodep->fileline(), AstConst::RealDouble{},
+                             1.0 / nodep->timeunit().multiplier()}};
+            nodep->replaceWith(scaledp);
+            VL_DO_DANGLING(nodep->deleteTree(), nodep);
+            return;
+        }
         const AstConst* const constp = VN_CAST(nodep->lhsp(), Const);
         UASSERT_OBJ(constp && constp->isDouble(), nodep, "Times should be doubles");
-        UASSERT_OBJ(!nodep->timeunit().isNone(), nodep, "$time import no units");
         const double timePrescale = constp->num().toDouble();
         UASSERT_OBJ(!v3Global.rootp()->timeprecision().isNone(), nodep, "Never set precision?");
         const double time = timePrescale / nodep->timeunit().multiplier();

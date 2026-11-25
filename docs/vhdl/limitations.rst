@@ -151,7 +151,8 @@ Timing
 ``wait for`` is supported: a timed process lowers to an initial block that
 repeats after an ``AstDelay``. A nonzero ``after`` on a concurrent signal
 assignment is also supported and lowers to a timed always block. Both delays
-keep their absolute VHDL time whatever :vlopt:`--timescale` says. A zero
+keep their absolute VHDL time whatever :vlopt:`--timescale` says. A delay may be
+computed at run time, such as ``wait for n * 10 ns`` with ``n`` a signal. A zero
 ``after`` in a process body is a delta; a nonzero one there is refused, as are
 ``transport``, ``inertial`` and ``reject``. A process with more than one ``wait``,
 or a ``wait`` inside an ``if``, ``case`` or ``for``, lowers to one timed block that

@@ -1855,15 +1855,21 @@ AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Ex
 }
 
 AstNodeStmt* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
-    int64_t fs = 0;
-    if (!evalInt(expr, fs)) {
-        unsupportedError(flp, "delay that is not static");
-        return nullptr;
-    }
     // Like an SV time literal: V3Width scales the seconds to the module's timeunit, which
     // is only known after the frontend has run
-    AstConst* const secondsp
-        = new AstConst{flp, AstConst::RealDouble{}, static_cast<double>(fs) * 1e-15};
+    int64_t fs = 0;
+    AstNodeExpr* secondsp = nullptr;
+    if (evalInt(expr, fs)) {
+        secondsp = new AstConst{flp, AstConst::RealDouble{}, static_cast<double>(fs) * 1e-15};
+    } else {
+        // A run-time delay is a 64-bit count of femtoseconds
+        const VType type = timeType(flp);
+        AstNodeExpr* const countp = lowerExpr(expr, &type);
+        if (!countp) return nullptr;
+        secondsp = new AstMulD{
+            flp, new AstIToRD{flp, resizeExpr(countp, type, flp)},
+            new AstConst{flp, AstConst::RealDouble{}, 1e-15}};
+    }
     AstTimeImport* const timep = new AstTimeImport{flp, secondsp};
     timep->dtypeSetDouble();
     return new AstDelay{flp, timep, false};
