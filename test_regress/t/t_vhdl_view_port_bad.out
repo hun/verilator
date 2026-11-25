@@ -1,0 +1,5 @@
+%Error: t/t_vhdl_view_port_bad.vhdl:45:9: VHDL: view 'in_view' is not a view of type 'other_t'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_view_port_bad.vhdl:57:9: VHDL: view 'in_view' is not a view of the elements of 'rec_t'.
+%Error: t/t_vhdl_view_port_bad.vhdl:75:33: VHDL: view port 'p' has no element 'zz'.
+%Error: Exiting due to

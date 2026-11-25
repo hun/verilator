@@ -29,6 +29,7 @@
 namespace vhdlnative {
 
 struct VType;
+struct ViewInfo;
 using VTypeP = std::shared_ptr<VType>;
 
 //! One record element: its bit offset from the least significant bit of the record
@@ -59,6 +60,8 @@ struct VType final {
     int elemWidth = 1;  // ARRAY: width of one element
     std::vector<VField> fields;  // RECORD: most significant element first
     std::vector<std::string> literals;  // ENUM: literal names in declaration order
+    // A mode view declaration: the record is this type and viewp says how each element is driven
+    std::shared_ptr<const ViewInfo> viewp;
 
     bool isVector() const { return kind == VECTOR || kind == ARRAY; }
     bool isInt() const { return kind == INT; }
@@ -84,6 +87,37 @@ struct VType final {
     //! Bit offset of a declared array index from the least significant element;
     //! the right bound is the least significant element in either direction
     int indexOffset(int index) const { return ascending ? right - index : index - right; }
+};
+
+//! An interface view of a record: one leaf for each scalar-mode element, however deep it is
+//! nested in views of records and arrays of records. A leaf is a port of its own.
+struct ViewInfo final {
+    //! One step from the viewed object to a leaf: a record element or an array index
+    struct Step final {
+        std::string name;  // Folded element name; unused for an index
+        bool isIndex = false;
+        int64_t index = 0;
+    };
+    struct Leaf final {
+        std::vector<Step> path;  // From the viewed object down to the leaf
+        VDirection dir;  // Direction seen from the entity that declares the port
+        int offset = 0;  // Bit offset of the leaf in the viewed object
+        int width = 1;  // Bit width of the leaf
+        AstNodeDType* dtp = nullptr;  // Data type of the leaf, null when it is unconstrained
+    };
+    std::vector<Leaf> leaves;  // In the order the view declares them
+    //! The view seen from the other end of the connection
+    ViewInfo converse() const {
+        ViewInfo out = *this;
+        for (Leaf& leaf : out.leaves) {
+            if (leaf.dir.isInput()) {
+                leaf.dir = VDirection::OUTPUT;
+            } else if (leaf.dir.isOutput()) {
+                leaf.dir = VDirection::INPUT;
+            }
+        }
+        return out;
+    }
 };
 
 //! Code of a control character named by an enumeration literal of the predefined

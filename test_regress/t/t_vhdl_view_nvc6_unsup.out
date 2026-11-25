@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc6_unsup.vhdl:35:36: Unsupported: VHDL interface view of a subprogram parameter.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

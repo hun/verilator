@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_view_mode_unsup.vhdl:18:9: Unsupported: VHDL view element mode 'buffer'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

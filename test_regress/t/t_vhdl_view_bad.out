@@ -1,0 +1,10 @@
+%Error: t/t_vhdl_view_bad.vhdl:18:8: VHDL: view 'no_elem' names no element 'x' of its record.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_vhdl_view_bad.vhdl:24:8: VHDL: view 'dup_elem' lists element 'a' more than once.
+%Error: t/t_vhdl_view_bad.vhdl:30:8: VHDL: view 'missing_elem' does not list element 'b'.
+%Error: t/t_vhdl_view_bad.vhdl:34:8: VHDL: view 'not_record' is not of a record type.
+%Error: t/t_vhdl_view_bad.vhdl:51:8: VHDL: 'no_such_view' is not an interface view.
+%Error: t/t_vhdl_view_bad.vhdl:51:8: VHDL: view 'inner_view' does not fit element 's' of view 'nested_bad'.
+%Error: t/t_vhdl_view_bad.vhdl:68:9: VHDL: 'no_such_view' is not an interface view.
+%Error: t/t_vhdl_view_bad.vhdl:72:14: VHDL: view 'ok_view' is not a type.
+%Error: Exiting due to

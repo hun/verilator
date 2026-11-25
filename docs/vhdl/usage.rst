@@ -152,6 +152,13 @@ What the C++ side sees:
   it drives one it writes the low W bits of the two's complement value. An
   ``integer`` port behaves the same way, as an unsigned 32-bit field.
 
+- A port declared with a VHDL-2019 mode view, ``p : view v``, becomes one
+  class member per leaf of the view, named ``p__element`` and given the
+  direction the view assigns it. A nested view adds its element name
+  (``p__tx__valid``) and an array of views its index (``p__tx__1__valid``,
+  ``p__m1__valid`` for index -1). Inside the design ``p`` is still one
+  record or array signal.
+
 - A port of the top entity whose name is a C++ keyword, such as ``const``,
   is a class member named with a ``__SYM__`` prefix, ``__SYM__const``, and
   Verilator reports :option:`SYMRSVDWORD` for it, as for a SystemVerilog

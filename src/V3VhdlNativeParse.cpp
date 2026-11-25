@@ -491,6 +491,7 @@ class Parser final {
     void parseSubtypeDecl(Architecture& arch);
     void parseSubtypeInto(std::vector<TypeDecl>& types);
     void parseAliasInto(std::vector<AliasDecl>& aliases);
+    void parseViewDeclInto(std::vector<TypeDecl>& types);
     void parseFileDeclInto(std::vector<Decl>& decls);
     void parsePackage(FileLine* flp, bool isBody);
     void parseUseClause();
@@ -1319,6 +1320,32 @@ void Parser::parsePortClause(std::vector<PortDecl>& ports) {
         (void)acceptId("signal");  // Optional interface-object class (IEEE 1076-2008 6.5.2)
         parseNameList(port.names);
         if (m_failed) return;
+        if (isId("view")) {  // IEEE 1076-2019 6.5.2: a mode view indication replaces the mode
+            advance();
+            port.isView = true;
+            const bool viewArray = acceptSym("(");
+            parseTypeSpec(port.viewMark);
+            if (m_failed) return;
+            if (acceptSym("'")) {
+                if (!expectId("converse")) return;
+                port.viewConverse = true;
+            }
+            if (viewArray) expectSym(")");
+            port.viewArray = viewArray;
+            if (m_failed) return;
+            if (acceptId("of")) {
+                parseTypeSpec(port.type);
+            } else if (viewArray) {
+                error("expected 'of' after an array of views");
+                return;
+            }
+            if (m_failed) return;
+            ports.push_back(std::move(port));
+            if (acceptSym(";")) continue;
+            if (acceptSym(")")) break;
+            error("expected ';' or ')' in a port clause, got '" + m_cur.text + "'");
+            return;
+        }
         // IEEE 1076-2008 6.5.2: an omitted port mode means `in`
         if (acceptId("in")) {
             port.dir = PortMode::IN;
@@ -1494,9 +1521,10 @@ void Parser::parseEntity(FileLine* flp) {
             parseContextClause(entity.contextNames, false);
             continue;
         }
-        if (isId("view")) {  // VHDL-2019 interface view; unsupported
-            unsupported("interface view");
-            return;
+        if (isId("view")) {
+            advance();
+            parseViewDeclInto(entity.types);
+            continue;
         }
         if (isId("attribute") || isId("default")) {
             // Attribute specifications and PSL directives have no synthesis meaning
@@ -1604,6 +1632,10 @@ void Parser::parseInterfaceList(std::vector<FormalDecl>& formals) {
         }
         parseNameList(formal.names);
         if (m_failed) return;
+        if (isId("view")) {
+            unsupported("interface view of a subprogram parameter");
+            return;
+        }
         // IEEE 1076-2008 6.5.2: an omitted mode means `in`, `buffer` is a readable `out`
         if (acceptId("in")) {
             formal.mode = PortMode::IN;
@@ -1955,6 +1987,56 @@ void Parser::parseAliasInto(std::vector<AliasDecl>& aliases) {
     aliases.push_back(std::move(alias));
 }
 
+//! `view name of record_type is element_list end view [name];`
+void Parser::parseViewDeclInto(std::vector<TypeDecl>& types) {
+    Token nameTok;
+    if (!takeName(nameTok)) return;
+    TypeDecl decl{TypeDecl::VIEW};
+    decl.flp = nameTok.flp;
+    decl.name = nameTok.text;
+    decl.spelling = nameTok.spelling;
+    if (!expectId("of")) return;
+    parseTypeSpec(decl.base);
+    if (m_failed || !expectId("is")) return;
+    while (!isId("end")) {
+        if (m_failed) return;
+        TypeDecl::Member member;
+        parseNameList(member.names);
+        if (m_failed) return;
+        if (acceptId("in")) {
+            member.mode = PortMode::IN;
+        } else if (acceptId("out")) {
+            member.mode = PortMode::OUT;
+        } else if (acceptId("inout")) {
+            member.mode = PortMode::INOUT;
+        } else if (isId("view")) {
+            advance();
+            member.isView = true;
+            member.isArray = acceptSym("(");
+            parseTypeSpec(member.type);
+            if (m_failed) return;
+            if (acceptSym("'")) {
+                if (!expectId("converse")) return;
+                member.converse = true;
+            }
+            if (member.isArray) expectSym(")");
+            if (m_failed) return;
+        } else {
+            unsupported("view element mode '" + m_cur.text + "'");
+            return;
+        }
+        decl.members.push_back(std::move(member));
+        expectSym(";");
+        if (m_failed) return;
+    }
+    advance();  // 'end'
+    (void)acceptId("view");
+    if (m_cur.kind == Token::ID) advance();  // Optional repeated name
+    expectSym(";");
+    if (m_failed) return;
+    types.push_back(std::move(decl));
+}
+
 //! `component name [is] [generic (...);] [port (...);] end component [name];`
 //! The interface is kept so an instantiation can check its formals and the bound entity.
 void Parser::parseComponentDecl(std::vector<ComponentDecl>& components) {
@@ -2297,9 +2379,10 @@ void Parser::parseArchitecture(FileLine* flp) {
             parseContextClause(arch.contextNames, false);
             continue;
         }
-        if (isId("view")) {  // VHDL-2019 interface view; unsupported
-            unsupported("interface view");
-            return;
+        if (isId("view")) {
+            advance();
+            parseViewDeclInto(arch.types);
+            continue;
         }
         if (isId("default") || isId("attribute")) {
             // Verification directives and attribute specifications have no synthesis meaning
@@ -3411,9 +3494,10 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
             }
             continue;
         }
-        if (isId("view")) {  // VHDL-2019 interface view; unsupported
-            unsupported("interface view");
-            return;
+        if (isId("view")) {
+            advance();
+            parseViewDeclInto(pkg.types);
+            continue;
         }
         if (isId("attribute") || isId("default")) {
             // Attribute specifications and PSL directives have no synthesis meaning

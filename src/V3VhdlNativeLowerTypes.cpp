@@ -953,6 +953,9 @@ void Lowering::registerType(const TypeDecl& decl) {
     case TypeDecl::RECORD:
         if (!registerRecordType(decl, type)) return;
         break;
+    case TypeDecl::VIEW:
+        if (!registerViewType(decl, type)) return;
+        break;
     }
     if (decl.kind == TypeDecl::PHYSICAL) {
         type.typeName = m_unitName.empty() ? decl.name : m_unitName + "." + decl.name;
@@ -961,6 +964,93 @@ void Lowering::registerType(const TypeDecl& decl) {
     }
     m_types[decl.name] = type;
     m_ambiguousTypes.erase(decl.name);
+}
+
+//! A mode view takes its record's type; its leaves are the elements it lists, with those of
+//! a nested view or array of views spliced in, so a view is flattened once where it is declared
+bool Lowering::registerViewType(const TypeDecl& decl, VType& type) {
+    FileLine* const flp = decl.flp;
+    if (!resolveType(decl.base, type)) return false;
+    if (type.kind != VType::RECORD || type.viewp) {
+        flp->v3error("VHDL: view '" + decl.spelling + "' is not of a record type.");
+        return false;
+    }
+    auto info = std::make_shared<ViewInfo>();
+    std::set<std::string> listed;
+    bool failed = false;
+    for (const TypeDecl::Member& member : decl.members) {
+        for (const auto& name : member.names) {
+            const VField* const fieldp = findRecordField(type, name.first);
+            if (!fieldp) {
+                flp->v3error("VHDL: view '" + decl.spelling + "' names no element '" + name.second
+                             + "' of its record.");
+                failed = true;
+                continue;
+            }
+            if (!listed.insert(name.first).second) {
+                flp->v3error("VHDL: view '" + decl.spelling + "' lists element '" + name.second
+                             + "' more than once.");
+                failed = true;
+                continue;
+            }
+            ViewInfo::Step step;
+            step.name = name.first;
+            if (!member.isView) {
+                const VDirection dir = member.mode == PortMode::IN    ? VDirection::INPUT
+                                       : member.mode == PortMode::OUT ? VDirection::OUTPUT
+                                                                      : VDirection::INOUT;
+                info->leaves.push_back(
+                    ViewInfo::Leaf{{step}, dir, fieldp->offset, fieldp->width, fieldp->type->dtp});
+                continue;
+            }
+            VType inner;
+            if (!findViewByName(nullptr, member.type.mark, member.type.pkg, member.converse,
+                                inner)) {
+                flp->v3error("VHDL: '" + member.type.mark + "' is not an interface view.");
+                failed = true;
+                continue;
+            }
+            const VType& fieldType = *fieldp->type;
+            const bool shaped = member.isArray ? fieldType.kind == VType::ARRAY && fieldType.elemp
+                                                     && fieldType.elemp->typeName == inner.typeName
+                                               : fieldType.typeName == inner.typeName;
+            if (!shaped) {
+                flp->v3error("VHDL: view '" + member.type.mark + "' does not fit element '"
+                             + name.second + "' of view '" + decl.spelling + "'.");
+                failed = true;
+                continue;
+            }
+            // Each copy of the nested view sits at its own offset inside the element
+            const int count = member.isArray ? fieldType.length() : 1;
+            for (int pos = 0; pos < count; ++pos) {
+                ViewInfo::Step indexStep;
+                int base = fieldp->offset;
+                if (member.isArray) {
+                    const int index
+                        = fieldType.ascending ? fieldType.left + pos : fieldType.left - pos;
+                    indexStep.isIndex = true;
+                    indexStep.index = index;
+                    base += fieldType.indexOffset(index) * fieldType.elemWidth;
+                }
+                for (const ViewInfo::Leaf& leaf : inner.viewp->leaves) {
+                    ViewInfo::Leaf copy = leaf;
+                    copy.path.insert(copy.path.begin(), step);
+                    if (member.isArray) copy.path.insert(copy.path.begin() + 1, indexStep);
+                    copy.offset += base;
+                    info->leaves.push_back(std::move(copy));
+                }
+            }
+        }
+    }
+    if (failed) return false;
+    for (const VField& field : type.fields) {
+        if (listed.count(field.name)) continue;
+        flp->v3error("VHDL: view '" + decl.spelling + "' does not list element '" + field.name
+                     + "'.");
+        return false;
+    }
+    type.viewp = std::move(info);
+    return true;
 }
 
 //! Register an enumeration's dtype and its literal positions
@@ -1666,6 +1756,12 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
     return true;
 }
 
+//! A mode view names no subtype, so it cannot declare an object
+bool Lowering::notATypeView(FileLine* flp, const std::string& mark) {
+    flp->v3error("VHDL: view '" + mark + "' is not a type.");
+    return false;
+}
+
 bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     if (!flp) return false;
@@ -1705,6 +1801,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         if (pkgIt != m_packagesp->packages.end()) {
             const auto typeIt = pkgIt->second.types.find(mark);
             if (typeIt != pkgIt->second.types.end()) {
+                if (typeIt->second.viewp) return notATypeView(flp, mark);
                 out = typeIt->second;
                 if (out.typeName.empty()) out.typeName = spec.pkg + "." + mark;
                 if (!spec.memberConstraints.empty() && !applyMemberConstraints(spec, out)) {
@@ -1738,6 +1835,7 @@ bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
         declared = m_types.find(mark);
     }
     if (declared != m_types.end()) {
+        if (declared->second.viewp) return notATypeView(flp, mark);
         out = declared->second;
         if (out.typeName.empty()) out.typeName = mark;
         if (!spec.memberConstraints.empty() && !applyMemberConstraints(spec, out)) return false;

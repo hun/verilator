@@ -203,9 +203,27 @@ package ``float_pkg``;
 user-defined resolution functions; allocators; multi-dimensional
 ports; ``linkage`` ports, ``disconnect`` and ``guarded`` signals; embedded
 other-language source; and general timing constructs. VHDL-2019 is outside the
-baseline. Zero-width arrays are supported as empty values only in whole-array
-assignments, and a slice with a static null range converted by ``to_integer`` gives 0 as
+baseline except for mode views of a record (see below). Zero-width arrays are
+supported as empty values only in whole-array assignments, and a slice with a static null range converted by ``to_integer`` gives 0 as
 numeric_std does; other uses are not modeled.
+
+Mode views
+----------
+
+A port may be declared ``p : view v``, ``p : view v of rec_t``,
+``p : view v'converse`` or ``p : view (v) of array_type``, where ``v`` is a
+``view v of rec_t is ... end view`` declared in a package, or an alias of one or of
+its ``'converse``. An element of a view may itself be a view (``r : view w``,
+``w'converse``) or an array of views (``r : view (w)``). The element modes are
+``in`` and ``out``. An association of the whole port or of one element in an instance
+port map is split into one association per leaf of the view. Verilator does not
+check that the design only drives the ``out`` elements and only reads the ``in`` ones.
+
+These are refused with an ``Unsupported:`` diagnostic: an ``inout`` element, a
+``buffer`` or ``linkage`` element, an element with an unconstrained type, a
+view with a constraint, a view on a signal or a subprogram parameter, an
+association of part of a view port. A port finds only a view declared in a
+package.
 
 Known limitations
 -----------------

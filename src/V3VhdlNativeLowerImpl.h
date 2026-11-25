@@ -439,6 +439,8 @@ class Lowering final {
     std::map<const Expr*, LoweredType> m_exprTypes;
     std::set<std::string> m_variables;  // Module-level variables, which are not signals
     std::map<std::string, AliasInfo> m_aliases;  // Aliases visible in the unit, by folded name
+    // Port associations of an instance whose entity has view ports, one per element
+    std::map<const Concurrent*, std::vector<PortAssoc>> m_viewAssocs;
     mutable std::set<std::string> m_aliasBusy;  // Aliases being expanded (recursion guard)
     Design* const m_designp;  // Design context for generic specialization
 
@@ -723,6 +725,9 @@ class Lowering final {
     //! Whether a use clause or a qualified name makes a type of a standard package visible
     bool checkStdTypeVisible(const TypeSpec& spec, const std::string& mark);
     void registerType(const TypeDecl& decl);
+    bool registerViewType(const TypeDecl& decl, VType& type);
+    static bool notATypeView(FileLine* flp, const std::string& mark);
+    static bool viewUnconstrained(const VType& obj, const ViewInfo& leaves);
     void registerEnumType(FileLine* flp, const TypeDecl& decl, VType& type);
     bool resolveArrayElement(const TypeDecl& decl, VType& elem);
     bool registerArrayType(const TypeDecl& decl, VType& type);
@@ -1684,6 +1689,17 @@ public:
                      const GenericBindings* bindingsp);
     void emitEntityDecls(const EntityUnit& entity, const Architecture& arch);
     void emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoundsp);
+    //! Declare a view port: the record as an internal signal and one port per element
+    void emitViewPort(const EntityUnit& entity, const PortDecl& port, int& pinNum);
+    //! The view a port declares, found in this scope or in the entity's packages
+    bool findPortView(const EntityUnit& entity, const PortDecl& port, VType& objType,
+                      ViewInfo& view);
+    //! Resolve a view name, or an alias of one, to its record type and element directions
+    bool findViewByName(const EntityUnit* entityp, const std::string& name, const std::string& pkg,
+                        bool converse, VType& out, int depth = 0);
+    //! Replace the associations of view ports by one association per element
+    bool expandViewAssocs(const Concurrent& conc, const EntityUnit* entityp);
+    const std::vector<PortAssoc>& instanceAssocs(const Concurrent& conc) const;
     void emitArchitectureDecls(const Architecture& arch);
 
     const Architecture* selectInstanceArchitecture(const Concurrent& conc,

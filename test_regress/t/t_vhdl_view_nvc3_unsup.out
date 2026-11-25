@@ -1,0 +1,9 @@
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc3_unsup.vhdl:30:12: Unsupported: VHDL unconstrained element of an interface view.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc3_unsup.vhdl:30:30: Unsupported: VHDL unconstrained element of an interface view.
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc3_unsup.vhdl:36:5: Unsupported: VHDL record element as an assignment target.
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc3_unsup.vhdl:37:5: Unsupported: VHDL record element as an assignment target.
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc3_unsup.vhdl:38:5: Unsupported: VHDL record element as an assignment target.
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc3_unsup.vhdl:47:12: Unsupported: VHDL unconstrained element of an interface view.
+%Error-UNSUPPORTED: t/t_vhdl_view_nvc3_unsup.vhdl:47:30: Unsupported: VHDL unconstrained element of an interface view.
+%Error: Exiting due to

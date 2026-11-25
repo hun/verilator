@@ -539,6 +539,10 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
     // bound, an integer subtype) that names one resolves during type registration,
     // exactly as an entity or architecture prescans before registering its types.
     preScanIntConstants(pkg.decls);
+    // A view may name an alias of an earlier view, and such an alias needs no type to resolve
+    for (const AliasDecl& alias : pkg.aliases) {
+        if (!alias.hasSignature && !alias.mark.flp) registerAlias(alias);
+    }
     registerTypes(pkg.types, pkg.decls);
     registerComponents(pkg.components);
     // Subprograms are visible to the declarative items below, including deferred
@@ -675,6 +679,10 @@ void Lowering::emitEntityDecls(const EntityUnit& entity, const Architecture& arc
 void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoundsp) {
     int pinNum = 0;
     for (const PortDecl& port : entity.ports) {
+        if (port.isView) {
+            emitViewPort(entity, port, pinNum);
+            continue;
+        }
         VType type;
         const PortBounds* boundsp = nullptr;
         if (portBoundsp) {
@@ -761,6 +769,291 @@ void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoun
             if (!isResolvedType(type)) m_designp->unresolvedSignals.insert(varp);
         }
     }
+}
+
+//! A leaf without a fixed width has no port of its own
+bool Lowering::viewUnconstrained(const VType& obj, const ViewInfo& leaves) {
+    return !obj.dtp
+           || std::any_of(leaves.leaves.begin(), leaves.leaves.end(),
+                          [](const ViewInfo::Leaf& leaf) { return !leaf.dtp; });
+}
+
+//! The name of the port of one leaf: the port name, then each step down to the leaf
+static std::string viewLeafName(const std::string& portName, const ViewInfo::Leaf& leaf) {
+    std::string out = portName;
+    for (const ViewInfo::Step& step : leaf.path) {
+        out += "__";
+        if (!step.isIndex) {
+            out += step.name;
+        } else if (step.index < 0) {
+            out += "m" + std::to_string(-step.index);
+        } else {
+            out += std::to_string(step.index);
+        }
+    }
+    return out;
+}
+
+//! A view port: the body sees one record (or array) signal, which each leaf port feeds or is
+//! fed from
+void Lowering::emitViewPort(const EntityUnit& entity, const PortDecl& port, int& pinNum) {
+    VType objType;
+    ViewInfo view;
+    if (!findPortView(entity, port, objType, view)) return;
+    FileLine* const flp = port.flp;
+    if (viewUnconstrained(objType, view)) {
+        unsupportedError(flp, "unconstrained element of an interface view");
+        return;
+    }
+    if (std::any_of(view.leaves.begin(), view.leaves.end(),
+                    [](const ViewInfo::Leaf& leaf) { return leaf.dir.isInout(); })) {
+        unsupportedError(flp, "inout element of an interface view");
+        return;
+    }
+    for (const auto& name : port.names) {
+        if (!reserveName(name.first, name.second, flp)) continue;
+        AstVar* const recp = new AstVar{flp, VVarType::VAR, name.first, objType.dtp};
+        traceDeclared(recp);
+        m_modp->addStmtsp(recp);
+        m_scope[name.first] = VarInfo{recp, objType};
+        for (const ViewInfo::Leaf& leaf : view.leaves) {
+            const std::string portName = viewLeafName(name.first, leaf);
+            AstVar* const varp = new AstVar{flp, VVarType::PORT, portName, leaf.dtp};
+            traceDeclared(varp);
+            varp->direction(leaf.dir);
+            varp->declDirection(leaf.dir);
+            m_modp->addStmtsp(new AstPort{flp, ++pinNum, portName});
+            varp->pinNum(pinNum);
+            varp->declTyped(true);
+            m_modp->addStmtsp(varp);
+            const bool isInput = leaf.dir.isInput();
+            AstSel* const selp = new AstSel{
+                flp, new AstVarRef{flp, recp, isInput ? VAccess::WRITE : VAccess::READ},
+                leaf.offset, leaf.width};
+            selp->dtypep(leaf.dtp);
+            AstVarRef* const portRefp
+                = new AstVarRef{flp, varp, isInput ? VAccess::READ : VAccess::WRITE};
+            AstAssign* const assignp = isInput ? new AstAssign{flp, selp, portRefp}
+                                               : new AstAssign{flp, portRefp, selp};
+            m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::CONT_ASSIGN, nullptr, assignp});
+        }
+    }
+}
+
+//! The type of the object a view port declares, and the leaves of the view it names
+bool Lowering::findPortView(const EntityUnit& entity, const PortDecl& port, VType& objType,
+                            ViewInfo& view) {
+    const TypeSpec& mark = port.viewMark;
+    if (mark.hasRange || !mark.constraintMark.empty() || !mark.memberConstraints.empty()) {
+        unsupportedError(port.flp, "constrained interface view");
+        return false;
+    }
+    VType viewType;
+    if (!findViewByName(&entity, mark.mark, mark.pkg, port.viewConverse, viewType)) {
+        port.flp->v3error("VHDL: '" + mark.mark + "' is not an interface view.");
+        return false;
+    }
+    if (!port.viewArray) {
+        if (!port.type.mark.empty()) {
+            VType declared;
+            if (!resolveType(port.type, declared) || declared.typeName != viewType.typeName) {
+                port.flp->v3error("VHDL: view '" + mark.mark + "' is not a view of type '"
+                                  + port.type.mark + "'.");
+                return false;
+            }
+        }
+        view = *viewType.viewp;
+        objType = viewType;
+        objType.viewp.reset();
+        return true;
+    }
+    // Each element of the array gets its own copy of the view's leaves
+    VType arrayType;
+    if (!resolveType(port.type, arrayType)) return false;
+    if (arrayType.kind != VType::ARRAY || !arrayType.elemp
+        || arrayType.elemp->typeName != viewType.typeName) {
+        port.flp->v3error("VHDL: view '" + mark.mark + "' is not a view of the elements of '"
+                          + port.type.mark + "'.");
+        return false;
+    }
+    for (int pos = 0; pos < arrayType.length(); ++pos) {
+        ViewInfo::Step step;
+        step.isIndex = true;
+        step.index = arrayType.ascending ? arrayType.left + pos : arrayType.left - pos;
+        const int base = arrayType.indexOffset(static_cast<int>(step.index)) * arrayType.elemWidth;
+        for (const ViewInfo::Leaf& leaf : viewType.viewp->leaves) {
+            ViewInfo::Leaf copy = leaf;
+            copy.path.insert(copy.path.begin(), step);
+            copy.offset += base;
+            view.leaves.push_back(std::move(copy));
+        }
+    }
+    objType = arrayType;
+    return true;
+}
+
+bool Lowering::findViewByName(const EntityUnit* entityp, const std::string& name,
+                              const std::string& pkg, bool converse, VType& out, int depth) {
+    if (depth > 16) return false;  // An alias cycle
+    const VType* typep = nullptr;
+    const AliasInfo* aliasp = nullptr;
+    const auto typeIt = m_types.find(name);
+    if (typeIt != m_types.end() && typeIt->second.viewp) typep = &typeIt->second;
+    const auto aliasIt = m_aliases.find(name);
+    if (!typep && aliasIt != m_aliases.end()) aliasp = &aliasIt->second;
+    if (!typep && !aliasp && m_packagesp) {
+        // The parent can name a view the entity's packages declare without importing them
+        std::vector<std::string> pkgs;
+        if (!pkg.empty()) pkgs.push_back(pkg);
+        if (entityp) {
+            for (const auto& use : entityp->uses) pkgs.push_back(use.pkg);
+        }
+        for (const std::string& pkgName : pkgs) {
+            const auto pkgIt = m_packagesp->packages.find(pkgName);
+            if (pkgIt == m_packagesp->packages.end()) continue;
+            const auto pkgTypeIt = pkgIt->second.types.find(name);
+            if (pkgTypeIt != pkgIt->second.types.end() && pkgTypeIt->second.viewp) {
+                typep = &pkgTypeIt->second;
+                break;
+            }
+            const auto pkgAliasIt = pkgIt->second.aliases.find(name);
+            if (pkgAliasIt != pkgIt->second.aliases.end()) {
+                aliasp = &pkgAliasIt->second;
+                break;
+            }
+        }
+    }
+    if (typep) {
+        out = *typep;
+        if (converse) out.viewp = std::make_shared<const ViewInfo>(typep->viewp->converse());
+        return true;
+    }
+    if (!aliasp || !aliasp->designatorp) return false;
+    // `alias slave is master'converse;` or `alias same is master;`
+    const Expr* designp = aliasp->designatorp;
+    bool aliasConverse = false;
+    if (designp->kind == Expr::ATTR && designp->text == "converse" && designp->a) {
+        aliasConverse = true;
+        designp = designp->a.get();
+    }
+    if (designp->kind != Expr::NAME && designp->kind != Expr::SELECTED) return false;
+    const std::string designPkg
+        = designp->kind == Expr::SELECTED && designp->a ? designp->a->text : std::string{};
+    return findViewByName(entityp, designp->text, designPkg, converse != aliasConverse, out,
+                          depth + 1);
+}
+
+static PortAssoc copyPortAssoc(const PortAssoc& in) {
+    PortAssoc out;
+    out.flp = in.flp;
+    out.formal = in.formal;
+    out.formalSpelling = in.formalSpelling;
+    out.formalMember = in.formalMember;
+    out.formalMemberSpelling = in.formalMemberSpelling;
+    out.hasFormalRange = in.hasFormalRange;
+    out.formalAscending = in.formalAscending;
+    if (in.formalLeft) out.formalLeft = cloneExpr(*in.formalLeft);
+    if (in.formalRight) out.formalRight = cloneExpr(*in.formalRight);
+    if (in.actual) out.actual = cloneExpr(*in.actual);
+    return out;
+}
+
+//! The actual of one leaf: the actual of the whole port or element, selected down to the leaf
+static ExprP selectLeaf(const Expr& actual, const ViewInfo::Leaf& leaf, size_t skipSteps) {
+    ExprP out = cloneExpr(actual);
+    for (size_t i = skipSteps; i < leaf.path.size(); ++i) {
+        const ViewInfo::Step& step = leaf.path[i];
+        ExprP next = std::make_unique<Expr>(step.isIndex ? Expr::INDEX : Expr::SELECTED);
+        next->flp = actual.flp;
+        if (step.isIndex) {
+            ExprP indexp = std::make_unique<Expr>(Expr::INT_LIT);
+            indexp->flp = actual.flp;
+            indexp->intValue = step.index;
+            next->args.push_back(std::move(indexp));
+        } else {
+            next->text = step.name;
+            next->spelling = step.name;
+        }
+        next->a = std::move(out);
+        out = std::move(next);
+    }
+    return out;
+}
+
+//! The leaf ports of a view port are named `port__step__step`; an association of the whole
+//! port, or of one of its elements, becomes one association per leaf port
+bool Lowering::expandViewAssocs(const Concurrent& conc, const EntityUnit* entityp) {
+    m_viewAssocs.erase(&conc);
+    if (!entityp
+        || std::none_of(entityp->ports.begin(), entityp->ports.end(),
+                        [](const PortDecl& port) { return port.isView; })) {
+        return true;
+    }
+    std::vector<std::pair<std::string, const PortDecl*>> flat;
+    std::map<std::string, std::string> spellings;
+    for (const PortDecl& port : entityp->ports) {
+        for (const auto& name : port.names) {
+            flat.emplace_back(name.first, &port);
+            spellings[name.first] = name.second;
+        }
+    }
+    std::vector<PortAssoc> out;
+    for (size_t i = 0; i < conc.associations.size(); ++i) {
+        const PortAssoc& assoc = conc.associations[i];
+        const bool positional = assoc.formal.empty();
+        if (positional && i >= flat.size()) {
+            out.push_back(copyPortAssoc(assoc));  // Reported as excess when the ports are bound
+            continue;
+        }
+        const std::string formal = positional ? flat[i].first : assoc.formal;
+        const PortDecl* declp = nullptr;
+        for (const auto& entry : flat) {
+            if (entry.first == formal) declp = entry.second;
+        }
+        if (!declp || !declp->isView) {
+            out.push_back(copyPortAssoc(assoc));
+            if (positional) {
+                out.back().formal = formal;
+                out.back().formalSpelling = spellings[formal];
+            }
+            continue;
+        }
+        VType objType;
+        ViewInfo view;
+        if (!findPortView(*entityp, *declp, objType, view)) return false;
+        // The entity reports it where it declares the port
+        if (viewUnconstrained(objType, view)) return false;
+        if (assoc.hasFormalRange) {
+            unsupportedError(assoc.flp, "part of an interface view port");
+            return false;
+        }
+        const bool member = !assoc.formalMember.empty();
+        bool found = !member;
+        for (const ViewInfo::Leaf& leaf : view.leaves) {
+            if (member
+                && (leaf.path.front().isIndex || leaf.path.front().name != assoc.formalMember))
+                continue;
+            found = true;
+            PortAssoc part;
+            part.flp = assoc.flp;
+            part.formal = viewLeafName(formal, leaf);
+            part.formalSpelling = viewLeafName(spellings[formal], leaf);
+            if (assoc.actual) part.actual = selectLeaf(*assoc.actual, leaf, member ? 1 : 0);
+            out.push_back(std::move(part));
+        }
+        if (!found) {
+            assoc.flp->v3error("VHDL: view port '" + spellings[formal] + "' has no element '"
+                               + assoc.formalMemberSpelling + "'.");
+            return false;
+        }
+    }
+    m_viewAssocs[&conc] = std::move(out);
+    return true;
+}
+
+const std::vector<PortAssoc>& Lowering::instanceAssocs(const Concurrent& conc) const {
+    const auto it = m_viewAssocs.find(&conc);
+    return it != m_viewAssocs.end() ? it->second : conc.associations;
 }
 
 void Lowering::emitArchitectureDecls(const Architecture& arch) {
@@ -1266,8 +1559,8 @@ bool Lowering::derivePortBounds(const EntityUnit& entity, const Concurrent& conc
         }
     }
     std::vector<const PortAssoc*> assocs;
-    for (size_t i = 0; i < conc.associations.size(); ++i) {
-        const PortAssoc& assoc = conc.associations[i];
+    for (size_t i = 0; i < instanceAssocs(conc).size(); ++i) {
+        const PortAssoc& assoc = instanceAssocs(conc)[i];
         if (assoc.formal.empty() ? static_cast<int>(i) == targetIndex
                                  : assoc.formal == port.names.front().first) {
             assocs.push_back(&assoc);
@@ -1402,8 +1695,8 @@ bool Lowering::deriveRecordBounds(const EntityUnit& entity, const Concurrent& co
         }
     }
     std::vector<const PortAssoc*> assocs;
-    for (size_t i = 0; i < conc.associations.size(); ++i) {
-        const PortAssoc& assoc = conc.associations[i];
+    for (size_t i = 0; i < instanceAssocs(conc).size(); ++i) {
+        const PortAssoc& assoc = instanceAssocs(conc)[i];
         if (assoc.formal.empty() ? static_cast<int>(i) == targetIndex
                                  : assoc.formal == port.names.front().first) {
             assocs.push_back(&assoc);
@@ -1740,7 +2033,7 @@ bool Lowering::collectInstancePorts(const Concurrent& conc, AstModule* modp,
               [](const AstVar* lp, const AstVar* rp) { return lp->pinNum() < rp->pinNum(); });
     // Associations without a formal name are positional: they map to the next port
     const size_t positionalCount = static_cast<size_t>(
-        std::count_if(conc.associations.begin(), conc.associations.end(),
+        std::count_if(instanceAssocs(conc).begin(), instanceAssocs(conc).end(),
                       [](const PortAssoc& assoc) { return assoc.formal.empty(); }));
     if (positionalCount > ports.size()) {
         flp->v3error("VHDL: instance of '" + conc.instanceName
@@ -2045,8 +2338,8 @@ bool Lowering::bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t por
     {
         // A positional association belongs to the port at its position; the named ones
         // that follow it name their port
-        for (size_t i = 0; i < conc.associations.size(); ++i) {
-            const PortAssoc& assoc = conc.associations[i];
+        for (size_t i = 0; i < instanceAssocs(conc).size(); ++i) {
+            const PortAssoc& assoc = instanceAssocs(conc)[i];
             if (assoc.formal.empty() ? i == portIndex : assoc.formal == portp->name()) {
                 assocs.push_back(&assoc);
             }
@@ -2142,6 +2435,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
     if (!conc.entityInstantiation && entityp && !checkComponentConformance(conc, *entityp)) {
         return nullptr;
     }
+    if (!expandViewAssocs(conc, entityp)) return nullptr;
     if (!selectInstanceArchitecture(conc, entityp, modp)) return nullptr;
     PortBoundsMap portBounds;
     if (!specializeInstancePorts(conc, entityp, modp, portBounds)) return nullptr;
@@ -2153,7 +2447,7 @@ AstNode* Lowering::lowerInstance(const Concurrent& conc) {
         if (!bindInstancePort(ctx, ports[portIndex], portIndex, pinsp)) return nullptr;
     }
     {
-        for (const PortAssoc& assoc : conc.associations) {
+        for (const PortAssoc& assoc : instanceAssocs(conc)) {
             if (assoc.formal.empty()) continue;
             const bool known = std::any_of(ports.begin(), ports.end(), [&](const AstVar* portp) {
                 return portp->name() == assoc.formal;

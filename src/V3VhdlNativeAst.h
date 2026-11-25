@@ -311,8 +311,12 @@ struct PortDecl final {
     FileLine* flp = nullptr;  // Source location
     std::vector<std::pair<std::string, std::string>> names;  // (folded, spelling)
     PortMode dir = PortMode::IN;  // Port mode
-    TypeSpec type;  // Subtype indication
+    TypeSpec type;  // Subtype indication; of a view port, the `of` record type if written
     ExprP init;  // Default value for an unassociated input
+    bool isView = false;  // VHDL-2019 interface view port: `view V` replaces the mode
+    TypeSpec viewMark;  // The view's name, see isView
+    bool viewConverse = false;  // The view is written `V'converse`
+    bool viewArray = false;  // `view (V) of array_type`: an array of views
 };
 
 struct Decl final {
@@ -351,7 +355,7 @@ struct AliasDecl final {
 
 //! A type, subtype or alias declaration
 struct TypeDecl final {
-    enum Kind : uint8_t { ENUM, ARRAY, RECORD, SUBTYPE, PHYSICAL } kind;
+    enum Kind : uint8_t { ENUM, ARRAY, RECORD, SUBTYPE, PHYSICAL, VIEW } kind;
     FileLine* flp = nullptr;  // Source location
     std::string name;  // Folded
     std::string spelling;  // As written
@@ -364,9 +368,13 @@ struct TypeDecl final {
     struct Member final {
         // Field names as (folded, spelling)
         std::vector<std::pair<std::string, std::string>> names;
-        TypeSpec type;  // Field subtype indication
+        TypeSpec type;  // Field subtype indication; VIEW: the view a nested element names
+        PortMode mode = PortMode::IN;  // VIEW: mode of the element, unless it names a view
+        bool isView = false;  // VIEW: the element is itself a view named by type
+        bool isArray = false;  // VIEW: `view (v)`, an array of views
+        bool converse = false;  // VIEW: the nested view is written `v'converse`
     };
-    std::vector<Member> members;  // RECORD
+    std::vector<Member> members;  // RECORD; VIEW: the elements, with base the record type
 
     // PHYSICAL: one `unit_name [= <numeric> <unit_name>]` line; the value names an earlier
     // unit of the same type, or a predefined unit of `time'
