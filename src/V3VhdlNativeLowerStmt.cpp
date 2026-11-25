@@ -1669,6 +1669,8 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
         return nullptr;
     }
     if (std::llabs(right - left) > MAX_FOLD_ITERATIONS) {
+        // Unrolling a long range would bloat the netlist, so it runs as a loop
+        if (stmt.c) return lowerForRuntime(stmt);
         unsupportedError(flp, "loop range with more than " + std::to_string(MAX_FOLD_ITERATIONS)
                                   + " iterations");
         return nullptr;
@@ -1781,7 +1783,10 @@ AstNodeStmt* Lowering::lowerForRuntime(const Stmt& stmt) {
     m_loops.pop_back();
     if (bodyp) loopp->addStmtsp(bodyp);
     AstNodeExpr* const stepp
-        = new AstAdd{flp, new AstVarRef{flp, varp, VAccess::READ}, new AstConst{flp, 1}};
+        = up ? static_cast<AstNodeExpr*>(
+                   new AstAdd{flp, new AstVarRef{flp, varp, VAccess::READ}, new AstConst{flp, 1}})
+             : static_cast<AstNodeExpr*>(
+                   new AstSub{flp, new AstVarRef{flp, varp, VAccess::READ}, new AstConst{flp, 1}});
     stepp->dtypep(intT.dtp);
     loopp->addStmtsp(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, stepp});
     restoreScope(savedScope);
