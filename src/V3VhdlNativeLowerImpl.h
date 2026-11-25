@@ -788,6 +788,8 @@ class Lowering final {
     bool stringOperandText(const Expr& expr, std::string& out) const;
     //! Evaluate a locally static real-valued expression
     bool evalReal(const Expr& expr, double& value) const;
+    //! A real constant visible here, with its value when `value` is given
+    bool isRealConst(const std::string& name, double* value = nullptr) const;
     //! Evaluate a locally static condition: a literal, a comparison of literals, or a
     //! pure function of literals returning one. An elaboration-time check such as
     //! `assert is_power_of_two(n)` folds, so its callee's body is never lowered.
@@ -1221,6 +1223,8 @@ class Lowering final {
     AstNodeExpr* lowerConversion(const Expr& expr, const VType* contextp);
     //! `real(x)`: an integer converted to a double, or a real itself
     AstNodeExpr* lowerRealConversion(const Expr& expr);
+    //! A call of an ieee.math_real function on doubles, from isMathRealFunction
+    AstNodeExpr* lowerMathCall(const Expr& expr);
     //! An operator with a real operand, on doubles
     AstNodeExpr* lowerRealBinary(FileLine* flp, const std::string& op, BinaryOperands& ops);
     AstNodeExpr* lowerDesignator(const Expr& expr, bool write);
@@ -1667,6 +1671,8 @@ bool predefinedUnit(const std::string& unit, int64_t& out);
 bool physicalValue(const Design& design, const Expr& expr, int64_t& out);
 void addPhysicalUnits(const TypeDecl& decl, Design& design);
 bool mentionsRealValue(const Expr& expr);
+//! A function of ieee.math_real that this frontend folds and lowers on doubles
+bool isMathRealFunction(const std::string& name);
 bool isIndexRangeAttribute(const std::string& attribute);
 bool aggregateHasOthers(const Expr& expr);
 VType cloneArrayChain(const VType& type);

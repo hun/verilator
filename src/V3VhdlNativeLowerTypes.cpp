@@ -509,6 +509,51 @@ bool Lowering::pushPureCall(const Expr& call, const Expr*& returnp) const {
 
 void Lowering::popPureCall() const { m_pureCalls.pop_back(); }
 
+bool isMathRealFunction(const std::string& name) {
+    static const std::set<std::string> names
+        = {"arccos", "arccosh", "arcsin", "arcsinh", "arctan", "arctanh", "ceil",    "cos",
+           "cosh",   "exp",     "floor",  "log",     "log10",  "log2",    "realmax", "realmin",
+           "round",  "sign",    "sin",    "sinh",    "sqrt",   "tan",     "tanh",    "trunc"};
+    return names.count(name) != 0;
+}
+
+//! Whether a name is a real constant visible here, with its value when `value` is given.
+//! The constants of ieee.math_real (IEEE 1076.2-1996 5.1) count unless a declaration of
+//! the same name is visible.
+bool Lowering::isRealConst(const std::string& name, double* value) const {
+    const auto realIt = m_realConsts.find(name);
+    if (realIt != m_realConsts.end()) {
+        if (value) *value = realIt->second;
+        return true;
+    }
+    static const std::map<std::string, double> mathRealConsts
+        = {{"math_e", 2.71828182845904523536},
+           {"math_1_over_e", 0.36787944117144232160},
+           {"math_pi", 3.14159265358979323846},
+           {"math_2_pi", 6.28318530717958647693},
+           {"math_1_over_pi", 0.31830988618379067154},
+           {"math_pi_over_2", 1.57079632679489661923},
+           {"math_pi_over_3", 1.04719755119659774615},
+           {"math_pi_over_4", 0.78539816339744830962},
+           {"math_3_pi_over_2", 4.71238898038468985769},
+           {"math_log_of_2", 0.69314718055994530942},
+           {"math_log_of_10", 2.30258509299404568402},
+           {"math_log2_of_e", 1.4426950408889634074},
+           {"math_log10_of_e", 0.43429448190325182765},
+           {"math_sqrt_2", 1.41421356237309504880},
+           {"math_1_over_sqrt_2", 0.70710678118654752440},
+           {"math_sqrt_pi", 1.77245385090551602730},
+           {"math_deg_to_rad", 0.01745329251994329577},
+           {"math_rad_to_deg", 57.29577951308232087680}};
+    const auto mathIt = mathRealConsts.find(name);
+    if (mathIt == mathRealConsts.end() || m_scope.count(name) || m_consts.count(name)
+        || m_constValues.count(name)) {
+        return false;
+    }
+    if (value) *value = mathIt->second;
+    return true;
+}
+
 bool Lowering::evalReal(const Expr& expr, double& value) const {
     switch (expr.kind) {
     case Expr::INT_LIT: value = static_cast<double>(expr.intValue); return true;
@@ -525,38 +570,7 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
             const auto argIt = args.find(expr.text);
             if (argIt != args.end()) return evalReal(*argIt->second, value);
         }
-        const auto realIt = m_realConsts.find(expr.text);
-        if (realIt != m_realConsts.end()) {
-            value = realIt->second;
-            return true;
-        }
-        // The constants of ieee.math_real (IEEE 1076.2-1996 5.1), unless a declaration of
-        // the same name is visible
-        static const std::map<std::string, double> mathRealConsts
-            = {{"math_e", 2.71828182845904523536},
-               {"math_1_over_e", 0.36787944117144232160},
-               {"math_pi", 3.14159265358979323846},
-               {"math_2_pi", 6.28318530717958647693},
-               {"math_1_over_pi", 0.31830988618379067154},
-               {"math_pi_over_2", 1.57079632679489661923},
-               {"math_pi_over_3", 1.04719755119659774615},
-               {"math_pi_over_4", 0.78539816339744830962},
-               {"math_3_pi_over_2", 4.71238898038468985769},
-               {"math_log_of_2", 0.69314718055994530942},
-               {"math_log_of_10", 2.30258509299404568402},
-               {"math_log2_of_e", 1.44269504088896340736},
-               {"math_log10_of_e", 0.43429448190325182765},
-               {"math_sqrt_2", 1.41421356237309504880},
-               {"math_1_over_sqrt_2", 0.70710678118654752440},
-               {"math_sqrt_pi", 1.77245385090551602730},
-               {"math_deg_to_rad", 0.01745329251994329577},
-               {"math_rad_to_deg", 57.29577951308232087680}};
-        const auto mathIt = mathRealConsts.find(expr.text);
-        if (mathIt != mathRealConsts.end() && !m_scope.count(expr.text)
-            && !m_consts.count(expr.text) && !m_constValues.count(expr.text)) {
-            value = mathIt->second;
-            return true;
-        }
+        if (isRealConst(expr.text, &value)) return true;
         int64_t intValue = 0;
         if (!evalInt(expr, intValue)) return false;
         value = static_cast<double>(intValue);
@@ -620,10 +634,23 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
         if (expr.args.size() == 2) {
             double lhs = 0.0;
             double rhs = 0.0;
-            if ((fn != "min" && fn != "max") || !evalReal(*expr.args[0], lhs)
-                || !evalReal(*expr.args[1], rhs))
+            if (!evalReal(*expr.args[0], lhs) || !evalReal(*expr.args[1], rhs)) return false;
+            if (fn == "min") {
+                value = std::min(lhs, rhs);
+            } else if (fn == "max") {
+                value = std::max(lhs, rhs);
+            } else if (fn == "realmax") {
+                value = lhs >= rhs ? lhs : rhs;
+            } else if (fn == "realmin") {
+                value = lhs <= rhs ? lhs : rhs;
+            } else if (fn == "arctan") {
+                value = std::atan2(lhs, rhs);
+            } else if (fn == "log") {
+                if (lhs <= 0.0 || rhs <= 0.0 || rhs == 1.0) return false;
+                value = std::log(lhs) / std::log(rhs);
+            } else {
                 return false;
-            value = fn == "min" ? std::min(lhs, rhs) : std::max(lhs, rhs);
+            }
             return true;
         }
         if (expr.args.size() != 1) return false;
@@ -636,7 +663,12 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
         } else if (fn == "floor") {
             value = std::floor(operand);
         } else if (fn == "round") {
-            value = std::round(operand);
+            // IEEE 1076.2's body rounds halfway cases away from zero as floor(x + 0.5)
+            value = operand > 0.0   ? std::floor(operand + 0.5)
+                    : operand < 0.0 ? std::ceil(operand - 0.5)
+                                    : 0.0;
+        } else if (fn == "sign") {
+            value = operand > 0.0 ? 1.0 : (operand < 0.0 ? -1.0 : 0.0);
         } else if (fn == "trunc") {
             value = std::trunc(operand);
         } else if (fn == "log2") {
@@ -664,6 +696,20 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
             value = std::acos(operand);
         } else if (fn == "atan") {
             value = std::atan(operand);
+        } else if (fn == "sinh") {
+            value = std::sinh(operand);
+        } else if (fn == "cosh") {
+            value = std::cosh(operand);
+        } else if (fn == "tanh") {
+            value = std::tanh(operand);
+        } else if (fn == "arcsinh") {
+            value = std::asinh(operand);
+        } else if (fn == "arccosh") {
+            if (operand < 1.0) return false;
+            value = std::acosh(operand);
+        } else if (fn == "arctanh") {
+            if (operand <= -1.0 || operand >= 1.0) return false;
+            value = std::atanh(operand);
         } else if (fn == "log10") {
             if (operand <= 0.0) return false;
             value = std::log10(operand);
@@ -797,7 +843,7 @@ bool Lowering::evalCond(const Expr& expr, bool& value) const {
 bool Lowering::mentionsReal(const Expr& expr) const {
     switch (expr.kind) {
     case Expr::REAL_LIT: return true;
-    case Expr::NAME: return m_realConsts.count(expr.text) != 0;
+    case Expr::NAME: return isRealConst(expr.text);
     case Expr::PAREN: return expr.a && mentionsReal(*expr.a);
     case Expr::UNARY: return expr.a && mentionsReal(*expr.a);
     case Expr::BINARY:

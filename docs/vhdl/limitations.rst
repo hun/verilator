@@ -40,6 +40,17 @@ halfway cases away from zero. A real subtype's range is not checked. ``uniform``
 ``ieee.math_real`` follows the IEEE 1076.2 generator, the same sequence as GHDL. A constant
 array or record with real elements or fields is folded to its bit patterns.
 
+The constants of ``ieee.math_real`` are doubles, read in constant and run-time expressions.
+The functions ``sqrt``, ``exp``, ``log`` (also with a base), ``log2``, ``log10``, ``sin``,
+``cos``, ``tan``, ``arcsin``, ``arccos``, ``arctan`` (also of two arguments), ``sinh``,
+``cosh``, ``tanh``, ``arcsinh``, ``arccosh``, ``arctanh``, ``ceil``, ``floor``, ``round``,
+``trunc``, ``sign``, ``realmax`` and ``realmin``, and the predefined ``abs`` of a real, are
+supported in both. ``round`` and ``trunc`` follow the IEEE 1076.2 body, so ``round`` of the
+largest double below one half is one. ``cbrt`` and ``mod`` are not supported, and ``**`` on reals folds
+only in a constant. The functions compute with the C library, which agrees with GHDL's
+approximations within 1e-7 on the values tested. For a magnitude of ``2**31 - 1`` or more,
+``ceil``, ``floor`` and ``round`` differ from the body, which returns its argument there.
+
 The attributes ``'pos``, ``'val``, ``'succ``, ``'pred``, ``'leftof`` and ``'rightof`` apply to
 integer types, and all but the last two to enumeration types. ``'value`` and ``'image`` of a
 run-time value are refused.

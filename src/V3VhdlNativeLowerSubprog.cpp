@@ -404,7 +404,7 @@ bool Lowering::actualKind(const Expr& expr, VType::Kind& out) const {
             out = VType::INT;
             return true;
         }
-        if (m_realConsts.count(expr.text)) {
+        if (isRealConst(expr.text)) {
             out = VType::REAL;
             return true;
         }
@@ -716,7 +716,7 @@ bool Lowering::actualTypeName(const Expr& expr, VType& out) const {
         out = constTypeIt->second;
         return true;
     }
-    if (m_realConsts.count(expr.text)) {
+    if (isRealConst(expr.text)) {
         out = VType{};
         out.kind = VType::REAL;
         out.typeName = "real";

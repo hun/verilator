@@ -134,6 +134,12 @@ AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* c
     const auto it = m_scope.find(expr.text);
     if (it == m_scope.end()) {
         if (AstNodeExpr* const aliasp = lowerAlias(expr, false)) return aliasp;
+        double realValue = 0.0;
+        if (isRealConst(expr.text, &realValue)) {
+            AstConst* const constp = new AstConst{flp, AstConst::RealDouble{}, realValue};
+            constp->dtypep(findBasic(flp, VBasicDTypeKwd::DOUBLE));
+            return constp;
+        }
         if (m_subprograms.count(expr.text)) {
             // A function whose formals all have defaults may be called without
             // parentheses; a procedure name alone is not a value
@@ -247,17 +253,28 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
         // numeric_std defines "abs" for a signed operand (IEEE 1076-2008
         // Annex C), which compares and negates in place
         const bool signedVec = type.isVector() && type.isSigned();
-        if (!type.isInt() && !signedVec) {
+        const bool realOperand = type.kind == VType::REAL;
+        if (!type.isInt() && !signedVec && !realOperand) {
             unsupportedError(flp, "abs of a non-integer value");
             operandp->deleteTree();
             return nullptr;
         }
         // |x| is x when x is not negative, and -x otherwise
-        AstNodeExpr* const zerop = type.isInt() ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
-                                                : makeVectorConst(flp, type, 0);
-        AstNodeExpr* const ltZerop = new AstLtS{flp, operandp->cloneTree(false), zerop};
+        AstNodeExpr* ltZerop = nullptr;
+        AstNodeExpr* negp = nullptr;
+        if (realOperand) {
+            AstConst* const zerop = new AstConst{flp, AstConst::RealDouble{}, 0.0};
+            zerop->dtypep(operandp->dtypep());
+            ltZerop = new AstLtD{flp, operandp->cloneTree(false), zerop};
+            negp = new AstNegateD{flp, operandp->cloneTree(false)};
+        } else {
+            AstNodeExpr* const zerop = type.isInt()
+                                           ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
+                                           : makeVectorConst(flp, type, 0);
+            ltZerop = new AstLtS{flp, operandp->cloneTree(false), zerop};
+            negp = new AstNegate{flp, operandp->cloneTree(false)};
+        }
         ltZerop->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-        AstNegate* const negp = new AstNegate{flp, operandp->cloneTree(false)};
         negp->dtypep(operandp->dtypep());
         AstCond* const resultp = new AstCond{flp, ltZerop, negp, operandp};
         resultp->dtypep(operandp->dtypep());
@@ -471,6 +488,8 @@ AstNodeExpr* Lowering::lowerIndexedCall(FileLine* flp, const Expr& expr, const V
             const ExprP indexedp = indexOfNoFormalCall(expr);
             if (indexedp) return lowerIndexedCall(flp, *indexedp, contextp);
             if (userDeclarationShadows(expr)) return lowerFunctionCall(expr, contextp);
+        } else if (isMathRealFunction(expr.a->text)) {
+            return lowerMathCall(expr);
         }
         if (isFixedFunction(expr.a->text)) {
             bool handled = false;
@@ -2349,6 +2368,122 @@ AstNodeExpr* Lowering::lowerRealConversion(const Expr& expr) {
     AstNodeExpr* const realp = new AstIToRD{flp, valuep};
     realp->dtypep(findBasic(flp, VBasicDTypeKwd::DOUBLE));
     return realp;
+}
+
+//! A call of an ieee.math_real function on doubles. Most map to one double operation. The
+//! rest keep the reference body's comparisons, so its halfway cases and zero come out the same.
+AstNodeExpr* Lowering::lowerMathCall(const Expr& expr) {
+    FileLine* const flp = expr.flp;
+    const std::string& fn = expr.a->text;
+    std::vector<AstNodeExpr*> ops;
+    const auto discardOperands = [&ops]() {
+        for (AstNodeExpr* const opp : ops) opp->deleteTree();
+        ops.clear();
+    };
+    for (const ExprP& argp : expr.args) {
+        AstNodeExpr* const opp = lowerExpr(*argp, nullptr);
+        if (!opp) {
+            discardOperands();
+            return nullptr;
+        }
+        ops.push_back(opp);
+    }
+    const bool binary
+        = ops.size() == 2 && (fn == "arctan" || fn == "log" || fn == "realmax" || fn == "realmin");
+    const bool unary = ops.size() == 1 && fn != "realmax" && fn != "realmin";
+    if (!binary && !unary) {
+        unsupportedError(flp, "math_real '" + fn + "' with " + std::to_string(ops.size())
+                                  + " arguments");
+        discardOperands();
+        return nullptr;
+    }
+    for (AstNodeExpr* const opp : ops) {
+        if (typeOfDType(opp->dtypep()).kind != VType::REAL) {
+            unsupportedError(flp, "math_real '" + fn + "' of a non-real argument");
+            discardOperands();
+            return nullptr;
+        }
+    }
+    AstNodeDType* const realDtp = findBasic(flp, VBasicDTypeKwd::DOUBLE);
+    AstNodeDType* const bitDtp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+    const auto asReal = [realDtp](AstNodeExpr* const nodep) {
+        nodep->dtypep(realDtp);
+        return nodep;
+    };
+    const auto asBit = [bitDtp](AstNodeExpr* const nodep) {
+        nodep->dtypep(bitDtp);
+        return nodep;
+    };
+    const auto realConst = [flp, realDtp](double value) {
+        AstConst* const constp = new AstConst{flp, AstConst::RealDouble{}, value};
+        constp->dtypep(realDtp);
+        return constp;
+    };
+    if (binary) {
+        AstNodeExpr* const lhsp = ops[0];
+        AstNodeExpr* const rhsp = ops[1];
+        if (fn == "arctan") return new AstAtan2D{flp, lhsp, rhsp};
+        if (fn == "log") {
+            return asReal(new AstDivD{flp, new AstLogD{flp, lhsp}, new AstLogD{flp, rhsp}});
+        }
+        // The body returns the first operand when it wins the comparison, else the second
+        AstNodeExpr* const cmpp
+            = fn == "realmax"
+                  ? asBit(new AstGteD{flp, lhsp->cloneTree(false), rhsp->cloneTree(false)})
+                  : asBit(new AstLteD{flp, lhsp->cloneTree(false), rhsp->cloneTree(false)});
+        return asReal(new AstCond{flp, cmpp, lhsp, rhsp});
+    }
+    AstNodeExpr* const xp = ops[0];
+    if (fn == "sqrt") return new AstSqrtD{flp, xp};
+    if (fn == "exp") return new AstExpD{flp, xp};
+    if (fn == "log") return new AstLogD{flp, xp};
+    if (fn == "log10") return new AstLog10D{flp, xp};
+    if (fn == "log2") {
+        // The body is MATH_LOG2_OF_E * LOG(X)
+        return asReal(new AstMulD{flp, realConst(1.4426950408889634074), new AstLogD{flp, xp}});
+    }
+    if (fn == "sin") return new AstSinD{flp, xp};
+    if (fn == "cos") return new AstCosD{flp, xp};
+    if (fn == "tan") return new AstTanD{flp, xp};
+    if (fn == "arcsin") return new AstAsinD{flp, xp};
+    if (fn == "arccos") return new AstAcosD{flp, xp};
+    if (fn == "arctan") return new AstAtanD{flp, xp};
+    if (fn == "sinh") return new AstSinhD{flp, xp};
+    if (fn == "cosh") return new AstCoshD{flp, xp};
+    if (fn == "tanh") return new AstTanhD{flp, xp};
+    if (fn == "arcsinh") return new AstAsinhD{flp, xp};
+    if (fn == "arccosh") return new AstAcoshD{flp, xp};
+    if (fn == "arctanh") return new AstAtanhD{flp, xp};
+    if (fn == "ceil") return new AstCeilD{flp, xp};
+    if (fn == "floor") return new AstFloorD{flp, xp};
+    // The body's sign, trunc and round: each compares the operand with zero, the operand
+    // being cloned for every use
+    const auto isPositive
+        = [&]() { return asBit(new AstGtD{flp, xp->cloneTree(false), realConst(0.0)}); };
+    const auto isNegative
+        = [&]() { return asBit(new AstLtD{flp, xp->cloneTree(false), realConst(0.0)}); };
+    AstNodeExpr* resultp = nullptr;
+    if (fn == "sign") {
+        resultp = asReal(
+            new AstCond{flp, isPositive(), realConst(1.0),
+                        asReal(new AstCond{flp, isNegative(), realConst(-1.0), realConst(0.0)})});
+    } else if (fn == "trunc") {
+        resultp = asReal(new AstCond{
+            flp, isPositive(), new AstFloorD{flp, xp->cloneTree(false)},
+            asReal(new AstCond{flp, isNegative(), new AstCeilD{flp, xp->cloneTree(false)},
+                               realConst(0.0)})});
+    } else {
+        // round: halfway cases away from zero, as floor(x + 0.5) above zero
+        resultp = asReal(new AstCond{
+            flp, isPositive(),
+            new AstFloorD{flp, asReal(new AstAddD{flp, xp->cloneTree(false), realConst(0.5)})},
+            asReal(new AstCond{
+                flp, isNegative(),
+                new AstCeilD{flp, asReal(new AstSubD{flp, xp->cloneTree(false), realConst(0.5)})},
+                realConst(0.0)})});
+    }
+    xp->deleteTree();
+    return resultp;
 }
 
 AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) {

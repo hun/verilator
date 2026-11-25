@@ -210,11 +210,9 @@ void addPhysicalUnits(const TypeDecl& decl, Design& design) {
 //! in the model, so the expression it belongs to must fold at elaboration time
 bool mentionsRealValue(const Expr& expr) {
     if (expr.kind == Expr::REAL_LIT) return true;
-    if (expr.kind == Expr::INDEX && expr.a && expr.a->kind == Expr::NAME) {
-        static const std::set<std::string> realFunctions
-            = {"real", "ceil", "floor", "round", "trunc", "log2", "log10", "log",
-               "exp",  "sqrt", "sin",   "cos",   "tan",   "asin", "acos",  "atan"};
-        if (realFunctions.count(expr.a->text)) return true;
+    if (expr.kind == Expr::INDEX && expr.a && expr.a->kind == Expr::NAME
+        && (expr.a->text == "real" || isMathRealFunction(expr.a->text))) {
+        return true;
     }
     if (expr.a && mentionsRealValue(*expr.a)) return true;
     if (expr.b && mentionsRealValue(*expr.b)) return true;
