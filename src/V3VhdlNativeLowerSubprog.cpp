@@ -2213,6 +2213,72 @@ AstNodeExpr* Lowering::adoptCallResultType(AstNodeExpr* resultp, const Subprogra
     return resultp;
 }
 
+bool Lowering::needsStatementForm(const SubprogramDecl& subp) {
+    const std::function<bool(const std::vector<StmtP>&, bool)> scan
+        = [&scan](const std::vector<StmtP>& stmts, bool conditional) {
+              for (const StmtP& stmtp : stmts) {
+                  if (!stmtp) continue;
+                  const Stmt& stmt = *stmtp;
+                  if (stmt.kind == Stmt::FOR || stmt.kind == Stmt::WHILE
+                      || stmt.kind == Stmt::LOOP) {
+                      return true;
+                  }
+                  if (conditional && stmt.kind == Stmt::VAR_ASSIGN && stmt.target
+                      && stmt.target->kind != Expr::NAME) {
+                      return true;
+                  }
+                  for (const auto& branch : stmt.branches) {
+                      if (scan(branch.second, true)) return true;
+                  }
+                  for (const auto& item : stmt.caseItems) {
+                      if (scan(item.second, true)) return true;
+                  }
+              }
+              return false;
+          };
+    return scan(subp.body, false);
+}
+
+bool Lowering::materializeActuals(const SubprogramDecl& subp, InlineEnv& env,
+                                  AstNodeStmt*& prologsp) {
+    bool allFold = true;
+    for (const FormalDecl& formal : subp.formals) {
+        for (const auto& name : formal.names) {
+            const auto it = env.find(name.first);
+            if (it == env.end()) continue;
+            InlineBinding& binding = it->second;
+            if (VN_IS(binding.exprp, Const)) continue;
+            if (AstConst* const foldedp = foldStatic(binding.exprp)) {
+                binding.exprp->deleteTree();
+                binding.exprp = foldedp;
+                continue;
+            }
+            allFold = false;
+        }
+    }
+    if (allFold) return false;
+    for (const FormalDecl& formal : subp.formals) {
+        for (const auto& name : formal.names) {
+            const auto it = env.find(name.first);
+            if (it == env.end()) continue;
+            InlineBinding& binding = it->second;
+            if (VN_IS(binding.exprp, Const) || VN_IS(binding.exprp, VarRef)) continue;
+            FileLine* const flp = formal.flp;
+            AstVar* const varp
+                = new AstVar{flp, VVarType::VAR,
+                             "__Vproc_" + std::to_string(++m_procVarSeq) + "__" + name.first,
+                             binding.exprp->dtypep()};
+            m_modp->addStmtsp(varp);
+            AstNodeStmt* const initp
+                = new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, binding.exprp};
+            prologsp
+                = prologsp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(prologsp, initp) : initp;
+            binding.exprp = new AstVarRef{flp, varp, VAccess::READ};
+        }
+    }
+    return true;
+}
+
 AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp,
                                          const SubprogramDecl* forcedp) {
     const SubprogramRef* refp = nullptr;
@@ -2237,6 +2303,19 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
     if (!bindSubprogramFormals(call, *subp, env, unusedPrologsp, false, false)) {
         deleteInlineEnv(env);
         return nullptr;
+    }
+    // Where the call has a statement sink, a body with loops or conditional element writes
+    // runs as statements: its run-time actuals would otherwise be copied into every read
+    if (m_materializeLocals && needsStatementForm(*subp) && !m_inlineBodies.count(subp)
+        && m_functionDepth[subp] == 0) {
+        AstNodeStmt* prologsp = nullptr;
+        if (materializeActuals(*subp, env, prologsp)) {
+            if (m_inlineFrames.empty()) m_execIterations = 0;
+            FnExpansion fn;
+            if (!expandSubprogram(call, *subp, env, base, prologsp, &fn)) return nullptr;
+            return fn.valuep;
+        }
+        UASSERT(!prologsp, "Prologue of a call that folds");
     }
     // An actual may call this same subprogram again: nesting is not recursion, so the body
     // is marked only once its actuals are bound
@@ -3517,6 +3596,16 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
         if (prologsp) prologsp->deleteTree();
         return nullptr;
     }
+    return expandSubprogram(callExpr, *subp, env, base, prologsp, nullptr);
+}
+
+//! Expand a subprogram body as statements, once its formals are bound in `env`, which is
+//! deleted here. A function (`fnp` set) leaves its statements pending and its result in
+//! `fnp->valuep`.
+AstNodeStmt* Lowering::expandSubprogram(const Expr& callExpr, const SubprogramDecl& subpRef,
+                                        InlineEnv& env, ScopeSave& base, AstNodeStmt* prologsp,
+                                        FnExpansion* fnp) {
+    const SubprogramDecl* const subp = &subpRef;
     // An actual may call this same subprogram again: nesting is not recursion
     if (!m_inlineBodies.insert(subp).second) {
         deleteInlineEnv(env);
@@ -3524,6 +3613,8 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
         unsupportedError(callExpr.flp, "recursive call of procedure '" + subp->spelling + "'");
         return nullptr;
     }
+    // The statements of the enclosing expression's earlier calls stay out of this body
+    AstNodeStmt* const outerPendingp = takePendingStmts();
     const ScopeSave outer = saveScope();
     InlineEnv* const savedInlinep = m_inlinep;
     m_inlineFrames.push_back(InlineFrame{subp, outer, ScopeSave{}, &env});
@@ -3544,6 +3635,17 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
         if (prologsp) prologsp->deleteTree();
         return nullp;
     };
+    AstVar* retVarp = nullptr;
+    VType retType;
+    // An unconstrained return type takes its length from the first return lowered
+    const bool retSized
+        = fnp
+          && (!isUnconstrainedMark(subp->returnType.mark) || subp->returnType.hasRange
+              || !subp->returnType.constraintMark.empty());
+    if (retSized) {
+        if (!resolveType(subp->returnType, retType)) return fail(nullptr);
+        retVarp = newResultVar(subp->flp, subp->name, retType);
+    }
 
     // A local type may name a constant of the same declarative part, so the types register
     // in source order here, once the constants before them are emitted
@@ -3594,14 +3696,40 @@ AstNodeStmt* Lowering::lowerProcedureCall(const Expr& callExpr, bool concurrent)
     for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
 
     bool fallsThrough = true;
-    AstNodeStmt* const bodysp = lowerProcChain(rawPtrs(subp->body), 0, fallsThrough);
+    m_retFrames.push_back(
+        ReturnFrame{retVarp, retType, nullptr, m_loops.size(), fnp != nullptr, retSized});
+    AstNodeStmt* bodysp = lowerProcChain(rawPtrs(subp->body), 0, fallsThrough);
+    if (fnp) {
+        retVarp = m_retFrames.back().resultp;
+        retType = m_retFrames.back().type;
+    }
+    // A return from inside a loop latches a flag the statements after the loop test
+    if (AstVar* const flagp = m_retFrames.back().flagp) {
+        bodysp
+            = AstNode::addNext<AstNodeStmt, AstNodeStmt>(clearLoopFlag(subp->flp, flagp), bodysp);
+    }
+    m_retFrames.pop_back();
     AstNodeStmt* resultp = prologsp;
     prologsp = nullptr;
     if (initsp)
         resultp = resultp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(resultp, initsp) : initsp;
     if (bodysp)
         resultp = resultp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(resultp, bodysp) : bodysp;
-    return fail(resultp);
+    resultp = fail(resultp);
+    UASSERT_OBJ(!m_pendingStmtp, subp->flp, "Pending statements left behind by a subprogram body");
+    m_pendingStmtp = outerPendingp;
+    if (!fnp) return resultp;
+    if (!resultp) return nullptr;
+    if (!retVarp) {
+        unsupportedError(subp->flp, "function '" + subp->spelling + "' without a return value");
+        resultp->deleteTree();
+        return nullptr;
+    }
+    addPendingStmt(resultp);
+    fnp->valuep = new AstVarRef{subp->flp, retVarp, VAccess::READ};
+    if (retType.kind == VType::ARRAY && retType.elemWidth > 0)
+        m_arrayDtypes[retType.dtp] = retType;
+    return resultp;
 }
 
 std::vector<const Stmt*> Lowering::rawPtrs(const std::vector<StmtP>& stmts) {
@@ -3623,7 +3751,7 @@ AstNodeStmt* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std
     for (std::size_t i = index; i < stmts.size(); ++i) {
         const Stmt& stmt = *stmts[i];
         if (stmt.kind == Stmt::RETURN) {
-            if (stmt.value) unsupportedError(stmt.flp, "return value in a procedure body");
+            add(lowerReturn(stmt));
             fallsThroughp = false;
             return headp;
         }
@@ -3678,6 +3806,19 @@ AstNodeStmt* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std
                           : pendingp);
         } else {
             add(stmtNodep);
+        }
+        // A return inside the loop latched its flag: the rest of the body runs without it
+        if (containsReturn(stmt) && m_retFrames.back().flagp) {
+            bool restFalls = true;
+            AstNodeStmt* const restp = lowerProcChain(stmts, i + 1, restFalls);
+            if (restp) {
+                AstNodeExpr* const notp = new AstNot{
+                    stmt.flp, new AstVarRef{stmt.flp, m_retFrames.back().flagp, VAccess::READ}};
+                notp->dtypep(findBasic(stmt.flp, VBasicDTypeKwd::LOGIC));
+                add(new AstIf{stmt.flp, notp, restp, nullptr});
+            }
+            fallsThroughp = true;
+            return headp;
         }
     }
     fallsThroughp = true;
@@ -3752,6 +3893,82 @@ AstNodeStmt* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const S
         itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, itemp) : itemp;
     }
     return makeCase(flp, selectorp, itemsp);
+}
+
+//! Whether a statement list (recursively) contains a return
+bool Lowering::containsReturn(const Stmt& stmt) {
+    if (stmt.kind == Stmt::RETURN) return true;
+    const auto inList = [](const std::vector<StmtP>& list) {
+        return std::any_of(list.begin(), list.end(),
+                           [](const StmtP& stmtp) { return stmtp && containsReturn(*stmtp); });
+    };
+    if (inList(stmt.body)) return true;
+    for (const auto& branch : stmt.branches) {
+        if (inList(branch.second)) return true;
+    }
+    for (const auto& item : stmt.caseItems) {
+        if (inList(item.second)) return true;
+    }
+    return false;
+}
+
+AstVar* Lowering::newResultVar(FileLine* flp, const std::string& name, const VType& type) {
+    AstVar* const varp = new AstVar{
+        flp, VVarType::VAR, "__Vret_" + std::to_string(++m_procVarSeq) + "__" + name, type.dtp};
+    m_modp->addStmtsp(varp);
+    return varp;
+}
+
+//! A return: the value goes to the result variable, and a return inside loops of this
+//! body also latches the flag and ends each of those loops
+AstNodeStmt* Lowering::lowerReturn(const Stmt& stmt) {
+    FileLine* const flp = stmt.flp;
+    if (m_retFrames.empty()) {
+        unsupportedError(flp, "return outside a subprogram body");
+        return nullptr;
+    }
+    const std::size_t frameIndex = m_retFrames.size() - 1;
+    AstNodeStmt* headp = nullptr;
+    if (m_retFrames[frameIndex].function) {
+        if (!stmt.value) {
+            unsupportedError(flp, "return without a value in a function");
+            return nullptr;
+        }
+        const VType declared = m_retFrames[frameIndex].type;
+        AstNodeExpr* const valuep
+            = lowerExpr(*stmt.value, m_retFrames[frameIndex].sized ? &declared : nullptr);
+        if (!valuep) return nullptr;
+        if (!m_retFrames[frameIndex].resultp) {
+            VType type = typeOfLowered(*stmt.value, valuep);
+            if (!type.dtp) type = typeOfDType(valuep->dtypep());
+            m_retFrames[frameIndex].type = type;
+            m_retFrames[frameIndex].resultp = newResultVar(flp, "result", type);
+        }
+        const VType type = m_retFrames[frameIndex].type;
+        if (!m_retFrames[frameIndex].sized && valuep->width() != type.width) {
+            unsupportedError(flp, "function returns values of different lengths");
+            valuep->deleteTree();
+            return nullptr;
+        }
+        headp = new AstAssign{flp,
+                              new AstVarRef{flp, m_retFrames[frameIndex].resultp, VAccess::WRITE},
+                              resizeExpr(valuep, type, flp)};
+        headp = takePendingFor(headp);
+    } else if (stmt.value) {
+        unsupportedError(flp, "return value in a procedure body");
+        return nullptr;
+    }
+    const std::size_t loopBase = m_retFrames[frameIndex].loopBase;
+    if (m_loops.size() <= loopBase) return headp;
+    if (!m_retFrames[frameIndex].flagp) m_retFrames[frameIndex].flagp = newLoopFlag(flp, "return");
+    const auto add = [&headp](AstNodeStmt* nodep) {
+        headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, nodep) : nodep;
+    };
+    add(setLoopFlag(flp, m_retFrames[frameIndex].flagp, nullptr));
+    for (std::size_t i = loopBase; i < m_loops.size(); ++i) {
+        add(setLoopFlag(flp, m_loops[i].exitp, nullptr));
+    }
+    return headp;
 }
 
 }  // namespace vhdlnative

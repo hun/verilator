@@ -393,6 +393,17 @@ class Lowering final {
         bool guard = false;  // The body uses exit/next, so statements need guarding
     };
     std::vector<LoopFrame> m_loops;  // Active loops, innermost last
+    //! Subprogram body being expanded as statements, where a return lands
+    struct ReturnFrame final {
+        AstVar* resultp;  // Result variable of a function, null for a procedure
+        VType type;  // Type of the result
+        AstVar* flagp;  // Set by a return inside a loop of this body, once one is lowered
+        std::size_t loopBase;  // Loops of this body start at this depth of m_loops
+        bool function;  // The body returns a value
+        bool sized;  // The result type is the declared one
+    };
+    AstVar* newResultVar(FileLine* flp, const std::string& name, const VType& type);
+    std::vector<ReturnFrame> m_retFrames;
     int m_loopSeq = 0;  // Disambiguates the loop flag variables
     int m_genSeq = 0;  // Disambiguates sibling generate bodies
     std::string m_genSuffix;  // Suffix for names created inside a generate
@@ -1577,6 +1588,19 @@ class Lowering final {
     AstNodeExpr* updateLocalElement(FileLine* flp, AstNodeExpr* oldp, AstNodeExpr* valuep,
                                     AstNodeDType* elemDtp, AstNodeExpr* lsbp, int width);
     AstNodeStmt* lowerProcedureCall(const Expr& callExpr, bool concurrent);
+    //! Result of a function expanded as statements
+    struct FnExpansion final {
+        AstNodeExpr* valuep = nullptr;  // Read of the result variable
+    };
+    AstNodeStmt* expandSubprogram(const Expr& callExpr, const SubprogramDecl& subp, InlineEnv& env,
+                                  ScopeSave& base, AstNodeStmt* prologsp, FnExpansion* fnp);
+    AstNodeStmt* lowerReturn(const Stmt& stmt);
+    static bool containsReturn(const Stmt& stmt);
+    //! Whether a function body has a loop or a conditional element write, which only a
+    //! statement form keeps small when its actuals are not static
+    static bool needsStatementForm(const SubprogramDecl& subp);
+    //! Bind the non-trivial actuals of a function call to variables; false if all fold
+    bool materializeActuals(const SubprogramDecl& subp, InlineEnv& env, AstNodeStmt*& prologsp);
     //! `uniform` of ieee.math_real: its seed steps and the real result
     AstNodeStmt* lowerUniform(const Expr& callExpr);
     AstNodeStmt* lowerProcChain(const std::vector<const Stmt*>& stmts, std::size_t index,

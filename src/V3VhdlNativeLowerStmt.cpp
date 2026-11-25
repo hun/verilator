@@ -944,8 +944,8 @@ AstNodeStmt* Lowering::lowerStmt(const Stmt& stmt) {
     if (stmt.kind == Stmt::ASSERT) return lowerAssert(stmt);
     if (stmt.kind == Stmt::CALL) {
         // `finish` and `stop` of std.env end the simulation, with or without a status
-        const Expr& callee = stmt.value->kind == Expr::INDEX && stmt.value->a ? *stmt.value->a
-                                                                              : *stmt.value;
+        const Expr& callee
+            = stmt.value->kind == Expr::INDEX && stmt.value->a ? *stmt.value->a : *stmt.value;
         if ((callee.text == "finish" || callee.text == "stop")
             && !m_subprograms.count(callee.text)) {
             if (callee.text == "finish") return new AstFinish{stmt.flp};
@@ -953,10 +953,7 @@ AstNodeStmt* Lowering::lowerStmt(const Stmt& stmt) {
         }
         return lowerProcedureCall(*stmt.value, m_concurrentProc > 0);
     }
-    if (stmt.kind == Stmt::RETURN) {
-        unsupportedError(stmt.flp, "return outside a subprogram body");
-        return nullptr;
-    }
+    if (stmt.kind == Stmt::RETURN) return lowerReturn(stmt);
     if (stmt.kind == Stmt::FOR) return lowerFor(stmt);
     if (stmt.kind == Stmt::WHILE || stmt.kind == Stmt::LOOP) return lowerWhile(stmt);
     if (stmt.kind == Stmt::WAIT) {
@@ -1114,6 +1111,7 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
         headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, nodep) : nodep;
         // A wait suspends the process at once: the rest of this list never runs
         if (stmtp->kind == Stmt::WAIT && !m_seqWait) break;
+        if (stmtp->kind == Stmt::RETURN) break;
         // Severity failure ends the run at the statement (IEEE 1076-2008 10.3, 10.4):
         // nothing after an unconditional report runs, and the statements after a
         // failing assert run only when it did not fail
@@ -1255,7 +1253,10 @@ void Lowering::collectReadNames(const std::vector<StmtP>& stmts, std::set<std::s
 bool Lowering::usesExitNext(const std::vector<StmtP>& stmts) {
     for (const StmtP& stmtp : stmts) {
         if (!stmtp) continue;
-        if (stmtp->kind == Stmt::EXIT || stmtp->kind == Stmt::NEXT) return true;
+        if (stmtp->kind == Stmt::EXIT || stmtp->kind == Stmt::NEXT
+            || stmtp->kind == Stmt::RETURN) {
+            return true;
+        }
         for (const auto& branch : stmtp->branches) {
             if (usesExitNext(branch.second)) return true;
         }
@@ -1671,12 +1672,15 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
             up = left <= right;
         } else {
             // `for i in name'range loop`: the bounds come from the prefix's type
-            if (!stmt.b || stmt.b->kind != Expr::ATTR || stmt.b->text != "range" || !stmt.b->a
+            if (!stmt.b || stmt.b->kind != Expr::ATTR
+                || (stmt.b->text != "range" && stmt.b->text != "reverse_range") || !stmt.b->a
                 || stmt.b->a->kind != Expr::NAME) {
                 unsupportedError(flp, "loop range without 'to' or 'downto'");
                 return nullptr;
             }
-            const VType* const typep = typeOfName(*stmt.b->a);
+            VType designatorType;
+            const VType* typep = typeOfName(*stmt.b->a);
+            if (!typep && typeOfDesignator(*stmt.b->a, designatorType)) typep = &designatorType;
             if (!typep) {
                 unsupportedError(flp, "loop range of an unresolved name");
                 return nullptr;
@@ -1689,6 +1693,10 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
             left = levelp->left;
             right = levelp->right;
             up = levelp->ascending;
+            if (stmt.b->text == "reverse_range") {
+                std::swap(left, right);
+                up = !up;
+            }
         }
     } else if (!staticInt(stmt.b, left) || !staticInt(stmt.c, right)) {
         // A sequential loop evaluates its bounds when it is reached, so they may read a
@@ -1842,7 +1850,9 @@ void Lowering::appendReportText(const Expr& expr, std::string& fmt, AstNodeExpr*
         return;
     }
     case Expr::BITS_LIT: fmt += expr.bits; return;
-    case Expr::CHAR_LIT: fmt += expr.charValue == '%' ? "%%" : std::string(1, expr.charValue); return;
+    case Expr::CHAR_LIT:
+        fmt += expr.charValue == '%' ? "%%" : std::string(1, expr.charValue);
+        return;
     case Expr::PAREN: appendReportText(*expr.a, fmt, argsp); return;
     case Expr::BINARY:
         if (expr.text == "&") {
@@ -1909,8 +1919,8 @@ AstNodeStmt* Lowering::assertBody(FileLine* flp, const Expr& condition, const Ex
     failp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     const bool failure = severity == Stmt::SEV_FAILURE;
     AstNodeStmt* bodyp
-        = reportDisplay(flp, failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY,
-                        messagep, "Assertion failed");
+        = reportDisplay(flp, failure ? VDisplayType::DT_FATAL : VDisplayType::DT_DISPLAY, messagep,
+                        "Assertion failed");
     if (failure) bodyp = AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, new AstStop{flp, true});
     return new AstIf{flp, failp, bodyp, nullptr};
 }
@@ -1927,9 +1937,8 @@ AstNodeStmt* Lowering::lowerDelay(const Expr& expr, FileLine* flp) {
         const VType type = timeType(flp);
         AstNodeExpr* const countp = lowerExpr(expr, &type);
         if (!countp) return nullptr;
-        secondsp = new AstMulD{
-            flp, new AstIToRD{flp, resizeExpr(countp, type, flp)},
-            new AstConst{flp, AstConst::RealDouble{}, 1e-15}};
+        secondsp = new AstMulD{flp, new AstIToRD{flp, resizeExpr(countp, type, flp)},
+                               new AstConst{flp, AstConst::RealDouble{}, 1e-15}};
     }
     AstTimeImport* const timep = new AstTimeImport{flp, secondsp};
     timep->dtypeSetDouble();

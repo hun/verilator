@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_fn_cond_array_bad.vhdl:28:7: Unsupported: VHDL array local assigned under a run-time condition.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

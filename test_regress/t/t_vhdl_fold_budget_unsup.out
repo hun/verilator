@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_fold_budget_unsup.vhdl:28:7: Unsupported: VHDL function body with too many element assignments.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

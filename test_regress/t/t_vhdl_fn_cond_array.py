@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: a loop that only a run-time value ends
+# DESCRIPTION: Verilator: an array local written under a run-time condition
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -9,11 +9,11 @@
 
 import vltest_bootstrap
 
-test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_loop_bad.vhdl'
+test.scenarios('simulator')
+test.top_filename = 't/t_vhdl_fn_cond_array.vhdl'
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-          fails=True,
-          expect_filename=test.golden_filename)
+test.compile(verilator_flags2=['--language', 'vhdl', '--binary'])
+
+test.execute()
 
 test.passes()
