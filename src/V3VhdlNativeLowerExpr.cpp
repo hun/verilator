@@ -226,7 +226,16 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     bool userFound = false;
     if (AstNodeExpr* const userp = lowerUserUnary(expr, contextp, userFound)) return userp;
     if (userFound) return nullptr;
-    AstNodeExpr* operandp = lowerExpr(*expr.a, nullptr);
+    // `not` yields its operand's type, so an aggregate operand takes the context's type
+    // (IEEE 1076-2008 9.3.3.2)
+    const Expr* operandExprp = expr.a.get();
+    while (operandExprp->kind == Expr::PAREN && operandExprp->a) {
+        operandExprp = operandExprp->a.get();
+    }
+    const bool aggregateOperand
+        = expr.text == "not"
+          && (operandExprp->kind == Expr::AGG_POSITIONAL || operandExprp->kind == Expr::AGG_NAMED);
+    AstNodeExpr* operandp = lowerExpr(*expr.a, aggregateOperand ? contextp : nullptr);
     if (!operandp) return nullptr;
     const VType loweredType = typeOfLowered(*expr.a, operandp);
     if (isFixedType(loweredType)) return lowerFixedUnary(flp, expr, operandp, loweredType);
