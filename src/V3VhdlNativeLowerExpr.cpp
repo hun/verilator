@@ -3916,10 +3916,11 @@ AstConst* Lowering::foldStatic(AstNodeExpr* exprp) {
     const auto result = [&](const V3Number& num) {
         AstConst* const constp = new AstConst{exprp->fileline(), num};
         constp->dtypep(exprp->dtypep());
+        // A later read of the constant takes its sign from the number
+        constp->num().isSigned(exprp->dtypep() && exprp->dtypep()->isSigned());
         return constp;
     };
     if (AstConst* const constp = VN_CAST(exprp, Const)) { return constp->cloneTree(false); }
-    if (exprp->dtypep() && exprp->dtypep()->isDouble()) return nullptr;
     V3Number lhs{exprp, 1};
     V3Number rhs{exprp, 1};
     const auto operand = [&](AstNodeExpr* operandp, V3Number& out) {
@@ -3930,14 +3931,13 @@ AstConst* Lowering::foldStatic(AstNodeExpr* exprp) {
         return true;
     };
     if (AstNodeUniop* const nodep = VN_CAST(exprp, NodeUniop)) {
-        if (!operand(nodep->lhsp(), lhs) || lhs.isDouble()) return nullptr;
+        if (!operand(nodep->lhsp(), lhs)) return nullptr;
         V3Number num{nodep, nodep->width()};
         nodep->numberOperate(num, lhs);
         return result(num);
     }
     if (AstNodeBiop* const nodep = VN_CAST(exprp, NodeBiop)) {
         if (!operand(nodep->lhsp(), lhs) || !operand(nodep->rhsp(), rhs)) return nullptr;
-        if (lhs.isDouble() || rhs.isDouble()) return nullptr;
         V3Number num{nodep, nodep->width()};
         nodep->numberOperate(num, lhs, rhs);
         return result(num);

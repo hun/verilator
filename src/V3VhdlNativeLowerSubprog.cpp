@@ -2333,8 +2333,15 @@ bool Lowering::evalFuncVarAssign(const Stmt& stmt) {
                                      resizeExpr(valuep, it->second.type, flp)});
         return true;
     }
+    // A value that folds is bound as a constant, so a loop that updates a local from its
+    // previous value does not nest one more tree around it per iteration
+    AstNodeExpr* boundp = valuep;
+    if (AstConst* const foldedp = foldStatic(valuep)) {
+        valuep->deleteTree();
+        boundp = foldedp;
+    }
     it->second.exprp->deleteTree();
-    it->second.exprp = valuep;
+    it->second.exprp = boundp;
     return true;
 }
 

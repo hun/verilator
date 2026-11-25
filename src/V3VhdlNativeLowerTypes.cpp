@@ -151,7 +151,9 @@ bool Lowering::evalIntName(const Expr& expr, int64_t& value) const {
         // A fold is speculative and reports nothing, so a value that does not fit an
         // integer is simply not folded (a string, or more than 64 bits)
         if (const AstConst* const boundp = VN_CAST(bindIt->second.exprp, Const)) {
-            if (boundp->num().isFourState() || boundp->width() > 64) return false;
+            if (boundp->num().isFourState() || boundp->num().isDouble() || boundp->width() > 64) {
+                return false;
+            }
             value = boundp->num().isSigned() ? boundp->num().toSQuad()
                                              : static_cast<int64_t>(boundp->num().toUQuad());
             return true;
@@ -569,6 +571,16 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
             const std::map<std::string, ExprP>& args = m_pureCalls.back().args;
             const auto argIt = args.find(expr.text);
             if (argIt != args.end()) return evalReal(*argIt->second, value);
+        }
+        const InlineEnv& bindings = activeEnv();
+        const auto bindIt = bindings.find(expr.text);
+        if (bindIt != bindings.end()) {
+            // A real local bound to a constant holds that value
+            const AstConst* const boundp = VN_CAST(bindIt->second.exprp, Const);
+            if (boundp && boundp->num().isDouble()) {
+                value = boundp->num().toDouble();
+                return true;
+            }
         }
         if (isRealConst(expr.text, &value)) return true;
         int64_t intValue = 0;
