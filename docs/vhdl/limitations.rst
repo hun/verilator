@@ -215,12 +215,13 @@ A port may be declared ``p : view v``, ``p : view v of rec_t``,
 ``view v of rec_t is ... end view`` declared in a package, or an alias of one or of
 its ``'converse``. An element of a view may itself be a view (``r : view w``,
 ``w'converse``) or an array of views (``r : view (w)``). The element modes are
-``in`` and ``out``. An association of the whole port or of one element in an instance
+``in``, ``out`` and ``buffer``, which is an ``out`` whose converse is an ``in``.
+An association of the whole port or of one element in an instance
 port map is split into one association per leaf of the view. Verilator does not
 check that the design only drives the ``out`` elements and only reads the ``in`` ones.
 
 These are refused with an ``Unsupported:`` diagnostic: an ``inout`` element, a
-``buffer`` or ``linkage`` element, an element with an unconstrained type, a
+``linkage`` element, an element with an unconstrained type, a
 view with a constraint, a view on a signal or a subprogram parameter, an
 association of part of a view port. A port finds only a view declared in a
 package.

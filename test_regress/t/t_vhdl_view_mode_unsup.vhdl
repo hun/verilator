@@ -1,4 +1,4 @@
--- DESCRIPTION: Verilator: VHDL interface view element with a buffer mode
+-- DESCRIPTION: Verilator: VHDL interface view element with a linkage mode
 --
 -- This program is free software; you can redistribute it and/or modify it
 -- under the terms of either the GNU Lesser General Public License Version 3,
@@ -15,7 +15,7 @@ package pack is
   end record;
 
   view buf_view of rec_t is
-    a : buffer;
+    a : linkage;
   end view;
 end package;
 

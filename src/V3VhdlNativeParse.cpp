@@ -2009,6 +2009,8 @@ void Parser::parseViewDeclInto(std::vector<TypeDecl>& types) {
             member.mode = PortMode::OUT;
         } else if (acceptId("inout")) {
             member.mode = PortMode::INOUT;
+        } else if (acceptId("buffer")) {
+            member.mode = PortMode::OUT;  // A readable out; the converse end reads it as an in
         } else if (isId("view")) {
             advance();
             member.isView = true;
