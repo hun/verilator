@@ -1047,6 +1047,9 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
     // variable here rather than a rebuilt expression
     const bool savedMaterialize = m_materializeLocals;
     m_materializeLocals = true;
+    // Statements the enclosing statement's condition produced run before that statement,
+    // not inside this list
+    AstNodeStmt* const outerPendingp = takePendingStmts();
     AstNodeStmt* headp = nullptr;
     // Conditions that must hold for the following statements to run, set by exit/next
     AstNodeExpr* runCondp = nullptr;
@@ -1065,6 +1068,11 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
             if (stmtp->value) {
                 condp = lowerCond(*stmtp->value);
                 if (!condp) continue;
+                // The condition's temporaries are assigned where it is evaluated
+                if (AstNodeStmt* const pendingp = takePendingStmts()) {
+                    headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(headp, pendingp)
+                                  : pendingp;
+                }
             }
             AstNodeStmt* const setp = setLoopFlag(stmtp->flp, flagp, condp);
             if (setp)
@@ -1131,6 +1139,10 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
     }
     if (runCondp) runCondp->deleteTree();
     m_materializeLocals = savedMaterialize;
+    if (AstNodeStmt* const leftp = takePendingStmts()) {
+        headp = headp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(leftp, headp) : leftp;
+    }
+    m_pendingStmtp = outerPendingp;
     return headp;
 }
 
@@ -1371,18 +1383,24 @@ void Lowering::lowerWaitProcess(const Process& process) {
     m_edges.clear();
     AstNodeExpr* const condp = lowerCond(*ctx.waitp->value);
     if (!condp) return;
+    AstNodeStmt* condPendingp = takePendingStmts();  // Temporaries of the condition
     const std::vector<Edge> edges = m_edges;
     m_edges.clear();
     AstSenItem* const itemsp = makeWaitSensitivity(*ctx.waitp->value, edges, flp);
     if (!itemsp) {
         unsupportedError(flp, "wait statement without a sensitivity item");
         condp->deleteTree();
+        if (condPendingp) condPendingp->deleteTree();
         return;
     }
     // Each activation runs the statements after the wait, then those before it
     m_initial = false;
     if (ctx.bareWaitInBody && !ctx.singleShot) makeWaitSuspendFlag(flp);
-    AstNodeStmt* const bodyp = makeWaitActivationBody(ctx, condp);
+    AstNodeStmt* bodyp = makeWaitActivationBody(ctx, condp);
+    if (condPendingp) {
+        bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(condPendingp, bodyp)
+                      : condPendingp;
+    }
     if (bodyp) {
         m_modp->addStmtsp(
             new AstAlways{flp, VAlwaysKwd::ALWAYS, new AstSenTree{flp, itemsp}, bodyp});
@@ -1497,9 +1515,11 @@ AstNodeStmt* Lowering::lowerSequentialWait(const Stmt& stmt) {
     if (stmt.delay) return lowerDelay(*stmt.delay, flp);
     AstSenItem* itemsp = nullptr;
     AstNodeExpr* condp = nullptr;
+    AstNodeStmt* condPendingp = nullptr;  // Temporaries of the condition
     if (stmt.value) {
         m_edges.clear();
         condp = lowerCond(*stmt.value);
+        condPendingp = takePendingStmts();
         const std::vector<Edge> edges = m_edges;
         m_edges.clear();
         if (!condp) return nullptr;
@@ -1527,6 +1547,8 @@ AstNodeStmt* Lowering::lowerSequentialWait(const Stmt& stmt) {
     // `wait until` resumes at the first event after which the condition holds
     AstLoop* const loopp = new AstLoop{flp};
     loopp->addStmtsp(eventp);
+    // The condition is evaluated again after every event
+    if (condPendingp) loopp->addStmtsp(condPendingp);
     AstNodeExpr* const notp = new AstNot{flp, condp};
     notp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
     loopp->addStmtsp(new AstLoopTest{flp, loopp, notp});

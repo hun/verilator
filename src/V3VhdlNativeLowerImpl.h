@@ -42,6 +42,9 @@ static constexpr int64_t MAX_FOLD_ITERATIONS = 4096;
 //! Maximum loop iterations one function call runs in place (Lowering::execFuncStatic)
 static constexpr int64_t MAX_EXEC_ITERATIONS = 1 << 20;
 static constexpr int MAX_RECURSION_DEPTH = 64;  // Nested inlinings of one function
+//! Largest value of a function local kept as an expression where its call has a statement
+//! sink; a larger one is held in a temporary
+static constexpr int MAX_LOCAL_VALUE_NODES = 32;
 //! Largest tracked variable value, in expression nodes; a variable that reads itself in
 //! each assignment would otherwise double its tracked value per statement
 static constexpr std::size_t MAX_TRACKED_VALUE_NODES = 256;
@@ -1594,6 +1597,8 @@ class Lowering final {
     bool evalMergedCase(const Stmt& stmt, InlineEnv& env, int depth);
     void mergeBranchEnvs(FileLine* flp, AstNodeExpr* condp, InlineEnv& thenEnv, InlineEnv& elseEnv,
                          InlineEnv& outEnv, std::set<std::string>& merged);
+    AstNodeExpr* holdInTemp(FileLine* flp, const std::string& name, AstNodeExpr* valuep);
+    void holdLargeActuals(const SubprogramDecl& subp, InlineEnv& env);
     void materializeEntries(FileLine* flp, InlineEnv& env, const std::set<std::string>& names);
     AstNodeExpr* evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,
                                   const InlineCont& cont, const InlineCont* exitContp, int depth);

@@ -2279,6 +2279,39 @@ bool Lowering::materializeActuals(const SubprogramDecl& subp, InlineEnv& env,
     return true;
 }
 
+//! Assign valuep to a new variable ahead of the statement being lowered, and read that
+//! variable instead: a value a function body reads more than once is not copied per read
+AstNodeExpr* Lowering::holdInTemp(FileLine* flp, const std::string& name, AstNodeExpr* valuep) {
+    AstVar* const varp
+        = new AstVar{flp, VVarType::VAR, "__Vfn_" + std::to_string(++m_localVarSeq) + "__" + name,
+                     valuep->dtypep()};
+    m_modp->addStmtsp(varp);
+    addPendingStmt(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, valuep});
+    return new AstVarRef{flp, varp, VAccess::READ};
+}
+
+//! Hold each large actual of a function call in a temporary: the body may read the formal
+//! more than once, and an actual that is itself such a call would be copied into every read
+void Lowering::holdLargeActuals(const SubprogramDecl& subp, InlineEnv& env) {
+    for (const FormalDecl& formal : subp.formals) {
+        for (const auto& name : formal.names) {
+            const auto it = env.find(name.first);
+            if (it == env.end()) continue;
+            InlineBinding& binding = it->second;
+            if (binding.lvalue || binding.materializedp || VN_IS(binding.exprp, Const)
+                || binding.exprp->nodeCount() <= MAX_LOCAL_VALUE_NODES) {
+                continue;
+            }
+            if (AstConst* const foldedp = foldStatic(binding.exprp)) {
+                binding.exprp->deleteTree();
+                binding.exprp = foldedp;
+                continue;
+            }
+            binding.exprp = holdInTemp(formal.flp, name.first, binding.exprp);
+        }
+    }
+}
+
 AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp,
                                          const SubprogramDecl* forcedp) {
     const SubprogramRef* refp = nullptr;
@@ -2304,6 +2337,7 @@ AstNodeExpr* Lowering::lowerFunctionCall(const Expr& call, const VType* contextp
         deleteInlineEnv(env);
         return nullptr;
     }
+    if (m_materializeLocals) holdLargeActuals(*subp, env);
     // Where the call has a statement sink, a body with loops or conditional element writes
     // runs as statements: its run-time actuals would otherwise be copied into every read
     if (m_materializeLocals && needsStatementForm(*subp) && !m_inlineBodies.count(subp)
@@ -2421,6 +2455,12 @@ bool Lowering::evalFuncVarAssign(const Stmt& stmt) {
     if (AstConst* const foldedp = foldStatic(valuep)) {
         valuep->deleteTree();
         boundp = foldedp;
+    }
+    // A tree this large that a later statement reads twice would be copied into each read,
+    // doubling per statement. The temporary is assigned once, in the sink of the call.
+    if (m_materializeLocals && !VN_IS(boundp, Const)
+        && boundp->nodeCount() > MAX_LOCAL_VALUE_NODES) {
+        boundp = holdInTemp(flp, target.text, boundp);
     }
     it->second.exprp->deleteTree();
     it->second.exprp = boundp;
@@ -3030,12 +3070,7 @@ void Lowering::materializeEntries(FileLine* flp, InlineEnv& env,
         if (!names.count(entry.first)) continue;
         AstNodeExpr* const valuep = entry.second.exprp;
         if (VN_IS(valuep, Const) || VN_IS(valuep, VarRef)) continue;
-        AstVar* const varp = new AstVar{
-            flp, VVarType::VAR, "__Vfn_" + std::to_string(++m_localVarSeq) + "__" + entry.first,
-            valuep->dtypep()};
-        m_modp->addStmtsp(varp);
-        addPendingStmt(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, valuep});
-        entry.second.exprp = new AstVarRef{flp, varp, VAccess::READ};
+        entry.second.exprp = holdInTemp(flp, entry.first, valuep);
     }
 }
 
