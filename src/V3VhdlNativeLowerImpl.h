@@ -1587,9 +1587,14 @@ class Lowering final {
                                    const InlineCont& cont, const InlineCont* exitContp, int depth);
     static bool isStraightLine(const std::vector<StmtP>& stmts);
     static bool isStraightIf(const Stmt& stmt);
+    static bool isStraightCase(const Stmt& stmt);
     bool evalProcedureCall(const Stmt& stmt, int depth);
     bool evalStraightLine(const std::vector<StmtP>& stmts, InlineEnv& env, int depth);
     bool evalMergedBranches(const Stmt& stmt, std::size_t branchIndex, InlineEnv& env, int depth);
+    bool evalMergedCase(const Stmt& stmt, InlineEnv& env, int depth);
+    void mergeBranchEnvs(FileLine* flp, AstNodeExpr* condp, InlineEnv& thenEnv, InlineEnv& elseEnv,
+                         InlineEnv& outEnv, std::set<std::string>& merged);
+    void materializeEntries(FileLine* flp, InlineEnv& env, const std::set<std::string>& names);
     AstNodeExpr* evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,
                                   const InlineCont& cont, const InlineCont* exitContp, int depth);
     AstNodeExpr* evalFuncCase(const Stmt& stmt, const InlineCont& cont,

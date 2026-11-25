@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
         topp->eval();
         const int cnt = __builtin_popcount(v);
         const int mix = mixer(v & 0xff);
-        if (topp->cnt != cnt || topp->mix != mix) {
+        if (topp->cnt != cnt || topp->mix != mix || topp->same != 4) {
             if (++fails < 10) {
                 std::printf("%%Error: v=%04x cnt=%d exp=%d mix=%d exp=%d\n", v, topp->cnt, cnt,
                             topp->mix, mix);

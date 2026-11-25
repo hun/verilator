@@ -2679,18 +2679,20 @@ AstNodeExpr* Lowering::evalFuncBlockBody(const std::vector<StmtP>& stmts, std::s
             const InlineCont restCont = [&](InlineEnv& restEnv) -> AstNodeExpr* {
                 return evalFuncBlock(stmts, i + 1, restEnv, cont, exitContp, depth);
             };
-            if (stmt.kind == Stmt::IF) {
-                if (isStraightIf(stmt)) {
-                    // No arm leaves the function or loop, so the rest of the body is
-                    // lowered once, after the arms merge, rather than once per arm
-                    InlineEnv mergedEnv = cloneInlineEnv(activeEnv());
-                    AstNodeExpr* resultp = nullptr;
-                    if (evalMergedBranches(stmt, 0, mergedEnv, depth + 1)) {
-                        resultp = restCont(mergedEnv);
-                    }
-                    deleteInlineEnv(mergedEnv);
-                    return resultp;
+            if (stmt.kind == Stmt::IF ? isStraightIf(stmt)
+                                      : stmt.kind == Stmt::CASE && isStraightCase(stmt)) {
+                // No arm leaves the function or loop, so the rest of the body is
+                // lowered once, after the arms merge, rather than once per arm
+                InlineEnv mergedEnv = cloneInlineEnv(activeEnv());
+                AstNodeExpr* resultp = nullptr;
+                if (stmt.kind == Stmt::IF ? evalMergedBranches(stmt, 0, mergedEnv, depth + 1)
+                                          : evalMergedCase(stmt, mergedEnv, depth + 1)) {
+                    resultp = restCont(mergedEnv);
                 }
+                deleteInlineEnv(mergedEnv);
+                return resultp;
+            }
+            if (stmt.kind == Stmt::IF) {
                 return evalFuncBranches(stmt, 0, restCont, exitContp, depth + 1);
             }
             if (stmt.kind == Stmt::CASE) return evalFuncCase(stmt, restCont, exitContp, depth + 1);
@@ -2726,11 +2728,21 @@ bool Lowering::isStraightLine(const std::vector<StmtP>& stmts) {
         case Stmt::IF:
             if (!isStraightIf(*stmtp)) return false;
             break;
+        case Stmt::CASE:
+            if (!isStraightCase(*stmtp)) return false;
+            break;
         case Stmt::FOR:
             if (!isStraightLine(stmtp->body)) return false;
             break;
         default: return false;
         }
+    }
+    return true;
+}
+
+bool Lowering::isStraightCase(const Stmt& stmt) {
+    for (const auto& item : stmt.caseItems) {
+        if (!isStraightLine(item.second)) return false;
     }
     return true;
 }
@@ -2756,6 +2768,8 @@ bool Lowering::evalStraightLine(const std::vector<StmtP>& stmts, InlineEnv& env,
             if (!stmtp->alternatives.empty() || !evalFuncVarAssign(*stmtp)) ok = false;
         } else if (stmtp->kind == Stmt::IF) {
             ok = evalMergedBranches(*stmtp, 0, env, depth + 1);
+        } else if (stmtp->kind == Stmt::CASE) {
+            ok = evalMergedCase(*stmtp, env, depth + 1);
         } else if (stmtp->kind == Stmt::CALL) {
             ok = evalProcedureCall(*stmtp, depth + 1);
         } else if (stmtp->kind == Stmt::FOR) {
@@ -2852,42 +2866,177 @@ bool Lowering::evalMergedBranches(const Stmt& stmt, std::size_t branchIndex, Inl
              && (!hasNext || evalMergedBranches(stmt, branchIndex + 1, elseEnv, depth));
     }
     if (ok) {
-        for (auto& entry : env) {
-            AstNodeExpr* thenp = thenEnv[entry.first].exprp;
-            AstNodeExpr* elsep = elseEnv[entry.first].exprp;
-            if (thenp->sameTree(elsep)) continue;
-            if (thenp->width() != elsep->width()) {
-                if (thenp->width() > elsep->width()) {
-                    elsep = resizeExpr(elsep, typeOfDType(thenp->dtypep()), stmt.flp);
-                } else {
-                    thenp = resizeExpr(thenp, typeOfDType(elsep->dtypep()), stmt.flp);
-                }
-                elseEnv[entry.first].exprp = elsep;
-                thenEnv[entry.first].exprp = thenp;
-            }
-            AstCond* const mergedp = new AstCond{stmt.flp, condp->cloneTree(false),
-                                                 thenp->cloneTree(false), elsep->cloneTree(false)};
-            mergedp->dtypep(thenp->dtypep());
-            entry.second.exprp->deleteTree();
-            entry.second.exprp = mergedp;
-            if (!m_materializeLocals) continue;
-            // A later merge reads this value twice, so held as an expression it doubles
-            // per merge. The temporary is assigned once, so computing it ahead of the
-            // enclosing arm is harmless.
-            AstVar* const varp
-                = new AstVar{stmt.flp, VVarType::VAR,
-                             "__Vfn_" + std::to_string(++m_localVarSeq) + "__" + entry.first,
-                             mergedp->dtypep()};
-            m_modp->addStmtsp(varp);
-            addPendingStmt(
-                new AstAssign{stmt.flp, new AstVarRef{stmt.flp, varp, VAccess::WRITE}, mergedp});
-            entry.second.exprp = new AstVarRef{stmt.flp, varp, VAccess::READ};
-        }
+        std::set<std::string> merged;
+        mergeBranchEnvs(stmt.flp, condp, thenEnv, elseEnv, env, merged);
+        if (m_materializeLocals) materializeEntries(stmt.flp, env, merged);
     }
     deleteInlineEnv(thenEnv);
     deleteInlineEnv(elseEnv);
     condp->deleteTree();
     return ok;
+}
+
+//! Evaluate the arms of a case into env as evalMergedBranches does for an if
+bool Lowering::evalMergedCase(const Stmt& stmt, InlineEnv& env, int depth) {
+    InlineEnv* const savedInlinep = m_inlinep;
+    m_inlinep = &env;
+    AstNodeExpr* const selectorp = lowerExpr(*stmt.selector, nullptr);
+    VType selType;
+    if (selectorp && !actualType(*stmt.selector, selType)) {
+        selType = typeOfDType(selectorp->dtypep());
+    }
+    m_inlinep = savedInlinep;
+    if (!selectorp) return false;
+    AstConst* const selConstp = foldStatic(selectorp);
+    const bool known = selConstp && !selConstp->num().isFourState();
+    struct Arm final {
+        AstNodeExpr* condp;  // Null for the "others" alternative
+        const std::vector<StmtP>* bodyp;
+        InlineEnv env;  // Bindings after the arm
+    };
+    std::vector<Arm> arms;
+    const std::vector<StmtP>* othersp = nullptr;
+    AstNodeDType* const bitdtp = findBasic(stmt.flp, VBasicDTypeKwd::LOGIC);
+    std::set<int64_t> covered;
+    bool ok = true;
+    for (const auto& item : stmt.caseItems) {
+        std::vector<AstConst*> cops;
+        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
+            ok = false;
+        } else if (known) {
+            // The first matching choice is the only arm that runs
+            bool matches = cops.empty();
+            for (AstConst* const cop : cops) {
+                if (cop->num().isCaseEq(selConstp->num())) matches = true;
+            }
+            if (matches && arms.empty() && !othersp) {
+                if (cops.empty()) {
+                    othersp = &item.second;
+                } else {
+                    arms.push_back(Arm{nullptr, &item.second, InlineEnv{}});
+                }
+            }
+        } else if (cops.empty()) {
+            othersp = &item.second;
+        } else if (!addChoiceValues(cops, covered, "case statement")) {
+            ok = false;
+        } else {
+            AstNodeExpr* condp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[0]};
+            condp->dtypep(bitdtp);
+            for (std::size_t i = 1; i < cops.size(); ++i) {
+                AstNodeExpr* const eqp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[i]};
+                eqp->dtypep(bitdtp);
+                condp = new AstOr{stmt.flp, condp, eqp};
+                condp->dtypep(bitdtp);
+            }
+            arms.push_back(Arm{condp, &item.second, InlineEnv{}});
+            cops.clear();
+        }
+        for (AstConst* const cop : cops) cop->deleteTree();
+        if (!ok) break;
+    }
+    if (known) {
+        // Evaluate the one arm that runs in place
+        const std::vector<StmtP>* const bodyp = !arms.empty() ? arms[0].bodyp : othersp;
+        if (ok && bodyp) ok = evalStraightLine(*bodyp, env, depth);
+        selConstp->deleteTree();
+        selectorp->deleteTree();
+        return ok;
+    }
+    if (selConstp) selConstp->deleteTree();
+    InlineEnv defaultEnv;
+    if (ok) {
+        // Both a missing others and every other arm are lowered, so a statement one of them
+        // emits would run on both
+        const RuntimeBranchScope scope{m_runtimeBranchDepth};
+        for (Arm& arm : arms) {
+            arm.env = cloneInlineEnv(env);
+            if (ok) ok = evalStraightLine(*arm.bodyp, arm.env, depth);
+        }
+        if (othersp) {
+            defaultEnv = cloneInlineEnv(env);
+            if (ok) ok = evalStraightLine(*othersp, defaultEnv, depth);
+        } else if (!arms.empty() && choicesComplete(selectorp->dtypep(), selType, covered)) {
+            // Every value of the selector is covered: the last arm serves as the default
+            defaultEnv = std::move(arms.back().env);
+            arms.back().condp->deleteTree();
+            arms.pop_back();
+        } else {
+            defaultEnv = cloneInlineEnv(env);
+        }
+    }
+    if (ok) {
+        std::set<std::string> merged;
+        for (std::size_t i = arms.size(); i-- > 0;) {
+            InlineEnv outEnv = cloneInlineEnv(defaultEnv);
+            mergeBranchEnvs(stmt.flp, arms[i].condp, arms[i].env, defaultEnv, outEnv, merged);
+            deleteInlineEnv(defaultEnv);
+            defaultEnv = std::move(outEnv);
+        }
+        deleteInlineEnv(env);
+        env = std::move(defaultEnv);
+        if (m_materializeLocals) materializeEntries(stmt.flp, env, merged);
+    } else {
+        deleteInlineEnv(defaultEnv);
+    }
+    for (Arm& arm : arms) {
+        if (arm.condp) arm.condp->deleteTree();
+        deleteInlineEnv(arm.env);
+    }
+    selectorp->deleteTree();
+    return ok;
+}
+
+//! Set each binding of outEnv to the value thenEnv has where condp holds and elseEnv has
+//! elsewhere
+void Lowering::mergeBranchEnvs(FileLine* flp, AstNodeExpr* condp, InlineEnv& thenEnv,
+                               InlineEnv& elseEnv, InlineEnv& outEnv,
+                               std::set<std::string>& merged) {
+    for (auto& entry : outEnv) {
+        AstNodeExpr* thenp = thenEnv[entry.first].exprp;
+        AstNodeExpr* elsep = elseEnv[entry.first].exprp;
+        if (thenp->sameTree(elsep)) {
+            if (!thenp->sameTree(entry.second.exprp)) {
+                entry.second.exprp->deleteTree();
+                entry.second.exprp = thenp->cloneTree(false);
+                merged.insert(entry.first);
+            }
+            continue;
+        }
+        if (thenp->width() != elsep->width()) {
+            if (thenp->width() > elsep->width()) {
+                elsep = resizeExpr(elsep, typeOfDType(thenp->dtypep()), flp);
+            } else {
+                thenp = resizeExpr(thenp, typeOfDType(elsep->dtypep()), flp);
+            }
+            elseEnv[entry.first].exprp = elsep;
+            thenEnv[entry.first].exprp = thenp;
+        }
+        AstCond* const mergedp = new AstCond{flp, condp->cloneTree(false), thenp->cloneTree(false),
+                                             elsep->cloneTree(false)};
+        mergedp->dtypep(thenp->dtypep());
+        entry.second.exprp->deleteTree();
+        entry.second.exprp = mergedp;
+        merged.insert(entry.first);
+    }
+}
+
+//! Hold the named bindings of env in temporaries: a later merge reads a value twice, so
+//! held as an expression it doubles per merge. A temporary is assigned once, so computing
+//! it ahead of the enclosing arm is harmless.
+void Lowering::materializeEntries(FileLine* flp, InlineEnv& env,
+                                  const std::set<std::string>& names) {
+    for (auto& entry : env) {
+        if (!names.count(entry.first)) continue;
+        AstNodeExpr* const valuep = entry.second.exprp;
+        if (VN_IS(valuep, Const) || VN_IS(valuep, VarRef)) continue;
+        AstVar* const varp = new AstVar{
+            flp, VVarType::VAR, "__Vfn_" + std::to_string(++m_localVarSeq) + "__" + entry.first,
+            valuep->dtypep()};
+        m_modp->addStmtsp(varp);
+        addPendingStmt(new AstAssign{flp, new AstVarRef{flp, varp, VAccess::WRITE}, valuep});
+        entry.second.exprp = new AstVarRef{flp, varp, VAccess::READ};
+    }
 }
 
 AstNodeExpr* Lowering::evalFuncBranches(const Stmt& stmt, std::size_t branchIndex,

@@ -14,7 +14,8 @@ entity t_vhdl_func_if_merge is
   port (v   : in  std_logic_vector(15 downto 0);
         cnt : out std_logic_vector(4 downto 0);
         mix : out std_logic_vector(7 downto 0);
-        k   : out std_logic_vector(4 downto 0));
+        k   : out std_logic_vector(4 downto 0);
+        same : out std_logic_vector(7 downto 0));
 end t_vhdl_func_if_merge;
 
 architecture behav of t_vhdl_func_if_merge is
@@ -52,9 +53,22 @@ architecture behav of t_vhdl_func_if_merge is
     return std_logic_vector (a + b);
   end mixer;
 
+  -- Both arms give the variable the same new value
+  function same_arms (x : std_logic_vector (15 downto 0)) return std_logic_vector is
+    variable n : integer := 0;
+  begin
+    if x (0) = '1' then
+      n := 4;
+    else
+      n := 4;
+    end if;
+    return std_logic_vector (to_unsigned (n, 8));
+  end same_arms;
+
   constant kc : std_logic_vector (4 downto 0) := count (x"a5f3");
 begin
   cnt <= count (v);
   mix <= mixer (v (7 downto 0));
   k <= kc;
+  same <= same_arms (v);
 end behav;
