@@ -1922,13 +1922,19 @@ AstNodeExpr* Lowering::edgeLevel(FileLine* flp, AstVar* varp, bool rising) {
     return notp;
 }
 
-AstNodeExpr* Lowering::edgeChanged(FileLine* flp, AstVar* varp) {
+//! The variable holding what a signal had when the process last ran
+AstVar* Lowering::edgePrevVar(FileLine* flp, AstVar* varp) {
     AstVar*& prevp = m_edgePrevVars[varp];
     if (!prevp) {
         const std::string name = "__Vedge_" + std::to_string(++m_edgeSeq) + "__" + varp->name();
         prevp = new AstVar{flp, VVarType::VAR, name, varp->dtypep()};
         m_modp->addStmtsp(prevp);
     }
+    return prevp;
+}
+
+AstNodeExpr* Lowering::edgeChanged(FileLine* flp, AstVar* varp) {
+    AstVar* const prevp = edgePrevVar(flp, varp);
     AstNodeExpr* const changedp = new AstNeq{flp, new AstVarRef{flp, varp, VAccess::READ},
                                              new AstVarRef{flp, prevp, VAccess::READ}};
     changedp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
@@ -3684,6 +3690,15 @@ AstNodeExpr* Lowering::lowerAttr(const Expr& expr) {
         && (expr.a->kind == Expr::INDEX || expr.a->kind == Expr::SLICE)) {
         AstNodeExpr* eventp = nullptr;
         if (lowerIndexedEventAttr(flp, expr, eventp)) return eventp;
+    }
+    // The process runs on an event of the signal, and the value it had at the previous run is
+    // the one before that event
+    if (attribute == "last_value" && m_prevTracked && expr.a && expr.a->kind == Expr::NAME) {
+        if (AstVar* const varp = lookupVar(*expr.a)) {
+            m_edges.push_back({varp, VEdgeType::ET_CHANGED});
+            AstVar* const readp = m_initial ? varp : edgePrevVar(flp, varp);
+            return new AstVarRef{flp, readp, VAccess::READ};
+        }
     }
     AttrTypeInfo info;
     if (!expr.a) {

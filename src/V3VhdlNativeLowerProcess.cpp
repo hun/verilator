@@ -82,7 +82,9 @@ void Lowering::lowerProcess(const Process& process) {
     for (AstNodeExpr* const readp : m_externalReads) readp->deleteTree();
     m_externalReads.clear();
     m_recordExternals = true;
+    m_prevTracked = true;
     AstNodeStmt* bodyp = lowerStmtList(process.body);
+    m_prevTracked = false;
     m_recordExternals = false;
     const std::vector<Edge> edges = m_edges;
     m_edges.clear();
@@ -99,8 +101,10 @@ void Lowering::lowerProcess(const Process& process) {
         bodyp = AstNode::addNext(bodyp, initPrevsp->cloneTree(true));
     }
     m_initial = true;
+    m_prevTracked = true;
     m_varVals.clear();
     AstNodeStmt* initp = lowerStmtList(process.body);
+    m_prevTracked = false;
     m_initial = false;
     if (!m_edgePrevVars.empty() && initp && initPrevsp) {
         initp = AstNode::addNext(initp, initPrevsp);

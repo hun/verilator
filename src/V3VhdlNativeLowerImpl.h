@@ -380,6 +380,7 @@ class Lowering final {
     };
     std::map<AstVar*, AstVar*, AstVarLess> m_edgePrevVars;  // Edge signal -> its previous value
     int m_edgeSeq = 0;  // Disambiguates the previous-value variables
+    bool m_prevTracked = false;  // The process body being lowered updates the previous values
     //! Set while a wait process lowers its body: a bare `wait;` reached at run time
     //! sets this flag, which gates every later activation
     AstVar* m_suspendFlagp = nullptr;
@@ -1200,6 +1201,7 @@ class Lowering final {
     //! The clock's level, which is its edge when the process is change sensitive
     AstNodeExpr* edgeLevel(FileLine* flp, AstVar* varp, bool rising);
     //! Whether the signal differs from its value at the previous process run
+    AstVar* edgePrevVar(FileLine* flp, AstVar* varp);
     AstNodeExpr* edgeChanged(FileLine* flp, AstVar* varp);
     //! The signal's edge, from its level and whether it changed
     AstNodeExpr* edgeFromChanged(FileLine* flp, AstVar* varp, bool rising);
