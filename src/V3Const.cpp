@@ -1851,6 +1851,13 @@ class ConstVisitor final : public VNVisitor {
                || (!node1p->isLargerThan(SAME_TREE_MAX_NODES) && node1p->sameGateTree(node2p)
                    && node1p->isPure());
     }
+    // Same tree for the operands of a logical operation, where each is only a boolean
+    static bool operandsSameBoolTree(AstNode* node1p, const AstNode* node2p) {
+        return operandsSameTree(node1p, node2p)
+               || (node1p->width1() && node2p->width1()
+                   && !node1p->isLargerThan(SAME_TREE_MAX_NODES) && node1p->sameBoolTree(node2p)
+                   && node1p->isPure());
+    }
     bool ifSameAssign(const AstIf* nodep) {
         const AstNodeAssign* const thensp = VN_CAST(nodep->thensp(), NodeAssign);
         const AstNodeAssign* const elsesp = VN_CAST(nodep->elsesp(), NodeAssign);
@@ -4622,8 +4629,8 @@ class ConstVisitor final : public VNVisitor {
     TREEOP ("AstNeqN   {operandsSameTree($lhsp,,$rhsp)}",   "replaceZero(nodep)");
     TREEOP ("AstNeqCase{operandsSameTree($lhsp,,$rhsp)}",   "replaceZero(nodep)");
     TREEOP ("AstNeqWild{operandsSameTree($lhsp,,$rhsp)}",   "replaceZero(nodep)");
-    TREEOP ("AstLogAnd {operandsSameTree($lhsp,,$rhsp)}",   "replaceWLhsBool(nodep)");
-    TREEOP ("AstLogOr  {operandsSameTree($lhsp,,$rhsp)}",   "replaceWLhsBool(nodep)");
+    TREEOP ("AstLogAnd {operandsSameBoolTree($lhsp,,$rhsp)}",   "replaceWLhsBool(nodep)");
+    TREEOP ("AstLogOr  {operandsSameBoolTree($lhsp,,$rhsp)}",   "replaceWLhsBool(nodep)");
     ///=== Verilog operators
     // Comparison against 1'b0/1'b1; must be careful about widths.
     // These use Not, so must be Verilog only
