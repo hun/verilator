@@ -76,9 +76,6 @@ bool AstNode::sameTree(const AstNode* node2p) const {
 bool AstNode::sameGateTree(const AstNode* node2p) const {
     return sameTreeIter(this, node2p, true, true);
 }
-bool AstNode::sameBoolTree(const AstNode* node2p) const {
-    return sameTreeIter(this, node2p, true, false, true);
-}
 
 int AstNodeArrayDType::left() const VL_MT_STABLE { return rangep()->leftConst(); }
 int AstNodeArrayDType::right() const VL_MT_STABLE { return rangep()->rightConst(); }

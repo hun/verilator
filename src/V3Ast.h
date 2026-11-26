@@ -531,7 +531,7 @@ private:
     void checkTreeIter(const AstNode* prevBackp) const VL_MT_STABLE;
     bool gateTreeIter() const;
     static bool sameTreeIter(const AstNode* node1p, const AstNode* node2p, bool ignNext,
-                             bool gateOnly, bool boolOnly = false);
+                             bool gateOnly);
     void deleteTreeIter();
     void deleteNode();
     string instanceStr() const;
@@ -988,9 +988,6 @@ public:
     inline bool sameTree(const AstNode* node2p) const;  // Does tree of this == node2p?
     // Does tree of this == node2p?, not allowing non-isGateOptimizable
     inline bool sameGateTree(const AstNode* node2p) const;
-    // Does tree of this == node2p, treating one-bit values that differ only in being
-    // logic or bit as equal, as when each is only used as a boolean?
-    inline bool sameBoolTree(const AstNode* node2p) const;
     void deleteTree();  // Always deletes the next link
     void checkTree() const VL_MT_STABLE {
         if (v3Global.opt.debugCheck()) checkTreeIter(backp());
