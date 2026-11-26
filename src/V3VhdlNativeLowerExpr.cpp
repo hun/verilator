@@ -164,6 +164,18 @@ AstNodeExpr* Lowering::lowerName(FileLine* flp, const Expr& expr, const VType* c
         if (code >= 0 && contextp && contextp->isVector() && contextp->width == 8) {
             return makeVectorConst(flp, *contextp, static_cast<unsigned char>(code));
         }
+        if (code >= 0) {
+            // With no eight-bit context it is still a character: an operand of `&` or a
+            // string element
+            VType charType;
+            charType.kind = VType::VECTOR;
+            charType.kwd = VBasicDTypeKwd::LOGIC;  // As a string's elements
+            charType.signing = VSigning::UNSIGNED;
+            charType.width = 8;
+            charType.typeName = "character";
+            charType.dtp = findVectorWidth(flp, charType.kwd, charType.signing, 8);
+            return makeVectorConst(flp, charType, static_cast<unsigned char>(code));
+        }
         flp->v3error("VHDL: unknown identifier '" + expr.spelling + "'.");
         return nullptr;
     }
@@ -269,9 +281,8 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
             ltZerop = new AstLtD{flp, operandp->cloneTree(false), zerop};
             negp = new AstNegateD{flp, operandp->cloneTree(false)};
         } else {
-            AstNodeExpr* zerop = type.isInt()
-                                           ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
-                                           : makeVectorConst(flp, type, 0);
+            AstNodeExpr* zerop = type.isInt() ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
+                                              : makeVectorConst(flp, type, 0);
             AstNodeExpr* valuep = operandp->cloneTree(false);
             if (signedLogic) {
                 // The width pass only keeps a signed comparison when its operands are signed
