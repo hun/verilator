@@ -459,13 +459,13 @@ def first_diff(left, right, lname, rname):
 
 
 class Known:
-    """Divergences accepted for now: lines 'BUCKET<TAB>regex on the key and message<TAB>reason'."""
+    """Divergences accepted for now: lines 'BUCKET :: regex on the key and message :: reason'."""
 
     def __init__(self, path):
         self.rules = []
         if path and Path(path).is_file():
             for line in Path(path).read_text().splitlines():
-                parts = line.split('\t')
+                parts = line.split(' :: ')
                 if len(parts) >= 2 and not line.startswith('#'):
                     self.rules.append((parts[0], re.compile(parts[1]), parts[2:3] or ['']))
 

@@ -1,7 +1,7 @@
 # DESCRIPTION: Verilator: divergences vhdl_cross_check.py accepts as KNOWN
 # SPDX-FileCopyrightText: 2026-2026 Wilson Snyder
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
-# Divergences vhdl_cross_check.py reports as KNOWN instead of failing: BUCKET<TAB>regex<TAB>reason
+# Divergences vhdl_cross_check.py reports as KNOWN instead of failing: BUCKET :: regex :: reason
 # The regex is searched in "corpus/name message". Keep each rule narrow; a rule that
 # hides a bug is worse than a noisy report. See docs/vhdl/limitations.rst for the causes.
-RUN_DIVERGE	ours='[^']*\?	A message that is not a literal prints as a placeholder, as documented
+RUN_DIVERGE :: ours='[^']*\? :: A message that is not a literal prints as a placeholder, as documented
