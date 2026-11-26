@@ -1721,7 +1721,7 @@ AstNodeStmt* Lowering::lowerFor(const Stmt& stmt) {
             // `for i in name'range loop`: the bounds come from the prefix's type
             if (!stmt.b || stmt.b->kind != Expr::ATTR
                 || (stmt.b->text != "range" && stmt.b->text != "reverse_range") || !stmt.b->a
-                || stmt.b->a->kind != Expr::NAME) {
+                || (stmt.b->a->kind != Expr::NAME && stmt.b->a->kind != Expr::SELECTED)) {
                 unsupportedError(flp, "loop range without 'to' or 'downto'");
                 return nullptr;
             }
