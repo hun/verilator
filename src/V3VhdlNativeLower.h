@@ -112,6 +112,9 @@ struct Design final {
     std::map<std::pair<std::string, std::string>, AstModule*> archModules;
     std::map<SpecKey, AstModule*, SpecKeyLess> specializations;  // Binding key -> module
     std::unordered_set<std::string> instantiated;  // Entities named by at least one instance
+    // (parent, child) entity pairs where the child also reaches the parent through its own
+    // instances, so the child is not made a non-top by this instance
+    std::set<std::pair<std::string, std::string>> recursiveEdges;
     // Signals whose type has no resolution function, in any unit: at most one driver across
     // the design (IEEE 1076-2008 6.4.2.3). A package signal is driven from every unit.
     std::set<AstVar*> unresolvedSignals;

@@ -71,6 +71,11 @@ object of an instance. The path starts at this unit, as ``dut.accum`` or ``.top.
 or climbs out of blocks with ``^``. Paths through an indexed generate, to a package object,
 or up out of this unit are refused.
 
+An entity may instantiate itself, or two entities may instantiate each other, under a generate
+condition that stops the recursion. Each distinct set of generics is one specialized module, and
+a recursion that does not stop within 32 specializations is refused. A cycle with no entity
+outside it needs ``--top-module``, as it has no unique top.
+
 A configuration specification in an architecture, ``for all|others|labels : comp use entity
 work.comp(arch);``, selects the architecture of a component instance. A configuration declaration
 does the same for the architecture it configures and overrides a specification. The entity must

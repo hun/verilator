@@ -2012,7 +2012,11 @@ bool Lowering::selectInstanceArchitecture(const Concurrent& conc, const EntityUn
 //! Derive unconstrained port ranges at this instance and specialize the module
 bool Lowering::specializeInstancePorts(const Concurrent& conc, const EntityUnit* entityp,
                                        AstModule*& modp, PortBoundsMap& portBounds) {
-    if (entityp) m_designp->instantiated.insert(conc.instanceName);
+    // An entity reached only through its own recursion, under a generate condition, is
+    // still a top
+    if (entityp && !m_designp->recursiveEdges.count({m_entityName, conc.instanceName})) {
+        m_designp->instantiated.insert(conc.instanceName);
+    }
     if (entityp) {
         for (const PortDecl& port : entityp->ports) {
             const bool unconstrainedRange

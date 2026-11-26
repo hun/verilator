@@ -440,6 +440,27 @@ void orderEntities(EmitContext& ctx) {
             collectInstances(arch.stmts, instantiatedBy[arch.entityName]);
         }
     }
+    // An instance of an entity that reaches back to its parent is a recursion, which does not
+    // make the child a non-top: its only users are its own cycle
+    for (const auto& edge : instantiatedBy) {
+        for (const std::string& child : edge.second) {
+            std::set<std::string> seen;
+            std::vector<std::string> work{child};
+            while (!work.empty()) {
+                const std::string name = work.back();
+                work.pop_back();
+                if (name == edge.first) {
+                    ctx.design.recursiveEdges.emplace(edge.first, child);
+                    break;
+                }
+                if (!seen.insert(name).second) continue;
+                const auto next = instantiatedBy.find(name);
+                if (next != instantiatedBy.end()) {
+                    work.insert(work.end(), next->second.begin(), next->second.end());
+                }
+            }
+        }
+    }
     {
         std::set<std::string> done;
         std::set<std::string> visiting;
