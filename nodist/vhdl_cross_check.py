@@ -41,8 +41,10 @@ import os
 import re
 import resource
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import List, Optional
 
@@ -50,6 +52,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SEVERITY = ['CRASH', 'ACCEPTS_ILLEGAL', 'REJECTS_LEGAL', 'RUN_DIVERGE', 'UNSUP', 'REF_DISAGREE',
             'TIMEOUT', 'KNOWN', 'SKIP', 'MATCH']
 MEM_LIMIT = 6 * 1024**3  # per Verilator process, so a runaway fails one case
+OUTPUT_LIMIT = 64 * 1024**2  # per command; a simulation that prints without end counts as timed out
 STD_GHDL = {'1993': '93c', '2000': '00', '2002': '02', '2008': '08', '2019': '19'}
 ENTITY_RE = re.compile(r'^\s*entity\s+(\w+)\s+is\b', re.I | re.M)
 GHDL_MSG_RE = re.compile(r':@\S+:\((?:report|assertion) (\w+)\): ?(.*)$')
@@ -235,12 +238,42 @@ def run(cmd, cwd, timeout, limit_mem=False, env=None):
             resource.setrlimit(resource.RLIMIT_AS, (MEM_LIMIT, MEM_LIMIT))
 
     full_env = dict(os.environ, **(env or {}))
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            preexec_fn=limits, env=full_env)
+    assert proc.stdout is not None
+    output = bytearray()
+    runaway = threading.Event()
+
+    def kill():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def pump():
+        # Keep reading so the child never blocks, but keep only the start of the output
+        for chunk in iter(lambda: proc.stdout.read(65536), b''):
+            if runaway.is_set():
+                continue
+            output.extend(chunk[:OUTPUT_LIMIT - len(output)])
+            if len(output) >= OUTPUT_LIMIT:
+                runaway.set()
+                kill()
+
+    reader = threading.Thread(target=pump)
+    reader.start()
+    timed_out = False
     try:
-        proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              timeout=timeout, preexec_fn=limits, env=full_env, check=False)
-        return proc.returncode, proc.stdout.decode(errors='replace'), False
-    except subprocess.TimeoutExpired as exc:
-        return -9, (exc.stdout or b'').decode(errors='replace'), True
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        kill()
+        proc.wait()
+    reader.join()
+    proc.stdout.close()
+    if timed_out or runaway.is_set():
+        return -9, output.decode(errors='replace'), True
+    return proc.returncode, output.decode(errors='replace'), False
 
 
 class Tools:
