@@ -38,6 +38,8 @@ class AstVar;
 
 namespace vhdlnative {
 
+struct VType;
+
 //! Module created for each entity, so instances can bind to it by name
 using ModuleMap = std::map<std::string, AstModule*>;
 
@@ -118,6 +120,8 @@ struct Design final {
     // Signals whose type has no resolution function, in any unit: at most one driver across
     // the design (IEEE 1076-2008 6.4.2.3). A package signal is driven from every unit.
     std::set<AstVar*> unresolvedSignals;
+    // The declared type of every entity port, whose AST data type is a flat vector
+    std::unordered_map<const AstVar*, std::shared_ptr<VType>> portTypes;
     std::unordered_set<std::string> baseUsed;  // Entities whose base module an instance binds to
     UnconstrainedRecordMap unconstrainedRecordMembers;  // Unconstrained record elements
     // Physical unit name -> multiple of its type's step unit, and the names two physical

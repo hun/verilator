@@ -1824,7 +1824,7 @@ public:
                        const VType& aggType, const VType& portType, AstNodeExpr*& actualp);
     bool bindPartialPort(InstancePortBind& ctx, AstVar* portp,
                          const std::vector<const PortAssoc*>& assocs, const VType& portType,
-                         AstNodeExpr*& actualp);
+                         const VType& partType, bool declared, AstNodeExpr*& actualp);
     bool bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t portIndex, AstPin*& pinsp);
     bool hasDeferredConsts() const { return !m_deferredConsts.empty(); }
     void scanBodyIntConsts(const std::vector<PackageUnit>& packages);

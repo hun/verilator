@@ -781,6 +781,7 @@ void Lowering::emitPorts(const EntityUnit& entity, const PortBoundsMap* portBoun
             varp->declTyped(true);
             m_modp->addStmtsp(varp);
             m_scope[name.first] = VarInfo{varp, type};
+            m_designp->portTypes[varp] = std::make_shared<VType>(type);
             if (!isResolvedType(type)) m_designp->unresolvedSignals.insert(varp);
         }
     }
@@ -2257,7 +2258,7 @@ bool Lowering::bindWholePort(InstancePortBind& ctx, AstVar* portp, const PortAss
 //! Bind the individual bit ranges of a vector port
 bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
                                const std::vector<const PortAssoc*>& assocs, const VType& portType,
-                               AstNodeExpr*& actualp) {
+                               const VType& partType, bool declared, AstNodeExpr*& actualp) {
     FileLine* const flp = ctx.conc.flp;
     //! One association of a port, resolved to the bit range it connects
     struct Connection final {
@@ -2265,26 +2266,12 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
         int width = 1;  // Width of the connected range
         const PortAssoc* assocp = nullptr;  // The association that connects the range
     };
-    // A part of an array of vectors is whole elements, so only a flat bit vector fixes the
-    // width of a part from its range
-    bool flatVector = false;
-    if (ctx.entityp) {
-        for (const PortDecl& port : ctx.entityp->ports) {
-            const bool named = std::any_of(port.names.begin(), port.names.end(),
-                                           [&](const std::pair<std::string, std::string>& name) {
-                                               return name.first == portp->name();
-                                           });
-            if (!named) continue;
-            const std::string& mark = port.type.mark;
-            const auto typeIt = m_types.find(mark);
-            flatVector = mark == "std_logic_vector" || mark == "std_ulogic_vector"
-                         || mark == "bit_vector" || mark == "unsigned" || mark == "signed"
-                         || (typeIt != m_types.end()
-                             && (typeIt->second.kind == VType::VECTOR
-                                 || (typeIt->second.kind == VType::ARRAY && typeIt->second.elemp
-                                     && !typeIt->second.elemp->isVector())));
-        }
-    }
+    // A part of an array of vectors is whole elements: the range counts elements, each
+    // elemWidth bits wide
+    const int elemWidth
+        = partType.kind == VType::ARRAY && partType.elemp && partType.elemp->isVector()
+              ? partType.elemWidth
+              : 1;
     // Collect the bit range each association connects
     std::vector<Connection> connections;
     bool bad = false;
@@ -2305,10 +2292,10 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
         }
         if (!haveRight) right = left;
         Connection connection;
-        const int offsetLeft = portType.indexOffset(static_cast<int>(left));
-        const int offsetRight = portType.indexOffset(static_cast<int>(right));
-        connection.lsb = std::min(offsetLeft, offsetRight);
-        connection.width = std::abs(offsetLeft - offsetRight) + 1;
+        const int offsetLeft = partType.indexOffset(static_cast<int>(left));
+        const int offsetRight = partType.indexOffset(static_cast<int>(right));
+        connection.lsb = std::min(offsetLeft, offsetRight) * elemWidth;
+        connection.width = (std::abs(offsetLeft - offsetRight) + 1) * elemWidth;
         if (connection.lsb < 0 || connection.lsb + connection.width > portType.width) {
             assocp->flp->v3error("VHDL: association is out of range of port "
                                  + portp->prettyNameQ() + ".");
@@ -2330,7 +2317,7 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
                     = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
                 valuep = lowerExpr(*connection.assocp->actual, &elementType);
                 if (!valuep) return false;
-                if (flatVector && valuep->width() != connection.width) {
+                if (declared && valuep->width() != connection.width) {
                     connection.assocp->flp->v3error(
                         "VHDL: actual of a part of port " + portp->prettyNameQ()
                         + " does not have the part's length (IEEE 1076-2008 14.3.5).");
@@ -2362,7 +2349,7 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
                 if (headp) headp->deleteTree();
                 return false;
             }
-            if (flatVector && lhsp->width() != connection.width) {
+            if (declared && lhsp->width() != connection.width) {
                 connection.assocp->flp->v3error(
                     "VHDL: actual of a part of port " + portp->prettyNameQ()
                     + " does not have the part's length (IEEE 1076-2008 14.3.5).");
@@ -2466,14 +2453,24 @@ bool Lowering::bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t por
             if (!bindWholePort(ctx, portp, *assocs.front(), aggType, portType, actualp)) {
                 return false;
             }
-        } else if (!portType.isVector() || portType.elemWidth != 1) {
-            unsupportedError(flp, "part of a port that is not a bit vector");
-            return false;
-        } else if (portp->direction().isInout()) {
-            unsupportedError(flp, "part of an inout port");
-            return false;
-        } else if (!bindPartialPort(ctx, portp, assocs, portType, actualp)) {
-            return false;
+        } else {
+            // The data type of a port is a flat vector; the declared type has its elements
+            const auto declaredIt = m_designp->portTypes.find(portp);
+            const bool declared = declaredIt != m_designp->portTypes.end();
+            const VType& partType = declared ? *declaredIt->second : portType;
+            const bool vectorOfVectors
+                = partType.kind == VType::ARRAY && partType.elemp && partType.elemp->isVector();
+            if (!partType.isVector() || (partType.elemWidth != 1 && !vectorOfVectors)) {
+                unsupportedError(flp, "part of a port that is not a bit vector");
+                return false;
+            }
+            if (portp->direction().isInout()) {
+                unsupportedError(flp, "part of an inout port");
+                return false;
+            }
+            if (!bindPartialPort(ctx, portp, assocs, portType, partType, declared, actualp)) {
+                return false;
+            }
         }
     }
     AstPin* const pinp = new AstPin{flp, portp->pinNum(), portp->name(), actualp};
