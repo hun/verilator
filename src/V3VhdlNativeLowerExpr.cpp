@@ -1783,6 +1783,15 @@ AstNodeExpr* Lowering::lowerRealBinary(FileLine* flp, const std::string& op, Bin
         resultp = new AstMulD{flp, lp, rp};
     } else if (op == "/") {
         resultp = new AstDivD{flp, lp, rp};
+    } else if (op == "mod") {
+        // ieee.math_real: x - y * floor(x / y)
+        AstNodeExpr* const quotp = new AstDivD{flp, lp->cloneTree(false), rp->cloneTree(false)};
+        quotp->dtypep(realDtp);
+        AstNodeExpr* const floorp = new AstFloorD{flp, quotp};
+        floorp->dtypep(realDtp);
+        AstNodeExpr* const mulp = new AstMulD{flp, rp, floorp};
+        mulp->dtypep(realDtp);
+        resultp = new AstSubD{flp, lp, mulp};
     } else if (op == "=") {
         resultp = new AstEqD{flp, lp, rp};
     } else if (op == "/=") {

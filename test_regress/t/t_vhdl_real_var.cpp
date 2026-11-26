@@ -34,6 +34,8 @@ int main(int argc, char** argv) {
     check("o_sig", topp->o_sig, 5u);  // integer(2.5 * 2.0)
     check("o_pow", topp->o_pow, 16u);  // integer(2.5 ** 3) = 15.625
     check("o_powv", topp->o_powv, 6u);  // integer(2.5 ** 2) = 6.25
+    check("o_mod", topp->o_mod, 5u);  // (2.5 - 6.0) mod 2.0 = 0.5, sign of the divisor
+    check("o_modc", topp->o_modc, 5u);  // -7.5 mod 2.0 = 0.5
 
     topp->final();
     delete topp;

@@ -620,6 +620,9 @@ bool Lowering::evalReal(const Expr& expr, double& value) const {
         } else if (op == "/") {
             if (rhs == 0.0) return false;
             value = lhs / rhs;
+        } else if (op == "mod") {
+            if (rhs == 0.0) return false;
+            value = lhs - rhs * std::floor(lhs / rhs);
         } else if (op == "**") {
             value = std::pow(lhs, rhs);
         } else {
