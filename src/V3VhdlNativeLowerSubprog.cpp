@@ -3825,16 +3825,17 @@ AstNodeStmt* Lowering::expandSubprogram(const Expr& callExpr, const SubprogramDe
     AstVar* retVarp = nullptr;
     VType retType;
     // An unconstrained return type takes its length from the first return lowered
-    bool retSized
-        = fnp
-          && (!isUnconstrainedMark(subp->returnType.mark) || subp->returnType.hasRange
-              || !subp->returnType.constraintMark.empty());
+    bool retSized = fnp
+                    && (!isUnconstrainedMark(subp->returnType.mark) || subp->returnType.hasRange
+                        || !subp->returnType.constraintMark.empty());
     if (retSized) {
         if (!resolveType(subp->returnType, retType)) return fail(nullptr);
         // A declared array type without bounds has no data type to hold the result yet
         retSized = retType.dtp != nullptr;
-        if (retSized) retVarp = newResultVar(subp->flp, subp->name, retType);
-        else retType = VType{};
+        if (retSized)
+            retVarp = newResultVar(subp->flp, subp->name, retType);
+        else
+            retType = VType{};
     }
 
     // A local type may name a constant of the same declarative part, so the types register
@@ -3859,7 +3860,25 @@ AstNodeStmt* Lowering::expandSubprogram(const Expr& callExpr, const SubprogramDe
     for (const Decl& decl : subp->decls) {
         registerTypesBefore(decl.flp->lineno());
         if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
+            std::vector<RuntimeConst> runtimeConsts;
+            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false, &runtimeConsts);
+            for (const RuntimeConst& rc : runtimeConsts) {
+                for (size_t i = 0; i < rc.names.size(); ++i) {
+                    const std::string mangled
+                        = "__Vproc_" + std::to_string(++m_procVarSeq) + "__" + rc.names[i].first;
+                    AstVar* const varp = new AstVar{rc.flp, VVarType::VAR, mangled, rc.type.dtp};
+                    traceDeclared(varp);
+                    m_modp->addStmtsp(varp);
+                    m_scope[rc.names[i].first] = VarInfo{varp, rc.type};
+                    frameRef.liveScope = saveScope();
+                    AstNodeExpr* const valuep
+                        = i + 1 == rc.names.size() ? rc.valuep : rc.valuep->cloneTree(false);
+                    AstNodeStmt* const initp = new AstAssign{
+                        rc.flp, new AstVarRef{rc.flp, varp, VAccess::WRITE}, valuep};
+                    initsp = initsp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(initsp, initp)
+                                    : initp;
+                }
+            }
             continue;
         }
         VType ltype;

@@ -43,6 +43,18 @@
 
 namespace vhdlnative {
 
+void Lowering::scanBodyIntConsts(const std::vector<PackageUnit>& packages) {
+    for (const PackageUnit& pkg : packages) {
+        if (!pkg.isBody || !pkg.generics.empty()) continue;
+        for (const Decl& decl : pkg.decls) {
+            if (decl.kind != Decl::CONSTANT || !decl.init) continue;
+            int64_t value = 0;
+            if (!evalInt(*decl.init, value)) continue;
+            for (const auto& name : decl.names) m_bodyIntConsts[pkg.name][name.first] = value;
+        }
+    }
+}
+
 void Lowering::preScanIntConstants(const std::vector<Decl>& decls) {
     for (const Decl& decl : decls) {
         if (decl.kind != Decl::CONSTANT || !decl.init) continue;
@@ -60,7 +72,7 @@ void Lowering::preScanIntConstants(const std::vector<Decl>& decls) {
 
 void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
                             const TypeSpec& type, const Expr* initp, FileLine* flp,
-                            bool deferredOk) {
+                            bool deferredOk, std::vector<RuntimeConst>* runtimeOut) {
     if (!initp) {
         // A package body completes the constants its specification deferred
         if (!deferredOk) flp->v3error("VHDL: constant without a value.");
@@ -109,6 +121,10 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
     }
     AstConst* const constp = VN_CAST(valuep, Const);
     if (!constp) {
+        if (runtimeOut) {
+            runtimeOut->push_back(RuntimeConst{names, constType, valuep, flp});
+            return;
+        }
         unsupportedError(flp, "constant value that is not static");
         valuep->deleteTree();
         return;
@@ -245,10 +261,10 @@ bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileL
                 return self(*valueType.elemp, self);
             }
             if (valueType.kind != VType::RECORD) return false;
-            return std::any_of(valueType.fields.begin(), valueType.fields.end(),
-                               [&self](const VField& field) {
-                                   return field.width == 0 || (field.type && self(*field.type, self));
-                               });
+            return std::any_of(
+                valueType.fields.begin(), valueType.fields.end(), [&self](const VField& field) {
+                    return field.width == 0 || (field.type && self(*field.type, self));
+                });
         };
         if (init.kind == Expr::AGG_POSITIONAL && unsizedRecord(constType, unsizedRecord)) {
             unsupportedError(flp, "constant of a record with an unconstrained element");

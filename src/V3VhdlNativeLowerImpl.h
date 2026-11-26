@@ -771,8 +771,21 @@ class Lowering final {
     void importInlineScope(const std::string& name);
     //! Record integer constants that a type declaration may depend on
     void preScanIntConstants(const std::vector<Decl>& decls);
+    //! A constant whose value is known only at run time, such as one initialized from a
+    //! subprogram's formal: the caller declares it as a variable set on entry
+    struct RuntimeConst final {
+        std::vector<std::pair<std::string, std::string>> names;  // Declared (folded, spelling)
+        VType type;  // Resolved type
+        AstNodeExpr* valuep = nullptr;  // Initial value, owned by the receiver
+        FileLine* flp = nullptr;  // Source location
+    };
+    //! Emit a constant; a non-static value goes to `runtimeOut` when given, else is refused
+    //! Integer constants of package bodies by package name, folded before any package is
+    //! emitted so a type that names a deferred constant resolves before its body is read
+    std::map<std::string, std::map<std::string, int64_t>> m_bodyIntConsts;
     void emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
-                      const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk);
+                      const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk,
+                      std::vector<RuntimeConst>* runtimeOut = nullptr);
     //! Resolved type of a constant, with a value lowered early when the type needed it
     struct ConstantTypeInfo final {
         VType type;  // Resolved type of the constant
@@ -1774,6 +1787,7 @@ public:
                          AstNodeExpr*& actualp);
     bool bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t portIndex, AstPin*& pinsp);
     bool hasDeferredConsts() const { return !m_deferredConsts.empty(); }
+    void scanBodyIntConsts(const std::vector<PackageUnit>& packages);
     std::string deferredOwner() const {
         return m_deferredConsts.empty() ? std::string{} : m_deferredConsts.front().owner;
     }
