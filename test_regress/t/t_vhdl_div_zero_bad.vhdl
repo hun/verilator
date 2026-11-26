@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- Dividing by zero is an error (IEEE 1076-2008 9.1; subset row 4.5)
+-- Dividing by zero is an error (IEEE 1076-2008 5.2.3.1; subset row 4.5)
 
 entity t is
   port (

@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- IEEE 1076-2008 6.5.2.2: a component declaration's ports must conform to the
+-- IEEE 1076-2008 6.5.7.1: a component declaration's ports must conform to the
 -- entity the instantiation binds.
 
 library ieee;

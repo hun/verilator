@@ -19,7 +19,7 @@ end;
 
 architecture rtl of t is
 begin
-  -- numeric_std defines "abs" for a signed operand (IEEE 1076-2008 Annex C).
+  -- numeric_std defines "abs" for a signed operand (IEEE 1076-2008 16.8.5).
   -- GHDL: abs(-2) = 2.
   a1 <= abs(s);
 end;

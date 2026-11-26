@@ -8,7 +8,7 @@
 
 -- poc's arith_Adder_Wide declares a constant table and a function that reads it in the
 -- same declarative part, and a constant that calls the function. A subprogram body
--- evaluates against what its unit has declared before it (IEEE 1076-2008 4.7).
+-- evaluates against what its unit has declared before it (IEEE 1076-2008 14.4.1).
 
 library ieee;
 use ieee.std_logic_1164.all;

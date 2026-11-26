@@ -19,7 +19,7 @@ end;
 architecture rtl of t is
 begin
   -- A wait with no sensitivity, condition or timeout suspends forever
-  -- (IEEE 1076-2008 8.1): after the third edge the process must not run
+  -- (IEEE 1076-2008 10.2): after the third edge the process must not run
   -- again, whatever the clock does. GHDL: the count stops at 3.
   proc : process
     variable c : integer := 0;

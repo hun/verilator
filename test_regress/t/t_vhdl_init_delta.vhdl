@@ -21,7 +21,7 @@ architecture rtl of t is
   signal bb : std_logic := '0';
 begin
   -- The time-zero activation is a normal one: a signal assignment updates the
-  -- signal only at the end of the delta (IEEE 1076-2008 10.5), so the read of
+  -- signal only at the end of the delta (IEEE 1076-2008 14.7.5.3), so the read of
   -- aa after assigning it still sees the old value. GHDL: b_o is '0' after
   -- the first activation and '1' after the first clock edge.
   process (clk)

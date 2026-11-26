@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- A return statement is only legal in a subprogram body (IEEE 1076-2008 10.9).
+-- A return statement is only legal in a subprogram body (IEEE 1076-2008 10.13).
 library ieee;
 use ieee.std_logic_1164.all;
 

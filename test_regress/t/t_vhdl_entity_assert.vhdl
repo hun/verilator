@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- An entity may state assertions of its own, beside its architectures (IEEE
--- 1076-2008 8.3). The assertion here fails while ``d`` is low and ``STRICT`` is
+-- 1076-2008 3.2.4). The assertion here fails while ``d`` is low and ``STRICT`` is
 -- false; `severity error` reports and the model keeps running, which is what the
 -- harness checks. Every value below is the one GHDL reports.
 

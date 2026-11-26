@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_div_zero_bad.vhdl'
 
-# IEEE 1076-2008 9.1: dividing by zero is an error
+# IEEE 1076-2008 5.2.3.1: dividing by zero is an error
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

@@ -8,7 +8,7 @@
 
 -- poc's configuration lists boards as records of strings in a constant whose array type
 -- states no range: the aggregate supplies it, one element per association from the index
--- subtype's low bound (IEEE 1076-2008 9.3.3.2). The element type is a record whose members
+-- subtype's low bound (IEEE 1076-2008 9.3.3.3). The element type is a record whose members
 -- are constrained subtypes, and an element is selected through the array index.
 
 library ieee;

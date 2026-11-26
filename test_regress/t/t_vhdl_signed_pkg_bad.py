@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_signed_pkg_bad.vhdl'
 
-# std_logic_signed declares no "/", so a division is an error (IEEE 1076-2008 4.5.3)
+# std_logic_signed declares no "/", so a division is an error (IEEE 1076-2008 4.5.2)
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- IEEE 1076-2008 9.1: the integer type is 32 bits.
+-- IEEE 1076-2008 5.2.3.1: the integer type is 32 bits.
 
 entity t is
   port (y : out integer);

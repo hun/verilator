@@ -20,7 +20,7 @@ entity t is
 end entity t;
 
 architecture rtl of t is
-  -- A static value gives a constant string, IEEE 1076-2008 5.3.2.4
+  -- A static value gives a constant string, IEEE 1076-2008 5.2.6
   constant int_text : string := to_string(n);
   constant hex_text : string := to_hstring(x"A5");
   constant flag : boolean := n > 3;

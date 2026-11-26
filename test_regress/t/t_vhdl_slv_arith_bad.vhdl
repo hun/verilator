@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- The predefined arithmetic operators have bit and boolean elements (IEEE
--- 1076-2008 9.1); a std_logic_vector needs std_logic_unsigned or
+-- 1076-2008 9.2.5); a std_logic_vector needs std_logic_unsigned or
 -- std_logic_arith visible, so GHDL refuses this design.
 
 library ieee;

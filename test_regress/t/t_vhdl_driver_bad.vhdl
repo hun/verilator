@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- An unresolved signal may have only one driver (IEEE 1076-2008 12.6.4); GHDL
+-- An unresolved signal may have only one driver (IEEE 1076-2008 6.4.2.3); GHDL
 -- refuses this design at elaboration.
 
 library ieee;

@@ -18,7 +18,7 @@ end;
 architecture rtl of t is
 begin
   -- A report message is a string of characters, whatever those characters
-  -- are (IEEE 1076-2008 8.3): "0101" is a message, not a bit-string literal.
+  -- are (IEEE 1076-2008 10.4): "0101" is a message, not a bit-string literal.
   -- GHDL prints 0101 and ends the run, so done_o never takes its assignment.
   proc : process
   begin

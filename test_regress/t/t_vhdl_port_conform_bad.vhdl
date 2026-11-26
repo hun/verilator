@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- The actual's type must conform to the port's (IEEE 1076-2008 6.5.2.2);
+-- The actual's type must conform to the port's (IEEE 1076-2008 6.5.7.1);
 -- GHDL refuses both instantiations below.
 
 library ieee;

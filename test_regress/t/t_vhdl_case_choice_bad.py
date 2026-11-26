@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_case_choice_bad.vhdl'
 
-# IEEE 1076-2008 10.9 and 11.5: a case or selected choice list must be complete
+# IEEE 1076-2008 10.9 and 10.5.4: a case or selected choice list must be complete
 # and every choice must be distinct
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],

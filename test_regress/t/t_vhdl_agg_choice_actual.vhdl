@@ -8,7 +8,7 @@
 
 -- An aggregate whose only choice is an object's range has no type of its own: the
 -- enclosing expression fixes it. Adding it to an unsigned takes the unsigned `ite`
--- out of the overload set (IEEE 1076-2008 9.1), and the choice's bounds give the
+-- out of the overload set (IEEE 1076-2008 12.5), and the choice's bounds give the
 -- aggregate its width.
 
 library ieee;

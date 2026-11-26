@@ -8,7 +8,7 @@
 
 -- poc's arith_Adder_Wide keeps a per-architecture table and indexes it with the
 -- architecture generic: `DEFAULT_BLOCKING(ARCH)`. An enumeration value used as an index
--- is its position (IEEE 1076-2008 9.3.6), whether it is a literal, a constant or a
+-- is its position (IEEE 1076-2008 8.4), whether it is a literal, a constant or a
 -- formal an inlined body bound to one.
 
 library ieee;

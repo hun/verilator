@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- An integer literal is inside the integer type's range (IEEE 1076-2008 15.5);
+-- An integer literal is inside the integer type's range (IEEE 1076-2008 5.2.3.1);
 -- GHDL refuses this one, which the 32-bit model would wrap.
 
 entity t is

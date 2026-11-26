@@ -15,7 +15,7 @@ entity t is
     y : out std_logic
   );
   -- A signal declared beside the entity's ports is a signal of the design
-  -- (IEEE 1076-2008 6.2), and process(all) reads it.
+  -- (IEEE 1076-2008 3.2.3), and process(all) reads it.
   signal s : std_logic := '0';
 end;
 

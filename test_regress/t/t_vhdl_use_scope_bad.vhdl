@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A context clause applies only to the design unit that follows it and that unit's
--- architectures (IEEE 1076-2008 13.4), so a second entity in the file needs its own.
+-- architectures (IEEE 1076-2008 12.4, 12.1), so a second entity in the file needs its own.
 -- GHDL rejects each type below with "no declaration".
 
 library ieee;

@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_int_lit_bad.vhdl'
 
-# IEEE 1076-2008 15.5: an integer literal fits the integer type
+# IEEE 1076-2008 5.2.3.1: an integer literal fits the integer type
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

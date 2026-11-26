@@ -8,7 +8,7 @@
 
 -- A concurrent procedure call is one combinational process: its locals are
 -- intermediates and its signal out parameters are the process outputs, so the
--- whole expansion is one driver set (IEEE 1076-2008 11.6).
+-- whole expansion is one driver set (IEEE 1076-2008 11.4).
 
 library ieee;
 use ieee.std_logic_1164.all;

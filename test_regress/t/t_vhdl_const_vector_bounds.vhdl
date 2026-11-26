@@ -25,7 +25,7 @@ entity t is
 end;
 
 architecture rtl of t is
-  -- The constants have no constraint of their own (IEEE 1076-2008 6.4.2.2)
+  -- The constants have no constraint of their own (IEEE 1076-2008 5.3.2.2)
   constant c : std_logic_vector := a & b;
   constant d : unsigned := unsigned(a) + 1;
 begin

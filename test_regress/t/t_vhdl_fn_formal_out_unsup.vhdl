@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- Function parameters must be of mode in (IEEE 1076-2008 4.2.1).
+-- Function parameters must be of mode in (IEEE 1076-2008 4.2.2.1).
 library ieee;
 use ieee.std_logic_1164.all;
 

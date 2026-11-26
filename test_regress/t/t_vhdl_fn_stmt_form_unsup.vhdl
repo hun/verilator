@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- A function body cannot assign a signal (IEEE 1076-2008 10.1.3).
+-- A function body cannot assign a signal.
 library ieee;
 use ieee.std_logic_1164.all;
 

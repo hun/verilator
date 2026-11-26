@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- IEEE 1076-2008 6.5.2.2 and 6.5.7.1: a vector generic value must have the
+-- IEEE 1076-2008 14.3.3: a vector generic value must have the
 -- declared length, for a default and for an actual.
 
 library ieee;

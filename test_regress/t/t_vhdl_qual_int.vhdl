@@ -17,7 +17,7 @@ entity t is
 end;
 
 architecture rtl of t is
-  -- A qualified expression has the type of its mark (IEEE 1076-2008 9.3.6):
+  -- A qualified expression has the type of its mark (IEEE 1076-2008 9.3.5):
   -- integer'(x) stays an integer while folding and at run time. GHDL:
   -- x = -5 gives q1 = -2 and q2 = 1, and the constants are -2 and 1.
   constant c1 : integer := integer'(-5) / 2;

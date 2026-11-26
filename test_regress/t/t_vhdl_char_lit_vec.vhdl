@@ -20,8 +20,8 @@ end;
 architecture rtl of t is
 begin
   -- The scalar/array logical operators of std_logic_1164 combine element-wise
-  -- with the logic value of the literal (IEEE 1076-2008 9.2.2), not with its
-  -- character code: '1' is one, never 16#31#. GHDL reports y1 = y2 = v.
+  -- with the logic value of the literal (9.2.2 defines them for bit and boolean arrays,
+  -- std_logic_1164 gives std_logic the same), not with its character code: '1' is one, never 16#31#. GHDL reports y1 = y2 = v.
   y1 <= v and '1';
   y2 <= '0' or v;
 end;

@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- The exit has no enclosing loop, so it is not a loop exit (IEEE 1076-2008 10.10).
+-- The exit has no enclosing loop, so it is not a loop exit (IEEE 1076-2008 10.12).
 library ieee;
 use ieee.std_logic_1164.all;
 

@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A bit-string literal is an array of bit or std_logic, so it has no array type of
--- enumeration elements to compare with (IEEE 1076-2008 9.3.1, 9.2.3). GHDL rejects the
+-- enumeration elements to compare with (IEEE 1076-2008 9.3.2, 9.2.3). GHDL rejects the
 -- comparison below.
 
 entity t is

@@ -21,7 +21,7 @@ end;
 architecture rtl of t is
   type mem_t is array (0 to 3) of std_logic;
 begin
-  -- An indexed name evaluates its index (IEEE 1076-2008 8.4), so process(all)
+  -- An indexed name evaluates its index (IEEE 1076-2008 11.3), so process(all)
   -- wakes when addr changes even though addr appears only on the left side.
   -- GHDL: with d = '1', setting addr = 2 writes mem(2).
   proc : process (all)

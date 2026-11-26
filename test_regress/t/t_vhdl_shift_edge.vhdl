@@ -19,7 +19,7 @@ end;
 
 architecture rtl of t is
 begin
-  -- The vacated positions use the edge element of the array (IEEE 1076-2008 9.2.3)
+  -- The vacated positions use the edge element of the array (IEEE 1076-2008 9.2.4)
   sra_o <= b sra n;
   sla_o <= b sla n;
   sll_o <= b sll n;

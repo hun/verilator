@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- Each process below has an illegal choice list (IEEE 1076-2008 10.9, 11.5);
+-- Each process below has an illegal choice list (IEEE 1076-2008 10.9, 10.5.4);
 -- GHDL refuses every one of them.
 
 entity t is

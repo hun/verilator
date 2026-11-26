@@ -62,7 +62,7 @@ package pkg_b is
   constant tag_c  : string := pkg_a.tag(3);
   constant bits_c : std_logic_vector(3 downto 0) := pkg_a.bits(3);
   -- A function without arguments, and one whose only formal has a default, are called by
-  -- naming them alone (IEEE 1076-2008 4.3)
+  -- naming them alone (IEEE 1076-2008 9.3.4)
   constant ver_c   : integer := version;
   constant scale_c : integer := scaled;
 end package;

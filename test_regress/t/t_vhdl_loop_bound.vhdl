@@ -16,7 +16,7 @@ end;
 architecture rtl of t is
 begin
   -- The discrete range of a for loop is fixed at loop entry (IEEE 1076-2008
-  -- 8.9): the body may assign the bound variable, and the trip count keeps
+  -- 10.10): the body may assign the bound variable, and the trip count keeps
   -- the value the range had on entry. GHDL: n_in = 3 gives c = 4.
   process (n_in)
     variable n : integer;

@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_enum_bound_bad.vhdl'
 
-# `'succ` of the last literal is a bound check failure (IEEE 1076-2008 9.2.3)
+# `'succ` of the last literal is a bound check failure (IEEE 1076-2008 16.2.2)
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

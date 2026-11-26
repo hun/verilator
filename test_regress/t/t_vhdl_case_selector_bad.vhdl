@@ -6,8 +6,8 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- IEEE 1076-2008 10.9: a selector is discrete or an array of a discrete
--- element type. A record and an integer array are neither.
+-- IEEE 1076-2008 10.9: a selector is discrete or a one-dimensional array of a
+-- character type. A record and an integer array are neither.
 
 library ieee;
 use ieee.std_logic_1164.all;

@@ -19,7 +19,7 @@ end entity t;
 
 architecture rtl of t is
 begin
-  -- A zero divisor is an error where the division runs (IEEE 1076-2008 9.2.7)
+  -- A zero divisor is an error where the division runs (IEEE 1076-2008 5.2.3.1)
   plain <= a / b when guard = '0' else 0;
 
   process (a, b, guard) is

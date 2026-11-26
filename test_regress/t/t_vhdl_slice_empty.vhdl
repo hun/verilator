@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A pipeline shift writes `p(2 to N) <= p(1 to N-1)`, which for a one-deep
--- pipeline is the null array `p(2 to 1)` on both sides (IEEE 1076-2008 5.3.2):
+-- pipeline is the null array `p(2 to 1)` on both sides (IEEE 1076-2008 8.5):
 -- the statement is a no-op, not an error. The three-deep copy of the same
 -- statement must still shift.
 

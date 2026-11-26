@@ -7,7 +7,8 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A report whose message is not a literal must still execute, including the
--- `severity failure` termination (IEEE 1076-2008 8.3). GHDL stops on the same
+-- `severity failure` termination (IEEE 1076-2008 10.4 only asks an implementation to continue after NOTE, WARNING or
+-- ERROR). GHDL stops on the same
 -- source; the harness checks that the model saw a finish.
 
 library ieee;

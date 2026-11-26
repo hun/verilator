@@ -8,7 +8,7 @@
 
 -- A character literal concatenated to a logic vector is a single logic value,
 -- even when the vector is eight bits wide: `'0' & v` is nine bits with a zero
--- in the top bit, not the eight-bit character code of '0' (IEEE 1076-2008 9.2.2).
+-- in the top bit, not the eight-bit character code of '0' (IEEE 1076-2008 9.2.5).
 
 library ieee;
 use ieee.std_logic_1164.all;

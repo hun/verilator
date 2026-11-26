@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- Two failing-severity assertions in a row gate every later statement of the
--- process on both conditions (IEEE 1076-2008 8.3). Each gate must come from the
+-- process on both conditions (IEEE 1076-2008 10.3). Each gate must come from the
 -- assertion it follows, not from the wrapper the previous one left behind.
 
 library ieee;

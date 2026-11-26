@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- IEEE 1076-2008 6.5.7.1: an unassociated input takes its default; without a
+-- IEEE 1076-2008 6.5.6.3: an unassociated input takes its default; without a
 -- default it is an error, whether it is omitted or explicitly open.
 
 library ieee;

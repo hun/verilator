@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- A sensitivity item may be a subelement of a signal (IEEE 1076-2008 11.3):
+-- A sensitivity item may be a subelement of a signal (IEEE 1076-2008 10.2):
 -- the process runs when that element changes and not when another element of
 -- the same signal does. The variable counts activations, so a widened
 -- sensitivity would be visible.

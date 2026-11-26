@@ -12,8 +12,8 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_type_conf_bad.vhdl'
 
-# IEEE 1076-2008 10.5.1, 10.5.2, 12.5 and 9.3.6: assignment, return, call and
-# conversion values must belong to the target's base type or be closely related
+# IEEE 1076-2008 10.5.2.1 (assignment), 10.13 (return), 6.5.7.1 (call) and 9.3.6
+# (conversion): the values must belong to the target's base type or be closely related
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

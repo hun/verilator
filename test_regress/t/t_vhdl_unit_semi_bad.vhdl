@@ -6,7 +6,7 @@
 -- SPDX-FileCopyrightText: 2026 Wilson Snyder
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
--- Each physical unit declaration ends with ';' (IEEE 1076-2008 5.2.4.2).
+-- Each physical unit declaration ends with ';' (IEEE 1076-2008 5.2.4.1).
 
 entity t is
   port (o : out bit);

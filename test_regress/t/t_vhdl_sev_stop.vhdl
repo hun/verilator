@@ -17,8 +17,8 @@ end;
 
 architecture rtl of t is
 begin
-  -- Severity failure ends the simulation at that point (IEEE 1076-2008 8.3):
-  -- no later statement of the process runs. GHDL reports "first" once and
+  -- Severity failure ends the simulation at that point (IEEE 1076-2008 10.3, 10.4 only ask an
+  -- implementation to continue after NOTE, WARNING or ERROR): no later statement of the process runs. GHDL reports "first" once and
   -- done_o stays '0'.
   proc : process
   begin

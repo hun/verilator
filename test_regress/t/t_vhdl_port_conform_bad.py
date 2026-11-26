@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_port_conform_bad.vhdl'
 
-# IEEE 1076-2008 6.5.2.2: the actual must conform to the port's type
+# IEEE 1076-2008 6.5.7.1: the actual must conform to the port's type
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

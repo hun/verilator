@@ -12,7 +12,7 @@ import vltest_bootstrap
 test.scenarios('vlt')
 test.top_filename = 't/t_vhdl_driver_bad.vhdl'
 
-# IEEE 1076-2008 12.6.4: several sources on an unresolved signal are an error
+# IEEE 1076-2008 6.4.2.3: several sources on an unresolved signal are an error
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

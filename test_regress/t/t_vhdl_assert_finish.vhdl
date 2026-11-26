@@ -7,7 +7,8 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- `assert ... severity failure` must end the simulation, not report and carry on
--- (IEEE 1076-2008 8.3). The harness checks that the model saw a finish.
+-- (IEEE 1076-2008 10.3 only asks an implementation to continue after NOTE, WARNING or
+-- ERROR). The harness checks that the model saw a finish.
 
 library ieee;
 use ieee.std_logic_1164.all;

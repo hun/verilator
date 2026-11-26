@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A file type definition is legal VHDL that the native frontend does not implement
--- (IEEE 1076-2008 5.4.1).
+-- (IEEE 1076-2008 5.5.1).
 
 entity t is
   port (o : out bit);

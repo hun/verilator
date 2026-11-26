@@ -7,7 +7,8 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- `severity failure` ends the run, the other severities report and the process goes on
--- (IEEE 1076-2008 8.3). The failing assertions below are severity error and warning, so
+-- (IEEE 1076-2008 10.3 only asks an implementation to continue after NOTE, WARNING or
+-- ERROR). The failing assertions below are severity error and warning, so
 -- the counter keeps counting and the model reaches the end of the trace.
 
 library ieee;

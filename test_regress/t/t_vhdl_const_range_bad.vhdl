@@ -7,7 +7,7 @@
 -- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 -- A constant's value is inside its declared subtype's bounds (IEEE 1076-2008
--- 5.4); GHDL reports the violation.
+-- 14.4.2.5); GHDL reports the violation.
 
 entity t is
   port (
