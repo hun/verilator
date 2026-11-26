@@ -681,7 +681,9 @@ void Lowering::emitEntityDecls(const EntityUnit& entity, const Architecture& arc
     finishDeferredTypes();
 
     // The architecture's own types come after the entity's items, because a constraint may
-    // name one of the entity's constants and the loop above emits them
+    // name one of the entity's constants and the loop above emits them. A constraint may
+    // call a subprogram of this unit, which reads the generics bound above.
+    m_moduleScope = saveScope();
     registerTypes(arch.types, arch.decls);
     registerComponents(arch.components);
     // A subprogram alias has to exist before the declarations, whose initializers may call it
