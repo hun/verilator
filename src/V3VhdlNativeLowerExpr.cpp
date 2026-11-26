@@ -2916,7 +2916,7 @@ AstNodeExpr* Lowering::lowerIndexChain(const Expr& expr, AstNodeExpr* basep,
         // vectors is one-dimensional, so `v(i, j)` has too many indices; the valid form
         // is the chained `v(i)(j)`, which reaches here as separate single-index steps
         if (ai > 0 && levelType.kind == VType::VECTOR) {
-            unsupportedError(flp, "multi-dimensional index on a vector element");
+            flp->v3error("VHDL: too many indices for an array of vectors.");
             curp->deleteTree();
             return nullptr;
         }
@@ -3556,7 +3556,7 @@ AstNodeExpr* Lowering::lowerCharacterAttr(FileLine* flp, const Expr& expr,
     // code and wrap at 255 back to 0.
     if (attribute == "pos" || attribute == "val" || attribute == "succ" || attribute == "pred") {
         if (expr.args.size() != 1) {
-            unsupportedError(flp, "character attribute '" + attribute + "' without one argument");
+            flp->v3error("VHDL: character attribute '" + attribute + "' needs one argument.");
             return nullptr;
         }
         AstNodeExpr* const argp = lowerExpr(*expr.args[0], &type);
@@ -4215,7 +4215,7 @@ bool Lowering::collectRecordAggregateSegments(FileLine* flp, const Expr& expr, c
     if (expr.kind == Expr::AGG_POSITIONAL) {
         // Positional association fills record elements in declaration order
         if (expr.args.size() != type.fields.size()) {
-            unsupportedError(flp, "record aggregate that is not a full positional list");
+            flp->v3error("VHDL: record aggregate needs one value per element.");
             return false;
         }
         for (size_t i = 0; i < expr.args.size(); ++i) {
@@ -4234,7 +4234,7 @@ bool Lowering::collectRecordAggregateSegments(FileLine* flp, const Expr& expr, c
                     continue;
                 }
                 if (choicep->kind != Expr::NAME) {
-                    unsupportedError(flp, "record aggregate choice that is not an element name");
+                    flp->v3error("VHDL: record aggregate choice must be an element name.");
                     return false;
                 }
                 const auto fieldIt = std::find_if(

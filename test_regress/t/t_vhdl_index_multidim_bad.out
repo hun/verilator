@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_index_multidim_bad.vhdl:18:8: VHDL: too many indices for an array of vectors.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

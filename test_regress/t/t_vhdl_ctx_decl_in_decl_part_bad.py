@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: a variable assignment with an after clause is unsupported
+# DESCRIPTION: Verilator: VHDL context declaration in an entity declarative part
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,7 +10,7 @@
 import vltest_bootstrap
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_parse_var_after_unsup.vhdl'
+test.top_filename = 't/t_vhdl_ctx_decl_in_decl_part_bad.vhdl'
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

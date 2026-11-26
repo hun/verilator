@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL context declaration in an entity declarative part
+# DESCRIPTION: Verilator: VHDL character position attribute without an argument is rejected
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,7 +10,7 @@
 import vltest_bootstrap
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_ctx_decl_in_decl_part_unsup.vhdl'
+test.top_filename = 't/t_vhdl_char_attr_noarg_bad.vhdl'
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

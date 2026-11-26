@@ -318,7 +318,7 @@ class Parser final {
         }
         if (isId("is")) {
             if (!allowDeclaration) {
-                unsupported("context declaration in a declarative part");
+                error("a context declaration is not allowed in a declarative part");
                 return;
             }
             ContextUnit context;
@@ -328,7 +328,7 @@ class Parser final {
             while (true) {
                 if (m_failed) return;
                 if (m_cur.kind == Token::END) {
-                    unsupported("context declaration that reaches the end of the file");
+                    error("unexpected end of file in a context declaration");
                     return;
                 }
                 if (isId("end")) {
@@ -394,7 +394,7 @@ class Parser final {
             if (parens == 0 && acceptSym(";")) return;
             advance();
         }
-        unsupported("declaration that reaches the end of the file");
+        error("unexpected end of file in a declaration");
     }
 
     //! Consume a `file` declaration: a file has no synthesis meaning, so it is skipped
@@ -3496,7 +3496,7 @@ StmtP Parser::parseSequentialAssignOrCall(FileLine* flp) {
         if (!stmt->value) return nullptr;
         if (isId("when") && !parseConditionalTail(*stmt, false)) return nullptr;
         if (isId("after")) {
-            unsupported("delayed variable assignment ('after')");
+            error("'after' is not allowed in a variable assignment");
             return nullptr;
         }
         expectSym(";");

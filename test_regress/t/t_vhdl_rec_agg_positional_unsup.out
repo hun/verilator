@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_rec_agg_positional_unsup.vhdl:24:9: Unsupported: VHDL record aggregate that is not a full positional list.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

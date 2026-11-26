@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_ctx_decl_in_decl_part_unsup.vhdl:14:14: Unsupported: VHDL context declaration in a declarative part.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

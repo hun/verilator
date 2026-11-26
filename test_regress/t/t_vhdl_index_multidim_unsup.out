@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_index_multidim_unsup.vhdl:18:8: Unsupported: VHDL multi-dimensional index on a vector element.
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

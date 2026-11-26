@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_char_attr_noarg_bad.vhdl:18:8: VHDL: character attribute 'pos' needs one argument.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

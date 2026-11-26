@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: VHDL positional record aggregate with a missing element is unsupported
+# DESCRIPTION: Verilator: VHDL file declaration with no semicolon before the end of the file
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,7 +10,7 @@
 import vltest_bootstrap
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_rec_agg_positional_unsup.vhdl'
+test.top_filename = 't/t_vhdl_skip_decl_eof_bad.vhdl'
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

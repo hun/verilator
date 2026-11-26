@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_parse_var_after_unsup.vhdl:21:12: Unsupported: VHDL delayed variable assignment ('after').
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to
