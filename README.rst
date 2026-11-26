@@ -90,9 +90,9 @@ primitive.
 
 The branch has been run against a corpus of open-source VHDL projects (PoC,
 open-logic, hdl-modules, microwatt, neorv32, T80 and others). At the last
-count 64 of 86 ported testcases simulate with every check passing, and all
-45 cycle-by-cycle comparisons against GHDL that build match. The corpus
-repository is not public yet, so these numbers cannot be reproduced from
+count 87 of 88 ported testcases simulate with every check passing; the other
+one builds a model that its C++ compiler rejects under ``--enable-ccwarn``. The
+corpus repository is not public yet, so these numbers cannot be reproduced from
 this checkout.
 
 Read the proposal

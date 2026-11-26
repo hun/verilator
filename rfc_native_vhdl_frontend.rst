@@ -283,12 +283,14 @@ entity's emitted tree.
 7. Evidence
 ===========
 
-- 414 regression drivers, 104 diagnostic/tree goldens, 414 ``.vhdl``
-  fixtures, 280 value-checked C++ harnesses.
-- Full VHDL suite (``t_vhdl*``, ``--vlt``): 414 passed / 0 failed in ~20 s
-  on 16 jobs locally. Both distribution tests (``t_dist_test_style``,
+- 496 regression drivers, 116 diagnostic/tree goldens, 496 ``.vhdl``
+  fixtures, 320 value-checked C++ harnesses.
+- Full VHDL suite (``t_vhdl*``, ``--vlt``): 496 passed / 0 failed in ~25 s
+  on 8 jobs locally. Both distribution tests (``t_dist_test_style``,
   ``t_dist_copyright``) pass. The suite needs only the built Verilator and
   a C++ compiler; no test invokes GHDL or nvc.
+- ``nodist/vhdl_cross_check.py`` runs the tests of GHDL and NVC through all
+  three tools and reports where both references agree and Verilator does not.
 
 Open-source corpus
 ------------------
@@ -298,7 +300,7 @@ pinned open-source VHDL projects: PoC, open-logic, hdl-modules, microwatt,
 neorv32, neo430, neoTRNG, potato, RPU, T65, T80, nandland spi-master,
 spi-fpga and others. The corpus lives in a separate repository: a manifest
 of pinned upstream revisions, a fetch script, and 88 ported testcases (the
-table below covers the 86 run for this summary). Each testcase keeps the
+table below covers all 88). Each testcase keeps the
 upstream design unmodified, drives it from a self-checking C++ testbench,
 and many also compare a cycle-by-cycle trace against GHDL. Upstream sources
 are fetched, not copied, so each keeps its own license.
@@ -333,8 +335,9 @@ are independent reductions: a comment names the upstream construct that
 motivated one, and no fixture shares a line of 35 or more characters with
 the corpus sources. The legal review of the points above is still open.
 
-Results on this branch (lint and simulation with Verilator, trace
-comparison against GHDL 7.0.0-dev):
+Results on this branch (simulation with Verilator, every case rebuilt from
+scratch with this branch's binary and a 12 GB address-space cap per job; the
+trace comparisons against GHDL 7.0.0-dev were not repeated for this table):
 
 .. list-table::
    :header-rows: 1
@@ -344,44 +347,43 @@ comparison against GHDL 7.0.0-dev):
      - Simulates
      - Notes
    - - open-logic
-     - 32 / 35
-     - All 32 match GHDL cycle by cycle: arbiters, clock crossings, FIFOs
-       (sync, async, packet), RAMs, CRC, width converters, TDM, CAM
+     - 34 / 35
+     - Arbiters, clock crossings, FIFOs (sync, async, packet), RAMs, CRC
+       (encode, append, check), width converters, TDM, CAM. The CAM model
+       is generated correctly but its C++ fails to compile under
+       ``--enable-ccwarn``: a logical operation of two equal operands
+       (``-Wlogical-op``) in the lowering of ``ppcOr``
    - - hdl-modules
-     - 13 / 13
+     - 14 / 14
      - FIFO, ring buffer, handshake pipeline/mux/merger/splitter, LFSR,
-       debounce, resync; 7 also traced against GHDL
+       debounce, resync
    - - microwatt
-     - 5 / 7
-     - Multiplier, PLRU, bitsort, SoC reset, wishbone BRAM; the caches do
-       not yet elaborate
+     - 7 / 7
+     - Multiplier, PLRU, bitsort, SoC reset, wishbone BRAM, instruction and
+       data caches
    - - neorv32
-     - 1 / 2
-     - The CPU runs a freestanding C program (12.2M cycles) to the expected
-       results; the SoC top does not yet elaborate
+     - 2 / 2
+     - The CPU and the SoC top, each running a freestanding C program
    - - neo430, neoTRNG
      - 3 / 3
-     - Multiplier/divider and CRC units; the TRNG matches a 5,621-cycle
-       GHDL trace
+     - Multiplier/divider, CRC unit and the TRNG
    - - T80, RPU, spi-master, spi-fpga
-     - 6 / 6
+     - 7 / 7
      - The T80 runs a Z80 program; RV32 ALU and register file; SPI masters
        and slave
    - - PoC
-     - 4 / 17
-     - Divider, square root, Gray counter, strobe generator; 13 others
-       share one blocker in PoC's configuration package
+     - 17 / 17
+     - Arithmetic blocks, counters, delay lines, the clock-crossing FIFO on
+       its OCRAM plan, and the configuration-package cases
    - - potato, T65
-     - 0 / 3
-     - An enumeration actual on a port of another type is not accepted
+     - 3 / 3
+     - The potato core and SoC, which runs a freestanding C program, and
+       the T65
 
-In total 64 of 86 testcases simulate with every check passing. All 45 GHDL
-trace comparisons that build match cycle for cycle; none mismatches. Two of
-the failures, open-logic's CAM and one PoC harness, fail only because
-``--enable-ccwarn`` turns a C++ warning into an error. The rest fall into
-three groups: a configuration-package blocker in PoC, enumeration actuals
-on ports of another type (potato, T65), and elaboration gaps in microwatt's
-caches and the neorv32 SoC top.
+In total 87 of 88 testcases simulate with every check passing. The
+corpus testcases are not independent evidence of correctness: they were
+written against this frontend, and the ones that compare a trace against
+GHDL are the stronger check.
 
 The corpus repository is not yet public, so these results cannot be
 reproduced from a Verilator checkout. Publishing it is part of the
@@ -392,9 +394,11 @@ maintenance plan; until then the numbers are reported for information.
 
 - Dynamic-index driver counts and ``std_logic_vector`` ``MULTIDRIVEN``
   diagnostics are imprecise.
-- ``std_logic_signed`` arithmetic and comparison, ``case generate``,
-  enumeration range subtypes, resolution indications and some type
-  attributes are not implemented.
+- Resolution indications, a ``wait`` with a timeout, several waveform
+  elements in one assignment, generic subprograms and packages, allocators
+  and ``'value`` of a run-time value are parsed and then refused with an
+  ``Unsupported:`` diagnostic. ``docs/vhdl/limitations.rst`` has the full
+  list.
 - PSL directives are skipped. Library namespace handling is simplified.
 - Waveforms keep the hierarchy and signal names, but an enumeration shows
   as its integer encoding and a record or array as one vector, in VCD and
