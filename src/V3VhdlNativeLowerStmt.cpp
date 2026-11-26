@@ -326,9 +326,10 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
                 continue;
             }
             if ((right - left) * step >= MAX_CHOICE_RANGE_VALUES) {
-                unsupportedError(choicep->flp, "choice range of more than "
-                                                   + std::to_string(MAX_CHOICE_RANGE_VALUES)
-                                                   + " values");
+                // Only an integer selector has a range this wide to choose
+                choicep->flp->v3error(
+                    "VHDL: a choice range of more than " + std::to_string(MAX_CHOICE_RANGE_VALUES)
+                    + " values needs a selector of an integer type (IEEE 1076-2008 10.9).");
                 return false;
             }
             for (int64_t value = left;; value += step) {
