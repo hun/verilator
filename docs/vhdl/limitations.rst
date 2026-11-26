@@ -242,8 +242,8 @@ Known limitations
 - Dynamic-index driver counts and ``std_logic_vector`` ``MULTIDRIVEN``
   diagnostics are still imprecise.
 - ``std_logic_signed`` and ``std_logic_unsigned`` treat a ``std_logic_vector`` as a
-  number in ``+``, ``-``, ``*`` and the comparisons, and ``+`` and ``-`` also take a
-  ``std_logic``. Unary ``-`` and ``abs`` on such a vector are refused.
+  number in ``+``, ``-``, ``*``, unary ``-``, ``abs`` and the comparisons, and ``+`` and
+  ``-`` also take a ``std_logic``.
 - PSL directives are skipped rather than checked.
 - Visibility is enforced for the types of the IEEE packages only. The
   subprograms of those packages are not checked, so ``to_integer`` is

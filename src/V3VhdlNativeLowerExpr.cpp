@@ -252,9 +252,10 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     if (expr.text == "abs") {
         // numeric_std defines "abs" for a signed operand (IEEE 1076-2008
         // Annex C), which compares and negates in place
+        const bool signedLogic = isSignedLogicVector(type);
         const bool signedVec = type.isVector() && type.isSigned();
         const bool realOperand = type.kind == VType::REAL;
-        if (!type.isInt() && !signedVec && !realOperand) {
+        if (!type.isInt() && !signedVec && !signedLogic && !realOperand) {
             unsupportedError(flp, "abs of a non-integer value");
             operandp->deleteTree();
             return nullptr;
@@ -268,10 +269,18 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
             ltZerop = new AstLtD{flp, operandp->cloneTree(false), zerop};
             negp = new AstNegateD{flp, operandp->cloneTree(false)};
         } else {
-            AstNodeExpr* const zerop = type.isInt()
+            AstNodeExpr* zerop = type.isInt()
                                            ? static_cast<AstNodeExpr*>(makeIntConst(flp, 0))
                                            : makeVectorConst(flp, type, 0);
-            ltZerop = new AstLtS{flp, operandp->cloneTree(false), zerop};
+            AstNodeExpr* valuep = operandp->cloneTree(false);
+            if (signedLogic) {
+                // The width pass only keeps a signed comparison when its operands are signed
+                valuep = new AstSigned{flp, valuep};
+                valuep->dtypep(operandp->dtypep());
+                zerop = new AstSigned{flp, zerop};
+                zerop->dtypep(operandp->dtypep());
+            }
+            ltZerop = new AstLtS{flp, valuep, zerop};
             negp = new AstNegate{flp, operandp->cloneTree(false)};
         }
         ltZerop->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
@@ -319,7 +328,7 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
             return negp;
         }
         // numeric_std defines unary minus for signed vectors and integers
-        if (!type.isInt() && !(type.isVector() && type.isSigned())) {
+        if (!type.isInt() && !(type.isVector() && type.isSigned()) && !isSignedLogicVector(type)) {
             unsupportedError(flp, "unary '-' on a non-signed value");
             operandp->deleteTree();
             return nullptr;

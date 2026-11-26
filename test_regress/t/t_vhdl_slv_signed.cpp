@@ -33,9 +33,12 @@ int main(int argc, char** argv) {
                                 (a + 3) & 0xf,
                                 (a - 5) & 0xf,
                                 (a < b) | (a <= b) << 1 | (a > b) << 2 | (a >= b) << 3
-                                    | (a == b) << 4 | (a != b) << 5 | (a > 2) << 6 | (1 < a) << 7};
-            const int got[] = {topp->s5, topp->s6, topp->m, topp->i1, topp->i2, topp->r};
-            for (int i = 0; i < 6; ++i) {
+                                    | (a == b) << 4 | (a != b) << 5 | (a > 2) << 6 | (1 < a) << 7,
+                                (-a) & 0xf,
+                                (a < 0 ? -a : a) & 0xf};
+            const int got[] = {topp->s5, topp->s6, topp->m, topp->i1, topp->i2, topp->r, topp->n,
+                              topp->ab};
+            for (int i = 0; i < 8; ++i) {
                 if (got[i] != want[i]) {
                     std::printf("%%Error: a=%d b=%d output %d = 0x%x expected 0x%x\n", x, y, i,
                                 got[i], want[i]);

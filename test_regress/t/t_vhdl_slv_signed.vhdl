@@ -19,7 +19,9 @@ entity t is
     m  : out std_logic_vector(6 downto 0);
     i1 : out std_logic_vector(3 downto 0);
     i2 : out std_logic_vector(3 downto 0);
-    r  : out std_logic_vector(7 downto 0)
+    r  : out std_logic_vector(7 downto 0);
+    n  : out std_logic_vector(3 downto 0);
+    ab : out std_logic_vector(3 downto 0)
   );
 end;
 
@@ -30,6 +32,8 @@ begin
   m  <= a * b;
   i1 <= a + 3;
   i2 <= a - 5;
+  n  <= -a;
+  ab <= abs a;
   r(0) <= '1' when a < b else '0';
   r(1) <= '1' when a <= b else '0';
   r(2) <= '1' when a > b else '0';
