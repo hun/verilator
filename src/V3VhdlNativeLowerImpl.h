@@ -1422,6 +1422,8 @@ class Lowering final {
         bool typeMark = false;  // The prefix names a type, not an object
     };
     bool lowerIndexedEventAttr(FileLine* flp, const Expr& expr, AstNodeExpr*& resultp);
+    bool isFunctionCall(const Expr& expr) const;
+    bool typeOfCall(const Expr& call, VType& out);
     bool resolveAttrDesignator(FileLine* flp, const Expr& prefix, AttrTypeInfo& info);
     void resolveAttrNameType(FileLine* flp, const Expr& prefix, AttrTypeInfo& info);
     AstNodeExpr* lowerEventAttr(FileLine* flp, const Expr& expr);

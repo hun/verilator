@@ -3420,11 +3420,30 @@ bool Lowering::lowerIndexedEventAttr(FileLine* flp, const Expr& expr, AstNodeExp
     return true;
 }
 
+//! Whether an expression is a call of a visible function, written `f(...)` or `f`
+bool Lowering::isFunctionCall(const Expr& expr) const {
+    if (expr.kind == Expr::CALL) return true;
+    const Expr* const namep = expr.kind == Expr::INDEX ? expr.a.get() : &expr;
+    return (expr.kind == Expr::INDEX || expr.kind == Expr::NAME) && namep
+           && namep->kind == Expr::NAME && m_subprograms.count(namep->text)
+           && !m_scope.count(namep->text);
+}
+
+//! The type a function call returns, whose bounds only the call itself fixes
+bool Lowering::typeOfCall(const Expr& call, VType& out) {
+    if (!isFunctionCall(call)) return false;
+    AstNodeExpr* const callp = lowerExpr(call, nullptr);
+    if (!callp) return false;
+    out = typeOfLowered(call, callp);
+    callp->deleteTree();
+    return true;
+}
+
 bool Lowering::resolveAttrDesignator(FileLine* flp, const Expr& prefix, AttrTypeInfo& info) {
     // A designator prefix such as a record element has no name to look up, but its
     // declared type fixes every static attribute, so resolve the type instead
-    if (!typeOfDesignator(prefix, info.resolved)) {
-        unsupportedError(flp, "attribute of a non-name prefix");
+    if (!typeOfDesignator(prefix, info.resolved) && !typeOfCall(prefix, info.resolved)) {
+        if (!isFunctionCall(prefix)) unsupportedError(flp, "attribute of a non-name prefix");
         return false;
     }
     info.typep = &info.resolved;

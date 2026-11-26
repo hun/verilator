@@ -1547,7 +1547,7 @@ bool Lowering::constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& ri
         return false;
     }
     VType prefix;
-    if (!typeOfDesignator(*spec.left->a, prefix)) {
+    if (!typeOfDesignator(*spec.left->a, prefix) && !typeOfCall(*spec.left->a, prefix)) {
         // A range attribute's prefix may be a type mark rather than an object, which only a
         // plain name can name
         const auto typeIt

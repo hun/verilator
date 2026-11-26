@@ -62,6 +62,10 @@ but a value outside it is not detected at run time. A ``for`` loop, a function l
 ``for generate`` may run over an enumeration type or subtype, or over its ``'range``; the
 loop parameter has that type, and the loop is unrolled like an integer one.
 
+The attributes of a function call, ``f(x)'range``, ``'length``, ``'left`` and ``'right``, take the bounds of the
+returned value. This is an extension that GHDL accepts only with ``-frelaxed``, as an attribute prefix
+should be an object or a type.
+
 The attributes ``'pos``, ``'val``, ``'succ``, ``'pred``, ``'leftof`` and ``'rightof`` apply to
 integer types, and all but the last two to enumeration types. ``'value`` and ``'image`` of a
 run-time value are refused.

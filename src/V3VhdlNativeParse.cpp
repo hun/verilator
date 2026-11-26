@@ -1301,8 +1301,9 @@ void Parser::parseTypeSpec(TypeSpec& type) {
                     } else if (t.kind == Token::SYM && t.text == ")") {
                         if (--depth == 0) break;
                     } else if (depth == 1 && t.kind == Token::ID
-                               && (t.text == "to" || t.text == "downto")) {
-                        sawTopRange = true;
+                               && (t.text == "to" || t.text == "downto" || t.text == "range"
+                                   || t.text == "reverse_range")) {
+                        sawTopRange = true;  // Also `x'range`, which no member name can be
                     }
                 }
                 m_lexer.restore(saved);
