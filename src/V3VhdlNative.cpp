@@ -317,6 +317,7 @@ ArchByEntity resolveArchitectures(vhdlnative::DesignLibrary& library) {
                 instp->flp->v3error("VHDL: instance '" + instp->instanceLabel
                                     + "' names configuration '" + instp->instanceName
                                     + "', which was not analyzed.");
+                instp->instanceName.clear();  // Already reported; elaboration skips the instance
                 continue;
             }
             instp->instanceName = configIt->entityName;

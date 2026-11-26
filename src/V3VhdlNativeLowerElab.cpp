@@ -1851,6 +1851,7 @@ bool Lowering::lookupInstanceModule(const Concurrent& conc, AstModule*& modp,
         unsupportedError(flp, "instantiation without an elaborated design");
         return false;
     }
+    if (conc.instanceName.empty()) return false;  // Naming it failed and was reported
     const auto modIt = m_modulesp->find(conc.instanceName);
     if (modIt == m_modulesp->end()) {
         flp->v3error("Cannot find VHDL entity '" + conc.instanceName + "' for instance '"
