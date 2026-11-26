@@ -1,4 +1,4 @@
-Verilator Tree Dump (format 0x3900) from <e0> to <e165>
+Verilator Tree Dump (format 0x3900) from <e0> to <e167>
      NETLIST (B) {a0aa}  $root [1ps/1ps]
     1: MODULE (C) {d13ab}  t  L1 D2 [1ps]
     1:1: PORT (D) {d15af}  clk
@@ -27,22 +27,23 @@ Verilator Tree Dump (format 0x3900) from <e0> to <e165>
     1: PACKAGE (DB) {a0aa}  __024unit  L2 D3 [LIB] [1ps]
     1: PACKAGE (EB) {a0aa}  __Vconstpool  L2 D3 [LIB] [1ps]
     3: TYPETABLE (FB) {a0aa}
-		     int  -> BASICDTYPE (GB) {d26aq} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
+		     bit  -> BASICDTYPE (GB) {d25ai} @dt=this@(G/w1)  bit [GENERIC] kwd=bit
+		     int  -> BASICDTYPE (HB) {d26aq} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
 		   logic  -> BASICDTYPE (F) {d15ao} @dt=this@(G/w1)  logic [GENERIC] kwd=logic
-		detailed  ->  BASICDTYPE (HB) {d25ai} @dt=this@(G/w1)  bit [GENERIC] kwd=bit
+		detailed  ->  BASICDTYPE (GB) {d25ai} @dt=this@(G/w1)  bit [GENERIC] kwd=bit
 		detailed  ->  BASICDTYPE (F) {d15ao} @dt=this@(G/w1)  logic [GENERIC] kwd=logic
 		detailed  ->  BASICDTYPE (IB) {d21bx} @dt=this@(G/w4)  bit [GENERIC] kwd=bit range=[3:0]
 		detailed  ->  BASICDTYPE (K) {d21ao} @dt=this@(G/w4)  logic [GENERIC] kwd=logic range=[3:0]
 		detailed  ->  BASICDTYPE (JB) {d26aq} @dt=this@(G/w32)  bit [GENERIC] kwd=bit range=[31:0]
-		detailed  ->  BASICDTYPE (GB) {d26aq} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
+		detailed  ->  BASICDTYPE (HB) {d26aq} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
     3:1: BASICDTYPE (F) {d15ao} @dt=this@(G/w1)  logic [GENERIC] kwd=logic
     3:1: BASICDTYPE (I) {d16ap} @dt=this@(nw4)  logic kwd=logic range=[3:0]
     3:1: BASICDTYPE (K) {d21ao} @dt=this@(G/w4)  logic [GENERIC] kwd=logic range=[3:0]
     3:1: BASICDTYPE (IB) {d21bx} @dt=this@(G/w4)  bit [GENERIC] kwd=bit range=[3:0]
-    3:1: BASICDTYPE (GB) {d26aq} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
+    3:1: BASICDTYPE (HB) {d26aq} @dt=this@(G/sw32)  int [GENERIC] kwd=int range=[31:0]
     3:1: BASICDTYPE (JB) {d26aq} @dt=this@(G/w32)  bit [GENERIC] kwd=bit range=[31:0]
     3:1: BASICDTYPE (KB) {d27am} @dt=this@(nw4)  logic kwd=logic range=[3:0]
     3:1: BASICDTYPE (LB) {d27am} @dt=this@(nw4)  logic kwd=logic range=[3:0]
     3:1: BASICDTYPE (MB) {d27am} @dt=this@(nw4)  logic kwd=logic range=[3:0]
     3:1: BASICDTYPE (NB) {d27am} @dt=this@(nw4)  logic kwd=logic range=[3:0]
-    3:1: BASICDTYPE (HB) {d25ai} @dt=this@(G/w1)  bit [GENERIC] kwd=bit
+    3:1: BASICDTYPE (GB) {d25ai} @dt=this@(G/w1)  bit [GENERIC] kwd=bit

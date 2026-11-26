@@ -158,6 +158,9 @@ void collectPhysicalUnits(const DesignLibrary& library, Design& design) VL_MT_DI
 //! Point every reference to a package signal at its package, which the references of one
 //! unit cannot name themselves
 void linkPackageSignalRefs(AstNetlist* rootp, const PackageTable& table) VL_MT_DISABLED;
+//! Type each one-bit select as `bit`, as the optimizer does for the one-bit values it builds,
+//! so two selects of one bit compare equal wherever it merges them
+void normalizeBitSelects(AstNetlist* rootp) VL_MT_DISABLED;
 
 //! Report every unresolved signal that more than one emitted statement drives
 void checkDrivers(AstNetlist* rootp, const Design& design) VL_MT_DISABLED;

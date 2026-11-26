@@ -559,4 +559,5 @@ void V3VhdlNative::emit(AstNetlist* rootp, const std::vector<V3VhdlNativeFile>& 
     finishElaboration(ctx);
     vhdlnative::checkDrivers(rootp, ctx.design);
     vhdlnative::linkPackageSignalRefs(rootp, ctx.packages);
+    vhdlnative::normalizeBitSelects(rootp);
 }

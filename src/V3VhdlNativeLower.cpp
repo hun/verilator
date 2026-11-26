@@ -289,6 +289,17 @@ void linkPackageSignalRefs(AstNetlist* rootp, const PackageTable& table) {
     }
 }
 
+void normalizeBitSelects(AstNetlist* rootp) {
+    AstNodeDType* const bitDtp
+        = rootp->typeTablep()->findBasicDType(rootp->fileline(), VBasicDTypeKwd::BIT);
+    rootp->foreach([bitDtp](AstSel* const selp) {
+        if (selp->widthConst() != 1) return;
+        const AstBasicDType* const dtp = VN_CAST(selp->dtypep(), BasicDType);
+        if (!dtp || dtp->rangep() || !dtp->keyword().isSameish(VBasicDTypeKwd::LOGIC)) { return; }
+        selp->dtypep(bitDtp);
+    });
+}
+
 void createModules(const std::vector<EntityUnit>& entities, AstNetlist* rootp,
                    ModuleMap& modules) {
     for (const EntityUnit& entity : entities) {
