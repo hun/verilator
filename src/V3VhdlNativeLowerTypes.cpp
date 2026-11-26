@@ -178,11 +178,16 @@ bool Lowering::evalIntName(const Expr& expr, int64_t& value) const {
     const auto valueIt = m_constValues.find(expr.text);
     if (valueIt != m_constValues.end()) {
         const auto constTypeIt = m_constTypes.find(expr.text);
-        if (constTypeIt != m_constTypes.end()
-            && (constTypeIt->second.kind == VType::INT
-                || constTypeIt->second.kind == VType::ENUM)) {
-            value = static_cast<int64_t>(valueIt->second->num().toUInt());
-            return true;
+        if (constTypeIt != m_constTypes.end()) {
+            // An integer is 32-bit signed, so a negative value is not zero-extended
+            if (constTypeIt->second.kind == VType::INT) {
+                value = static_cast<int32_t>(valueIt->second->num().toUInt());
+                return true;
+            }
+            if (constTypeIt->second.kind == VType::ENUM) {
+                value = static_cast<int64_t>(valueIt->second->num().toUInt());
+                return true;
+            }
         }
     }
     // A function without a formal may be named without parentheses
