@@ -970,7 +970,9 @@ bool Lowering::lowerBinaryOperands(const Expr& expr, const std::string& op, bool
                 ctxType.width = 0;
             }
             const VType* const ctxp
-                = !selfTypedAggregate && (known.isVector() || known.kind == VType::ARRAY)
+                = !selfTypedAggregate
+                          && (known.isVector() || known.kind == VType::ARRAY
+                              || (known.kind == VType::RECORD && aggregateOperand))
                       ? &ctxType
                       : nullptr;
             if (lowerLeftFirst) {
