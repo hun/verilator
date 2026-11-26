@@ -16,7 +16,9 @@ entity t is
     o_scaled : out std_logic_vector(31 downto 0);
     o_round  : out std_logic_vector(31 downto 0);
     o_cmp    : out std_logic_vector(3 downto 0);
-    o_sig    : out std_logic_vector(31 downto 0)
+    o_sig    : out std_logic_vector(31 downto 0);
+    o_pow    : out std_logic_vector(31 downto 0);
+    o_powv   : out std_logic_vector(31 downto 0)
   );
 end entity t;
 
@@ -26,6 +28,9 @@ begin
   -- Driven from an input, so the value is only known at run time
   sig_r <= real(to_integer(unsigned(i_in))) / 4.0;
   o_sig <= std_logic_vector(to_signed(integer(sig_r * 2.0), 32));
+
+  o_pow <= std_logic_vector(to_signed(integer(sig_r ** 3), 32));
+  o_powv <= std_logic_vector(to_signed(integer(sig_r ** to_integer(unsigned(i_in(1 downto 0)))), 32));
 
   process
     variable r : real;

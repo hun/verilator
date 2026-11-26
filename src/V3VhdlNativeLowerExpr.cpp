@@ -1758,6 +1758,14 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
 AstNodeExpr* Lowering::lowerRealBinary(FileLine* flp, const std::string& op, BinaryOperands& ops) {
     AstNodeExpr*& lp = ops.lp;
     AstNodeExpr*& rp = ops.rp;
+    if (op == "**" && ops.lt.kind == VType::REAL && ops.rt.isInt()) {
+        // IEEE 1076-2008 9.2.7: a real raised to an integer power
+        AstNodeExpr* const exponentp = new AstIToRD{flp, rp};
+        exponentp->dtypep(findBasic(flp, VBasicDTypeKwd::DOUBLE));
+        AstPowD* const powp = new AstPowD{flp, lp, exponentp};
+        powp->dtypep(findBasic(flp, VBasicDTypeKwd::DOUBLE));
+        return powp;
+    }
     if (ops.lt.kind != VType::REAL || ops.rt.kind != VType::REAL) {
         unsupportedError(flp, "operator '" + op + "' on a real and a non-real value");
         lp->deleteTree();

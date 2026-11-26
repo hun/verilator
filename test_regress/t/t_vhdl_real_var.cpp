@@ -32,6 +32,8 @@ int main(int argc, char** argv) {
     check("o_round", topp->o_round, 0xfffffffdu);  // -3
     check("o_cmp", topp->o_cmp, 0x7u);
     check("o_sig", topp->o_sig, 5u);  // integer(2.5 * 2.0)
+    check("o_pow", topp->o_pow, 16u);  // integer(2.5 ** 3) = 15.625
+    check("o_powv", topp->o_powv, 6u);  // integer(2.5 ** 2) = 6.25
 
     topp->final();
     delete topp;

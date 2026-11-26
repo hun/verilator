@@ -46,8 +46,8 @@ The functions ``sqrt``, ``exp``, ``log`` (also with a base), ``log2``, ``log10``
 ``cosh``, ``tanh``, ``arcsinh``, ``arccosh``, ``arctanh``, ``ceil``, ``floor``, ``round``,
 ``trunc``, ``sign``, ``realmax`` and ``realmin``, and the predefined ``abs`` of a real, are
 supported in both. ``round`` and ``trunc`` follow the IEEE 1076.2 body, so ``round`` of the
-largest double below one half is one. ``cbrt`` and ``mod`` are not supported, and ``**`` on reals folds
-only in a constant. The functions compute with the C library, which agrees with GHDL's
+largest double below one half is one. ``cbrt`` and ``mod`` are not supported. A real raised to an integer power, ``x ** n``, is
+supported; ``**`` of two reals folds only in a constant. The functions compute with the C library, which agrees with GHDL's
 approximations within 1e-7 on the values tested. For a magnitude of ``2**31 - 1`` or more,
 ``ceil``, ``floor`` and ``round`` differ from the body, which returns its argument there.
 
@@ -204,7 +204,7 @@ Not supported
 These constructs are refused with a diagnostic: access, protected, file and
 ``textio`` types; ``force out`` and ``release out``; runtime ``'value`` and string parsing;
 physical objects and ``now``; real ports; arrays and records with real elements that
-are variables or signals; the operators ``**`` and ``mod`` on a real; and the floating-point
+are variables or signals; the operator ``mod`` on a real; and the floating-point
 package ``float_pkg``;
 user-defined resolution functions; allocators; multi-dimensional
 ports; ``linkage`` ports, ``disconnect`` and ``guarded`` signals; embedded
