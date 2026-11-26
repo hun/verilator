@@ -213,6 +213,12 @@ baseline except for mode views of a record (see below). Zero-width arrays are
 supported as empty values only in whole-array assignments, and a slice with a static null range converted by ``to_integer`` gives 0 as
 numeric_std does; other uses are not modeled.
 
+These are parsed and then refused: a resolution function in a subtype indication (only
+``resolved`` on ``std_ulogic`` is known), a ``wait`` with a timeout, a ``wait on`` part of a signal,
+several waveform elements in a sequential assignment, a delay in a conditional signal
+assignment, a block header with generics or ports, a generic subprogram, a generic package
+parameter, a package declared in a package, an incomplete type declaration and an allocator.
+
 A sequential signal assignment may ``force`` a value onto a signal and ``release`` it
 again, ``s <= force '1';`` and ``s <= release;``, with the effect of a Verilog ``force``.
 ``force out`` and ``release out`` do the same, as the two-state model has one value per signal. The

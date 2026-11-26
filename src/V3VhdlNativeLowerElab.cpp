@@ -2706,6 +2706,11 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
         lhsp->deleteTree();
         return;
     }
+    if (stmt.kind == Concurrent::COND_ASSIGN && stmt.delay && !staticZeroDelay(stmt.delay)) {
+        unsupportedError(stmt.flp, "delay in a conditional signal assignment");
+        lhsp->deleteTree();
+        return;
+    }
     if (stmt.kind == Concurrent::COND_ASSIGN && concHasEdge(stmt)) {
         emitClockedConcurrentAssign(stmt, ltype, lhsp);
         return;

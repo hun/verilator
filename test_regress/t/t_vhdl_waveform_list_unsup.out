@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_waveform_list_unsup.vhdl:15:26: Unsupported: VHDL signal assignment with several waveform elements.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

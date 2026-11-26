@@ -286,6 +286,7 @@ struct Stmt final {
 struct TypeSpec final {
     std::string mark;  // Folded type mark
     std::string pkg;  // Package qualifier of a `work.pkg.mark` reference, if any
+    std::string resolution;  // Folded name of a resolution function written before the mark
     std::string objectName;  // A `name'subtype` indication: the mark above is an object
     bool elementMark = false;  // The indication is `name'element`: an array's element type
     FileLine* flp = nullptr;  // Source location

@@ -790,6 +790,10 @@ ExprP Parser::parseExternalName() {
 
 ExprP Parser::parsePrimary() {
     if (m_cur.kind == Token::SYM && m_cur.text == "<<") return parseExternalName();
+    if (isId("new")) {
+        unsupported("allocator");
+        return nullptr;
+    }
     if (m_cur.kind == Token::INT || m_cur.kind == Token::REAL || m_cur.kind == Token::BITS
         || m_cur.kind == Token::CHAR) {
         ExprP node;
@@ -1078,6 +1082,18 @@ void Parser::parseSeverity(Stmt& stmt) { stmt.severity = parseSeverityValue(); }
 
 bool Parser::parseRange(TypeSpec& type) {
     if (!type.flp) type.flp = m_cur.flp;  // An index constraint has no mark to take one from
+    // `mark range l to r`: the bounds alone give the range, as in `natural range 3 downto 0`
+    if (m_cur.kind == Token::ID && !isReservedWord(m_cur.text)) {
+        const auto saved = m_lexer.state();
+        const Token markTok = m_cur;
+        advance();
+        if (isId("range")) {
+            advance();
+        } else {
+            m_cur = markTok;
+            m_lexer.restore(saved);
+        }
+    }
     ExprP left = parseExpr();
     if (!left) return false;
     if (isId("downto")) {
@@ -1157,9 +1173,20 @@ bool Parser::parseMemberConstraints(TypeSpec& type) {
 }
 
 void Parser::parseTypeSpec(TypeSpec& type) {
+    // `(fn) mark` resolves the elements of an array subtype (IEEE 1076-2008 6.3)
+    std::string elementResolution;
+    if (isSym("(")) {
+        advance();
+        Token fnTok;
+        if (!takeId(fnTok)) return;
+        elementResolution = fnTok.text;
+        expectSym(")");
+        if (m_failed) return;
+    }
     Token markTok;
     if (!takeId(markTok)) return;
     type.flp = markTok.flp;
+    type.resolution = elementResolution;
     // A library- or package-qualified mark uses only its final name; remember the
     // package qualifier (ignoring a leading library) so a type such as `work.defs.rec`
     // can be imported on demand when no `use work.defs.all` clause made it visible
@@ -1170,6 +1197,19 @@ void Parser::parseTypeSpec(TypeSpec& type) {
         if (!takeId(next)) return;
         if (markTok.text != "work") pkg = markTok.text;
         markTok = next;
+    }
+    // A name directly before the mark is a resolution function (IEEE 1076-2008 6.3)
+    if (m_cur.kind == Token::ID && !isReservedWord(m_cur.text)) {
+        type.resolution = markTok.text;  // A second function name would be an error anyway
+        pkg.clear();
+        if (!takeId(markTok)) return;
+        while (isSym(".")) {
+            advance();
+            Token next;
+            if (!takeId(next)) return;
+            if (markTok.text != "work") pkg = markTok.text;
+            markTok = next;
+        }
     }
     type.mark = markTok.text;
     type.pkg = pkg;
@@ -1407,10 +1447,20 @@ void Parser::parseGenericClauseInto(std::vector<GenericDecl>& generics) {
             SubprogramDecl spec{SubprogramDecl::FUNCTION};
             if (!parseSubprogramSpec(spec)) return;
             generic.names.emplace_back(spec.name, spec.spelling);
+            if (acceptId("is")) {  // The default: `is <>` or the name of a subprogram
+                if (!acceptSym("<>")) {
+                    Token defaultTok;
+                    if (!takeId(defaultTok)) return;
+                }
+            }
             generics.push_back(std::move(generic));
             if (acceptSym(";")) continue;
             if (acceptSym(")")) break;
             error("expected ';' or ')' in a generic clause, got '" + m_cur.text + "'");
+            return;
+        }
+        if (isId("package")) {
+            unsupported("generic package parameter");
             return;
         }
         GenericDecl generic;
@@ -1687,6 +1737,10 @@ bool Parser::parseSubprogramSpec(SubprogramDecl& sub) {
     sub.flp = nameTok.flp;
     sub.name = nameTok.text;
     sub.spelling = nameTok.spelling;
+    if (isId("generic")) {
+        unsupported("generic subprogram");
+        return false;
+    }
     parseInterfaceList(sub.formals);
     if (m_failed) return false;
     if (sub.kind == SubprogramDecl::FUNCTION) {
@@ -1851,6 +1905,10 @@ void Parser::parseTypeDeclInto(std::vector<TypeDecl>& types) {
     decl.flp = nameTok.flp;
     decl.name = nameTok.text;
     decl.spelling = nameTok.spelling;
+    if (isSym(";")) {
+        unsupported("incomplete type declaration");
+        return;
+    }
     if (!expectId("is")) return;
     if (isSym("(")) {  // Enumeration
         decl.kind = TypeDecl::ENUM;
@@ -2137,15 +2195,11 @@ void Parser::parsePackageInstanceTail(FileLine* flp, const std::string& name,
     inst.inLibrary = m_inLibrary;
     inst.uses = m_uses;
     inst.contextNames = m_contextNames;
-    if (isId("work")) {
-        advance();
-        if (!acceptSym(".")) {
-            error("expected '.' after 'work'");
-            return;
-        }
-    }
     Token baseTok;
     if (!takeId(baseTok)) return;
+    while (acceptSym(".")) {  // A library qualifier is not modelled
+        if (!takeId(baseTok)) return;
+    }
     inst.baseName = baseTok.text;
     if (isId("generic")) {
         advance();
@@ -2619,7 +2673,8 @@ bool Parser::parseConcurrentPreamble(Architecture& arch, FileLine* flp) {
         // A labelled bare designator is a component instantiation with no maps; an
         // unlabelled one stays a concurrent procedure call (IEEE 1076-2008 11.4)
         const bool mapped = nameTok.text == "entity"
-                            || ((isId("port") || isId("generic")) && m_cur.text != "process")
+                            || ((isId("port") || isId("generic")) && m_cur.text != "process"
+                                && nameTok.text != "block")
                             || (!label.empty() && isSym(";"));
         m_cur = nameTok;
         m_lexer.restore(saved);
@@ -2723,6 +2778,11 @@ void Parser::parseConcurrentIfGenerate(FileLine* flp, Architecture& arch) {
         if (acceptId("elsif")) continue;
         if (acceptId("else")) {
             GenBranch elseBranch;  // The else part carries no condition
+            if (m_cur.kind == Token::ID && !isId("generate")) {  // `else label: generate`
+                advance();
+                expectSym(":");
+                if (m_failed) return;
+            }
             if (!expectId("generate")) return;
             parseConcurrentList(elseBranch.stmts, &elseBranch.decls, &elseBranch.types,
                                 &elseBranch.subprograms, &elseBranch.components);
@@ -2809,6 +2869,10 @@ void Parser::parseConcurrentBlock(FileLine* flp, Architecture& arch) {
         return;
     }
     (void)acceptId("is");
+    if (isId("generic") || isId("port")) {
+        unsupported("block header with generics or ports");
+        return;
+    }
     while (!m_failed && !isId("begin") && !isId("end")) {
         if (isId("signal")) {
             advance();
@@ -2932,6 +2996,25 @@ void Parser::parseConcurrentAssignOrCall(FileLine* flp, Architecture& arch) {
         }
         conc->value = isId("unaffected") ? parseWaveformValue() : parseExpr();
         if (!conc->value) return;
+        if (acceptId("after")) {  // The first value's delay precedes its condition
+            conc->delay = parseExpr();
+            if (!conc->delay) return;
+        }
+        // A waveform list: further elements, each with its own delay (IEEE 1076-2008 10.5)
+        while (acceptSym(",")) {
+            ExprP value = parseExpr();
+            if (!value) return;
+            ExprP delay;
+            if (acceptId("after")) {
+                delay = parseExpr();
+                if (!delay) return;
+            }
+            conc->waveform.emplace_back(std::move(value), std::move(delay));
+        }
+        if (isId("when") && !conc->waveform.empty()) {
+            unsupported("conditional signal assignment with several waveform elements");
+            return;
+        }
         if (isId("when")) {
             conc->kind = Concurrent::COND_ASSIGN;
             conc->alternatives.emplace_back(std::move(conc->value), nullptr);
@@ -2946,22 +3029,13 @@ void Parser::parseConcurrentAssignOrCall(FileLine* flp, Architecture& arch) {
             }
         }
         if (isId("after")) {  // A delayed concurrent assignment drives the target in time
+            if (conc->delay) {
+                unsupported("different delays in one conditional assignment");
+                return;
+            }
             advance();
             conc->delay = parseExpr();
             if (!conc->delay) return;
-        }
-        // A waveform list: further elements, each with its own delay (IEEE 1076-2008 10.5)
-        if (conc->kind == Concurrent::ASSIGN) {
-            while (acceptSym(",")) {
-                ExprP value = parseExpr();
-                if (!value) return;
-                ExprP delay;
-                if (acceptId("after")) {
-                    delay = parseExpr();
-                    if (!delay) return;
-                }
-                conc->waveform.emplace_back(std::move(value), std::move(delay));
-            }
         }
         expectSym(";");
         arch.stmts.push_back(std::move(conc));
@@ -3286,6 +3360,10 @@ StmtP Parser::parseSequentialLoopOrJump(FileLine* flp, const std::string& label)
             while (true) {
                 Token nameTok;
                 if (!takeId(nameTok)) return nullptr;
+                if (isSym("(") || isSym("'") || isSym(".")) {
+                    unsupported("wait on a part of a signal or an attribute of it");
+                    return nullptr;
+                }
                 stmt->waitNames.push_back(nameTok.text);
                 if (!acceptSym(",")) break;
             }
@@ -3295,6 +3373,10 @@ StmtP Parser::parseSequentialLoopOrJump(FileLine* flp, const std::string& label)
             if (!stmt->delay) return nullptr;
         } else {
             stmt->waitForever = true;
+        }
+        if (!stmt->delay && !stmt->waitForever && isId("for")) {
+            unsupported("wait with a timeout");
+            return nullptr;
         }
         expectSym(";");
         return stmt;
@@ -3408,11 +3490,23 @@ StmtP Parser::parseSequentialAssignOrCall(FileLine* flp) {
     }
     stmt->value = parseWaveformValue();
     if (!stmt->value) return nullptr;
+    if (acceptId("after")) {  // The first value's delay precedes its condition
+        stmt->delay = parseExpr();
+        if (!stmt->delay) return nullptr;
+    }
     if (isId("when") && !parseConditionalTail(*stmt, true)) return nullptr;
     if (isId("after")) {  // A zero delay is a delta; anything else needs a timed update
+        if (stmt->delay) {
+            unsupported("different delays in one conditional assignment");
+            return nullptr;
+        }
         advance();
         stmt->delay = parseExpr();
         if (!stmt->delay) return nullptr;
+    }
+    if (isSym(",")) {
+        unsupported("signal assignment with several waveform elements");
+        return nullptr;
     }
     expectSym(";");
     return stmt;
@@ -3613,6 +3707,10 @@ void Parser::parsePackage(FileLine* flp, bool isBody) {
         }
         if (isId("signal") || isId("shared") || isId("variable") || isId("group")) {
             unsupported("package declarative item '" + m_cur.text + "'");
+            return;
+        }
+        if (isId("package")) {
+            unsupported("package declared in a package");
             return;
         }
         error("unexpected package declaration '" + m_cur.text + "'");

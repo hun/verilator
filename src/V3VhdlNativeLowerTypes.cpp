@@ -1686,6 +1686,7 @@ TypeSpec Lowering::copySpec(const TypeSpec& spec) {
     TypeSpec out;
     out.mark = spec.mark;
     out.pkg = spec.pkg;
+    out.resolution = spec.resolution;
     out.objectName = spec.objectName;
     out.elementMark = spec.elementMark;
     out.flp = spec.flp;
@@ -1831,6 +1832,12 @@ bool Lowering::notATypeView(FileLine* flp, const std::string& mark) {
 bool Lowering::resolveType(const TypeSpec& spec, VType& out) {
     FileLine* const flp = spec.flp;
     if (!flp) return false;
+    // std_logic is the one resolved subtype the model knows: `resolved std_ulogic`
+    if (!spec.resolution.empty()
+        && !(spec.resolution == "resolved" && spec.mark.compare(0, 9, "std_ulogi") == 0)) {
+        unsupportedError(flp, "resolution function '" + spec.resolution + "'");
+        return false;
+    }
     if (!spec.objectName.empty()) {  // `name'subtype` or `name'element`
         // `name'element` names the element of an array, which the name may denote either
         // as a type or as an object
