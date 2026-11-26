@@ -233,6 +233,7 @@ void lowerPackages(const DesignLibrary& library, AstNetlist* rootp, PackageTable
     // replace each other in the table; report the second, as for a duplicate entity
     std::set<std::string> specNames;
     std::set<std::string> bodyNames;
+    lowering.scanBodyIntConsts(library.packages);
     for (const PackageUnit& pkg : library.packages) {
         std::set<std::string>& names = pkg.isBody ? bodyNames : specNames;
         if (!names.insert(pkg.name).second) {

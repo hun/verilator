@@ -557,6 +557,23 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
             emitPackageSignal(pkg, decl, pubName, table);
             continue;
         }
+        // A deferred integer constant takes the value its package body gives it, so that
+        // a type declared before the body is read can name it
+        if (!decl.init && !pkg.isBody) {
+            const auto bodyIt = m_bodyIntConsts.find(pkg.name);
+            VType constType;
+            if (bodyIt != m_bodyIntConsts.end() && resolveType(decl.type, constType)
+                && constType.isInt()) {
+                for (const auto& name : decl.names) {
+                    const auto valueIt = bodyIt->second.find(name.first);
+                    if (valueIt == bodyIt->second.end()
+                        || !reserveName(name.first, name.second, decl.flp))
+                        continue;
+                    m_consts[name.first] = valueIt->second;
+                    m_constTypes[name.first] = constType;
+                }
+            }
+        }
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
         // A subprogram of this unit evaluates against what the unit has declared before
         // it, so a body that reads a constant declared earlier in the same package body
