@@ -1574,6 +1574,12 @@ bool Lowering::applyIndexConstraints(const TypeSpec& spec, VType& out) {
     return true;
 }
 
+bool Lowering::arrayWidthFits(FileLine* flp, const VType& type) {
+    if (static_cast<int64_t>(type.elemWidth) * type.length() <= MAX_TYPE_WIDTH) return true;
+    unsupportedError(flp, "array of more than " + std::to_string(MAX_TYPE_WIDTH) + " bits");
+    return false;
+}
+
 bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
     FileLine* const flp = spec.flp;
     if (spec.hasRange) {
@@ -1594,6 +1600,7 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
         }
         if (type.kind == VType::ENUM) return true;  // The bounds are literal positions
         if (type.isVector()) {
+            if (!arrayWidthFits(flp, type)) return false;
             type.width = type.elemWidth * type.length();
             type.dtp = type.kind == VType::ARRAY
                            ? findVectorWidth(flp, type.kwd, type.signing, type.width)
@@ -1622,6 +1629,7 @@ bool Lowering::applyRange(const TypeSpec& spec, VType& type) {
             type.intLow = it->second.intLow;
             type.intHigh = it->second.intHigh;
         } else if (type.isVector()) {
+            if (!arrayWidthFits(flp, type)) return false;
             type.width = type.elemWidth * type.length();
             type.dtp = type.kind == VType::ARRAY
                            ? findVectorWidth(flp, type.kwd, type.signing, type.width)

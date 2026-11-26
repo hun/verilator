@@ -307,6 +307,12 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
                 choicep->flp->v3error("VHDL: empty choice range.");
                 return false;
             }
+            if ((right - left) * step >= MAX_CHOICE_RANGE_VALUES) {
+                unsupportedError(choicep->flp, "choice range of more than "
+                                                   + std::to_string(MAX_CHOICE_RANGE_VALUES)
+                                                   + " values");
+                return false;
+            }
             for (int64_t value = left;; value += step) {
                 AstNodeExpr* const exprp = makeVectorConst(choicep->flp, choiceType, value);
                 AstConst* const constp = VN_CAST(exprp, Const);

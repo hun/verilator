@@ -52,6 +52,10 @@ static constexpr std::size_t MAX_TRACKED_VALUE_NODES = 256;
 static constexpr int64_t MAX_FOLD_WIDTH = 4096;
 //! Maximum width of a constant folded into a memory image
 static constexpr int MAX_FOLD_CONST_WIDTH = 1 << 20;
+//! Maximum width of one array object, so a size the model cannot hold fails at its declaration
+static constexpr int64_t MAX_TYPE_WIDTH = 1 << 28;
+//! Maximum number of case items one choice range expands to
+static constexpr int64_t MAX_CHOICE_RANGE_VALUES = 1 << 16;
 //! Maximum AST cost of the element writes folded into one function body
 static constexpr int64_t MAX_FOLD_WRITE_COST = 1 << 18;
 
@@ -809,6 +813,8 @@ class Lowering final {
     bool reserveName(const std::string& folded, const std::string& spelling, FileLine* flp);
     AstNodeDType* enumDType(FileLine* flp, const TypeDecl& decl, int width);
     bool applyRange(const TypeSpec& spec, VType& type);
+    //! Whether an array of this length and element width stays within MAX_TYPE_WIDTH
+    bool arrayWidthFits(FileLine* flp, const VType& type);
     //! Constrain a nested-array subtype `t(r1)(r2, ...)` by descending one level per
     //! constraint; a fresh copy, and any residual unconstrained level is rejected
     bool applyIndexConstraints(const TypeSpec& spec, VType& out);
