@@ -2916,7 +2916,7 @@ AstNodeExpr* Lowering::lowerIndexChain(const Expr& expr, AstNodeExpr* basep,
         // vectors is one-dimensional, so `v(i, j)` has too many indices; the valid form
         // is the chained `v(i)(j)`, which reaches here as separate single-index steps
         if (ai > 0 && levelType.kind == VType::VECTOR) {
-            flp->v3error("VHDL: too many indices for an array of vectors.");
+            flp->v3error("VHDL: too many indices for an array of vectors (IEEE 1076-2008 8.4).");
             curp->deleteTree();
             return nullptr;
         }
@@ -4215,7 +4215,8 @@ bool Lowering::collectRecordAggregateSegments(FileLine* flp, const Expr& expr, c
     if (expr.kind == Expr::AGG_POSITIONAL) {
         // Positional association fills record elements in declaration order
         if (expr.args.size() != type.fields.size()) {
-            flp->v3error("VHDL: record aggregate needs one value per element.");
+            flp->v3error(
+                "VHDL: record aggregate needs one value per element (IEEE 1076-2008 9.3.3.1).");
             return false;
         }
         for (size_t i = 0; i < expr.args.size(); ++i) {
@@ -4234,7 +4235,8 @@ bool Lowering::collectRecordAggregateSegments(FileLine* flp, const Expr& expr, c
                     continue;
                 }
                 if (choicep->kind != Expr::NAME) {
-                    flp->v3error("VHDL: record aggregate choice must be an element name.");
+                    flp->v3error("VHDL: record aggregate choice must be an element name "
+                                 "(IEEE 1076-2008 9.3.3.2).");
                     return false;
                 }
                 const auto fieldIt = std::find_if(

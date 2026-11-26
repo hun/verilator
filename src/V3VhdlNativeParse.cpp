@@ -3496,7 +3496,7 @@ StmtP Parser::parseSequentialAssignOrCall(FileLine* flp) {
         if (!stmt->value) return nullptr;
         if (isId("when") && !parseConditionalTail(*stmt, false)) return nullptr;
         if (isId("after")) {
-            error("'after' is not allowed in a variable assignment");
+            error("'after' is not allowed in a variable assignment (IEEE 1076-2008 10.6.2.1)");
             return nullptr;
         }
         expectSym(";");
