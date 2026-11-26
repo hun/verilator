@@ -13,4 +13,3 @@ end entity t;
 
 architecture rtl of t is
   function f return bit is
-
