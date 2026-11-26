@@ -87,11 +87,28 @@ bool isIndexRangeAttribute(const std::string& attribute) {
            || attribute == "length" || attribute == "ascending";
 }
 
+//! Whether an expression has type universal_integer: only literals, and the results of
+//! 'pos and 'length, combine into one; a named constant or generic is an integer
+static bool isUniversalInteger(const Expr& expr) {
+    switch (expr.kind) {
+    case Expr::INT_LIT: return true;
+    case Expr::PAREN:
+    case Expr::UNARY: return isUniversalInteger(*expr.a);
+    case Expr::BINARY: return isUniversalInteger(*expr.a) && isUniversalInteger(*expr.b);
+    case Expr::ATTR: return expr.text == "pos" || expr.text == "length";
+    default: return false;
+    }
+}
+
 //! The index range an array attribute refers to: one element level per unit above the index
 //! it names. Null when the index is not static or exceeds the type's dimensionality.
 const VType* Lowering::indexRangeLevel(const Expr& expr, const VType& type) const {
     const VType* levelp = &type;
     if (!isIndexRangeAttribute(expr.text)) return levelp;
+    if (!expr.args.empty() && !isUniversalInteger(*expr.args[0])) {
+        expr.flp->v3error("VHDL: the index of attribute '" + expr.text
+                          + "' must be a universal integer expression (IEEE 1076-2008 16.2.3).");
+    }
     int64_t index = 1;
     if (!expr.args.empty() && (!staticInt(expr.args[0], index) || index < 1)) return nullptr;
     for (int64_t i = 1; i < index; ++i) {

@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_attr_index_const_bad.vhdl:17:8: VHDL: the index of attribute 'length' must be a universal integer expression (IEEE 1076-2008 16.2.3).
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to
