@@ -1582,6 +1582,9 @@ class Lowering final {
     void emitConcurrentAssign(const Concurrent& stmt);
     void emitClockedConcurrentAssign(const Concurrent& stmt, const VType& ltype,
                                      AstNodeExpr* lhsp);
+    bool concurrentRunsOnce(const Concurrent& stmt);
+    void emitDelayedOnce(const Concurrent& stmt, const VType& ltype, AstNodeExpr* lhsp,
+                         AstNodeExpr* rhsp);
     void emitConcurrentWaveform(const Concurrent& stmt, const VType& ltype, AstNodeExpr* lhsp,
                                 AstNodeExpr* rhsp);
     AstNodeStmt* lowerStmtList(const std::vector<StmtP>& stmts);

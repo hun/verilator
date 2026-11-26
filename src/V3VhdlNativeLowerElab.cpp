@@ -2811,6 +2811,10 @@ void Lowering::emitConcurrentAssign(const Concurrent& stmt) {
         return;
     }
     if (stmt.delay && !staticZeroDelay(stmt.delay)) {
+        if (concurrentRunsOnce(stmt)) {
+            emitDelayedOnce(stmt, ltype, lhsp, rhsp);
+            return;
+        }
         // A concurrent delayed assignment repeats: it waits, then drives the target
         AstNodeStmt* const assignp = new AstAssign{stmt.flp, lhsp, rhsp};
         AstNodeStmt* const delayp = lowerDelay(*stmt.delay, stmt.flp);
@@ -2870,8 +2874,77 @@ void Lowering::emitClockedConcurrentAssign(const Concurrent& stmt, const VType& 
     lhsp->deleteTree();
 }
 
+//! Whether a delayed concurrent assignment runs once: it reads no signal that could start it
+//! again, and its element times are static and do not decrease (IEEE 1076-2008 11.6)
+bool Lowering::concurrentRunsOnce(const Concurrent& stmt) {
+    std::set<std::string> names;
+    collectExprNames(*stmt.value, names);
+    for (const auto& element : stmt.waveform) collectExprNames(*element.first, names);
+    for (const std::string& name : names) {
+        if (m_scope.find(name) != m_scope.end()) return false;
+    }
+    int64_t previous = 0;
+    const auto timeOk = [&](const ExprP& delayp) {
+        int64_t fs = 0;
+        if (delayp && !staticIntFold(delayp, fs)) return false;
+        if (fs < previous) return false;
+        previous = fs;
+        return true;
+    };
+    return timeOk(stmt.delay)
+           && std::all_of(
+               stmt.waveform.begin(), stmt.waveform.end(),
+               [&](const std::pair<ExprP, ExprP>& element) { return timeOk(element.second); });
+}
+
+//! The target takes each element at its time after the start of simulation
+void Lowering::emitDelayedOnce(const Concurrent& stmt, const VType& ltype, AstNodeExpr* lhsp,
+                               AstNodeExpr* rhsp) {
+    AstNodeStmt* bodyp = nullptr;
+    int64_t now = 0;
+    const auto add = [&](const ExprP& delayp, AstNodeExpr* valuep) {
+        int64_t fs = 0;
+        if (delayp) staticIntFold(delayp, fs);
+        if (fs > now) {
+            Expr step{Expr::INT_LIT};
+            step.intValue = fs - now;
+            AstNodeStmt* const delaystmtp = lowerDelay(step, stmt.flp);
+            if (!delaystmtp) {
+                valuep->deleteTree();
+                return false;
+            }
+            bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, delaystmtp)
+                          : delaystmtp;
+            now = fs;
+        }
+        AstNodeStmt* const assignp = new AstAssign{stmt.flp, lhsp->cloneTree(false), valuep};
+        bodyp = bodyp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(bodyp, assignp) : assignp;
+        return true;
+    };
+    bool ok = add(stmt.delay, rhsp);
+    for (const auto& element : stmt.waveform) {
+        if (!ok) break;
+        AstNodeExpr* const elementp = lowerExpr(*element.first, &ltype);
+        if (!elementp) {
+            ok = false;
+            break;
+        }
+        ok = add(element.second, resizeExpr(elementp, ltype, stmt.flp));
+    }
+    lhsp->deleteTree();
+    if (!ok) {
+        if (bodyp) bodyp->deleteTree();
+        return;
+    }
+    m_modp->addStmtsp(new AstInitial{stmt.flp, takePendingFor(bodyp)});
+}
+
 void Lowering::emitConcurrentWaveform(const Concurrent& stmt, const VType& ltype,
                                       AstNodeExpr* lhsp, AstNodeExpr* rhsp) {
+    if (concurrentRunsOnce(stmt)) {
+        emitDelayedOnce(stmt, ltype, lhsp, rhsp);
+        return;
+    }
     // A waveform list repeats: each element after the first waits its own delay, and
     // the last element's delay closes the period (IEEE 1076-2008 10.5)
     AstNodeStmt* bodyp = new AstAssign{stmt.flp, lhsp, rhsp};
