@@ -196,7 +196,7 @@ one there is refused.
 **Choice lists.** Every case and selected-assignment choice list is validated as
 it lowers: a value covered twice (an overlapping range is one), a second
 ``others`` arm, and a list without ``others`` that does not cover every value
-the selector can take are reported (IEEE 1076-2008 10.9, 11.5). Coverage is
+the selector can take are reported (IEEE 1076-2008 10.9, 10.5.4). Coverage is
 computed from the lowered constants: an enumeration's literals, both values of a
 scalar, or every combination of a vector up to 16 bits.
 
@@ -212,7 +212,7 @@ declared default.
 **Driver count.** Once every statement has been emitted, ``checkDrivers`` walks
 the module and counts, per bit position, which statement drives each bit of a
 signal whose type has no resolution function: two statements on the same bit are
-reported (IEEE 1076-2008 12.6.4). Bit positions matter because a composite
+reported (IEEE 1076-2008 6.4.2.3). Bit positions matter because a composite
 signal's scalar subelements are separate signals, so element and record-member
 writes do not collide; a static element index is folded for the comparison,
 while a dynamic one conservatively covers the whole signal. `std_logic` and the

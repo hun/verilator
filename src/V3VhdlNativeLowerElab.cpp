@@ -577,7 +577,7 @@ void Lowering::emitPackage(const PackageUnit& pkg, PackageTable::Impl& table,
         emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, !pkg.isBody);
         // A subprogram of this unit evaluates against what the unit has declared before
         // it, so a body that reads a constant declared earlier in the same package body
-        // sees it (IEEE 1076-2008 4.7)
+        // sees it (IEEE 1076-2008 12.2)
         m_moduleScope = saveScope();
     }
     completeDeferredConsts();
@@ -643,7 +643,7 @@ void Lowering::emitEntityDecls(const EntityUnit& entity, const Architecture& arc
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
             // A subprogram of this declarative part evaluates against what the unit has
-            // declared before it (IEEE 1076-2008 4.7)
+            // declared before it (IEEE 1076-2008 12.2)
             m_moduleScope = saveScope();
             continue;
         }
@@ -1876,7 +1876,7 @@ bool Lowering::lookupInstanceModule(const Concurrent& conc, AstModule*& modp,
 }
 
 //! A component declaration's interface must conform to the entity the instance binds,
-//! and the association formals are the component's (IEEE 1076-2008 6.5.2.2)
+//! and the association formals are the component's (IEEE 1076-2008 7.3.3)
 bool Lowering::checkComponentConformance(const Concurrent& conc, const EntityUnit& entity) {
     const auto componentIt = m_components.find(conc.instanceName);
     if (componentIt == m_components.end()) return true;
@@ -2103,7 +2103,7 @@ AstNodeExpr* Lowering::instanceDeclaredDefault(const Concurrent& conc, const Ent
         if (!matches) continue;
         // The default is written in the entity's scope, so its packages are visible
         // there even when the instance does not import them, and its generics carry
-        // the values this instance binds (IEEE 1076-2008 6.5.7.1)
+        // the values this instance binds
         bool conforms = false;
         AstNodeExpr* defaultp = nullptr;
         {
@@ -2123,7 +2123,7 @@ AstNodeExpr* Lowering::instanceDeclaredDefault(const Concurrent& conc, const Ent
         }
         if (aggType.width > 0 && defaultp->width() != aggType.width) {
             port.flp->v3error("VHDL: default of port " + portp->prettyNameQ()
-                              + " does not have the port's length (IEEE 1076-2008 6.5.7.1).");
+                              + " does not have the port's length (IEEE 1076-2008 14.3.5).");
             defaultp->deleteTree();
             defaultError = true;
             return nullptr;
@@ -2210,7 +2210,7 @@ bool Lowering::bindWholePort(InstancePortBind& ctx, AstVar* portp, const PortAss
     // The whole port connects to one actual; an `open` association leaves
     // it unconnected, so an input takes its declared default
     if (assoc.actual) {
-        // IEEE 1076-2008 6.5.2.2: the actual must conform to the formal's
+        // IEEE 1076-2008 6.5.7.1: the actual must conform to the formal's
         // type. A scalar of another base type is a user error, not a resize.
         if (!valueConforms(aggType, *assoc.actual, "port actual")) return false;
         const bool driven = portp->direction().isOutput() || portp->direction().isInout();
@@ -2230,14 +2230,14 @@ bool Lowering::bindWholePort(InstancePortBind& ctx, AstVar* portp, const PortAss
         if (!conforms) {
             assoc.flp->v3error("VHDL: actual of port " + portp->prettyNameQ()
                                + " does not conform to the port's type "
-                                 "(IEEE 1076-2008 6.5.2.2).");
+                                 "(IEEE 1076-2008 6.5.7.1).");
             valuep->deleteTree();
             return false;
         }
         if (aggType.width > 0 && valuep->width() != aggType.width) {
             assoc.flp->v3error("VHDL: actual of port " + portp->prettyNameQ()
                                + " does not have the port's length "
-                                 "(IEEE 1076-2008 6.5.2.2).");
+                                 "(IEEE 1076-2008 14.3.5).");
             valuep->deleteTree();
             return false;
         }
@@ -2946,7 +2946,7 @@ void Lowering::emitConcurrentWaveform(const Concurrent& stmt, const VType& ltype
         return;
     }
     // A waveform list repeats: each element after the first waits its own delay, and
-    // the last element's delay closes the period (IEEE 1076-2008 10.5)
+    // the last element's delay closes the period (IEEE 1076-2008 11.6)
     AstNodeStmt* bodyp = new AstAssign{stmt.flp, lhsp, rhsp};
     const Expr* lastDelayp = stmt.delay.get();
     for (const auto& element : stmt.waveform) {

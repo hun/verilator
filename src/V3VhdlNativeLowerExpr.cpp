@@ -87,7 +87,7 @@ AstNodeExpr* Lowering::lowerBitStringLiteral(FileLine* flp, const Expr& expr,
                                              const VType* contextp) {
     // A string literal whose characters are all logic characters is a bit vector in a
     // logic context, but a string in a character-array context: `"ZU"` is a legal
-    // std_logic_vector and a legal `string` (IEEE 1076-2008 9.3.2, 15.5)
+    // std_logic_vector and a legal `string` (IEEE 1076-2008 9.3.2, 15.7)
     if (contextp && !expr.spelling.empty()
         && ((contextp->kind == VType::ARRAY && contextp->elemp
              && contextp->elemp->typeName == "character")
@@ -245,7 +245,7 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     if (AstNodeExpr* const userp = lowerUserUnary(expr, contextp, userFound)) return userp;
     if (userFound) return nullptr;
     // `not` yields its operand's type, so an aggregate operand takes the context's type
-    // (IEEE 1076-2008 9.3.3.2)
+    // (IEEE 1076-2008 9.2.2, 9.3.3.1)
     const Expr* operandExprp = expr.a.get();
     while (operandExprp->kind == Expr::PAREN && operandExprp->a) {
         operandExprp = operandExprp->a.get();
@@ -263,7 +263,7 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
     if (reduction) return makeReduction(flp, operandp, expr.text);
     if (expr.text == "abs") {
         // numeric_std defines "abs" for a signed operand (IEEE 1076-2008
-        // Annex C), which compares and negates in place
+        // 16.8.5), which compares and negates in place
         const bool signedLogic = isSignedLogicVector(type);
         const bool signedVec = type.isVector() && type.isSigned();
         const bool realOperand = type.kind == VType::REAL;
@@ -354,7 +354,7 @@ AstNodeExpr* Lowering::lowerUnary(FileLine* flp, const Expr& expr, const VType* 
 }
 
 //! Arguments to a function that has no formals index its result: `fun(0, 0)` is `fun`'s
-//! value indexed (IEEE 1076-2008 9.3.3.1). Null when the call is something else.
+//! value indexed (IEEE 1076-2008 8.4). Null when the call is something else.
 ExprP Lowering::indexOfNoFormalCall(const Expr& expr) const {
     if (expr.kind != Expr::INDEX || !expr.a || expr.a->kind != Expr::NAME || expr.args.empty()) {
         return nullptr;
@@ -831,8 +831,9 @@ AstNodeExpr* Lowering::lowerArrayRelation(FileLine* flp, const std::string& cmpO
 //! Whether a static integer arithmetic result fits the 32-bit integer type
 bool Lowering::binaryStaticFits(FileLine* flp, const Expr& expr) {
     const std::string& op = expr.text;
-    // A static integer expression must fit the 32-bit integer type (IEEE 1076-2008 9.1);
-    // the unrolled multiply or the middle end would otherwise wrap it silently
+    // A static integer expression must fit the 32-bit integer type (INTEGER's range is
+    // implementation-defined, IEEE 1076-2008 5.2.3.2); the unrolled multiply or the middle end
+    // would otherwise wrap it silently
     if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem"
          || op == "**")
         && expr.a && expr.b && literalIntegerExpr(expr)) {
@@ -950,7 +951,7 @@ bool Lowering::lowerBinaryOperands(const Expr& expr, const std::string& op, bool
     } else {
         // A typed operand fixes the type of a call or aggregate beside it, e.g.
         // `C <= C + ite(c, (C'range => '1'), x)` takes the unsigned ite (IEEE 1076-2008
-        // 9.1). Concatenation and shifts combine operands of different types, so they
+        // 12.5). Concatenation and shifts combine operands of different types, so they
         // give no such context.
         const bool sameType = op == "+" || op == "-" || op == "*" || op == "/" || op == "="
                               || op == "/=" || op == "<" || op == "<=" || op == ">" || op == ">="
@@ -1298,7 +1299,7 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
         return lp;
     }
     // A concatenation of bit-string and character literals takes the element type of the
-    // other operand (IEEE 1076-2008 9.3.6), so `"000" & bit_vector_signal` is a bit_vector
+    // other operand (IEEE 1076-2008 9.2.5), so `"000" & bit_vector_signal` is a bit_vector
     {
         const auto elementKwd = [](const VType& type, VBasicDTypeKwd& kwd) {
             if (type.isVector()) {
@@ -1368,7 +1369,7 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
         return nullptr;
     }
     // A bit-string literal beside a numeric_std vector takes that vector's type, so
-    // `"0" & unsigned(x)` stays unsigned and can be added (IEEE 1076-2008 9.3.6)
+    // `"0" & unsigned(x)` stays unsigned and can be added (IEEE 1076-2008 9.2.5)
     const VType& named = !lt.isVector()                   ? rt
                          : !rt.isVector()                 ? lt
                          : lt.signing == VSigning::NOSIGN ? rt
@@ -1462,7 +1463,7 @@ AstNodeExpr* Lowering::lowerShiftBinary(FileLine* flp, const Expr& expr, const s
         return nullptr;
     }
     if (op == "rol" || op == "ror") return makeRotate(flp, lp, rp, op == "rol");
-    // IEEE 1076-2008 9.2.3 gives the predefined shift operators bit and boolean
+    // IEEE 1076-2008 9.2.4 gives the predefined shift operators bit and boolean
     // elements; std_logic_1164 (2008) declares the std_logic_vector ones, so a
     // std_logic_vector shifts without a numeric package
     // A negative count is the opposite shift (IEEE 1076-2008 9.2.4)
@@ -1546,7 +1547,8 @@ AstNodeExpr* Lowering::lowerIntArithmetic(FileLine* flp, const Expr& expr, const
     AstNodeExpr*& rp = ops.rp;
     VType& lt = ops.lt;
     const VType& rt = ops.rt;
-    // IEEE 1076-2008 9.1: dividing by zero is an error
+    // IEEE 1076-2008 5.2.3.1: an operation that cannot deliver the correct result is an
+    // error, and a zero divisor has no result
     AstNodeExpr* zeroTestp = nullptr;  // True when the divisor is zero
     if (op == "/" || op == "mod" || op == "rem") {
         int64_t divisor = 0;
@@ -1723,12 +1725,12 @@ AstNodeExpr* Lowering::lowerVectorArithmetic(FileLine* flp, const Expr& expr,
         rp->deleteTree();
         return nullptr;
     }
-    // IEEE 1076-2008 9.1: the predefined arithmetic operators have bit and boolean
-    // elements, so a std_logic_vector needs one of the packages that declare them
+    // IEEE 1076-2008 9.2.5: the predefined + and - are for numeric types only, so a
+    // std_logic_vector needs one of the packages that declare them
     if (lt.kwd == VBasicDTypeKwd::LOGIC && lt.signing == VSigning::NOSIGN && !m_stdLogicArith
         && !m_stdLogicSigned && !m_stdLogicUnsigned) {
         flp->v3error("VHDL: arithmetic on std_logic_vector needs a package that defines it "
-                     "(IEEE 1076-2008 9.1).");
+                     "(IEEE 1076-2008 9.2.5).");
         lp->deleteTree();
         rp->deleteTree();
         return nullptr;
@@ -1791,7 +1793,7 @@ AstNodeExpr* Lowering::lowerRealBinary(FileLine* flp, const std::string& op, Bin
     AstNodeExpr*& lp = ops.lp;
     AstNodeExpr*& rp = ops.rp;
     if (op == "**" && ops.lt.kind == VType::REAL && ops.rt.isInt()) {
-        // IEEE 1076-2008 9.2.7: a real raised to an integer power
+        // IEEE 1076-2008 9.2.8: a real raised to an integer power
         AstNodeExpr* const exponentp = new AstIToRD{flp, rp};
         exponentp->dtypep(findBasic(flp, VBasicDTypeKwd::DOUBLE));
         AstPowD* const powp = new AstPowD{flp, lp, exponentp};
@@ -2076,7 +2078,7 @@ AstNodeExpr* Lowering::makeRotate(FileLine* flp, AstNodeExpr* valuep, AstNodeExp
 //! The shifted value for one direction, consuming its operands. A predefined
 //! `bit_vector` or logic-vector shift fills the vacated positions with the
 //! array's edge element: sra with the leftmost, sla with the rightmost (IEEE
-//! 1076-2008 9.2.3). The numeric_std vector types keep their own shift semantics.
+//! 1076-2008 9.2.4). The numeric_std vector types keep their own shift semantics.
 AstNodeExpr* Lowering::makeShift(FileLine* flp, AstNodeExpr* valuep, AstNodeExpr* amountp,
                                  const std::string& op, const VType& vt) {
     AstNodeDType* const dtp = valuep->dtypep();
@@ -2668,7 +2670,8 @@ AstNodeExpr* Lowering::lowerConversion(const Expr& expr, const VType* contextp) 
     }
     if (name == "integer" || name == "natural" || name == "positive") {
         if (valueType.isInt()) return valuep;
-        // A real rounds to the nearest integer, halfway cases away from zero (IEEE 1076-2008 16.3)
+        // A real rounds to the nearest integer (IEEE 1076-2008 9.3.6); a halfway case may go
+        // either way there, and this rounds it away from zero
         if (valueType.kind == VType::REAL) {
             AstNodeExpr* const roundp = new AstRToIRoundS{flp, valuep};
             roundp->dtypep(intType(flp).dtp);
@@ -2933,7 +2936,7 @@ AstNodeExpr* Lowering::lowerIndexChain(const Expr& expr, AstNodeExpr* basep,
             curp->deleteTree();
             return nullptr;
         }
-        // An enumeration value as an index is its position (IEEE 1076-2008 9.3.6), which
+        // An enumeration value as an index is its position (IEEE 1076-2008 8.4), which
         // is also its encoding
         VType indexEnum;
         if (!typeOfDType(indexp->dtypep()).isInt()) {

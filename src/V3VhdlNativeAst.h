@@ -434,7 +434,7 @@ struct Process final {
     bool sensitivityAll = false;  // process(all): every signal the body reads
     std::vector<std::string> sensitivity;  // Folded names
     // Element designators (`rec.field`, `v(i)`, `v(hi downto lo)`): each denotes a
-    // subelement signal of the process's sensitivity list (IEEE 1076-2008 11.3)
+    // subelement signal of the process's sensitivity list (IEEE 1076-2008 10.2)
     std::vector<ExprP> sensitivityElems;
     std::vector<Decl> decls;  // Variables of the process declarative part
     std::vector<TypeDecl> types;  // Types declared by the process

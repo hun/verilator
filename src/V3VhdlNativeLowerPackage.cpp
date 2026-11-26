@@ -129,7 +129,7 @@ void Lowering::emitConstant(const std::vector<std::pair<std::string, std::string
         valuep->deleteTree();
         return;
     }
-    // IEEE 1076-2008 9.3.2: an explicit value must have the declared type's length. The
+    // IEEE 1076-2008 5.3.2.2: an explicit value must have the declared type's length. The
     // width is not visible to valueConforms for a literal or a simple designator; an
     // operator expression takes its width from the context instead.
     const bool sized = initp->kind == Expr::STRING_LIT || initp->kind == Expr::BITS_LIT
@@ -162,7 +162,7 @@ bool Lowering::deferUnresolvedConstant(
     const std::vector<std::pair<std::string, std::string>>& names, const TypeSpec& type,
     const Expr& init, FileLine* flp) {
     // A call whose body this pass cannot read: the body's pass completes the constant
-    // rather than reporting the call (IEEE 1076-2008 6.4.2.2). The specifications are
+    // rather than reporting the call. The specifications are
     // emitted before any body, so a call to a function another package defines in its
     // body has none yet. A name with arguments parses as an indexed name and becomes a
     // call once the prefix names a subprogram.
@@ -226,7 +226,7 @@ bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileL
         intConstant = false;
     } else if (isUnconstrainedVectorMark(type)) {
         // An unconstrained vector constant takes its bounds from its initial value
-        // (IEEE 1076-2008 6.4.2.2), so the value is folded before the type is fixed
+        // (IEEE 1076-2008 5.3.2.2), so the value is folded before the type is fixed
         valuep = lowerExpr(init, nullptr);
         if (!valuep) return false;
         if (AstConst* const foldedp = foldStatic(valuep)) {
@@ -302,7 +302,7 @@ bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileL
         // An unconstrained array constant whose initializer is a value rather than an
         // aggregate takes its length from that value, as a function returning an
         // unconstrained array constrains it: poc's `RAM_Type_Depth` is
-        // `integer_vector := get_ram_type(...)` (IEEE 1076-2008 5.3.2)
+        // `integer_vector := get_ram_type(...)` (IEEE 1076-2008 5.3.2.2)
         if (!constType.dtp && constType.kind == VType::ARRAY && init.kind != Expr::AGG_POSITIONAL
             && init.kind != Expr::AGG_NAMED && !type.hasRange && type.constraintMark.empty()
             && type.indexConstraints.empty() && constType.elemWidth > 0) {
@@ -330,7 +330,7 @@ bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileL
             }
         }
         // An unconstrained array constant takes its bounds from its aggregate, one element
-        // per aggregate element from the index subtype's low bound (IEEE 1076-2008 9.3.3.2)
+        // per aggregate element from the index subtype's low bound (IEEE 1076-2008 9.3.3.3)
         if (!constType.dtp && constType.kind == VType::ARRAY && init.kind == Expr::AGG_POSITIONAL
             && !init.args.empty() && !type.hasRange && type.constraintMark.empty()
             && type.indexConstraints.empty()) {
@@ -359,7 +359,7 @@ bool Lowering::storeIntConstant(const std::vector<std::pair<std::string, std::st
                                 const VType& constType) {
     int64_t value = 0;
     if (!evalInt(init, value)) return false;
-    // IEEE 1076-2008 5.4: the value is within its declared subtype's bounds. Only
+    // IEEE 1076-2008 5.2.1: the value is within its declared subtype's bounds. Only
     // a subtype of a predefined integer type carries bounds that are complete here
     // (a physical type is modelled as an integer too, without them).
     const auto subtypeIt = m_types.find(type.mark);

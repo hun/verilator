@@ -59,7 +59,7 @@ void Lowering::setScope(const ScopeSave& saved) {
 }
 
 //! Whether two declarations are one profile: a declaration of the same name and formal
-//! types is a homograph of the other (IEEE 1076-2008 4.5.2, 12.4)
+//! types is a homograph of the other (IEEE 1076-2008 4.5.1, 12.3)
 bool homograph(const SubprogramDecl& lhs, const SubprogramDecl& rhs) {
     if (lhs.kind != rhs.kind || lhs.formals.size() != rhs.formals.size()) return false;
     if (lhs.returnType.mark != rhs.returnType.mark
@@ -573,7 +573,8 @@ bool Lowering::actualTypeUnary(const Expr& expr, VType& out) const {
 bool Lowering::actualTypeBinary(const Expr& expr, VType& out) const {
     const std::string& op = expr.text;
     if (op == "?=" || op == "?/=" || op == "?<" || op == "?<=" || op == "?>" || op == "?>=") {
-        // A matching operator returns std_ulogic, not boolean (IEEE 1076-2008 9.2.3)
+        // A matching operator returns the operand's element type (std_ulogic here), not
+        // boolean (IEEE 1076-2008 9.2.3)
         out = VType{};
         out.kind = VType::LOGIC;
         out.typeName = "std_ulogic";
@@ -653,7 +654,7 @@ bool Lowering::actualTypeBinary(const Expr& expr, VType& out) const {
     if (aType.kind == VType::INT && bType.kind == VType::INT) {
         // Addition and subtraction keep a physical type; a physical divided or
         // multiplied by an integer keeps it too, while physical/physical is an
-        // integer (IEEE 1076-2008 9.2.5)
+        // integer (IEEE 1076-2008 9.2.7)
         const bool aPhysical = physical(aType);
         const bool bPhysical = physical(bType);
         if ((op == "+" || op == "-") && aType.typeName == bType.typeName) {
@@ -1030,7 +1031,7 @@ bool Lowering::valueConforms(const VType& target, const Expr& value, const char*
     VType source;
     if (actualType(value, source) && !source.typeName.empty()) {
         // A universal integer literal takes any integer type, but not a physical type
-        // (IEEE 1076-2008 9.3.1)
+        // (IEEE 1076-2008 9.3.6)
         if (source.kind == VType::INT && target.kind == VType::INT && target.typeName == "integer"
             && isNumericLiteral(value)) {
             return true;
@@ -1303,7 +1304,7 @@ bool Lowering::formalsAccept(const Expr& call, const SubprogramDecl& sub) const 
         if (actualType(*actualp, aType) && formalType(formalp->type, fType)) {
             if (!typesMatch(fType, aType)) {
                 // A universal integer literal takes any integer subtype
-                // (IEEE 1076-2008 9.3.1)
+                // (IEEE 1076-2008 9.3.6)
                 if (fType.kind == VType::INT && fType.typeName == "integer"
                     && aType.kind == VType::INT && isNumericLiteral(*actualp)) {
                     continue;
@@ -1342,9 +1343,9 @@ bool Lowering::formalsExact(const Expr& call, const SubprogramDecl& sub) const {
         VType aType;
         VType fType;
         if (!actualType(*actualp, aType) || !formalType(formalp->type, fType)) return false;
-        // An integer actual may be associated with a real formal, but does not match it
-        // exactly: a universal integer literal or an integer object takes the integer
-        // overload when both are visible (IEEE 1076-2008 12.5)
+        // An integer actual does not match a real formal exactly (IEEE 1076-2008 6.5.7.1): a
+        // universal integer literal or an integer object takes the integer overload when
+        // both are visible (IEEE 1076-2008 12.5)
         if (fType.kind == VType::REAL && aType.kind == VType::INT) return false;
         if (!typesMatch(fType, aType)) return false;
     }
@@ -1622,7 +1623,7 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         // the formal's bounds, not the actual's narrower ones.
         if (haveFormalType && !formalType.isVector()) binding.type = formalType;
         // A constrained array formal indexes by its own bounds, whatever the actual's are
-        // (IEEE 1076-2008 4.2.2.1); an unconstrained one takes the actual's
+        // (IEEE 1076-2008 5.3.2.2); an unconstrained one takes the actual's
         if (haveFormalType && formalType.isVector() && binding.type.isVector()
             && !formalType.unconstrainedBase && formalType.length() == binding.type.length()) {
             binding.type.left = formalType.left;
@@ -3241,8 +3242,9 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
             selectorp->deleteTree();
             return nullptr;  // The arm that runs has no value on its path
         }
-        // No `others` arm: a selector that matches nothing leaves the rest of the body to
-        // run with the values it had before the case (IEEE 1076-2008 10.9)
+        // No `others` arm: the choices must cover every value (IEEE 1076-2008 10.9), so this
+        // arises only where the coverage is not visible here; the rest of the body then runs
+        // with the values it had before the case
         InlineEnv preEnv = cloneInlineEnv(activeEnv());
         resultp = cont(preEnv);
         deleteInlineEnv(preEnv);
@@ -3499,7 +3501,8 @@ Lowering::FuncExec Lowering::execFuncStmts(const std::vector<StmtP>& stmts, int 
         case Stmt::CASE: {
             const std::vector<StmtP>* armp = nullptr;
             if (!execFuncCaseArm(stmt, armp)) return FuncExec::ABORT;
-            // No choice matched and no others: the rest of the body runs (IEEE 1076-2008 10.9)
+            // No choice matched and no others: coverage is not visible here (IEEE 1076-2008 10.9),
+            // so the rest of the body runs
             if (armp) status = execFuncStmts(*armp, depth + 1);
             break;
         }

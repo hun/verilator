@@ -284,7 +284,7 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
     for (const ExprP& choicep : choices) {
         // A string literal whose characters are all logic characters is a bit vector in a
         // logic context and one character per element of a string selector, as `"ZU"` is
-        // for a `string(3 to 4)` selector (IEEE 1076-2008 9.3.2, 15.5)
+        // for a `string(3 to 4)` selector (IEEE 1076-2008 9.3.2, 15.7)
         if (choicep->kind == Expr::BITS_LIT && !choicep->spelling.empty() && dtp
             && dtp->width() == 8 * static_cast<int>(choicep->spelling.size())
             && dtp->width() != static_cast<int>(choicep->bits.size())) {
@@ -327,9 +327,9 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
             }
             if ((right - left) * step >= MAX_CHOICE_RANGE_VALUES) {
                 // Only an integer selector has a range this wide to choose
-                choicep->flp->v3error(
-                    "VHDL: a choice range of more than " + std::to_string(MAX_CHOICE_RANGE_VALUES)
-                    + " values needs a selector of an integer type (IEEE 1076-2008 10.9).");
+                choicep->flp->v3error("VHDL: a choice range of more than "
+                                      + std::to_string(MAX_CHOICE_RANGE_VALUES)
+                                      + " values needs a selector of an integer type.");
                 return false;
             }
             for (int64_t value = left;; value += step) {
@@ -676,7 +676,7 @@ AstNodeStmt* Lowering::lowerSelectedTristate(SelectedLowering& ctx) {
         }
         if (cops.empty() && wide.empty()) {  // The `others` alternative is the fall-through
             if (restp) {
-                // A second `others` can never be selected (IEEE 1076-2008 11.6)
+                // A second `others` can never be selected (IEEE 1076-2008 10.5.4, 10.9)
                 flp->v3error("VHDL: more than one 'others' choice in a selected "
                              "assignment.");
                 bad = true;
@@ -699,7 +699,7 @@ AstNodeStmt* Lowering::lowerSelectedTristate(SelectedLowering& ctx) {
         // fall-through is then unreachable, but a conditional expression needs one.
         if (bad || !choicesComplete(ctx.selDtp, ctx.selectorType, covered)) {
             flp->v3error("VHDL: selected assignment does not cover every value of "
-                         "its selector (IEEE 1076-2008 11.6).");
+                         "its selector (IEEE 1076-2008 10.5.4, 10.9).");
             ctx.lhsp->deleteTree();
             return nullptr;
         }
@@ -744,7 +744,7 @@ AstNodeStmt* Lowering::lowerSelectedCase(SelectedLowering& ctx) {
             return nullptr;
         }
         if (cops.empty() && currentp) {
-            // A second "others" alternative can never be selected (IEEE 1076-2008 11.6)
+            // A second "others" alternative can never be selected (IEEE 1076-2008 10.5.4, 10.9)
             flp->v3error("VHDL: more than one 'others' choice in a selected assignment.");
             bad = true;
             assignp->deleteTree();
@@ -764,7 +764,7 @@ AstNodeStmt* Lowering::lowerSelectedCase(SelectedLowering& ctx) {
     }
     if (!bad && !currentp && !choicesComplete(ctx.selDtp, ctx.selectorType, covered)) {
         flp->v3error("VHDL: selected assignment does not cover every value of its selector "
-                     "(IEEE 1076-2008 11.6).");
+                     "(IEEE 1076-2008 10.5.4, 10.9).");
         bad = true;
     }
     if (bad) {
@@ -852,7 +852,7 @@ AstNodeStmt* Lowering::lowerAssign(const Stmt& stmt, bool concurrent, bool varia
         return lowerAggregateAssign(stmt.flp, *stmt.target, *stmt.value, variable,
                                     m_concurrentProc);
     }
-    // A slice whose bounds cross is a null array (IEEE 1076-2008 5.3.2): a loop that
+    // A slice whose bounds cross is a null array (IEEE 1076-2008 8.5): a loop that
     // shifts a pipeline writes `p(2 to N)` and, with N=1, `p(2 to 1)`, which assigns
     // nothing
     if (stmt.target->kind == Expr::SLICE && stmt.target->b && stmt.target->c) {
@@ -1368,7 +1368,8 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
         // A wait suspends the process at once: the rest of this list never runs
         if (stmtp->kind == Stmt::WAIT && !m_seqWait) break;
         if (stmtp->kind == Stmt::RETURN) break;
-        // Severity failure ends the run at the statement (IEEE 1076-2008 10.3, 10.4):
+        // Severity failure ends the run at the statement (10.3 only has an implementation
+        // continue after NOTE, WARNING or ERROR, IEEE 1076-2008 10.3, 10.4):
         // nothing after an unconditional report runs, and the statements after a
         // failing assert run only when it did not fail
         if (stmtp->severity != Stmt::SEV_FAILURE) continue;

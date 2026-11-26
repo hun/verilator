@@ -1,6 +1,6 @@
 %Error: t/t_vhdl_port_assoc_bad.vhdl:59:38: VHDL: record port 'p' has no element 'zz'.
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
 %Error: t/t_vhdl_port_assoc_bad.vhdl:60:3: VHDL: instance of 'pos_sub' associates more ports than the entity has.
-%Error: t/t_vhdl_port_assoc_bad.vhdl:36:9: VHDL: default of port 'p' does not have the port's length (IEEE 1076-2008 6.5.7.1).
+%Error: t/t_vhdl_port_assoc_bad.vhdl:36:9: VHDL: default of port 'p' does not have the port's length (IEEE 1076-2008 14.3.5).
 %Error: t/t_vhdl_port_assoc_bad.vhdl:62:38: VHDL: association is out of range of port 'p'.
 %Error: Exiting due to

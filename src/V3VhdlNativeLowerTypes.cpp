@@ -2122,7 +2122,7 @@ bool Lowering::resolveTypePredefined(const TypeSpec& spec, const std::string& ma
         out.typeName = mark;
         return true;
     }
-    // The predefined arrays of a scalar element (IEEE 1076-2008 5.3.2.2): a use supplies
+    // The predefined arrays of a scalar element (IEEE 1076-2008 5.3.2.3): a use supplies
     // the index range, as `integer_vector(0 to 1)` does in poc's memory package. The
     // element is the scalar, so indexing yields an integer rather than a packed slice
     if (mark == "integer_vector" || mark == "natural_vector" || mark == "positive_vector"

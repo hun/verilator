@@ -86,7 +86,7 @@ struct PackageInfo final {
     std::vector<const SubprogramDecl*> subprograms;  // Prototypes and bodies, by declaration
     std::map<std::string, const ComponentDecl*> components;  // Folded name -> declaration
     // Declarations only the body makes: private to it, but visible while a body it
-    // declares is inlined (IEEE 1076-2008 12.4)
+    // declares is inlined (IEEE 1076-2008 12.2)
     std::vector<const SubprogramDecl*> bodySubprograms;
     std::vector<std::pair<std::string, std::string>> uses;  // Packages its `use` made visible
     std::vector<const AliasDecl*> subprogramAliases;  // Synonyms, re-registered on import
@@ -394,7 +394,7 @@ class Lowering final {
     bool m_seqWait = false;
     //! Nesting of if branches that a condition over elaboration constants guards but the
     //! frontend could not fold: such a branch may never run, so a length mismatch in it is
-    //! a run-time matter (IEEE 1076-2008 9.2.5)
+    //! a run-time matter
     int m_unfoldedBranch = 0;
     int m_varSeq = 0;  // Disambiguates a process's own variables module-wide
     //! Active loop, with the flags its exit/next conditions latch

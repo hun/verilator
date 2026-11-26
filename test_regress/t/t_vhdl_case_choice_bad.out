@@ -4,5 +4,5 @@
 %Error: t/t_vhdl_case_choice_bad.vhdl:56:12: VHDL: duplicate choice in a case statement (IEEE 1076-2008 10.9).
 %Error: t/t_vhdl_case_choice_bad.vhdl:64:5: VHDL: more than one 'others' choice in a case statement.
 %Error: t/t_vhdl_case_choice_bad.vhdl:74:19: VHDL: duplicate choice in a selected assignment (IEEE 1076-2008 10.9).
-%Error: t/t_vhdl_case_choice_bad.vhdl:77:3: VHDL: selected assignment does not cover every value of its selector (IEEE 1076-2008 11.6).
+%Error: t/t_vhdl_case_choice_bad.vhdl:77:3: VHDL: selected assignment does not cover every value of its selector (IEEE 1076-2008 10.5.4, 10.9).
 %Error: Exiting due to

@@ -103,7 +103,7 @@ bool literalIntegerExpr(const Expr& expr) {
 }
 
 //! Whether a case or selected-assignment selector is discrete, or a one-dimensional
-//! array of a discrete element type (IEEE 1076-2008 10.9)
+//! array of a character type (IEEE 1076-2008 10.9)
 bool discreteSelectorType(const VType& type) {
     if (type.kind == VType::LOGIC || type.kind == VType::BIT || type.kind == VType::BOOLEAN
         || type.kind == VType::INT || type.kind == VType::ENUM) {
@@ -117,7 +117,7 @@ bool discreteSelectorType(const VType& type) {
     return false;
 }
 
-//! Whether a character literal may adopt `target`'s type (IEEE 1076-2008 9.3.2, 15.5)
+//! Whether a character literal may adopt `target`'s type (IEEE 1076-2008 9.3.2, 15.6)
 bool charLiteralFits(const VType& target, char ch) {
     if (target.kind == VType::INT || target.kind == VType::REAL || target.kind == VType::FILE
         || target.kind == VType::LINE) {

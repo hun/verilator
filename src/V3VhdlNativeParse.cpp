@@ -198,7 +198,7 @@ class Parser final {
     std::vector<UseClause> m_uses;  // Use clauses seen since the last library unit
     // The context clause of the library unit a secondary unit belongs to: a design file
     // attaches its context clause to one library unit and the secondaries that follow it
-    // in the same file (IEEE 1076-2008 13.4)
+    // in the same file (IEEE 1076-2008 12.1, 12.4)
     std::vector<UseClause> m_libUses;
     // Context declarations named by the context clauses seen so far
     std::vector<std::string> m_contextNames;
@@ -826,7 +826,8 @@ ExprP Parser::parsePrimary() {
             node->kind = Expr::PHYS_LIT;
             advance();  // The unit name
         }
-        // IEEE 1076-2008 5.2.3: the INTEGER subtype bounds used for this 32-bit check.
+        // IEEE 1076-2008 5.2.3.2: the INTEGER range is implementation-defined; these are the
+        // bounds this tool uses for the 32-bit check.
         // The minimum is written as a literal 2**31 under a unary minus, so the bound
         // allows that one value; above it the 32-bit model would wrap silently.
         if (node->kind == Expr::INT_LIT && node->intValue > 2147483648LL) {
@@ -1512,7 +1513,7 @@ void Parser::parseGenericClauseInto(std::vector<GenericDecl>& generics) {
         (void)acceptId("constant");  // Optional interface-object class (IEEE 1076-2008 6.5.2)
         parseNameList(generic.names);
         if (m_failed) return;
-        // IEEE 1076-2008 6.5.6.2: a generic's mode is omitted or `in`
+        // IEEE 1076-2008 6.5.2: a generic's mode is omitted or `in`
         if (acceptId("in")) {
         } else if (isId("out") || isId("inout") || isId("buffer") || isId("linkage")) {
             unsupported("generic mode '" + m_cur.text + "'");
@@ -2549,7 +2550,7 @@ void Parser::parseArchitecture(FileLine* flp) {
             parsePackageInstanceTail(instTok.flp, instTok.text, instTok.spelling);
             continue;
         }
-        if (isId("for")) {  // IEEE 1076-2008 7.3.2 configuration specification
+        if (isId("for")) {  // IEEE 1076-2008 7.3.1 configuration specification
             parseConfigSpec(configSpecs);
             continue;
         }
@@ -2715,7 +2716,8 @@ bool Parser::parseConcurrentPreamble(Architecture& arch, FileLine* flp) {
         }
         // An `entity` head names an instantiation even with no map at all
         // A labelled bare designator is a component instantiation with no maps; an
-        // unlabelled one stays a concurrent procedure call (IEEE 1076-2008 11.4)
+        // unlabelled one stays a concurrent procedure call. Both are legal (11.4, 11.7), so
+        // this is the parser's choice
         const bool mapped = nameTok.text == "entity"
                             || ((isId("port") || isId("generic")) && m_cur.text != "process"
                                 && nameTok.text != "block")
@@ -3200,7 +3202,7 @@ void Parser::parseProcess(Architecture& arch, FileLine* flp) {
             while (true) {
                 if (m_failed) return;
                 // A bare name is a sensitivity signal; a selected, indexed or sliced name
-                // denotes one of its subelement signals (IEEE 1076-2008 11.3)
+                // denotes one of its subelement signals (IEEE 1076-2008 10.2)
                 const auto saved = m_lexer.state();
                 const Token item = m_cur;
                 const Token after = m_lexer.next();
