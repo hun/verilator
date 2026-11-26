@@ -828,6 +828,8 @@ class Lowering final {
     void setRecordField(FileLine* flp, VField& field, int left, int right, bool ascending);
     //! Recompute a record's total width, MSB-first offsets and packed dtype
     void finalizeRecordFields(FileLine* flp, VType& rec);
+    static std::vector<TypeSpec::MemberConstraint>
+    copyMemberConstraints(const std::vector<TypeSpec::MemberConstraint>& members);
     bool constraintBounds(const TypeSpec& spec, int64_t& left, int64_t& right, bool& ascending);
     bool discreteTypeRange(const Expr& range, int64_t& left, int64_t& right, bool& up);
     const VType* loopEnumType(const Stmt& loop) const;

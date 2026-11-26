@@ -302,6 +302,8 @@ struct TypeSpec final {
         ExprP range;  // A range attribute instead: rec_t(x(sig'range)), IEEE 1076-2008 6.3
         // Constraints of the member's elements, outermost first: rec_t(x(0 to 3)(y(7 downto 0)))
         std::vector<TypeSpec> elementConstraints;
+        // Constraints of the members of a record-typed member: rec_t(r(f(7 downto 0)))
+        std::vector<MemberConstraint> nested;
     };
     // Per-member discrete ranges of a record subtype constraint
     std::vector<MemberConstraint> memberConstraints;

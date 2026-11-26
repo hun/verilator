@@ -1442,8 +1442,8 @@ void Lowering::finishDeferredTypes() {
 //! Bounds of a loop range written as an integer or enumeration type mark, `mid` or
 //! `mid'range`; an enumeration is counted by literal position. False for anything else.
 bool Lowering::discreteTypeRange(const Expr& range, int64_t& left, int64_t& right, bool& up) {
-    const bool attr = range.kind == Expr::ATTR
-                      && (range.text == "range" || range.text == "reverse_range");
+    const bool attr
+        = range.kind == Expr::ATTR && (range.text == "range" || range.text == "reverse_range");
     const Expr* const namep = attr ? range.a.get() : &range;
     if (!namep || namep->kind != Expr::NAME) return false;
     // A declared object of that name hides the type mark
@@ -1482,7 +1482,7 @@ const VType* Lowering::loopEnumType(const Stmt& loop) const {
     if (!loop.c) {
         const auto typeIt = m_types.find(namep->text);
         return typeIt != m_types.end() && typeIt->second.kind == VType::ENUM ? &typeIt->second
-                                                                          : nullptr;
+                                                                             : nullptr;
     }
     if (m_ambiguousLiterals.count(namep->text) || !m_enumConsts.count(namep->text)) return nullptr;
     for (const auto& type : m_types) {
@@ -1681,6 +1681,25 @@ void Lowering::finalizeRecordFields(FileLine* flp, VType& rec) {
     if (total > 0) rec.dtp = findVectorWidth(flp, rec.kwd, VSigning::UNSIGNED, total);
 }
 
+std::vector<TypeSpec::MemberConstraint>
+Lowering::copyMemberConstraints(const std::vector<TypeSpec::MemberConstraint>& members) {
+    std::vector<TypeSpec::MemberConstraint> out;
+    for (const TypeSpec::MemberConstraint& member : members) {
+        TypeSpec::MemberConstraint copy;
+        copy.name = member.name;
+        copy.ascending = member.ascending;
+        if (member.lo) copy.lo = cloneExpr(*member.lo);
+        if (member.hi) copy.hi = cloneExpr(*member.hi);
+        if (member.range) copy.range = cloneExpr(*member.range);
+        for (const TypeSpec& element : member.elementConstraints) {
+            copy.elementConstraints.push_back(copySpec(element));
+        }
+        copy.nested = copyMemberConstraints(member.nested);
+        out.push_back(std::move(copy));
+    }
+    return out;
+}
+
 //! A copy of a subtype indication: its bound expressions are owned, so they are cloned
 TypeSpec Lowering::copySpec(const TypeSpec& spec) {
     TypeSpec out;
@@ -1695,18 +1714,7 @@ TypeSpec Lowering::copySpec(const TypeSpec& spec) {
     out.constraintMark = spec.constraintMark;
     if (spec.left) out.left = cloneExpr(*spec.left);
     if (spec.right) out.right = cloneExpr(*spec.right);
-    for (const TypeSpec::MemberConstraint& member : spec.memberConstraints) {
-        TypeSpec::MemberConstraint copy;
-        copy.name = member.name;
-        copy.ascending = member.ascending;
-        if (member.lo) copy.lo = cloneExpr(*member.lo);
-        if (member.hi) copy.hi = cloneExpr(*member.hi);
-        if (member.range) copy.range = cloneExpr(*member.range);
-        for (const TypeSpec& element : member.elementConstraints) {
-            copy.elementConstraints.push_back(copySpec(element));
-        }
-        out.memberConstraints.push_back(std::move(copy));
-    }
+    out.memberConstraints = copyMemberConstraints(spec.memberConstraints);
     for (const TypeSpec& nested : spec.indexConstraints) {
         out.indexConstraints.push_back(copySpec(nested));
     }
@@ -1786,7 +1794,22 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
             return false;
         }
         if (fieldp->type && fieldp->type->kind == VType::RECORD) {
-            unsupportedError(flp, "constraint on a nested record element");
+            if (member.nested.empty()) {
+                unsupportedError(flp, "range constraint on a record element");
+                return false;
+            }
+            TypeSpec inner;
+            inner.flp = flp;
+            inner.mark = member.name;
+            inner.memberConstraints = copyMemberConstraints(member.nested);
+            VType innerType = *fieldp->type;
+            if (!applyMemberConstraints(inner, innerType)) return false;
+            fieldp->width = innerType.width;
+            fieldp->type = std::make_shared<VType>(innerType);
+            continue;
+        }
+        if (!member.nested.empty()) {
+            unsupportedError(flp, "record constraint on an element that is not a record");
             return false;
         }
         int64_t lo = 0;

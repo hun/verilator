@@ -479,6 +479,8 @@ class Parser final {
     void parseTypeSpec(TypeSpec& type);
     //! The `name(range)` list of a record constraint
     bool parseMemberConstraints(TypeSpec& type);
+    bool parseMemberList(const TypeSpec& type, std::vector<TypeSpec::MemberConstraint>& out);
+    bool atNestedMemberConstraints();
     void parseChainedConstraints(TypeSpec& type);
     void parseMemberElementConstraints(const TypeSpec& type, TypeSpec::MemberConstraint& member);
     void parsePortClause(std::vector<PortDecl>& ports);
@@ -1134,14 +1136,46 @@ void Parser::parseMemberElementConstraints(const TypeSpec& type,
 //! A member's range is either written out or named by a range attribute.
 bool Parser::parseMemberConstraints(TypeSpec& type) {
     if (!type.flp) type.flp = m_cur.flp;
+    return parseMemberList(type, type.memberConstraints);
+}
+
+//! Whether the member's parenthesis holds a record constraint, `name(sub(...), ...)`, rather
+//! than a range: a name and a balanced group, followed by a comma or the closing parenthesis
+bool Parser::atNestedMemberConstraints() {
+    if (m_cur.kind != Token::ID) return false;
+    const Token savedTok = m_cur;
+    const auto savedState = m_lexer.state();
+    advance();
+    bool nested = false;
+    if (isSym("(")) {
+        int depth = 0;
+        do {
+            if (isSym("(")) ++depth;
+            if (isSym(")")) --depth;
+            advance();
+        } while (depth > 0 && m_cur.kind != Token::END);
+        nested = isSym(",") || isSym(")");
+    }
+    m_cur = savedTok;
+    m_lexer.restore(savedState);
+    return nested;
+}
+
+bool Parser::parseMemberList(const TypeSpec& type, std::vector<TypeSpec::MemberConstraint>& out) {
     while (true) {
         if (m_failed) return false;
         TypeSpec::MemberConstraint member;
         Token memberTok;
         if (!takeId(memberTok)) return false;
-        if (!type.flp) type.flp = memberTok.flp;
         member.name = memberTok.text;
         expectSym("(");
+        if (atNestedMemberConstraints()) {
+            if (!parseMemberList(type, member.nested)) return false;
+            expectSym(")");
+            out.push_back(std::move(member));
+            if (acceptSym(",")) continue;
+            return true;
+        }
         member.lo = parseExpr();
         if (!member.lo) return false;
         if (isId("to")) {
@@ -1155,7 +1189,7 @@ bool Parser::parseMemberConstraints(TypeSpec& type) {
             member.lo = nullptr;
             expectSym(")");
             parseMemberElementConstraints(type, member);
-            type.memberConstraints.push_back(std::move(member));
+            out.push_back(std::move(member));
             if (acceptSym(",")) continue;
             return true;
         } else {
@@ -1166,7 +1200,7 @@ bool Parser::parseMemberConstraints(TypeSpec& type) {
         if (!member.hi) return false;
         expectSym(")");
         parseMemberElementConstraints(type, member);
-        type.memberConstraints.push_back(std::move(member));
+        out.push_back(std::move(member));
         if (acceptSym(",")) continue;
         return true;
     }
