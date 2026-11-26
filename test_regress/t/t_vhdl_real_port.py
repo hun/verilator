@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: a conversion to a real has no synthesizable form
+# DESCRIPTION: Verilator: VHDL real ports, top level and through an instance
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -9,12 +9,13 @@
 
 import vltest_bootstrap
 
-test.scenarios('vlt')
+test.scenarios('vlt_all')
+test.top_filename = 't/t_vhdl_real_port.vhdl'
 
-test.top_filename = 't/t_vhdl_real_unsup.vhdl'
+test.compile(make_top_shell=False,
+             make_main=False,
+             verilator_flags2=['--language', 'vhdl', '--exe', test.pli_filename])
 
-test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
-          fails=True,
-          expect_filename=test.golden_filename)
+test.execute()
 
 test.passes()

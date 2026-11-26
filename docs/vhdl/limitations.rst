@@ -34,7 +34,7 @@ fixed-point operand. Division, ``mod``, ``rem``, shifts, ``to_real`` and arrays 
 fixed-point elements are refused. The results of these operations were compared with
 GHDL on every operand pair of small ranges.
 
-A ``real`` variable or signal is a double: ``+``, ``-``, ``*``, ``/``, unary ``-``, the six
+A ``real`` variable, signal or port is a double: ``+``, ``-``, ``*``, ``/``, unary ``-``, the six
 comparisons, and ``real`` of an integer. ``integer`` of a real rounds to the nearest integer,
 halfway cases away from zero. A real subtype's range is not checked. ``uniform`` of
 ``ieee.math_real`` follows the IEEE 1076.2 generator, the same sequence as GHDL. A constant
@@ -203,7 +203,7 @@ Not supported
 
 These constructs are refused with a diagnostic: access, protected, file and
 ``textio`` types; ``force out`` and ``release out``; runtime ``'value`` and string parsing;
-physical objects and ``now``; real ports; arrays and records with real elements that
+physical objects and ``now``; arrays and records with real elements that
 are variables or signals; and the floating-point
 package ``float_pkg``;
 user-defined resolution functions; allocators; multi-dimensional
