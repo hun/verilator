@@ -1871,8 +1871,9 @@ AstSenItem* Lowering::makeWaitSensitivity(const Expr& waitValue, const std::vect
 }
 
 AstVar* Lowering::visibleVar(const std::string& name) const {
-    const auto bindingIt = activeEnv().find(name);
-    if (bindingIt != activeEnv().end()) {
+    const InlineEnv& env = activeEnv();
+    const auto bindingIt = env.find(name);
+    if (bindingIt != env.end()) {
         const AstVarRef* const refp = VN_CAST(bindingIt->second.exprp, VarRef);
         return refp ? refp->varp() : nullptr;
     }

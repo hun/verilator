@@ -12,6 +12,7 @@
 
 #include VM_PREFIX_INCLUDE
 
+#include <cinttypes>
 #include <cstdio>
 
 int main(int argc, char** argv) {
@@ -30,9 +31,9 @@ int main(int argc, char** argv) {
             const int sb = (b & 8) ? static_cast<int>(b) - 16 : static_cast<int>(b);
             const auto check = [&](const char* name, uint64_t got, uint64_t exp) {
                 if (got != exp) {
-                    std::printf("%%Error: %s a=%u b=%u (signed %d %d): got %llx exp %llx\n", name,
-                                a, b, sa, sb, static_cast<unsigned long long>(got),
-                                static_cast<unsigned long long>(exp));
+                    std::printf("%%Error: %s a=%u b=%u (signed %d %d): got %" PRIx64
+                                " exp %" PRIx64 "\n",
+                                name, a, b, sa, sb, got, exp);
                     ++fails;
                 }
             };

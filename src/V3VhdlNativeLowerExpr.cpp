@@ -1282,8 +1282,9 @@ AstNodeExpr* Lowering::lowerConcat(FileLine* flp, const Expr& expr, BinaryOperan
     // open range has no elements either.
     const auto isNullObject = [this](const Expr& operand) {
         if (operand.kind != Expr::NAME) return false;
-        const auto bindIt = activeEnv().find(operand.text);
-        const VType* const typep = bindIt != activeEnv().end()   ? &bindIt->second.type
+        const InlineEnv& env = activeEnv();
+        const auto bindIt = env.find(operand.text);
+        const VType* const typep = bindIt != env.end()           ? &bindIt->second.type
                                    : m_scope.count(operand.text) ? typeOfName(operand)
                                                                  : nullptr;
         return typep && typep->isVector() && typep->length() == 0;

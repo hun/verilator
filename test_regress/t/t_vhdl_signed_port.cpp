@@ -12,6 +12,7 @@
 
 #include VM_PREFIX_INCLUDE
 
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 
@@ -26,9 +27,8 @@ static int fails = 0;
 
 static void check(const char* name, int64_t a, int64_t b, int64_t got, int64_t expected) {
     if (got != expected) {
-        std::printf("%%Error: a=%lld b=%lld %s=%lld exp=%lld\n", static_cast<long long>(a),
-                    static_cast<long long>(b), name, static_cast<long long>(got),
-                    static_cast<long long>(expected));
+        std::printf("%%Error: a=%" PRId64 " b=%" PRId64 " %s=%" PRId64 " exp=%" PRId64 "\n", a, b,
+                    name, got, expected);
         ++fails;
     }
 }
