@@ -1358,7 +1358,9 @@ bool Lowering::exprNeedsLaterObject(const Expr& expr) const {
         const bool known = activeEnv().count(name) || m_scope.count(name) || m_consts.count(name)
                            || m_preConsts.count(name) || m_constValues.count(name)
                            || m_constTypes.count(name) || m_enumConsts.count(name)
-                           || m_types.count(name);
+                           || m_types.count(name) || isPredefinedIntegerMark(name)
+                           || name == "boolean" || name == "bit" || name == "character"
+                           || name == "std_logic" || name == "std_ulogic";
         if (!known) return true;
     }
     if (expr.a && exprNeedsLaterObject(*expr.a)) return true;

@@ -268,7 +268,7 @@ void Lowering::constrainAggregateType(const Expr& agg, VType& type) const {
 }
 
 bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
-                                 std::vector<AstConst*>& cops) {
+                                 std::vector<AstConst*>& cops, WideRanges* wideOut) {
     VType choiceType;
     const bool choiceEnum = enumTypeOfDType(dtp, choiceType);
     if (!choiceEnum) choiceType = typeOfDType(dtp);
@@ -319,6 +319,11 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
             if ((right - left) * step < 0) {
                 choicep->flp->v3error("VHDL: empty choice range.");
                 return false;
+            }
+            if ((right - left) * step >= MAX_CHOICE_RANGE_VALUES && wideOut
+                && choiceType.kind == VType::INT) {
+                wideOut->emplace_back(std::min(left, right), std::max(left, right));
+                continue;
             }
             if ((right - left) * step >= MAX_CHOICE_RANGE_VALUES) {
                 unsupportedError(choicep->flp, "choice range of more than "
@@ -385,7 +390,82 @@ bool astHasZ(AstNode* nodep) {
     return found;
 }
 
-bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, std::set<int64_t>& covered,
+bool Lowering::choiceListWide(const std::vector<ExprP>& choices) {
+    for (const ExprP& choicep : choices) {
+        int64_t low = 0;
+        int64_t high = 0;
+        if (choicep && choiceRangeBounds(*choicep, low, high)
+            && high - low >= MAX_CHOICE_RANGE_VALUES) {
+            return true;
+        }
+    }
+    return false;
+}
+
+AstNodeExpr* Lowering::choiceCond(FileLine* flp, const AstNodeExpr* selectorp,
+                                  std::vector<AstConst*>& cops, const WideRanges& wide) {
+    AstNodeDType* const logicp = findBasic(flp, VBasicDTypeKwd::LOGIC);
+    AstNodeExpr* condp = nullptr;
+    const auto orIn = [&](AstNodeExpr* termp) {
+        termp->dtypep(logicp);
+        if (!condp) {
+            condp = termp;
+            return;
+        }
+        condp = new AstOr{flp, condp, termp};
+        condp->dtypep(logicp);
+    };
+    for (AstConst* const cop : cops) {
+        orIn(new AstEq{flp, const_cast<AstNodeExpr*>(selectorp)->cloneTree(false), cop});
+    }
+    cops.clear();
+    for (const auto& range : wide) {
+        AstNodeExpr* const gep
+            = new AstGteS{flp, const_cast<AstNodeExpr*>(selectorp)->cloneTree(false),
+                          makeIntConst(flp, range.first)};
+        gep->dtypep(logicp);
+        AstNodeExpr* const lep
+            = new AstLteS{flp, const_cast<AstNodeExpr*>(selectorp)->cloneTree(false),
+                          makeIntConst(flp, range.second)};
+        lep->dtypep(logicp);
+        orIn(new AstAnd{flp, gep, lep});
+    }
+    return condp;
+}
+
+bool Lowering::wideContains(const WideRanges& wide, const AstConst* valuep) {
+    if (valuep->width() > 32) return false;
+    // Wide ranges belong to integer selectors, which are 32-bit signed
+    const int64_t value = valuep->width() == 32 || valuep->num().isSigned()
+                              ? static_cast<int64_t>(valuep->num().toSInt())
+                              : static_cast<int64_t>(valuep->num().toUInt());
+    for (const auto& range : wide) {
+        if (value >= range.first && value <= range.second) return true;
+    }
+    return false;
+}
+
+bool Lowering::addWideChoices(FileLine* flp, const WideRanges& wide, ChoiceCover& covered,
+                              const char* what) {
+    bool ok = true;
+    for (const auto& range : wide) {
+        // Overlap with a value, or with a range seen before
+        const auto valueIt = covered.values.lower_bound(range.first);
+        bool overlap = valueIt != covered.values.end() && *valueIt <= range.second;
+        for (const auto& other : covered.wide) {
+            if (range.first <= other.second && other.first <= range.second) overlap = true;
+        }
+        if (overlap) {
+            flp->v3error(std::string{"VHDL: duplicate choice in a "} + what
+                         + " (IEEE 1076-2008 10.9).");
+            ok = false;
+        }
+        covered.wide.push_back(range);
+    }
+    return ok;
+}
+
+bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, ChoiceCover& covered,
                                const char* what) {
     bool ok = true;
     for (AstConst* const cop : cops) {
@@ -393,7 +473,11 @@ bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, std::set<int6
         if (cop->width() > 32) continue;
         const int64_t value = cop->num().isSigned() ? static_cast<int64_t>(cop->num().toSInt())
                                                     : static_cast<int64_t>(cop->num().toUInt());
-        if (covered.insert(value).second) continue;
+        bool inWide = false;
+        for (const auto& range : covered.wide) {
+            if (value >= range.first && value <= range.second) inWide = true;
+        }
+        if (!inWide && covered.insert(value).second) continue;
         cop->v3error(std::string{"VHDL: duplicate choice in a "} + what
                      + " (IEEE 1076-2008 10.9).");
         ok = false;
@@ -402,7 +486,7 @@ bool Lowering::addChoiceValues(const std::vector<AstConst*>& cops, std::set<int6
 }
 
 bool Lowering::choicesComplete(AstNodeDType* selDtp, const VType& selType,
-                               const std::set<int64_t>& covered) const {
+                               const ChoiceCover& covered) const {
     VType enumType;
     if (enumTypeOfDType(selDtp, enumType)) {
         for (size_t i = 0; i < enumType.literals.size(); ++i) {
@@ -414,12 +498,16 @@ bool Lowering::choicesComplete(AstNodeDType* selDtp, const VType& selType,
     if (selType.kind == VType::INT) {
         // An integer selector's choices must cover its subtype, not the base 32-bit
         // type (IEEE 1076-2008 10.9); a range too wide to enumerate needs `others`
-        const int64_t span = static_cast<int64_t>(selType.intHigh) - selType.intLow + 1;
-        if (span <= 0 || span > static_cast<int64_t>(covered.size())) return false;
-        for (int64_t value = selType.intLow; value <= selType.intHigh; ++value) {
-            if (!covered.count(value)) return false;
+        // Sweep the covered values and wide ranges, in order, for a gap
+        std::vector<std::pair<int64_t, int64_t>> spans = covered.wide;
+        for (const int64_t value : covered.values) spans.emplace_back(value, value);
+        std::sort(spans.begin(), spans.end());
+        int64_t next = selType.intLow;
+        for (const auto& span : spans) {
+            if (span.first > next) break;
+            next = std::max(next, span.second + 1);
         }
-        return true;
+        return next > selType.intHigh;
     }
     if (selType.isVector() && selType.width > 0) type = selType;
     if (type.kind == VType::LOGIC || type.kind == VType::BIT) {
@@ -569,13 +657,14 @@ AstNodeStmt* Lowering::lowerSelectedTristate(SelectedLowering& ctx) {
     // case item, so a selected assignment that releases the driver is lowered to the
     // equivalent if/elsif chain.
     AstNodeExpr* restp = nullptr;
-    std::set<int64_t> covered;
+    ChoiceCover covered;
     bool bad = false;
     for (std::size_t i = conc.choices.size(); i-- > 0;) {
         AstNodeExpr* const valuep = values[i];
         values[i] = nullptr;
         std::vector<AstConst*> cops;
-        if (!lowerChoiceConsts(conc.choices[i].first, ctx.selDtp, cops)) {
+        WideRanges wide;
+        if (!lowerChoiceConsts(conc.choices[i].first, ctx.selDtp, cops, &wide)) {
             for (AstConst* const cop : cops) cop->deleteTree();
             valuep->deleteTree();
             ctx.deleteValues(0);
@@ -584,7 +673,7 @@ AstNodeStmt* Lowering::lowerSelectedTristate(SelectedLowering& ctx) {
             ctx.selectorp->deleteTree();
             return nullptr;
         }
-        if (cops.empty()) {  // The `others` alternative is the fall-through
+        if (cops.empty() && wide.empty()) {  // The `others` alternative is the fall-through
             if (restp) {
                 // A second `others` can never be selected (IEEE 1076-2008 11.6)
                 flp->v3error("VHDL: more than one 'others' choice in a selected "
@@ -597,18 +686,8 @@ AstNodeStmt* Lowering::lowerSelectedTristate(SelectedLowering& ctx) {
             continue;
         }
         if (!addChoiceValues(cops, covered, "selected assignment")) bad = true;
-        AstNodeExpr* condp = nullptr;
-        for (AstConst* const cop : cops) {
-            AstEq* const eqp = new AstEq{flp, ctx.selectorp->cloneTree(false), cop};
-            eqp->dtypep(findBasic(flp, VBasicDTypeKwd::LOGIC));
-            if (!condp) {
-                condp = eqp;
-            } else {
-                AstOr* const orp = new AstOr{flp, condp, eqp};
-                orp->dtypep(eqp->dtypep());
-                condp = orp;
-            }
-        }
+        if (!addWideChoices(flp, wide, covered, "selected assignment")) bad = true;
+        AstNodeExpr* const condp = choiceCond(flp, ctx.selectorp, cops, wide);
         AstCond* const condexprp = new AstCond{flp, condp, valuep, restp};
         condexprp->dtypep(ctx.targetType.dtp);
         restp = condexprp;
@@ -637,10 +716,17 @@ AstNodeStmt* Lowering::lowerSelectedTristate(SelectedLowering& ctx) {
 AstNodeStmt* Lowering::lowerSelectedCase(SelectedLowering& ctx) {
     FileLine* const flp = ctx.flp;
     const Concurrent& conc = *ctx.concp;
+    // A choice range too wide to expand is a comparison, which the conditional-expression
+    // form of a selected assignment holds
+    if (ctx.selectorType.kind == VType::INT
+        && std::any_of(conc.choices.begin(), conc.choices.end(),
+                       [this](const auto& choice) { return choiceListWide(choice.first); })) {
+        return lowerSelectedTristate(ctx);
+    }
     std::vector<AstNodeExpr*>& values = ctx.values;
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;
-    std::set<int64_t> covered;
+    ChoiceCover covered;
     bool bad = false;
     for (std::size_t i = 0; i < conc.choices.size(); ++i) {
         AstNodeExpr* const valuep = values[i];
@@ -1153,7 +1239,7 @@ AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
     }
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen
-    std::set<int64_t> covered;
+    ChoiceCover covered;
     bool bad = false;
     for (const auto& item : stmt.caseItems) {
         restoreVarVals(entryVals);

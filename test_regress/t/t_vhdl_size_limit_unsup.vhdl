@@ -16,7 +16,4 @@ begin
   begin
     null;
   end process;
-  -- A concurrent selected assignment still expands each choice range
-  with m select k <= 5 when integer'low to -11,
-                     0 when others;
 end architecture;

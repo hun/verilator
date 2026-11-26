@@ -1514,16 +1514,41 @@ class Lowering final {
     void emitGenerateFor(const Concurrent& stmt);
     void emitLocalDecls(const std::vector<Decl>& decls, const std::vector<TypeDecl>& types,
                         const char* prefix);
+    //! Integer choice ranges too wide to expand to one constant per value, as (low, high)
+    using WideRanges = std::vector<std::pair<int64_t, int64_t>>;
+    //! The values the choices so far cover: expanded values and the wide ranges
+    struct ChoiceCover final {
+        std::set<int64_t> values;
+        WideRanges wide;
+        std::pair<std::set<int64_t>::iterator, bool> insert(int64_t value) {
+            return values.insert(value);
+        }
+        std::size_t count(int64_t value) const { return values.count(value); }
+        std::size_t size() const { return values.size(); }
+    };
+    //! The constants of a choice list. Ranges wider than can be expanded go to `wideOut`
+    //! when it is given, and are refused otherwise.
     bool lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType* dtp,
-                           std::vector<AstConst*>& cops);
+                           std::vector<AstConst*>& cops, WideRanges* wideOut = nullptr);
+    //! Whether a choice list holds a range wider than can be expanded
+    bool choiceListWide(const std::vector<ExprP>& choices);
+    //! The condition that the selector is one of the constants or inside a wide range. The
+    //! constants are consumed; null when the choice list is empty (the `others` arm).
+    AstNodeExpr* choiceCond(FileLine* flp, const AstNodeExpr* selectorp,
+                            std::vector<AstConst*>& cops, const WideRanges& wide);
+    //! Whether a constant selector value is inside one of the ranges
+    static bool wideContains(const WideRanges& wide, const AstConst* valuep);
     //! Add the values one choice list covers; a value already there is a duplicate
     //! or overlapping choice (IEEE 1076-2008 10.9)
-    static bool addChoiceValues(const std::vector<AstConst*>& cops, std::set<int64_t>& covered,
+    static bool addChoiceValues(const std::vector<AstConst*>& cops, ChoiceCover& covered,
                                 const char* what);
+    //! Add the wide ranges of one choice list, which must not overlap anything covered
+    static bool addWideChoices(FileLine* flp, const WideRanges& wide, ChoiceCover& covered,
+                               const char* what);
     //! Whether the choices cover every value the selector can take; a selector too
     //! wide to enumerate needs an `others` arm (IEEE 1076-2008 10.9)
     bool choicesComplete(AstNodeDType* selDtp, const VType& selType,
-                         const std::set<int64_t>& covered) const;
+                         const ChoiceCover& covered) const;
     //! Whether a type has a resolution function: std_logic and the arrays built from
     //! it do, so several drivers are legal (IEEE 1076-2008 6.4.2.3)
     static bool isResolvedType(const VType& type) {

@@ -2944,41 +2944,36 @@ bool Lowering::evalMergedCase(const Stmt& stmt, InlineEnv& env, int depth) {
     };
     std::vector<Arm> arms;
     const std::vector<StmtP>* othersp = nullptr;
-    AstNodeDType* const bitdtp = findBasic(stmt.flp, VBasicDTypeKwd::LOGIC);
-    std::set<int64_t> covered;
+    ChoiceCover covered;
     bool ok = true;
     for (const auto& item : stmt.caseItems) {
         std::vector<AstConst*> cops;
-        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
+        WideRanges wide;
+        const bool lowered = lowerChoiceConsts(item.first, selectorp->dtypep(), cops, &wide);
+        const bool othersArm = cops.empty() && wide.empty();
+        if (!lowered) {
             ok = false;
         } else if (known) {
             // The first matching choice is the only arm that runs
-            bool matches = cops.empty();
+            bool matches = othersArm || wideContains(wide, selConstp);
             for (AstConst* const cop : cops) {
                 if (cop->num().isCaseEq(selConstp->num())) matches = true;
             }
             if (matches && arms.empty() && !othersp) {
-                if (cops.empty()) {
+                if (othersArm) {
                     othersp = &item.second;
                 } else {
                     arms.push_back(Arm{nullptr, &item.second, InlineEnv{}});
                 }
             }
-        } else if (cops.empty()) {
+        } else if (othersArm) {
             othersp = &item.second;
-        } else if (!addChoiceValues(cops, covered, "case statement")) {
+        } else if (!addChoiceValues(cops, covered, "case statement")
+                   || !addWideChoices(stmt.flp, wide, covered, "case statement")) {
             ok = false;
         } else {
-            AstNodeExpr* condp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[0]};
-            condp->dtypep(bitdtp);
-            for (std::size_t i = 1; i < cops.size(); ++i) {
-                AstNodeExpr* const eqp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[i]};
-                eqp->dtypep(bitdtp);
-                condp = new AstOr{stmt.flp, condp, eqp};
-                condp->dtypep(bitdtp);
-            }
-            arms.push_back(Arm{condp, &item.second, InlineEnv{}});
-            cops.clear();
+            arms.push_back(
+                Arm{choiceCond(stmt.flp, selectorp, cops, wide), &item.second, InlineEnv{}});
         }
         for (AstConst* const cop : cops) cop->deleteTree();
         if (!ok) break;
@@ -3165,30 +3160,33 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
             deleteInlineEnv(branch.env);
         }
     };
-    AstNodeDType* const bitdtp = findBasic(stmt.flp, VBasicDTypeKwd::LOGIC);
-    std::set<int64_t> covered;
+    ChoiceCover covered;
     bool bad = false;
     for (const auto& item : stmt.caseItems) {
         std::vector<AstConst*> cops;
-        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
+        WideRanges wide;
+        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops, &wide)) {
             for (AstConst* const cop : cops) cop->deleteTree();
             if (selConstp) selConstp->deleteTree();
             cleanup();
             selectorp->deleteTree();
             return nullptr;
         }
+        const bool othersArm = cops.empty() && wide.empty();
         // An exhaustive case needs no fallthrough value, as in a lowered case statement
-        if (!known && !cops.empty() && !addChoiceValues(cops, covered, "case statement")) {
-            bad = true;
+        if (!known && !othersArm) {
+            if (!addChoiceValues(cops, covered, "case statement")) bad = true;
+            if (!addWideChoices(stmt.flp, wide, covered, "case statement")) bad = true;
         }
         if (known && kept) {
             for (AstConst* const cop : cops) cop->deleteTree();
             continue;  // The first matching choice wins
         }
-        bool matches = !known || cops.empty();
+        bool matches = !known || othersArm;
         for (AstConst* const cop : cops) {
             if (known && cop->num().isCaseEq(selConstp->num())) matches = true;
         }
+        if (known && wideContains(wide, selConstp)) matches = true;
         if (!matches) {
             for (AstConst* const cop : cops) cop->deleteTree();
             continue;
@@ -3203,17 +3201,8 @@ AstNodeExpr* Lowering::evalFuncCase(const Stmt& stmt, const InlineCont& cont,
         }
         if (known) {
             for (AstConst* const cop : cops) cop->deleteTree();
-        } else if (!cops.empty()) {
-            AstNodeExpr* condp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[0]};
-            condp->dtypep(bitdtp);
-            for (std::size_t i = 1; i < cops.size(); ++i) {
-                AstNodeExpr* const eqp = new AstEq{stmt.flp, selectorp->cloneTree(false), cops[i]};
-                eqp->dtypep(bitdtp);
-                AstNodeExpr* const orp = new AstOr{stmt.flp, condp, eqp};
-                orp->dtypep(bitdtp);
-                condp = orp;
-            }
-            branch.condp = condp;
+        } else if (!othersArm) {
+            branch.condp = choiceCond(stmt.flp, selectorp, cops, wide);
         }
         branches.push_back(std::move(branch));
     }
@@ -3455,8 +3444,9 @@ bool Lowering::execFuncCaseArm(const Stmt& stmt, const std::vector<StmtP>*& armp
     for (const auto& item : stmt.caseItems) {
         if (!ok) break;
         std::vector<AstConst*> cops;
-        ok = lowerChoiceConsts(item.first, selectorp->dtypep(), cops);
-        bool matches = cops.empty();
+        WideRanges wide;
+        ok = lowerChoiceConsts(item.first, selectorp->dtypep(), cops, &wide);
+        bool matches = (cops.empty() && wide.empty()) || (ok && wideContains(wide, selConstp));
         for (AstConst* const cop : cops) {
             if (cop->num().isCaseEq(selConstp->num())) matches = true;
             cop->deleteTree();
@@ -4106,22 +4096,59 @@ AstNodeStmt* Lowering::lowerProcCase(const Stmt& stmt, const std::vector<const S
         fallsThroughp = false;
         return nullptr;
     }
-    AstCaseItem* itemsp = nullptr;
-    fallsThroughp = false;
-    for (const auto& item : stmt.caseItems) {
+    // The alternatives, as case items, or as a chain of conditions when a choice range is
+    // too wide to expand
+    struct Alternative final {
         std::vector<AstConst*> cops;
-        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), cops)) {
-            for (AstConst* const cop : cops) cop->deleteTree();
-            if (itemsp) itemsp->deleteTree();
-            selectorp->deleteTree();
-            return nullptr;
+        WideRanges wide;
+        AstNodeStmt* bodyp = nullptr;
+    };
+    std::vector<Alternative> alternatives;
+    bool anyWide = false;
+    fallsThroughp = false;
+    bool failed = false;
+    for (const auto& item : stmt.caseItems) {
+        Alternative alt;
+        if (!lowerChoiceConsts(item.first, selectorp->dtypep(), alt.cops, &alt.wide)) {
+            for (AstConst* const cop : alt.cops) cop->deleteTree();
+            failed = true;
+            break;
         }
+        anyWide = anyWide || !alt.wide.empty();
         bool altFalls = true;
-        AstNodeStmt* const bodyp = lowerProcChainWithTail(item.second, tail, altFalls);
+        alt.bodyp = lowerProcChainWithTail(item.second, tail, altFalls);
         fallsThroughp = fallsThroughp || altFalls;
-        AstCaseItem* const itemp = cops.empty() ? new AstCaseItem{flp, nullptr, bodyp}
-                                                : new AstCaseItem{flp, cops.front(), bodyp};
-        for (std::size_t i = 1; i < cops.size(); ++i) itemp->addCondsp(cops[i]);
+        alternatives.push_back(std::move(alt));
+    }
+    if (failed) {
+        for (Alternative& alt : alternatives) {
+            for (AstConst* const cop : alt.cops) cop->deleteTree();
+            if (alt.bodyp) alt.bodyp->deleteTree();
+        }
+        selectorp->deleteTree();
+        return nullptr;
+    }
+    if (anyWide) {
+        AstNodeStmt* chainp = nullptr;
+        for (std::size_t i = alternatives.size(); i-- > 0;) {
+            Alternative& alt = alternatives[i];
+            if (alt.cops.empty() && alt.wide.empty()) {  // The others alternative ends the chain
+                if (chainp) chainp->deleteTree();
+                chainp = alt.bodyp;
+                continue;
+            }
+            AstNodeExpr* const condp = choiceCond(flp, selectorp, alt.cops, alt.wide);
+            chainp = new AstIf{flp, condp, alt.bodyp, chainp};
+        }
+        selectorp->deleteTree();
+        return chainp;
+    }
+    AstCaseItem* itemsp = nullptr;
+    for (Alternative& alt : alternatives) {
+        AstCaseItem* const itemp = alt.cops.empty()
+                                       ? new AstCaseItem{flp, nullptr, alt.bodyp}
+                                       : new AstCaseItem{flp, alt.cops.front(), alt.bodyp};
+        for (std::size_t i = 1; i < alt.cops.size(); ++i) itemp->addCondsp(alt.cops[i]);
         itemsp = itemsp ? AstNode::addNext<AstCaseItem, AstCaseItem>(itemsp, itemp) : itemp;
     }
     return makeCase(flp, selectorp, itemsp);
