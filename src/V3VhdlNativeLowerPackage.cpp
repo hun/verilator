@@ -239,8 +239,29 @@ bool Lowering::resolveConstantType(const TypeSpec& type, const Expr& init, FileL
             intConstant = constType.isInt();
             realConstant = constType.kind == VType::REAL;
         }
+        // Only a named aggregate fixes the bounds of a record's unconstrained element
+        const auto unsizedRecord = [](const VType& valueType, const auto& self) -> bool {
+            if (valueType.kind == VType::ARRAY && valueType.elemp) {
+                return self(*valueType.elemp, self);
+            }
+            if (valueType.kind != VType::RECORD) return false;
+            return std::any_of(valueType.fields.begin(), valueType.fields.end(),
+                               [&self](const VField& field) {
+                                   return field.width == 0 || (field.type && self(*field.type, self));
+                               });
+        };
+        if (init.kind == Expr::AGG_POSITIONAL && unsizedRecord(constType, unsizedRecord)) {
+            unsupportedError(flp, "constant of a record with an unconstrained element");
+            return false;
+        }
         // An array whose element type leaves a member unconstrained has no width until its
         // value fixes one: a call takes its bounds from what the function returns
+        if (constType.dtp && constType.kind == VType::ARRAY && constType.elemp
+            && constType.elemp->width == 0
+            && (init.kind == Expr::AGG_POSITIONAL || init.kind == Expr::AGG_NAMED)) {
+            unsupportedError(flp, "constant of an array of unconstrained elements");
+            return false;
+        }
         if (!constType.dtp && constType.kind == VType::ARRAY
             && (!constType.elemp || constType.elemp->width == 0)) {
             if (init.kind == Expr::AGG_POSITIONAL || init.kind == Expr::AGG_NAMED) {
