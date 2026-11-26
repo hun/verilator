@@ -283,9 +283,9 @@ entity's emitted tree.
 7. Evidence
 ===========
 
-- 496 regression drivers, 116 diagnostic/tree goldens, 496 ``.vhdl``
-  fixtures, 320 value-checked C++ harnesses.
-- Full VHDL suite (``t_vhdl*``, ``--vlt``): 496 passed / 0 failed in ~25 s
+- 502 regression drivers, 116 diagnostic/tree goldens, 502 ``.vhdl``
+  fixtures, 326 value-checked C++ harnesses.
+- Full VHDL suite (``t_vhdl*``, ``--vlt``): 502 passed / 0 failed in ~25 s
   on 8 jobs locally. Both distribution tests (``t_dist_test_style``,
   ``t_dist_copyright``) pass. The suite needs only the built Verilator and
   a C++ compiler; no test invokes GHDL or nvc.
@@ -347,12 +347,9 @@ trace comparisons against GHDL 7.0.0-dev were not repeated for this table):
      - Simulates
      - Notes
    - - open-logic
-     - 34 / 35
+     - 35 / 35
      - Arbiters, clock crossings, FIFOs (sync, async, packet), RAMs, CRC
-       (encode, append, check), width converters, TDM, CAM. The CAM model
-       is generated correctly but its C++ fails to compile under
-       ``--enable-ccwarn``: a logical operation of two equal operands
-       (``-Wlogical-op``) in the lowering of ``ppcOr``
+       (encode, append, check), width converters, TDM, CAM
    - - hdl-modules
      - 14 / 14
      - FIFO, ring buffer, handshake pipeline/mux/merger/splitter, LFSR,
@@ -380,7 +377,7 @@ trace comparisons against GHDL 7.0.0-dev were not repeated for this table):
      - The potato core and SoC, which runs a freestanding C program, and
        the T65
 
-In total 87 of 88 testcases simulate with every check passing. The
+In total 88 of 88 testcases simulate with every check passing. The
 corpus testcases are not independent evidence of correctness: they were
 written against this frontend, and the ones that compare a trace against
 GHDL are the stronger check.
