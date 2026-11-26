@@ -3853,12 +3853,26 @@ AstNodeStmt* Lowering::expandSubprogram(const Expr& callExpr, const SubprogramDe
         }
     };
     registerSubprograms(subp->subprograms, static_cast<int>(m_inlineFrames.size() - 1));
-    for (const AliasDecl& alias : subp->aliases) registerAlias(alias);
+    // An alias may name a constant declared before it, so aliases register in source order
+    // with the declarations, like the types above
+    std::vector<const AliasDecl*> pendingAliases;
+    for (const AliasDecl& alias : subp->aliases) pendingAliases.push_back(&alias);
+    const auto registerAliasesBefore = [this, &pendingAliases](int lineno) {
+        for (auto it = pendingAliases.begin(); it != pendingAliases.end();) {
+            if ((*it)->flp->lineno() > lineno) {
+                ++it;
+                continue;
+            }
+            registerAlias(**it);
+            it = pendingAliases.erase(it);
+        }
+    };
 
     // Locals are real module variables reinitialized on every call, like automatics
     AstNodeStmt* initsp = nullptr;
     for (const Decl& decl : subp->decls) {
         registerTypesBefore(decl.flp->lineno());
+        registerAliasesBefore(decl.flp->lineno());
         if (decl.kind == Decl::CONSTANT) {
             std::vector<RuntimeConst> runtimeConsts;
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false, &runtimeConsts);
@@ -3901,8 +3915,9 @@ AstNodeStmt* Lowering::expandSubprogram(const Expr& callExpr, const SubprogramDe
             initsp = initsp ? AstNode::addNext<AstNodeStmt, AstNodeStmt>(initsp, initp) : initp;
         }
     }
-    // A type no declaration follows still belongs to the part
+    // A type or alias no declaration follows still belongs to the part
     for (const TypeDecl* const typeDeclp : pendingTypes) registerType(*typeDeclp);
+    for (const AliasDecl* const aliasp : pendingAliases) registerAlias(*aliasp);
 
     bool fallsThrough = true;
     m_retFrames.push_back(
