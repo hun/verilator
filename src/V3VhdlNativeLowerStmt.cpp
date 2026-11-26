@@ -294,15 +294,28 @@ bool Lowering::lowerChoiceConsts(const std::vector<ExprP>& choices, AstNodeDType
             cops.push_back(constp);
             continue;
         }
-        if (choicep->kind == Expr::SLICE) {
+        // A subtype name stands for all the values of the subtype
+        const auto subtypeIt
+            = choicep->kind == Expr::NAME ? m_types.find(choicep->text) : m_types.end();
+        const bool subtypeChoice
+            = subtypeIt != m_types.end()
+              && (subtypeIt->second.kind == VType::INT || subtypeIt->second.kind == VType::ENUM);
+        if (choicep->kind == Expr::SLICE || subtypeChoice) {
             // A choice range expands to one case item per value
             int64_t left = 0;
             int64_t right = 0;
-            if (!staticInt(choicep->b, left) || !staticInt(choicep->c, right)) {
+            int64_t step = 1;
+            if (subtypeChoice) {
+                const VType& subtype = subtypeIt->second;
+                const bool isInt = subtype.kind == VType::INT;
+                left = isInt ? subtype.intLow : std::min(subtype.left, subtype.right);
+                right = isInt ? subtype.intHigh : std::max(subtype.left, subtype.right);
+            } else if (!staticInt(choicep->b, left) || !staticInt(choicep->c, right)) {
                 unsupportedError(choicep->flp, "non-static choice range");
                 return false;
+            } else {
+                step = choicep->text == "to" ? 1 : -1;
             }
-            const int64_t step = choicep->text == "to" ? 1 : -1;
             if ((right - left) * step < 0) {
                 choicep->flp->v3error("VHDL: empty choice range.");
                 return false;
@@ -1893,8 +1906,8 @@ AstNodeExpr* Lowering::lowerEnumImage(const Expr& expr, const VType& type) {
     if (!valuep) return nullptr;
     AstNodeExpr* const argp = resizeExpr(valuep, type, flp);
     auto textOf = [&](size_t position) -> AstNodeExpr* {
-        AstNodeExpr* const stringp = new AstCvtPackString{
-            flp, makeStringConst(flp, type.literals[position])};
+        AstNodeExpr* const stringp
+            = new AstCvtPackString{flp, makeStringConst(flp, type.literals[position])};
         stringp->dtypep(findBasic(flp, VBasicDTypeKwd::STRING));
         return stringp;
     };
@@ -1949,7 +1962,8 @@ void Lowering::appendReportText(const Expr& expr, std::string& fmt, AstNodeExpr*
                 return;
             }
         }
-        if (expr.text == "image" && expr.args.size() == 1 && expr.a && expr.a->kind == Expr::NAME) {
+        if (expr.text == "image" && expr.args.size() == 1 && expr.a
+            && expr.a->kind == Expr::NAME) {
             TypeSpec spec;
             spec.flp = expr.flp;
             spec.mark = expr.a->text;
