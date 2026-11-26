@@ -582,7 +582,24 @@ AstNodeExpr* Lowering::lowerOthersAssociation(FileLine* flp, const Expr& expr,
     } else if (expr.a->kind == Expr::BITS_LIT && expr.a->bits.size() == 1) {
         bit = expr.a->bits[0];
     }
-    if (bit != 0) return makeRepeatedConst(flp, *contextp, bit);
+    if (bit != 0 && contextp->kind != VType::RECORD) {
+        return makeRepeatedConst(flp, *contextp, bit);
+    }
+    if (contextp->kind == VType::RECORD && !contextp->fields.empty()) {
+        // Every element of the record takes the value: a named aggregate of all of them
+        Expr named{Expr::AGG_NAMED};
+        named.flp = flp;
+        for (const VField& field : contextp->fields) {
+            auto choice = std::make_unique<Expr>(Expr::NAME);
+            choice->flp = flp;
+            choice->text = field.name;
+            choice->spelling = field.name;
+            named.choices.emplace_back();
+            named.choices.back().push_back(std::move(choice));
+            named.args.push_back(cloneExpr(*expr.a));
+        }
+        return lowerExpr(named, contextp);
+    }
     // An arbitrary value is replicated across every element
     if (!contextp->isVector()) {
         unsupportedError(flp, "aggregate value for a non-array type");
@@ -957,8 +974,9 @@ bool Lowering::lowerBinaryOperands(const Expr& expr, const std::string& op, bool
             // aggregate operand keeps the bounds its own choices give it
             // (IEEE 1076-2008 9.3.3.3): `ac + bc + (0 to 0 => c)` adds a one-element vector
             const Expr& untyped = lowerLeftFirst ? *expr.b : *expr.a;
-            const bool aggregateOperand
-                = untyped.kind == Expr::AGG_POSITIONAL || untyped.kind == Expr::AGG_NAMED;
+            const bool aggregateOperand = untyped.kind == Expr::AGG_POSITIONAL
+                                          || untyped.kind == Expr::AGG_NAMED
+                                          || untyped.kind == Expr::AGG_OTHERS;
             const bool arithmeticOp
                 = op == "+" || op == "-" || op == "*" || op == "/" || op == "mod" || op == "rem";
             const bool selfTypedAggregate

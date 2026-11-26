@@ -1657,11 +1657,19 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
                                            + "' in call to '" + sub.name + "'");
             return false;
         }
-        AstNodeExpr* const initp = lowerExpr(*formal.init, nullptr);
+        // An aggregate default takes its shape from the formal's own type
+        VType formalType;
+        const bool aggregateInit = formal.init->kind == Expr::AGG_POSITIONAL
+                                   || formal.init->kind == Expr::AGG_NAMED
+                                   || formal.init->kind == Expr::AGG_OTHERS;
+        const bool typed
+            = aggregateInit && resolveType(formal.type, formalType) && formalType.width > 0;
+        AstNodeExpr* const initp = lowerExpr(*formal.init, typed ? &formalType : nullptr);
         if (!initp) return false;
         InlineBinding binding{initp, false, true, VType{}, nullptr};
-        binding.type = formal.type.mark == "string" ? stringType(formal.flp, initp->width() / 8)
-                                                    : typeOfDType(initp->dtypep());
+        binding.type = typed                          ? formalType
+                       : formal.type.mark == "string" ? stringType(formal.flp, initp->width() / 8)
+                                                      : typeOfDType(initp->dtypep());
         env[slots[s].second] = std::move(binding);
     }
     return true;
