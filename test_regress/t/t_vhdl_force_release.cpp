@@ -24,6 +24,12 @@ int main(int argc, char** argv) {
             std::printf("%%Error: %s: q=%d want %d\n", what, static_cast<int>(topp->q), want);
             ++fails;
         }
+        // `force out` acts as `force`: 6 while forced, else d
+        const int want2 = topp->en ? 6 : topp->d;
+        if (topp->q2 != want2) {
+            std::printf("%%Error: %s: q2=%d want %d\n", what, static_cast<int>(topp->q2), want2);
+            ++fails;
+        }
     };
 
     topp->en = 0;

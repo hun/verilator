@@ -1,3 +1,0 @@
-%Error-UNSUPPORTED: t/t_vhdl_force_out_unsup.vhdl:16:16: Unsupported: VHDL force or release of the driving value ('out').
-                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: Exiting due to

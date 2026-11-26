@@ -3393,11 +3393,9 @@ StmtP Parser::parseSequentialAssignOrCall(FileLine* flp) {
     if (isId("force") || isId("release")) {
         stmt->force = isId("force") ? Stmt::FORCE_SET : Stmt::FORCE_RELEASE;
         advance();
-        if (isId("out")) {  // The driving value rather than the effective one
-            unsupported("force or release of the driving value ('out')");
-            return nullptr;
-        }
-        acceptId("in");
+        // The driving and the effective value are the same in a two-state model, so `out`
+        // forces like `in`
+        if (!acceptId("out")) acceptId("in");
         if (stmt->force == Stmt::FORCE_RELEASE) {
             stmt->value = std::make_unique<Expr>(Expr::UNAFFECTED);
             stmt->value->flp = flp;

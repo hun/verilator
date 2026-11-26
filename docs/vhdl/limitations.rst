@@ -202,7 +202,7 @@ Not supported
 -------------
 
 These constructs are refused with a diagnostic: access, protected, file and
-``textio`` types; ``force out`` and ``release out``; runtime ``'value`` and string parsing;
+``textio`` types; runtime ``'value`` and string parsing;
 physical objects and ``now``; arrays and records with real elements that
 are variables or signals; and the floating-point
 package ``float_pkg``;
@@ -214,7 +214,8 @@ supported as empty values only in whole-array assignments, and a slice with a st
 numeric_std does; other uses are not modeled.
 
 A sequential signal assignment may ``force`` a value onto a signal and ``release`` it
-again, ``s <= force '1';`` and ``s <= release;``, with the effect of a Verilog ``force``. The
+again, ``s <= force '1';`` and ``s <= release;``, with the effect of a Verilog ``force``.
+``force out`` and ``release out`` do the same, as the two-state model has one value per signal. The
 concurrent forms and a force with a condition are not supported.
 
 Mode views
