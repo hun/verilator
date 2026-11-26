@@ -2294,7 +2294,7 @@ AstNodeExpr* Lowering::lowerIntrinsicResize(FileLine* flp, const std::string& fn
     AstNodeExpr* valuep = lowerExpr(*argsp[0], nullptr);
     if (!valuep) return nullptr;
     int64_t width = 0;
-    if (!staticInt(argsp[1], width) || width <= 0 || width > MAX_FOLD_WIDTH) {
+    if (!staticIntFold(argsp[1], width) || width <= 0 || width > MAX_FOLD_WIDTH) {
         unsupportedError(flp, "non-static width in '" + fn + "'");
         valuep->deleteTree();
         return nullptr;
