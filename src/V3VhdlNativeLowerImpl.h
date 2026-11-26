@@ -208,6 +208,7 @@ class Lowering final {
         bool readable = true;  // False for an out signal parameter, whose reads are rejected
         VType type;  // Resolved type of the bound value, for attributes of the name
         AstVar* materializedp = nullptr;  // A local held by a real variable, not an expression
+        bool constant = false;  // An in parameter, which the body may not assign
     };
     using InlineEnv = std::map<std::string, InlineBinding>;  // Bindings while inlining
     using InlineCont = std::function<AstNodeExpr*(InlineEnv&)>;  // Continuation for inlining

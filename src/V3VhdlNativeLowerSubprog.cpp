@@ -1592,6 +1592,7 @@ bool Lowering::bindSubprogramFormals(const Expr& call, const SubprogramDecl& sub
         AstNodeExpr* actualp = asLvalue ? lowerDesignator(actual, true) : lowerExpr(actual, ctxp);
         if (!actualp) return false;
         InlineBinding binding{actualp, asLvalue, true, VType{}, nullptr};
+        binding.constant = !asLvalue;
         // The actual's VHDL type first: an array's element width and index bounds are gone
         // from its data type, and a formal indexing the actual needs both
         const bool haveActualType = typeOfDesignator(actual, binding.type);
@@ -2440,6 +2441,11 @@ bool Lowering::evalFuncVarAssign(const Stmt& stmt) {
         unsupportedError(flp, "assignment to a name that is not local to the inlined subprogram");
         return false;
     }
+    if (it->second.constant) {
+        flp->v3error("VHDL: cannot assign to '" + target.text
+                     + "', an in parameter (IEEE 1076-2008 10.6.2.1).");
+        return false;
+    }
     // The target constrains the value, e.g. an aggregate's width
     AstNodeExpr* const valuep
         = lowerExpr(*stmt.value, it->second.type.dtp ? &it->second.type : nullptr);
@@ -2502,6 +2508,11 @@ bool Lowering::evalFuncElementAssign(const Stmt& stmt) {
     const auto it = bindings.find(basep->text);
     if (it == bindings.end()) {
         unsupportedError(flp, "assignment to an element outside the inlined subprogram");
+        return false;
+    }
+    if (it->second.constant) {
+        flp->v3error("VHDL: cannot assign to an element of '" + basep->text
+                     + "', an in parameter (IEEE 1076-2008 10.6.2.1).");
         return false;
     }
     if (it->second.materializedp) {
