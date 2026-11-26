@@ -1,0 +1,4 @@
+%Error-UNSUPPORTED: t/t_vhdl_port_range_dir_unsup.vhdl:14:49: Unsupported: VHDL mixed directions on an unconstrained port.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_vhdl_port_range_dir_unsup.vhdl:9:21: Unsupported: VHDL unconstrained type 'bit_vector'.
+%Error: Exiting due to

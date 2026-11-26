@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_unaffected_conc_unsup.vhdl:17:8: Unsupported: VHDL 'unaffected' outside an assignment.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

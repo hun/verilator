@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_ctx_decl_eof_unsup.vhdl:22:1: Unsupported: VHDL context declaration that reaches the end of the file.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

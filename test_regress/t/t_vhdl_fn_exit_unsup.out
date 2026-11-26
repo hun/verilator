@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_fn_exit_unsup.vhdl:24:7: Unsupported: VHDL exit statement outside a static loop in a function.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

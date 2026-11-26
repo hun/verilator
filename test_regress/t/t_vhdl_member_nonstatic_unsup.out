@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_member_nonstatic_unsup.vhdl:24:14: Unsupported: VHDL non-static record element constraint.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

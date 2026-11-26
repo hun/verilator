@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_time_attr_unsup.vhdl:18:17: Unsupported: VHDL attribute 'high' of an unresolved name.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_pkg_generic_subprog_unsup.vhdl:18:42: Unsupported: VHDL generic subprogram parameter on a package.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

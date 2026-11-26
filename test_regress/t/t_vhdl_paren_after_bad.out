@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_paren_after_bad.vhdl:17:21: VHDL: expected '(' after 'port map'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

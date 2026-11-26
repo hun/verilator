@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_edge_arg_unsup.vhdl:23:8: Unsupported: VHDL edge function argument.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_designator_bad.vhdl:14:12: VHDL: expected a subprogram name, got '('.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

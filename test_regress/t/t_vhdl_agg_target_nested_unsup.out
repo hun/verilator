@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_agg_target_nested_unsup.vhdl:27:5: Unsupported: VHDL nested aggregate assignment target.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_entity_item_bad.vhdl:14:3: VHDL: unsupported entity declaration item 'alias'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

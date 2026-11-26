@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_ext_name_unit_unsup.vhdl:22:10: Unsupported: VHDL external name that does not start in this unit.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

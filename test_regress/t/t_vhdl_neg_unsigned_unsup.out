@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_neg_unsigned_unsup.vhdl:23:10: Unsupported: VHDL unary '-' on a non-signed value.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

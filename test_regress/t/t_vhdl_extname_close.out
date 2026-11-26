@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_extname_close.vhdl:18:27: VHDL: expected '>>' at the end of an external name.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

@@ -1,0 +1,4 @@
+%Error-UNSUPPORTED: t/t_vhdl_rec_port_actual_unsup.vhdl:17:33: Unsupported: VHDL record port element actual is not a vector.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_vhdl_rec_port_actual_unsup.vhdl:11:21: Unsupported: VHDL unconstrained type 'rec'.
+%Error: Exiting due to

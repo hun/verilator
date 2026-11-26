@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_obj_attr_simple_name_unsup.vhdl:19:10: Unsupported: VHDL attribute 'simple_name'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

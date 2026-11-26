@@ -1,0 +1,30 @@
+-- DESCRIPTION: Verilator: a case choice range with signal bounds is refused
+--
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+-- A choice range must have static bounds (IEEE 1076-2008 10.9).
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity t is
+  port (
+    s, lo : in integer range 0 to 15;
+    y : out bit
+  );
+end entity t;
+
+architecture rtl of t is
+
+begin
+  process (s, lo)
+  begin
+    case s is
+      when lo to 5 => y <= '1';
+      when others => y <= '0';
+    end case;
+  end process;
+end architecture rtl;

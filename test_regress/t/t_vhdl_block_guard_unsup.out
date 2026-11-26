@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_block_guard_unsup.vhdl:17:12: Unsupported: VHDL guarded block statement.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

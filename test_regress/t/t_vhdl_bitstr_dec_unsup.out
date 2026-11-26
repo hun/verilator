@@ -1,0 +1,5 @@
+%Error-UNSUPPORTED: t/t_vhdl_bitstr_dec_unsup.vhdl:11:42: Unsupported: VHDL decimal bit-string literal.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: t/t_vhdl_bitstr_dec_unsup.vhdl:11:42: VHDL: expected an expression, got ''.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

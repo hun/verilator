@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_block_decl_unsup.vhdl:21:5: Unsupported: VHDL block declarative item 'for'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

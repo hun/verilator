@@ -1,0 +1,3 @@
+%Error: t/t_vhdl_generic_sep_a_bad.vhdl:12:19: VHDL: expected ';' or ')' in a generic clause, got 'q'.
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Exiting due to

@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_generic_recur_unsup.vhdl:12:3: Unsupported: VHDL generic binding recursion that does not terminate.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_port_linkage_unsup.vhdl:12:13: Unsupported: VHDL linkage port mode.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

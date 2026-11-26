@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_agg_scalar_unsup.vhdl:14:26: Unsupported: VHDL aggregate for a non-composite type.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

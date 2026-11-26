@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_rec_agg_choice_unsup.vhdl:23:9: Unsupported: VHDL record aggregate choice that is not an element name.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

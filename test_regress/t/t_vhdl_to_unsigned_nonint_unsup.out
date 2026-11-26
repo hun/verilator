@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_to_unsigned_nonint_unsup.vhdl:23:10: Unsupported: VHDL to_unsigned of a non-integer value.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_parse_arch_var_assign_unsup.vhdl:18:5: Unsupported: VHDL variable assignment at architecture level.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

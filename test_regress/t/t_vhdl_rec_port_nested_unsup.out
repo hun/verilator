@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_rec_port_nested_unsup.vhdl:17:25: Unsupported: VHDL nested record-member port association.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

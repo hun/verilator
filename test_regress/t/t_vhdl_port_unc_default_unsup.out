@@ -1,0 +1,4 @@
+%Error-UNSUPPORTED: t/t_vhdl_port_unc_default_unsup.vhdl:14:33: Unsupported: VHDL default value of an unconstrained port.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_vhdl_port_unc_default_unsup.vhdl:9:21: Unsupported: VHDL unconstrained type 'bit_vector'.
+%Error: Exiting due to

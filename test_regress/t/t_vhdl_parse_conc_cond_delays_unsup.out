@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_parse_conc_cond_delays_unsup.vhdl:18:45: Unsupported: VHDL different delays in one conditional assignment.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

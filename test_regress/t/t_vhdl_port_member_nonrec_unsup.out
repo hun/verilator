@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_port_member_nonrec_unsup.vhdl:14:3: Unsupported: VHDL record-member association on a non-record port.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

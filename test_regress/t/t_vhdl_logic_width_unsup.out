@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_logic_width_unsup.vhdl:21:12: Unsupported: VHDL logical operation on operands of different types.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

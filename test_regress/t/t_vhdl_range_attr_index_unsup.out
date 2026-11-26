@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_range_attr_index_unsup.vhdl:19:8: Unsupported: VHDL index of attribute 'range'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

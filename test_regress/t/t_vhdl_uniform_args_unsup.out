@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_uniform_args_unsup.vhdl:26:5: Unsupported: VHDL 'uniform' without three arguments.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

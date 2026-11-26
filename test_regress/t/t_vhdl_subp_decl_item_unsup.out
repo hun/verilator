@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_subp_decl_item_unsup.vhdl:17:5: Unsupported: VHDL subprogram declarative item 'attribute'.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to

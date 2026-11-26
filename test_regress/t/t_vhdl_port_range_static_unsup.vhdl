@@ -1,0 +1,16 @@
+-- DESCRIPTION: Verilator: VHDL non-static port association range on an unconstrained port is unsupported
+--
+-- This program is free software; you can redistribute it and/or modify it
+-- under the terms of either the GNU Lesser General Public License Version 3,
+-- or the Perl Artistic License Version 2.0.
+-- SPDX-FileCopyrightText: 2026 Wilson Snyder
+-- SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+entity sub is port (p : in bit_vector); end entity sub;
+architecture rtl of sub is begin end architecture rtl;
+entity t is port (a : in bit_vector(0 to 0)); end entity t;
+architecture rtl of t is
+  signal s : integer := 0;
+begin
+  u : entity work.sub port map (p(s to s) => a);
+end architecture rtl;

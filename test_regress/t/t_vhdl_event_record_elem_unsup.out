@@ -1,0 +1,3 @@
+%Error-UNSUPPORTED: t/t_vhdl_event_record_elem_unsup.vhdl:21:17: Unsupported: VHDL attribute 'event' on a non-signal prefix.
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error: Exiting due to
