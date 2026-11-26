@@ -86,6 +86,11 @@ does the same for the architecture it configures and overrides a specification. 
 have the component's name, and a generic map, a port map, ``use configuration`` and ``use open``
 are refused, as are two configurations that select different architectures for one instance.
 
+The choices of a ``case`` statement on an integer may be ranges or subtype names of any width: a range
+of up to 65536 values is expanded to one case item per value, and a wider one lowers the statement to
+comparisons. A concurrent selected assignment expands every range and refuses one of more than 65536
+values.
+
 Library clauses, ``work`` as the default library, case-insensitive name lookup,
 source locations in diagnostics, and ``.vhd``/``.vhdl`` extension detection are
 supported. ``--top-module`` selects the top entity.

@@ -1000,6 +1000,123 @@ AstNodeStmt* Lowering::lowerStmt(const Stmt& stmt) {
     return nullptr;
 }
 
+bool Lowering::choiceRangeBounds(const Expr& choice, int64_t& low, int64_t& high) {
+    if (choice.kind == Expr::SLICE) {
+        int64_t first = 0;
+        int64_t last = 0;
+        if (!staticInt(choice.b, first) || !staticInt(choice.c, last)) return false;
+        low = std::min(first, last);
+        high = std::max(first, last);
+        return true;
+    }
+    const auto subtypeIt = choice.kind == Expr::NAME ? m_types.find(choice.text) : m_types.end();
+    if (subtypeIt == m_types.end() || subtypeIt->second.kind != VType::INT) return false;
+    low = subtypeIt->second.intLow;
+    high = subtypeIt->second.intHigh;
+    return true;
+}
+
+AstNodeStmt* Lowering::lowerCaseRanges(const Stmt& stmt, AstNodeExpr* selectorp,
+                                       const VType& selType,
+                                       const std::map<std::string, ExprP>& entryVals) {
+    FileLine* const flp = stmt.flp;
+    struct Alternative final {
+        AstNodeExpr* condp = nullptr;  // Null for the others alternative
+        AstNodeStmt* bodyp = nullptr;
+    };
+    std::vector<Alternative> alternatives;
+    std::vector<std::pair<int64_t, int64_t>> intervals;
+    bool hasOthers = false;
+    bool bad = false;
+    const auto logic = [this, flp] { return findBasic(flp, VBasicDTypeKwd::LOGIC); };
+    for (const auto& item : stmt.caseItems) {
+        restoreVarVals(entryVals);
+        Alternative alt;
+        alt.bodyp = lowerStmtList(item.second);
+        const bool others
+            = item.first.empty()
+              || std::any_of(item.first.begin(), item.first.end(), [](const ExprP& c) {
+                     return c && c->kind == Expr::NAME && c->text == "others";
+                 });
+        if (others) {
+            if (hasOthers) {
+                flp->v3error("VHDL: more than one 'others' choice in a case statement.");
+                bad = true;
+            }
+            hasOthers = true;
+        }
+        for (const ExprP& choicep : item.first) {
+            if (!choicep || (choicep->kind == Expr::NAME && choicep->text == "others")) continue;
+            int64_t low = 0;
+            int64_t high = 0;
+            AstNodeExpr* condp = nullptr;
+            if (choiceRangeBounds(*choicep, low, high)) {
+                AstNodeExpr* const gep
+                    = new AstGteS{flp, selectorp->cloneTree(false), makeIntConst(flp, low)};
+                gep->dtypep(logic());
+                AstNodeExpr* const lep
+                    = new AstLteS{flp, selectorp->cloneTree(false), makeIntConst(flp, high)};
+                lep->dtypep(logic());
+                condp = new AstAnd{flp, gep, lep};
+                condp->dtypep(logic());
+            } else if (staticIntFold(choicep, low)) {
+                high = low;
+                condp = new AstEq{flp, selectorp->cloneTree(false), makeIntConst(flp, low)};
+                condp->dtypep(logic());
+            } else {
+                unsupportedError(choicep->flp, "non-static case choice");
+                bad = true;
+                continue;
+            }
+            intervals.emplace_back(low, high);
+            if (alt.condp) {
+                AstNodeExpr* const orp = new AstOr{flp, alt.condp, condp};
+                orp->dtypep(logic());
+                condp = orp;
+            }
+            alt.condp = condp;
+        }
+        alternatives.push_back(alt);
+    }
+    // Choices must neither overlap nor, without others, leave a value of the selector out
+    std::sort(intervals.begin(), intervals.end());
+    for (size_t i = 1; i < intervals.size(); ++i) {
+        if (intervals[i].first <= intervals[i - 1].second) {
+            flp->v3error("VHDL: duplicate choice in a case statement (IEEE 1076-2008 10.9).");
+            bad = true;
+            break;
+        }
+    }
+    if (!bad && !hasOthers) {
+        int64_t next = selType.intLow;
+        for (const auto& interval : intervals) {
+            if (interval.first > next) break;
+            next = std::max(next, interval.second + 1);
+        }
+        if (next <= selType.intHigh) {
+            flp->v3error("VHDL: case statement does not cover every value of its selector "
+                         "(IEEE 1076-2008 10.9).");
+            bad = true;
+        }
+    }
+    selectorp->deleteTree();
+    AstNodeStmt* chainp = nullptr;
+    for (size_t i = alternatives.size(); i-- > 0;) {
+        Alternative& alt = alternatives[i];
+        if (bad) {
+            if (alt.condp) alt.condp->deleteTree();
+            if (alt.bodyp) alt.bodyp->deleteTree();
+        } else if (!alt.condp) {
+            // The others alternative ends the chain
+            if (chainp) chainp->deleteTree();
+            chainp = alt.bodyp;
+        } else {
+            chainp = new AstIf{flp, alt.condp, alt.bodyp, chainp};
+        }
+    }
+    return bad ? nullptr : chainp;
+}
+
 AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
     FileLine* const flp = stmt.flp;
     // As in an if, an alternative starts from the values that held before the statement
@@ -1018,6 +1135,21 @@ AstNodeStmt* Lowering::lowerCase(const Stmt& stmt) {
         flp->v3error("VHDL: case statement has no alternatives.");
         selectorp->deleteTree();
         return nullptr;
+    }
+    // A choice range wider than can be expanded to one case item per value is a comparison
+    if (selType.kind == VType::INT) {
+        bool wide = false;
+        for (const auto& item : stmt.caseItems) {
+            for (const ExprP& choicep : item.first) {
+                int64_t low = 0;
+                int64_t high = 0;
+                if (choicep && choiceRangeBounds(*choicep, low, high)
+                    && high - low >= MAX_CHOICE_RANGE_VALUES) {
+                    wide = true;
+                }
+            }
+        }
+        if (wide) return lowerCaseRanges(stmt, selectorp, selType, entryVals);
     }
     AstCaseItem* itemsp = nullptr;
     AstCaseItem* currentp = nullptr;  // The "others" alternative, if seen

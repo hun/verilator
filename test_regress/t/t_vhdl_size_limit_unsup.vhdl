@@ -14,9 +14,9 @@ begin
   p : process (m)
     variable big : string(1 to 50331648);
   begin
-    case m is
-      when integer'low to -11 => k <= 5;
-      when others => null;
-    end case;
+    null;
   end process;
+  -- A concurrent selected assignment still expands each choice range
+  with m select k <= 5 when integer'low to -11,
+                     0 when others;
 end architecture;

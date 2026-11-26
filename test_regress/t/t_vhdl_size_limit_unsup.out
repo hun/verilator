@@ -1,4 +1,4 @@
 %Error-UNSUPPORTED: t/t_vhdl_size_limit_unsup.vhdl:15:20: Unsupported: VHDL array of more than 268435456 bits.
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error-UNSUPPORTED: t/t_vhdl_size_limit_unsup.vhdl:18:12: Unsupported: VHDL choice range of more than 65536 values.
+%Error-UNSUPPORTED: t/t_vhdl_size_limit_unsup.vhdl:20:29: Unsupported: VHDL choice range of more than 65536 values.
 %Error: Exiting due to

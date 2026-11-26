@@ -283,9 +283,9 @@ entity's emitted tree.
 7. Evidence
 ===========
 
-- 510 regression drivers, 116 diagnostic/tree goldens, 510 ``.vhdl``
-  fixtures, 334 value-checked C++ harnesses.
-- Full VHDL suite (``t_vhdl*``, ``--vlt``): 510 passed / 0 failed in ~25 s
+- 512 regression drivers, 117 diagnostic/tree goldens, 512 ``.vhdl``
+  fixtures, 336 value-checked C++ harnesses.
+- Full VHDL suite (``t_vhdl*``, ``--vlt``): 512 passed / 0 failed in ~25 s
   on 8 jobs locally. Both distribution tests (``t_dist_test_style``,
   ``t_dist_copyright``) pass. The suite needs only the built Verilator and
   a C++ compiler; no test invokes GHDL or nvc.

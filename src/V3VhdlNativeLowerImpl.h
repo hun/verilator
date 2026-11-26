@@ -1335,6 +1335,12 @@ class Lowering final {
                          int hi, int lo, bool ascending);
 
     AstNodeStmt* lowerCase(const Stmt& stmt);
+    //! The static bounds a choice stands for when it is a range or a subtype name
+    bool choiceRangeBounds(const Expr& choice, int64_t& low, int64_t& high);
+    //! A case over integer choices, some of them ranges too wide to expand, lowered as
+    //! comparisons. Takes the selector.
+    AstNodeStmt* lowerCaseRanges(const Stmt& stmt, AstNodeExpr* selectorp, const VType& selType,
+                                 const std::map<std::string, ExprP>& entryVals);
     //! Build an AstCase; a case over an enumeration is exhaustive
     AstCase* makeCase(FileLine* flp, AstNodeExpr* selectorp, AstCaseItem* itemsp) const {
         AstCase* const casep = new AstCase{flp, VCaseType::CT_CASE, selectorp, itemsp};
