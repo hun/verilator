@@ -1688,6 +1688,7 @@ Lowering::copyMemberConstraints(const std::vector<TypeSpec::MemberConstraint>& m
         TypeSpec::MemberConstraint copy;
         copy.name = member.name;
         copy.ascending = member.ascending;
+        copy.open = member.open;
         if (member.lo) copy.lo = cloneExpr(*member.lo);
         if (member.hi) copy.hi = cloneExpr(*member.hi);
         if (member.range) copy.range = cloneExpr(*member.range);
@@ -1815,6 +1816,21 @@ bool Lowering::applyMemberConstraints(const TypeSpec& spec, VType& out) {
         int64_t lo = 0;
         int64_t hi = 0;
         bool ascending = member.ascending;
+        if (member.open) {
+            // Only the elements are constrained; the member's own range comes from its use
+            if (!member.elementConstraints.empty()) {
+                TypeSpec chain;
+                chain.flp = flp;
+                for (const TypeSpec& element : member.elementConstraints) {
+                    chain.indexConstraints.push_back(copySpec(element));
+                }
+                VType memberType = *fieldp->type;
+                if (!applyIndexConstraints(chain, memberType)) return false;
+                fieldp->type = std::make_shared<VType>(memberType);
+                fieldp->width = memberType.width;
+            }
+            continue;
+        }
         if (member.range) {
             // The member takes its range from another object: `rec_t(f(sig'range))`
             TypeSpec range;

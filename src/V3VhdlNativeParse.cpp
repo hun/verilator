@@ -1169,6 +1169,15 @@ bool Parser::parseMemberList(const TypeSpec& type, std::vector<TypeSpec::MemberC
         if (!takeId(memberTok)) return false;
         member.name = memberTok.text;
         expectSym("(");
+        if (isId("open")) {
+            advance();
+            member.open = true;
+            expectSym(")");
+            parseMemberElementConstraints(type, member);
+            out.push_back(std::move(member));
+            if (acceptSym(",")) continue;
+            return true;
+        }
         if (atNestedMemberConstraints()) {
             if (!parseMemberList(type, member.nested)) return false;
             expectSym(")");
