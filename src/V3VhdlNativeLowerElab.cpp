@@ -2430,7 +2430,16 @@ bool Lowering::bindInstancePort(InstancePortBind& ctx, AstVar* portp, size_t por
         }
         finalizeRecordFields(flp, recPortType);
     }
-    const VType& aggType = recPortType.kind == VType::RECORD ? recPortType : portType;
+    // An array of vectors is a flat vector in the AST, so its actual conforms to the declared type
+    VType declaredArrayType;
+    const auto declaredIt = m_designp->portTypes.find(portp);
+    if (declaredIt != m_designp->portTypes.end() && declaredIt->second->kind == VType::ARRAY
+        && declaredIt->second->elemp && declaredIt->second->elemp->isVector()) {
+        declaredArrayType = *declaredIt->second;
+    }
+    const VType& aggType = recPortType.kind == VType::RECORD        ? recPortType
+                           : declaredArrayType.kind == VType::ARRAY ? declaredArrayType
+                                                                    : portType;
     AstNodeExpr* actualp = nullptr;
     if (assocs.empty()) {
         actualp = instanceDeclaredDefault(conc, ctx.entityp, portp, aggType, portType,
