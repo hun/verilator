@@ -1086,6 +1086,7 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
         registerAliasesBefore(decl.flp);
         if (decl.kind == Decl::CONSTANT) {
             emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
+            registerReadyDeferredTypes(arch.decls);
             // A subprogram of the architecture sees the constants declared before it
             m_moduleScope = saveScope();
             continue;

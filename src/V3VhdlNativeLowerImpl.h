@@ -760,6 +760,9 @@ class Lowering final {
     void registerTypes(const std::vector<TypeDecl>& types, const std::vector<Decl>& decls);
     //! Register the deferred types, reporting one whose constraint still cannot resolve
     void finishDeferredTypes();
+    //! Register the deferred types whose constants have values now, so a declaration that
+    //! follows, such as an initializer calling a subprogram, can use them
+    void registerReadyDeferredTypes(const std::vector<Decl>& decls);
     static bool exprNamesAny(const Expr& expr, const std::set<std::string>& names);
     static bool typeDeclNamesAny(const TypeDecl& decl, const std::set<std::string>& names);
     static bool typeDeclMarksAny(const TypeDecl& decl, const std::set<std::string>& names);

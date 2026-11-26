@@ -1429,6 +1429,42 @@ void Lowering::registerTypes(const std::vector<TypeDecl>& types, const std::vect
     }
 }
 
+void Lowering::registerReadyDeferredTypes(const std::vector<Decl>& decls) {
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        for (auto it = m_deferredTypes.begin(); it != m_deferredTypes.end(); ++it) {
+            if (it->second.seq != m_deferSeq) continue;
+            const TypeDecl& typeDecl = *it->second.declp;
+            std::set<std::string> unpublished;
+            for (const Decl& decl : decls) {
+                if (decl.kind != Decl::CONSTANT || decl.flp->lineno() > typeDecl.flp->lineno())
+                    continue;
+                for (const auto& name : decl.names) {
+                    if (m_consts.count(name.first) || m_preConsts.count(name.first)
+                        || m_constValues.count(name.first))
+                        continue;
+                    unpublished.insert(name.first);
+                }
+            }
+            std::set<std::string> otherDeferred;
+            for (const auto& other : m_deferredTypes) {
+                if (other.first != typeDecl.name) otherDeferred.insert(other.first);
+            }
+            if ((!unpublished.empty() && typeDeclNamesAny(typeDecl, unpublished))
+                || typeDeclMarksAny(typeDecl, otherDeferred)
+                || typeDeclNeedsLaterObject(typeDecl)) {
+                continue;
+            }
+            const TypeDecl* const declp = it->second.declp;
+            m_deferredTypes.erase(it);
+            registerType(*declp);
+            progress = true;
+            break;
+        }
+    }
+}
+
 void Lowering::finishDeferredTypes() {
     for (auto it = m_deferredTypes.begin(); it != m_deferredTypes.end();) {
         if (it->second.seq != m_deferSeq) {
