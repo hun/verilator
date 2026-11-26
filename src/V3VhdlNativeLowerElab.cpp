@@ -2265,6 +2265,26 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
         int width = 1;  // Width of the connected range
         const PortAssoc* assocp = nullptr;  // The association that connects the range
     };
+    // A part of an array of vectors is whole elements, so only a flat bit vector fixes the
+    // width of a part from its range
+    bool flatVector = false;
+    if (ctx.entityp) {
+        for (const PortDecl& port : ctx.entityp->ports) {
+            const bool named = std::any_of(port.names.begin(), port.names.end(),
+                                           [&](const std::pair<std::string, std::string>& name) {
+                                               return name.first == portp->name();
+                                           });
+            if (!named) continue;
+            const std::string& mark = port.type.mark;
+            const auto typeIt = m_types.find(mark);
+            flatVector = mark == "std_logic_vector" || mark == "std_ulogic_vector"
+                         || mark == "bit_vector" || mark == "unsigned" || mark == "signed"
+                         || (typeIt != m_types.end()
+                             && (typeIt->second.kind == VType::VECTOR
+                                 || (typeIt->second.kind == VType::ARRAY && typeIt->second.elemp
+                                     && !typeIt->second.elemp->isVector())));
+        }
+    }
     // Collect the bit range each association connects
     std::vector<Connection> connections;
     bool bad = false;
@@ -2310,6 +2330,14 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
                     = vectorType(flp, portType.kwd, VSigning::NOSIGN, connection.width);
                 valuep = lowerExpr(*connection.assocp->actual, &elementType);
                 if (!valuep) return false;
+                if (flatVector && valuep->width() != connection.width) {
+                    connection.assocp->flp->v3error(
+                        "VHDL: actual of a part of port " + portp->prettyNameQ()
+                        + " does not have the part's length (IEEE 1076-2008 14.3.5).");
+                    valuep->deleteTree();
+                    if (actualp) actualp->deleteTree();
+                    return false;
+                }
                 valuep = resizeExpr(valuep, elementType, flp);
             } else {
                 // An open input element contributes unknown bits
@@ -2331,6 +2359,14 @@ bool Lowering::bindPartialPort(InstancePortBind& ctx, AstVar* portp,
             if (!connection.assocp->actual) continue;
             AstNodeExpr* const lhsp = lowerDesignator(*connection.assocp->actual, true);
             if (!lhsp) {
+                if (headp) headp->deleteTree();
+                return false;
+            }
+            if (flatVector && lhsp->width() != connection.width) {
+                connection.assocp->flp->v3error(
+                    "VHDL: actual of a part of port " + portp->prettyNameQ()
+                    + " does not have the part's length (IEEE 1076-2008 14.3.5).");
+                lhsp->deleteTree();
                 if (headp) headp->deleteTree();
                 return false;
             }
