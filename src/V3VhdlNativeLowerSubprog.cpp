@@ -3825,13 +3825,16 @@ AstNodeStmt* Lowering::expandSubprogram(const Expr& callExpr, const SubprogramDe
     AstVar* retVarp = nullptr;
     VType retType;
     // An unconstrained return type takes its length from the first return lowered
-    const bool retSized
+    bool retSized
         = fnp
           && (!isUnconstrainedMark(subp->returnType.mark) || subp->returnType.hasRange
               || !subp->returnType.constraintMark.empty());
     if (retSized) {
         if (!resolveType(subp->returnType, retType)) return fail(nullptr);
-        retVarp = newResultVar(subp->flp, subp->name, retType);
+        // A declared array type without bounds has no data type to hold the result yet
+        retSized = retType.dtp != nullptr;
+        if (retSized) retVarp = newResultVar(subp->flp, subp->name, retType);
+        else retType = VType{};
     }
 
     // A local type may name a constant of the same declarative part, so the types register
