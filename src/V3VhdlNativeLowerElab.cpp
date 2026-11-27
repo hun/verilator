@@ -1086,7 +1086,7 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
     for (const Decl& decl : arch.decls) {
         registerAliasesBefore(decl.flp);
         if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
+            emitModuleConstant(decl);
             registerReadyDeferredTypes(arch.decls);
             // A subprogram of the architecture sees the constants declared before it
             m_moduleScope = saveScope();
@@ -1125,6 +1125,38 @@ void Lowering::emitArchitectureDecls(const Architecture& arch) {
     }
     finishDeferredTypes();
     registerAliasesBefore(nullptr);
+}
+
+void Lowering::emitModuleConstant(const Decl& decl) {
+    // The initializer's body is a statement list, so an inlined function can run a loop at
+    // run time; a failure leaves statements behind, so they are dropped
+    // A value that reads no object folds as before, so only a run-time one gets the sink
+    const bool savedMaterialize = m_materializeLocals;
+    if (decl.init && readsObject(*decl.init)) m_materializeLocals = true;
+    std::vector<RuntimeConst> runtimeConsts;
+    emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false, &runtimeConsts);
+    m_materializeLocals = savedMaterialize;
+    for (RuntimeConst& rc : runtimeConsts) {
+        for (size_t i = 0; i < rc.names.size(); ++i) {
+            const auto& name = rc.names[i];
+            AstNodeExpr* const valuep
+                = i + 1 == rc.names.size() ? rc.valuep : rc.valuep->cloneTree(false);
+            if (!reserveName(name.first, name.second, rc.flp)) {
+                valuep->deleteTree();
+                continue;
+            }
+            AstVar* const varp = new AstVar{rc.flp, VVarType::VAR, name.first, rc.type.dtp};
+            traceDeclared(varp);
+            m_modp->addStmtsp(varp);
+            m_scope[name.first] = VarInfo{varp, rc.type};
+            AstNodeExpr* const lhsp = new AstVarRef{rc.flp, varp, VAccess::WRITE};
+            AstNodeStmt* const assignp
+                = new AstAssignW{rc.flp, lhsp, resizeExpr(valuep, rc.type, rc.flp)};
+            m_modp->addStmtsp(new AstAlways{rc.flp, VAlwaysKwd::CONT_ASSIGN, nullptr,
+                                            takePendingFor(assignp)});
+        }
+    }
+    discardPendingStmts();
 }
 
 bool Lowering::emit(const EntityUnit& entity, const Architecture& arch, AstModule* modp,
@@ -2535,7 +2567,7 @@ void Lowering::emitLocalDecls(const std::vector<Decl>& decls, const std::vector<
     registerTypes(types, decls);
     for (const Decl& decl : decls) {
         if (decl.kind == Decl::CONSTANT) {
-            emitConstant(decl.names, decl.type, decl.init.get(), decl.flp, false);
+            emitModuleConstant(decl);
             continue;
         }
         VType type;

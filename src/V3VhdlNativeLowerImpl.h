@@ -790,6 +790,9 @@ class Lowering final {
     void emitConstant(const std::vector<std::pair<std::string, std::string>>& names,
                       const TypeSpec& type, const Expr* initp, FileLine* flp, bool deferredOk,
                       std::vector<RuntimeConst>* runtimeOut = nullptr);
+    //! Emit a constant of a module or block declarative part; a value known only at run time
+    //! becomes a variable that a continuous assignment keeps equal to its initializer
+    void emitModuleConstant(const Decl& decl);
     //! Resolved type of a constant, with a value lowered early when the type needed it
     struct ConstantTypeInfo final {
         VType type;  // Resolved type of the constant
@@ -869,6 +872,8 @@ class Lowering final {
     //! `assert is_power_of_two(n)` folds, so its callee's body is never lowered.
     bool evalCond(const Expr& expr, bool& value) const;
     bool mentionsReal(const Expr& expr) const;
+    //! Whether an expression names a signal, port or variable, so no value folds from it
+    bool readsObject(const Expr& expr) const;
     bool rejectUnmodelledObject(const VType& type, FileLine* flp, bool allowUnconstrained = false);
     bool staticInt(const ExprP& exprp, int64_t& value) const {
         return exprp && evalInt(*exprp, value);

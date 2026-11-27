@@ -889,6 +889,13 @@ bool Lowering::mentionsReal(const Expr& expr) const {
     }
 }
 
+bool Lowering::readsObject(const Expr& expr) const {
+    if (expr.kind == Expr::NAME && m_scope.count(expr.text)) return true;
+    const auto readsPtr = [&](const ExprP& exprp) { return exprp && readsObject(*exprp); };
+    return readsPtr(expr.a) || readsPtr(expr.b) || readsPtr(expr.c)
+           || std::any_of(expr.args.begin(), expr.args.end(), readsPtr);
+}
+
 //! Reject an object the model cannot hold so it reports as unsupported instead of emitting a
 //! variable with no data type. An object whose type stayed unconstrained (null data type) is
 //! rejected too; ports defer their width to a binding, so they opt out.
