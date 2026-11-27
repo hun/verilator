@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Verilator: an exit in a function body outside any loop is refusedRIPTION: DESC
+# DESCRIPTION: Verilator: A next statement has to sit inside a loop
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3
@@ -10,7 +10,7 @@
 import vltest_bootstrap
 
 test.scenarios('vlt')
-test.top_filename = 't/t_vhdl_fn_exit_unsup.vhdl'
+test.top_filename = 't/t_vhdl_next_outside_loop_bad.vhdl'
 
 test.lint(verilator_flags2=['--language', 'vhdl', '--top-module', 't'],
           fails=True,

@@ -28,6 +28,7 @@
 #include "V3Global.h"
 #include "V3VhdlNativeAst.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iterator>
@@ -237,6 +238,9 @@ class Parser final {
     };
     // Labels declared in each open scope, innermost last
     std::vector<std::set<std::string>> m_labelScopes;
+    // Labels of the loop statements around the statement being parsed, innermost last; an
+    // unlabelled loop has an empty entry
+    std::vector<std::string> m_loopLabels;
     bool addLabel(const std::string& label, FileLine* flp) {
         if (label.empty()) return true;
         if (!m_labelScopes.empty() && !m_labelScopes.back().insert(label).second) {
@@ -548,6 +552,7 @@ class Parser final {
     std::vector<StmtP> parseStmtList(bool stopAtElse);
     StmtP parseSequentialStatement();
     StmtP parseSequentialLoopOrJump(FileLine* flp, const std::string& label);
+    std::vector<StmtP> parseLoopBody(const std::string& label);
     StmtP parseSequentialReportAssertReturn(FileLine* flp);
     StmtP parseSequentialAssignOrCall(FileLine* flp);
     ExprP parseWaveformValue();
@@ -555,7 +560,7 @@ class Parser final {
     StmtP parseIf(FileLine* flp);
     StmtP parseCase(FileLine* flp);
     static StmtP matchingCaseToIf(Stmt& caseStmt);
-    StmtP parseFor(FileLine* flp);
+    StmtP parseFor(FileLine* flp, const std::string& label);
     bool parseLoopEnd(const char* what);
 
 public:
@@ -3341,9 +3346,7 @@ StmtP Parser::parseSequentialStatement() {
     }
     if (isId("for")) {
         advance();
-        StmtP stmt = parseFor(flp);
-        if (stmt) stmt->loopLabel = label;
-        return stmt;
+        return parseFor(flp, label);
     }
     if (isId("while") || isId("loop") || isId("exit") || isId("next") || isId("wait")) {
         return parseSequentialLoopOrJump(flp, label);
@@ -3363,7 +3366,7 @@ StmtP Parser::parseSequentialLoopOrJump(FileLine* flp, const std::string& label)
         stmt->value = parseExpr();  // Loop condition
         if (!stmt->value) return nullptr;
         if (!expectId("loop")) return nullptr;
-        stmt->body = parseStmtList(false);
+        stmt->body = parseLoopBody(label);
         if (m_failed) return nullptr;
         if (!parseLoopEnd("while")) return nullptr;
         return stmt;
@@ -3373,7 +3376,7 @@ StmtP Parser::parseSequentialLoopOrJump(FileLine* flp, const std::string& label)
         auto stmt = std::make_unique<Stmt>(Stmt::LOOP);
         stmt->flp = flp;
         stmt->loopLabel = label;
-        stmt->body = parseStmtList(false);
+        stmt->body = parseLoopBody(label);
         if (m_failed) return nullptr;
         if (!parseLoopEnd("loop")) return nullptr;
         return stmt;
@@ -3387,6 +3390,17 @@ StmtP Parser::parseSequentialLoopOrJump(FileLine* flp, const std::string& label)
             Token labelTok;
             if (!takeId(labelTok)) return nullptr;
             stmt->loopLabel = labelTok.text;
+        }
+        // A next statement is IEEE 1076-2008 10.11, an exit statement 10.12; each names a
+        // loop that encloses it
+        const auto& loops = m_loopLabels;
+        if (stmt->loopLabel.empty()
+                ? loops.empty()
+                : std::find(loops.begin(), loops.end(), stmt->loopLabel) == loops.end()) {
+            error(flp,
+                  std::string{isExit ? "exit" : "next"} + " statement "
+                      + (stmt->loopLabel.empty() ? "outside a loop" : "names no enclosing loop"));
+            return nullptr;
         }
         if (acceptId("when")) {
             stmt->value = parseExpr();
@@ -3845,12 +3859,13 @@ StmtP Parser::parseCase(FileLine* flp) {
     return matching ? matchingCaseToIf(*stmt) : std::move(stmt);
 }
 
-StmtP Parser::parseFor(FileLine* flp) {
+StmtP Parser::parseFor(FileLine* flp, const std::string& label) {
     Token varTok;
     if (!takeName(varTok)) return nullptr;
     auto stmt = std::make_unique<Stmt>(Stmt::FOR);
     stmt->flp = flp;
     stmt->loopVar = varTok.text;
+    stmt->loopLabel = label;
     if (!expectId("in")) return nullptr;
     stmt->b = parseExpr();
     if (!stmt->b) return nullptr;
@@ -3865,10 +3880,17 @@ StmtP Parser::parseFor(FileLine* flp) {
         return nullptr;
     }
     if (!expectId("loop")) return nullptr;
-    stmt->body = parseStmtList(false);
+    stmt->body = parseLoopBody(label);
     if (m_failed) return nullptr;
     if (!parseLoopEnd("for")) return nullptr;
     return stmt;
+}
+
+std::vector<StmtP> Parser::parseLoopBody(const std::string& label) {
+    m_loopLabels.push_back(label);
+    std::vector<StmtP> body = parseStmtList(false);
+    m_loopLabels.pop_back();
+    return body;
 }
 
 //! Consume `end loop [label];`

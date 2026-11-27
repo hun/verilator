@@ -4003,35 +4003,6 @@ AstNodeStmt* Lowering::lowerProcChain(const std::vector<const Stmt*>& stmts, std
             add(casep);
             return headp;
         }
-        if (stmt.kind == Stmt::EXIT || stmt.kind == Stmt::NEXT) {
-            const bool isExit = stmt.kind == Stmt::EXIT;
-            LoopFrame* const framep = findLoop(stmt.loopLabel);
-            if (!framep) {
-                unsupportedError(stmt.flp, isExit ? "exit outside a loop" : "next outside a loop");
-                continue;
-            }
-            AstNodeExpr* condp = stmt.value ? lowerCond(*stmt.value) : nullptr;
-            if (stmt.value && !condp) continue;
-            AstNodeStmt* const setp
-                = setLoopFlag(stmt.flp, isExit ? framep->exitp : framep->nextp, condp);
-            add(setp);
-            if (!stmt.value) {
-                // An unconditional exit truncates every following statement
-                fallsThroughp = false;
-                return headp;
-            }
-            bool restFalls = true;
-            AstNodeStmt* restp = lowerProcChain(stmts, i + 1, restFalls);
-            if (!restp) {
-                fallsThroughp = false;
-                return headp;
-            }
-            AstNodeExpr* const notp = new AstNot{stmt.flp, condp};
-            notp->dtypep(findBasic(stmt.flp, VBasicDTypeKwd::LOGIC));
-            add(new AstIf{stmt.flp, notp, restp, nullptr});
-            fallsThroughp = restFalls;
-            return headp;
-        }
         const bool savedMaterialize = m_materializeLocals;
         m_materializeLocals = true;
         AstNodeStmt* const stmtNodep = lowerStmt(stmt);

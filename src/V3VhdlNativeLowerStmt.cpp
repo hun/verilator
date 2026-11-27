@@ -1306,11 +1306,7 @@ AstNodeStmt* Lowering::lowerStmtRange(const std::vector<StmtP>& stmts, std::size
         if (stmtp->kind == Stmt::EXIT || stmtp->kind == Stmt::NEXT) {
             const bool isExit = stmtp->kind == Stmt::EXIT;
             LoopFrame* const framep = findLoop(stmtp->loopLabel);
-            if (!framep) {
-                unsupportedError(stmtp->flp,
-                                 isExit ? "exit outside a loop" : "next outside a loop");
-                continue;
-            }
+            if (!framep) stmtp->flp->v3fatalSrc("exit/next outside a loop passed the parser");
             AstVar* const flagp = isExit ? framep->exitp : framep->nextp;
             AstNodeExpr* condp = nullptr;
             if (stmtp->value) {
